@@ -1987,12 +1987,44 @@ mod tests {
                 "At API prices: what the published API list prices would charge for these tokens, not what a subscription costs. Cache writes are priced at their 5-minute and 1-hour rates.",
             ),
             (
+                "analytics_models_near_ai_charge",
+                "{x} per trace, charged by NEAR AI ({n} traces)",
+            ),
+            (
+                "analytics_models_near_ai_charge_one",
+                "{x} per trace, charged by NEAR AI ({n} trace)",
+            ),
+            (
+                "analytics_models_near_ai_charge_unknown",
+                "Charge unknown: {n} traces",
+            ),
+            (
+                "analytics_models_near_ai_charge_unknown_one",
+                "Charge unknown: {n} trace",
+            ),
+            (
+                "analytics_models_near_ai_charge_all_unknown",
+                "Charged by NEAR AI, charge unknown: {n} traces",
+            ),
+            (
+                "analytics_models_near_ai_charge_all_unknown_one",
+                "Charged by NEAR AI, charge unknown: {n} trace",
+            ),
+            (
+                "analytics_models_info_near_ai_charge",
+                "Charged by NEAR AI: what NEAR AI charged for the documentation traces sent through it, as the proxy on this Mac recorded it. It's shown apart from API prices and never added to them, and these traces are left out of the API-price figures. A trace with a call that has no recorded charge counts as charge unknown, never zero.",
+            ),
+            (
                 "analytics_models_info_time",
                 "Active time runs from each prompt to the model's last action before the next one, less time waiting on your answers. Only finished traces count, compared within one approval mode.",
             ),
             (
                 "analytics_models_left_out_unknown_facts",
                 "Left out, facts couldn't be read: {n}",
+            ),
+            (
+                "analytics_models_left_out_automated",
+                "Left out, run by an agent, not you: {n}",
             ),
             (
                 "analytics_models_left_out_delegated",
@@ -2100,6 +2132,22 @@ mod tests {
             let wire = serde_json::to_value(mode).unwrap();
             let key = format!("analytics_models_mode_{}", wire.as_str().unwrap());
             assert!(copy.contains_key(&key), "{key}");
+        }
+
+        // The NEAR AI charge is its own figure: its words name NEAR AI and
+        // never call it an API price, and the API-price words never name
+        // NEAR AI, so the two are never read as one figure.
+        for (key, words) in pinned {
+            if key.starts_with("analytics_models_near_ai_charge") {
+                assert!(
+                    words.contains("NEAR AI") || words.starts_with("Charge unknown"),
+                    "{key}"
+                );
+                assert!(!words.contains("API"), "{key} says API");
+            }
+            if key == "analytics_models_cost" || key == "analytics_models_docs_cost" {
+                assert!(!words.contains("NEAR AI"), "{key} names NEAR AI");
+            }
         }
 
         // The floor and noise sentences say the engine's numbers.

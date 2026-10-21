@@ -17,8 +17,9 @@
 //! Ron's 2026-10-11 review). No run of weeks is counted anywhere (owner
 //! decision D1: six weekly marks, no streaks). No sentence spells a currency:
 //! the only money is the Models card's documentation cost, a `{x}` hole the
-//! shell fills, labelled "at API prices" (owner decision D5, settled
-//! 2026-10-20).
+//! shell fills, labelled "at API prices", and beside it, never added to it,
+//! what NEAR AI charged, a `{x}` hole labelled "charged by NEAR AI" (owner
+//! decision D5, settled 2026-10-20).
 //!
 //! The glance, tip and news-mark words (`analytics_glance_*`,
 //! `analytics_tip_*`, `analytics_mark_a11y_tip`) stay in this table: the
@@ -521,8 +522,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // "benchmark" or "winner" (pinned in `service.rs`). A question's
     // words are `analytics_models_<question>`, with `_undone` when its
     // basis is undone edits. Money is only the `{x}` of
-    // `analytics_models_cost`, which the shell fills with a currency
-    // figure; no sentence spells a currency. `{n}` on a leader or next
+    // `analytics_models_cost` (at API prices) and of
+    // `analytics_models_near_ai_charge` (what NEAR AI charged), which the
+    // shell fills with a currency figure; no sentence spells a currency,
+    // and the two are never one figure. `{n}` on a leader or next
     // line is at least the session floor, so it is always plural.
     ("analytics_models_title", "Models"),
     (
@@ -648,6 +651,41 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_models_info_cost",
         "At API prices: what the published API list prices would charge for these tokens, not what a subscription costs. Cache writes are priced at their 5-minute and 1-hour rates.",
     ),
+    // What NEAR AI charged for the documentation traces sent through it
+    // (the daemon's `near_ai_charge`), its own line beside the API-price
+    // figures and never added to them. `{x}` is the median per trace over
+    // the traces whose charge is known, `{n}` how many those are; the
+    // unknown line counts the rest. With no charge known, the
+    // `_all_unknown` line stands alone. No line when no trace went
+    // through NEAR AI, and an unknown charge is never a zero.
+    (
+        "analytics_models_near_ai_charge",
+        "{x} per trace, charged by NEAR AI ({n} traces)",
+    ),
+    (
+        "analytics_models_near_ai_charge_one",
+        "{x} per trace, charged by NEAR AI ({n} trace)",
+    ),
+    (
+        "analytics_models_near_ai_charge_unknown",
+        "Charge unknown: {n} traces",
+    ),
+    (
+        "analytics_models_near_ai_charge_unknown_one",
+        "Charge unknown: {n} trace",
+    ),
+    (
+        "analytics_models_near_ai_charge_all_unknown",
+        "Charged by NEAR AI, charge unknown: {n} traces",
+    ),
+    (
+        "analytics_models_near_ai_charge_all_unknown_one",
+        "Charged by NEAR AI, charge unknown: {n} trace",
+    ),
+    (
+        "analytics_models_info_near_ai_charge",
+        "Charged by NEAR AI: what NEAR AI charged for the documentation traces sent through it, as the proxy on this Mac recorded it. It's shown apart from API prices and never added to them, and these traces are left out of the API-price figures. A trace with a call that has no recorded charge counts as charge unknown, never zero.",
+    ),
     (
         "analytics_models_info_time",
         "Active time runs from each prompt to the model's last action before the next one, less time waiting on your answers. Only finished traces count, compared within one approval mode.",
@@ -655,6 +693,13 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_models_left_out_unknown_facts",
         "Left out, facts couldn't be read: {n}",
+    ),
+    // Traces a coding tool started itself (Codex's approvals reviewer, or
+    // a thread an agent spawned), not the contributor: the daemon's
+    // `left_out.automated`.
+    (
+        "analytics_models_left_out_automated",
+        "Left out, run by an agent, not you: {n}",
     ),
     (
         "analytics_models_left_out_delegated",
