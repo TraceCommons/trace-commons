@@ -29,10 +29,22 @@ and reuses their code wherever it can.
 4. **The operator-wide monthly budget is $100,** in the measured compose. It
    sits above the $5 per account per month cap.
 5. **Pooled-tenant accounts stay excluded in v1** (the section 3 default).
-6. **Phala named-volume survival across an in-place upgrade:** this is a
-   fact to verify before slice 6, not a choice. If the volume does not
-   survive, section 6's ledger placement changes, and the owner is told
-   before deploying.
+6. **Phala named-volume survival: checked 2026-10-20 against Phala's docs.**
+   - **In-place upgrade:** a volume declared in the compose file survives. The
+     production checklist says it is reattached to the new instance. The
+     upgrade restarts the whole CVM.
+   - **Delete and recreate:** the docs do not cover it, so the runbook says
+     to upgrade in place with `phala cvms upgrade`, never delete and
+     recreate. Section 6's ledger therefore stays on the `/data` volume.
+   - **Secrets:** an upgrade replaces them all, so every upgrade passes the
+     full set.
+   - **Image tags:** an unchanged tag may not be re-pulled, so every release
+     uses a new tag. A memory note records that `phala deploy` ignores
+     app-compose.json. Check both against the witness's deploy procedure.
+   - Sources:
+     https://docs.phala.network/phala-cloud/production-checklist
+     https://docs.phala.com/phala-cloud/update/upgrade-application
+     https://docs.phala.com/phala-cloud/faqs
 
 ## What already exists, verified against the tree on 2026-10-20
 
