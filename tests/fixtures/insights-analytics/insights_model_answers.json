@@ -32,10 +32,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "refactor_rejected",
@@ -54,10 +56,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "tests_rejected",
@@ -76,10 +80,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "docs_cost",
@@ -103,7 +109,8 @@
           },
           "routed_sessions": 3,
           "charge_unknown": 1
-        }
+        },
+        "kept": null
       },
       "next": {
         "label": "claude-opus-5-5",
@@ -114,7 +121,8 @@
           "value": 85400
         },
         "interrupts_per_session_permille": null,
-        "near_ai_charge": null
+        "near_ai_charge": null,
+        "kept": null
       },
       "sessions_by_model": [
         [
@@ -135,6 +143,7 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
@@ -146,7 +155,8 @@
         },
         "routed_sessions": 3,
         "charge_unknown": 1
-      }
+      },
+      "kept_by_model": []
     },
     {
       "question": "rejected_across_tasks",
@@ -178,10 +188,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 1,
         "too_few_edits": 13,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "finish_time",
@@ -200,10 +212,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     }
   ]
 }
