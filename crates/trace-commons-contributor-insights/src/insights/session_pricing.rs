@@ -37,8 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_pricing::{
-    BillableTokenCategory, BillableTokenCount, PricingAccounting, PricingError, PricingUsageInput,
-    calculate_estimated_cost,
+    BillableTokenCategory, BillableTokenCount, PricingAccounting, PricingUsageInput,
 };
 use trace_commons_protocol::insights_usage_series::{CacheWrite, KnownTurnUsage, TurnRecord};
 
@@ -271,24 +270,19 @@ fn price_turn(
         observed_until: at,
         counts: billable_counts(accounting, &usage)?,
     };
-    let table = catalog
-        .select_newest_applicable(&input)
+    let (table, estimate) = catalog
+        .price_newest_applicable(&input)
         .map_err(|error| match error {
             PricingCatalogError::MissingPrice => UnpricedReason::MissingPrice,
             PricingCatalogError::UnresolvedWindow => UnpricedReason::WindowUnresolved,
             PricingCatalogError::StalePrices => UnpricedReason::StalePrice,
+            PricingCatalogError::ArithmeticOverflow => UnpricedReason::Overflow,
             PricingCatalogError::InvalidQuery
             | PricingCatalogError::InvalidCatalog
             | PricingCatalogError::DuplicateTable
             | PricingCatalogError::DuplicateVersion
             | PricingCatalogError::StoredTableUnavailable => UnpricedReason::InvalidCatalog,
         })?;
-    let estimate = calculate_estimated_cost(table, &input).map_err(|error| match error {
-        PricingError::ArithmeticOverflow => UnpricedReason::Overflow,
-        PricingError::MissingPrice => UnpricedReason::MissingPrice,
-        PricingError::UnresolvedWindow => UnpricedReason::WindowUnresolved,
-        PricingError::InvalidTable | PricingError::InvalidInput => UnpricedReason::InvalidCatalog,
-    })?;
     // Recomputed from the breakdown: the estimate's micros are already
     // rounded, and a session rounds once over exact numerators.
     let numerator = estimate.breakdown.iter().try_fold(0u128, |sum, item| {
@@ -1408,5 +1402,56 @@ mod tests {
         );
         assert_eq!(price.tables.len(), 2);
         assert_eq!(price.prices_as_of, Some(at(5)));
+    }
+
+    /// A session prices from tables the catalog validated when it was built.
+    /// Re-validating serializes and hashes a whole table, so a per-turn call
+    /// costs time linear in the turns and the tables (about 73 microseconds a
+    /// turn in a release build with the shipped tables). This counts digest
+    /// computations instead of timing them, so it cannot flake under load.
+    #[test]
+    fn pricing_a_full_series_computes_no_table_digest() {
+        use trace_commons_protocol::insights_pricing::table_digests_computed_on_this_thread;
+
+        use crate::insights::pricing_catalog::production_pricing_catalog;
+
+        let catalog = production_pricing_catalog();
+        let from = catalog.tables()[0].entries[0].effective_from;
+        let turns = (0..MAX_SERIES_TURNS)
+            .map(|ordinal| {
+                let mut record = turn(
+                    u32::try_from(ordinal).unwrap(),
+                    Some(0),
+                    Some(0),
+                    [Some(1_000), Some(10_000), Some(500)],
+                    Some(CacheWrite::TotalOnly(2_000)),
+                );
+                record.at = Some(from);
+                record
+            })
+            .collect::<Vec<_>>();
+        let before = table_digests_computed_on_this_thread();
+        let codex = price_session(
+            &catalog,
+            PricingAccounting::Codex,
+            &labels(&["gpt-6-astra"]),
+            &turns,
+        );
+        let claude_label_on_codex = price_session(
+            &catalog,
+            PricingAccounting::Codex,
+            &labels(&["claude-opus-5-5"]),
+            &turns,
+        );
+        assert_eq!(
+            table_digests_computed_on_this_thread(),
+            before,
+            "no turn may re-hash a table"
+        );
+        assert_eq!(codex.by_model["gpt-6-astra"].priced_turns as usize, turns.len());
+        assert_eq!(
+            claude_label_on_codex.by_model["claude-opus-5-5"].unpriced_turns as usize,
+            turns.len()
+        );
     }
 }

@@ -3,6 +3,7 @@
 //! Tables contain reviewed inputs but do not establish billed cost. The
 //! calculator performs no model, timestamp, service-tier, or catalog lookup.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 
 use chrono::{DateTime, Utc};
@@ -20,6 +21,18 @@ const MAX_ID_BYTES: usize = 96;
 const MAX_PROVENANCE_TEXT_BYTES: usize = 256;
 const MAX_SOURCE_URL_BYTES: usize = 2048;
 const TABLE_DIGEST_DOMAIN: &[u8] = b"trace-commons-insights-pricing-table-v1\0";
+
+thread_local! {
+    static TABLE_DIGESTS_COMPUTED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many table digests this thread has computed (each one serializes and
+/// SHA-256s a whole table). A diagnostic for tests that assert a hot path
+/// validates nothing per call; not part of any wire or storage contract.
+#[doc(hidden)]
+pub fn table_digests_computed_on_this_thread() -> u64 {
+    TABLE_DIGESTS_COMPUTED.with(Cell::get)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,6 +202,7 @@ impl PricingAccounting {
 
 impl PricingTable {
     pub fn canonical_table_id(&self) -> Result<String, PricingError> {
+        TABLE_DIGESTS_COMPUTED.with(|count| count.set(count.get().saturating_add(1)));
         let body = PricingTableDigestBody {
             schema_version: self.schema_version,
             version: self.version,
@@ -250,11 +264,57 @@ struct PricingTableDigestBody<'a> {
     entries: &'a [ModelPriceEntry],
 }
 
+/// A [`PricingTable`] that passed [`PricingTable::validate`] and can no
+/// longer change: the field is private and there is no mutable access. A
+/// holder prices many turns from it with
+/// [`calculate_estimated_cost_validated`], which does not repeat the
+/// validation (it serializes and SHA-256s the whole table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPricingTable(PricingTable);
+
+impl ValidatedPricingTable {
+    pub fn as_table(&self) -> &PricingTable {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ValidatedPricingTable {
+    type Target = PricingTable;
+
+    fn deref(&self) -> &PricingTable {
+        &self.0
+    }
+}
+
+impl PricingTable {
+    /// Validate once and keep the proof in the type.
+    pub fn into_validated(self) -> Result<ValidatedPricingTable, PricingError> {
+        self.validate()?;
+        Ok(ValidatedPricingTable(self))
+    }
+}
+
 pub fn calculate_estimated_cost(
     table: &PricingTable,
     input: &PricingUsageInput,
 ) -> Result<DeterministicCostEstimate, PricingError> {
     table.validate()?;
+    calculate_checked(table, input)
+}
+
+/// [`calculate_estimated_cost`] for a table already validated: the same
+/// result without the per-call validation.
+pub fn calculate_estimated_cost_validated(
+    table: &ValidatedPricingTable,
+    input: &PricingUsageInput,
+) -> Result<DeterministicCostEstimate, PricingError> {
+    calculate_checked(&table.0, input)
+}
+
+fn calculate_checked(
+    table: &PricingTable,
+    input: &PricingUsageInput,
+) -> Result<DeterministicCostEstimate, PricingError> {
     validate_input(input)?;
     let matching = table
         .entries
@@ -745,6 +805,27 @@ mod tests {
         changed.entries[0].rates[0].usd_nanos_per_million_tokens = 2;
         assert_eq!(changed.validate(), Err(PricingError::InvalidTable));
         assert_ne!(changed.canonical_table_id().unwrap(), first.table_id);
+    }
+
+    #[test]
+    fn a_validated_table_prices_like_the_checked_path_without_rehashing() {
+        let validated = claude_table().into_validated().unwrap();
+        let input = claude_input([5, 6, 7, 8, 9]);
+        let digests = table_digests_computed_on_this_thread();
+        let fast = calculate_estimated_cost_validated(&validated, &input).unwrap();
+        assert_eq!(table_digests_computed_on_this_thread(), digests);
+        assert_eq!(
+            fast,
+            calculate_estimated_cost(validated.as_table(), &input).unwrap()
+        );
+        assert!(table_digests_computed_on_this_thread() > digests);
+
+        let mut changed = claude_table();
+        changed.entries[0].rates[0].usd_nanos_per_million_tokens = 2;
+        assert_eq!(
+            changed.into_validated().unwrap_err(),
+            PricingError::InvalidTable
+        );
     }
 
     #[test]
