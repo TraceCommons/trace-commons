@@ -31,7 +31,7 @@
 - `insights::session_pricing::{price_session, SessionPrice, ModelPrice, UnpricedReason, PricingTableRef, PRICING_BASIS_API_LIST, normalize_model_label, pricing_provider}` and `insights::pricing_catalog::production_pricing_catalog`.
 - `price_session(catalog: &PricingCatalog, accounting: PricingAccounting, model_labels: &[String], turns: &[TurnRecord]) -> SessionPrice`; `SessionPrice.total_usd_micros: Option<u64>`, `.by_model: BTreeMap<String, ModelPrice>` keyed by normalized label, `.skipped_turns`, `.unlabelled_turns`, `.tables: Vec<PricingTableRef>`.
 - Skip rule: a turn with `model_label_ix: None` whose usage is known and totals zero is skipped (the `<synthetic>` shape). Attribution here reuses it: a skipped turn counts toward no model and not toward the turn total.
-- Codex turn mapping the reader must store: `uncached_input = input_tokens - cached_input_tokens`, `cache_read = cached_input_tokens`, `output = output_tokens`, `cache_write = Some(CacheWrite::TotalOnly(cache_write_input_tokens))`.
+- Codex turn mapping the reader must store: through `session_pricing::codex_turn_usage` and nothing else, which maps `uncached_input = input_tokens - cached_input_tokens - cache_write_input_tokens` with checked arithmetic (unknown, never wrapped, when cached and written exceed the input), `cache_read = cached_input_tokens`, `output = output_tokens`, `cache_write = CacheWrite::TotalOnly(cache_write_input_tokens)`. Storing `input - cached` would price every written token twice.
 - `BillableTokenCategory::{CacheWriteFiveMinuteInput, CacheWriteOneHourInput}`.
 
 ## Review Focus
@@ -298,7 +298,7 @@ Reader rules (spec section 2; verify spellings on a real file before writing fix
 #[test] fn repeated_token_counts_make_one_turn_per_increase() { assert_eq!(e.series.turns.len(), 3); assert_eq!(sum_total(&e), final_total); }
 #[test] fn a_decreasing_total_makes_that_turn_unknown_never_negative() {}
 #[test] fn each_turn_carries_the_model_of_the_turn_context_before_it() {}
-#[test] fn counters_follow_the_pricing_mapping() { assert_eq!(t.uncached_input, Some(input - cached)); assert_eq!(t.cache_write, Some(CacheWrite::TotalOnly(w))); }
+#[test] fn counters_follow_the_pricing_mapping() { let u = codex_turn_usage(input, cached, w, output).unwrap(); assert_eq!(t.uncached_input, Some(u.uncached_input)); assert_eq!(t.uncached_input, Some(input - cached - w)); assert_eq!(t.cache_write, Some(CacheWrite::TotalOnly(w))); }
 #[test] fn shell_only_sessions_have_edits_unknown_not_zero() { assert_eq!(m.edits, None); }
 #[test] fn apply_patch_hunks_count_edits_and_feed_undone() {}
 #[test] fn codex_denied_is_unknown_in_every_mode() { for policy in ["never","on-request","untrusted"] { assert_eq!(m.denied, None); } }
@@ -334,7 +334,7 @@ Update `held_and_default_decisions` to `const { assert!(CODEX_PER_TURN_SERIES) }
   - `RowBody::Codex { observed: Option<CodexObserved>, #[serde(default)] series: Option<CodexTurnSeriesEvidence> }`.
   - `CounterRow` gains `#[serde(default)] facts: Option<SessionFacts>` and `#[serde(default)] facts_version: u32`. Every row the pass makes is written with `facts_version = SESSION_FACTS_VERSION`, including rows whose facts scan failed (`facts: None`) and `RowBody::Unknown` rows, so a session that cannot be read is not read on every poll. A row is unchanged only when, beyond today's conditions, `facts_version == SESSION_FACTS_VERSION`; so every existing row is read once more, within the per-poll budget (1,921 Codex rows on the owner's machine take about 120 polls at 16 reads each). A row whose `facts.classifier_version` is stale is re-classified at answer time with `reclassify`, not re-read.
   - `scan_session` runs `ClaudeFactsScan` beside `ClaudeTurnSeriesScan`, and `CodexTurnSeriesScan` beside `CodexUsageScan`, on the same records; a scan that fails leaves the facts `None` and the rest unchanged. `read_body` sets `facts.delegated_unread = candidate.group_member_count > 0` and `facts.capped |= series.truncated` (before the delegated mark sets `truncated`).
-  - `turns()` and `tool_calls()` count a Codex row's series, so the store caps (`COUNTER_STORE_MAX_TURNS`, `..._TOOL_CALLS`) see it.
+  - A Codex row's series has its own allowance (owner decision, 2026-10-20): it does not count toward the shared caps (`COUNTER_STORE_MAX_TURNS`, `..._TOOL_CALLS`, Claude Code only), but toward `COUNTER_STORE_MAX_CODEX_SERIES_TURNS` and `..._TOOL_CALLS` (196608 each). Past that budget the oldest Codex rows lose only their series (`series_trimmed`), keeping the row, `observed`, dates and facts; a trimmed row is not evicted and not re-read while unchanged, the Sessions answers draw it as a pre-reader row, and the Models answers count it in `unknown_facts`.
 
 - [ ] **Step 1: Failing tests** in `insights_week.rs` tests:
 
