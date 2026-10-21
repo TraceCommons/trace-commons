@@ -4598,9 +4598,28 @@ hold the highest id and leave the window first; the start time keeps the
 calls left in that window from counting twice, and keeps the calls of a
 proxy ledger that started over from being lost, whether their ids are below
 the old highest or have climbed past it. Only Claude Code and Codex calls are
-folded, the two tools the counter pass counts. `cost_usd`, backend and model names
-are never read into it (owner decision D5, open), and no session ID is
-stored. Calls whose tokens are unknown are kept per bucket, so the answer
+folded, the two tools the counter pass counts. Backend names are never read
+into it, and no session ID is stored.
+
+The tally also keeps the session's **NEAR AI charge** (owner decision D5,
+settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
+charge is taken as the call is folded or not at all. For each call through
+the NEAR AI route (`verified`; `gateway_only`, `unattested`, `pending` or
+`unavailable`; `failed`), the ledger's `cost_usd` is added to a per-model
+sum: `{usd_micros, charged_calls, calls_without_charge}`, integer USD micros
+rounded to the nearest, with `overflowed: true` written only when the sum
+overflowed. The model is the call's served model label, else its requested
+one, normalized as the Models answers normalize labels (lower case, a date
+stamp or `-latest` removed), or `unlabelled`. A call with no `cost_usd`, or
+one that is not a finite, non-negative amount, is counted in
+`calls_without_charge` and makes that session's charge unknown, never zero;
+so does an overflow. `outside` calls add no charge (the proxy prices those
+whether or not anyone was billed), and neither do calls with no proof label
+(their route is unknown). A tally with no NEAR AI call writes no charges,
+and a tally written before charges loads with none. The store holds no list
+price: list prices are applied to stored tokens when an answer is built.
+The charge is the store's one money figure, and only
+`insights_model_answers` reads it. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
 settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
@@ -4968,11 +4987,12 @@ updated_at, window_start, window_end, pricing, rows}`:
   counted even when its row is still stored.
 - `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`. Cost is
   priced at published API list prices when the answer is built; the store
-  holds tokens and facts, never a price. `table_id` is the content digest of
-  a shipped price table, the one digest on this wire.
+  holds tokens and facts, never a list price. `table_id` is the content
+  digest of a shipped price table, the one digest on this wire. The NEAR AI
+  charge is apart from this: see `near_ai_charge`.
 - `rows`: always six, in this order, each
   `{question, state, basis, edit_mode, leader, next, sessions_by_model,
-  left_out}`:
+  left_out, near_ai_charge}`:
   - `question`: `bug_fix_rejected`, `refactor_rejected`, `tests_rejected`,
     `docs_cost`, `rejected_across_tasks`, `finish_time`.
   - `state`: `not_enough_sessions`, `not_priced`, `no_clear_difference` or
@@ -4981,10 +5001,14 @@ updated_at, window_start, window_end, pricing, rows}`:
   - `edit_mode`: `prompting` or `not_prompting` on `finish_time`, else
     `null`. `unknown` is never compared.
   - `leader`, `next`: `null`, or `{label, sessions, edits,
-    figure, interrupts_per_session_permille}`. `label` is a model label the
-    session declared, not a verified serving identity. `figure` is
-    `{kind: "rate_permille", value}`, `{kind: "usd_micros", value}` or
-    `{kind: "finish_time", median_active_secs, median_user_turns}`.
+    figure, interrupts_per_session_permille, near_ai_charge}`. `label` is a
+    model label the session declared, not a verified serving identity.
+    `figure` is `{kind: "rate_permille", value}`, `{kind: "usd_micros",
+    value}` or `{kind: "finish_time", median_active_secs,
+    median_user_turns}`. On `docs_cost`, `figure` is at API list prices and
+    takes only sessions with no route tally. `near_ai_charge` is as on the
+    row, over that model's Docs sessions (by majority label) sent through
+    NEAR AI; `null` on every other figure.
   - `sessions_by_model`: `[[label, sessions], ...]`.
   - `left_out`: counts of sessions left out of that question, per reason:
     `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
@@ -4993,9 +5017,22 @@ updated_at, window_start, window_end, pricing, rows}`:
     window (see "The store" above): compared on no row, and counted on
     every row whatever their facts. A fact
     that could not be read is left out and counted here, never read as zero.
+  - `near_ai_charge`: on `docs_cost` only, what NEAR AI charged, from the
+    route tallies (see "Route tallies" above): `{basis: "near_ai_ledger",
+    median, routed_sessions, charge_unknown}`. `routed_sessions` counts the
+    Docs sessions in the window with at least one call through NEAR AI;
+    `charge_unknown` how many of them have an unknown charge. `median` is
+    `{kind: "usd_micros", value}`, the median charge per session over those
+    with a known charge (a session's charge is every NEAR AI call in it),
+    or `null` when none is known: never zero for unknown. The whole field is
+    `null` on every other row, and on `docs_cost` when no session in the
+    window was sent through NEAR AI. It is never added to `figure`: a
+    session's charge and its list-price estimate never meet in one figure.
 
-Money crosses only as `figure.value` under `kind: "usd_micros"` on the
-`docs_cost` row. No other key or value carries a price, and no session
+Money crosses only on the `docs_cost` row, as `{kind: "usd_micros", value}`:
+in `figure` at API list prices, and in `near_ai_charge.median` as the NEAR
+AI charge, labelled by `basis: "near_ai_ledger"`. No other key or value
+carries money, and no session
 reference, path, folder name, backend or commit hash crosses. With the
 ledger feed off, or no proxy ledger declared, every session is treated as
 unobserved and no stored route tally is read. No label or field name is a

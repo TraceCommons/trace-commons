@@ -1204,6 +1204,7 @@ fn the_bootstrap_runs_exactly_the_configured_draws() {
     let answers = model_answers_counting(
         &bugfix_pair(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &catalog(),
         now(),
         &mut draws,
@@ -1400,4 +1401,150 @@ fn a_no_edit_session_whose_edits_are_unknown_is_counted_as_left_out() {
         expected.left_out.unknown_facts += 1;
         assert_eq!(with, &expected, "{:?}", with.question);
     }
+}
+
+/// Five list-priced Docs sessions on each of model-a and model-b, all
+/// unobserved, plus model-a Docs sessions through NEAR AI with the charges
+/// given (`None` is an unknown charge).
+fn docs_with_charges(
+    charges: &[Option<u64>],
+) -> (
+    Vec<SessionInput>,
+    BTreeMap<String, ModelRoute>,
+    BTreeMap<String, Option<u64>>,
+) {
+    let mut sessions = many("a", 5, |id| {
+        solo(&id, "model-a", InferredTask::Docs, 1, Some(0), 0)
+    });
+    sessions.extend(many("b", 5, |id| {
+        solo(&id, "model-b", InferredTask::Docs, 1, Some(0), 0)
+    }));
+    let mut routes = BTreeMap::new();
+    let mut charged = BTreeMap::new();
+    for (ix, charge) in charges.iter().enumerate() {
+        let id = format!("near-{ix}");
+        sessions.push(solo(&id, "model-a", InferredTask::Docs, 1, Some(0), 0));
+        routes.insert(id.clone(), ModelRoute::RoutedVerified);
+        charged.insert(id, *charge);
+    }
+    (sessions, routes, charged)
+}
+
+#[test]
+fn the_near_ai_charge_is_its_own_figure_never_summed_with_list_prices() {
+    // List prices would put each model-a session at 1 USD; the charges are
+    // far from that, so any mixing would move a figure.
+    let (sessions, routes, charges) =
+        docs_with_charges(&[Some(2_000), Some(9_000), Some(4_000), None]);
+    let with = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let without = model_answers(&sessions, &routes, &catalog(), now());
+    let q4 = row(&with, ModelQuestion::DocsCost);
+    let plain = row(&without, ModelQuestion::DocsCost);
+    // The API-price figures are those of the unrouted sessions alone.
+    assert_eq!(q4.state, AnswerState::Answered);
+    for label in ["model-a", "model-b"] {
+        assert_eq!(
+            figure_of(q4, label).figure,
+            figure_of(plain, label).figure,
+            "{label}"
+        );
+        assert_eq!(figure_of(q4, label).sessions, 5);
+    }
+    assert_eq!(q4.left_out.routed, 4);
+    // The charge is the median of the known charges, on its own.
+    let expected = NearAiChargeFigure {
+        basis: ChargeBasis::NearAiLedger,
+        median: Some(Figure::UsdMicros { value: 4_000 }),
+        routed_sessions: 4,
+        charge_unknown: 1,
+    };
+    assert_eq!(q4.near_ai_charge, Some(expected));
+    assert_eq!(figure_of(q4, "model-a").near_ai_charge, Some(expected));
+    assert_eq!(figure_of(q4, "model-b").near_ai_charge, None);
+    assert_eq!(plain.near_ai_charge, None, "no charges given, none shown");
+    // No other question carries a charge.
+    for other in with
+        .rows
+        .iter()
+        .filter(|r| r.question != ModelQuestion::DocsCost)
+    {
+        assert_eq!(other.near_ai_charge, None, "{:?}", other.question);
+    }
+}
+
+#[test]
+fn the_near_ai_charge_payload_has_its_shape() {
+    let (sessions, routes, charges) = docs_with_charges(&[Some(1_500), Some(2_500)]);
+    let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let wire = serde_json::to_value(&answers).unwrap();
+    let q4 = &wire["rows"][3];
+    assert_eq!(q4["question"], "docs_cost");
+    let charge = serde_json::json!({
+        "basis": "near_ai_ledger",
+        "median": {"kind": "usd_micros", "value": 2_000},
+        "routed_sessions": 2,
+        "charge_unknown": 0,
+    });
+    assert_eq!(q4["near_ai_charge"], charge);
+    let leader_or_next = if q4["leader"]["label"] == "model-a" {
+        &q4["leader"]
+    } else {
+        &q4["next"]
+    };
+    assert_eq!(leader_or_next["near_ai_charge"], charge);
+    // The list-price figure is untouched: a kind and an integer only.
+    assert_eq!(leader_or_next["figure"]["kind"], "usd_micros");
+    assert_eq!(leader_or_next["figure"].as_object().unwrap().len(), 2);
+    // Every other row and figure says null, never zero.
+    for (ix, row) in wire["rows"].as_array().unwrap().iter().enumerate() {
+        if ix != 3 {
+            assert!(row["near_ai_charge"].is_null(), "{row}");
+        }
+    }
+}
+
+#[test]
+fn an_all_unknown_charge_reads_unknown_never_zero() {
+    let (sessions, routes, charges) = docs_with_charges(&[None, None]);
+    let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let q4 = row(&answers, ModelQuestion::DocsCost);
+    assert_eq!(
+        q4.near_ai_charge,
+        Some(NearAiChargeFigure {
+            basis: ChargeBasis::NearAiLedger,
+            median: None,
+            routed_sessions: 2,
+            charge_unknown: 2,
+        })
+    );
+    let wire = serde_json::to_value(q4).unwrap();
+    assert!(wire["near_ai_charge"]["median"].is_null(), "{wire}");
+}
+
+#[test]
+fn a_charge_outside_the_docs_task_or_window_is_not_counted() {
+    let (mut sessions, mut routes, mut charges) = docs_with_charges(&[Some(1_000)]);
+    sessions.push(solo(
+        "near-bug",
+        "model-a",
+        InferredTask::BugFix,
+        1,
+        Some(0),
+        0,
+    ));
+    routes.insert("near-bug".into(), ModelRoute::RoutedVerified);
+    charges.insert("near-bug".into(), Some(50_000));
+    sessions.push(with_facts(
+        solo("near-auto", "model-a", InferredTask::Docs, 1, Some(0), 0),
+        |_| {},
+    ));
+    sessions.last_mut().unwrap().automated = true;
+    routes.insert("near-auto".into(), ModelRoute::RoutedVerified);
+    charges.insert("near-auto".into(), Some(70_000));
+    let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let charge = row(&answers, ModelQuestion::DocsCost)
+        .near_ai_charge
+        .unwrap();
+    assert_eq!(charge.routed_sessions, 1);
+    assert_eq!(charge.median, Some(Figure::UsdMicros { value: 1_000 }));
 }
