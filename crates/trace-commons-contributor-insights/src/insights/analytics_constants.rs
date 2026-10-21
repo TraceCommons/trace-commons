@@ -114,10 +114,12 @@ pub const ADVICE_SHOWN: bool = false;
 /// labelled inferred from the order of tool calls. Owner decision D9, open.
 pub const EDIT_FAIL_EDIT_CARD: bool = true;
 
-/// Whether Codex `last_token_usage` is accepted as a per-turn series. While
-/// false, Codex counts only first-to-last observed deltas and its per-turn
-/// views read "not recorded". Owner decision D11, open.
-pub const CODEX_PER_TURN_SERIES: bool = false;
+/// Whether Codex `last_token_usage` is accepted as a per-turn series. Owner
+/// decision D11, settled (owner, 2026-10-20): the Codex reader keeps one turn
+/// per increase of the running token total. Two views read the series: the
+/// session drill-in and the Models answers. Weekly token figures, goals, the
+/// glance and Patterns keep reading the first-to-last observed change.
+pub const CODEX_PER_TURN_SERIES: bool = true;
 
 /// Whether Claude turns are counted once across snapshots by their keyed
 /// message digest. While false, overlapping snapshots of one harness are
@@ -141,8 +143,11 @@ pub enum DigestKeyCustody {
 pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
 
 /// Whether ledger `cost_usd` or list prices may reach an Insights figure.
-/// Owner decision D5, open.
-pub const LEDGER_MONEY_IN_INSIGHTS: bool = false;
+/// Owner decision D5, settled by the owner on 2026-10-20: Insights shows
+/// money, labelled. The proxy ledger's `cost_usd` is shown as a charge;
+/// everything else is at API list prices from reviewed tables shipped in
+/// the build, with no runtime fetch.
+pub const LEDGER_MONEY_IN_INSIGHTS: bool = true;
 
 /// Whether the daemon setting `insights_ledger_feed` starts on. Owner
 /// decision D3, settled by the owner on 2026-10-09: on by default, and the
@@ -185,12 +190,58 @@ pub const COUNTER_PASS_EXCLUDES_NEVER_FOLDERS: bool = true;
 /// The counter store keeps at most this many sessions; past it the oldest go
 /// first. Owner decision D4, open (a capped daemon-local store).
 pub const COUNTER_STORE_MAX_SESSIONS: usize = 2_048;
-/// ...and at most this many turns across every session. Owner decision D4,
-/// open.
+/// ...and at most this many turns across every session's Claude Code
+/// series. Codex per-turn series do not count here: they have their own
+/// budget, below. Owner decision D4, open.
 pub const COUNTER_STORE_MAX_TURNS: usize = 131_072;
-/// ...and at most this many tool calls across every session. Owner decision
-/// D4, open.
+/// ...and at most this many tool calls across every session's Claude Code
+/// series; Codex's have their own budget. Owner decision D4, open.
 pub const COUNTER_STORE_MAX_TOOL_CALLS: usize = 131_072;
+/// The Codex per-turn series' own budget, in turns across every Codex row
+/// (owner decision, 2026-10-20: a separate allowance for Codex store data).
+/// Past it, or past the tool-call budget below, the oldest Codex rows lose
+/// their per-turn series only, never the row: the row, its observed totals,
+/// dates and facts stay, so the session still counts in every weekly
+/// figure, while the Sessions drill and the Models answers read its
+/// per-turn data as unknown. Nothing is evicted for this budget.
+///
+/// Sized for 13 weeks of heavy Codex use. Measured 2026-10-20 on the
+/// owner's machine over `COUNTER_STORE_KEEP_WEEKS`: 2,517 Codex files,
+/// 198,687 `token_count` events, 188,156 turns after the reader drops
+/// repeats, about 166,700 once each session's own `MAX_SERIES_TURNS` cap
+/// applies, and 160,756 tool calls. 196,608 (1.5 times the shared caps)
+/// keeps about 18% headroom on turns and 22% on tool calls.
+///
+/// Size: serialized as the store's JSON, a turn is 185 bytes typical and at
+/// most about 225 (every counter near `u32::MAX`, a sub-second time); a
+/// tool call is 194 bytes typical and about 280 at most (a path digest and
+/// extension). At both budgets the Codex series add at most about 44 MB
+/// (turns) plus 55 MB (tool calls), about 99 MB, to the file, and about
+/// 74 MB typical; in memory a record is about 100 bytes, about 40 MB, held
+/// twice while a pass writes. The shared caps keep their own bound (about
+/// 65 MB at most) beside it.
+pub const COUNTER_STORE_MAX_CODEX_SERIES_TURNS: usize = 196_608;
+/// ...and at most this many tool calls across every Codex row's series.
+/// See `COUNTER_STORE_MAX_CODEX_SERIES_TURNS` for the sizing.
+pub const COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS: usize = 196_608;
+/// Automated sessions' own allowance (owner decision, 2026-10-20, option
+/// (b)): a session started by a tool rather than the person (a Codex
+/// session its harness spawned itself: the automatic approvals reviewer or
+/// a delegated thread) does not count toward `COUNTER_STORE_MAX_SESSIONS`
+/// or the shared turn and tool-call caps. At most this many are kept
+/// besides, the oldest evicted first within the allowance, so they never
+/// crowd the contributor's own sessions out. Their Codex series stay under
+/// the Codex series budget above. A session that cannot be told apart
+/// counts as the person's.
+///
+/// They stay in the overview's token totals, since they cost tokens, but
+/// past the allowance the oldest are gone from those totals. Sized to keep
+/// two busy weeks of them, several hundred a week on a heavy Codex user's
+/// machine, so the current week and the one before it, the two the
+/// overview's change compares, stay whole; older weeks may undercount
+/// automated tokens. Half the shared cap, so the store grows by at most
+/// half as many rows.
+pub const COUNTER_STORE_MAX_AUTOMATED_SESSIONS: usize = 1_024;
 /// Sessions last written longer ago than this many weeks are not read, and
 /// their rows are dropped: enough for six weekly marks and a four-week
 /// baseline. Owner decision D4, open.
@@ -211,6 +262,81 @@ pub const COUNTER_PASS_MAX_BYTES_PER_TICK: u64 = 64 * 1024 * 1024;
 /// 2026-10-20). One line longer than this is not read: its session is
 /// stored as unknown, never as zero.
 pub const COUNTER_PASS_MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether a Codex transcript records a contributor declining an edit in a
+/// shape the Codex scan can match. While false, Codex `denied` is unknown
+/// (`None`) in every mode, never a known zero.
+///
+/// Search of 2026-10-20 over 4,823 local Codex transcripts: no
+/// `exec_approval_request` or `apply_patch_approval_request` event is
+/// persisted, and no `apply_patch` denial was found. Five `exec_command`
+/// rejections in four files were found, each a `response_item` of type
+/// `function_call_output` whose output ends
+/// `CreateProcess { message: "Rejected(\"rejected by user\")" }`, all in
+/// `on-request` turns that carry no `approvals_reviewer` field. None was a
+/// denial of an edit, and no denial appeared in a turn that names the
+/// reviewer (`user` was seen only under `never`), so the reviewer value that
+/// names the contributor cannot be pinned from a real transcript. Spec
+/// section 1, "Codex markers are not confirmed".
+pub const CODEX_DENIAL_CONFIRMED: bool = false;
+
+/// The model label Codex's automatic reviewer declares in `turn_context`.
+/// A session whose turns all declare it is the reviewer's, not the
+/// contributor's: it keeps its token totals and is left out of every model
+/// answer (spec section 2, "Reviewer sessions"). Search of 2026-10-20: 1,009
+/// local Codex transcripts declare it in `turn_context`, and none of them
+/// declares another model.
+pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
+
+/// Version of the task classifier's rules and thresholds. A bump that changes
+/// only rules or thresholds re-classifies from the stored shape (spec
+/// section 5).
+pub const CLASSIFIER_VERSION: u32 = 1;
+/// Version of the stored session facts. A bump that changes what a scan
+/// collects re-reads each row once.
+pub const SESSION_FACTS_VERSION: u32 = 1;
+
+/// Sessions a (task type, model) cell needs before its figure is compared
+/// (spec section 6).
+pub const MODEL_ANSWER_MIN_SESSIONS: u32 = 5;
+/// Edits a cell needs before its rejection figure is compared.
+pub const MODEL_ANSWER_MIN_EDITS: u32 = 30;
+/// Share of the contributor's task mix a model's qualifying task types must
+/// carry before it is compared across task types.
+pub const MODEL_ANSWER_MIN_MIX_COVERAGE: Ratio = Ratio::new(4, 5);
+/// Resamples behind every named leader.
+pub const MODEL_ANSWER_BOOTSTRAP_DRAWS: u32 = 1_000;
+/// Share of draws in which the leader must lead the next model.
+pub const MODEL_ANSWER_LEAD_SHARE: Ratio = Ratio::new(95, 100);
+/// The fixed bootstrap seed, so the same rows always give the same answer.
+pub const MODEL_ANSWER_BOOTSTRAP_SEED: u64 = 0x7472_6163_655f_6d61;
+/// Weeks the Models answers cover, ending now: the counter store's
+/// retention, whatever week is on screen.
+pub const MODEL_ANSWER_WINDOW_WEEKS: i64 = COUNTER_STORE_KEEP_WEEKS;
+
+/// Extensions that make an edited file doc-class.
+pub const DOC_EXTENSIONS: [&str; 4] = ["md", "mdx", "rst", "adoc"];
+/// Directories under which a `.txt` file is doc-class; elsewhere it is
+/// config-class.
+pub const DOC_DIRS: [&str; 2] = ["docs", "doc"];
+/// Directories that make every file under them test-class.
+pub const TEST_DIRS: [&str; 4] = ["tests", "test", "__tests__", "spec"];
+/// Marks inside a file name that make it test-class.
+pub const TEST_NAME_MARKS: [&str; 3] = ["_test.", ".test.", ".spec."];
+/// A file-name prefix that makes it test-class.
+pub const TEST_NAME_PREFIX: &str = "test_";
+/// Extensions that make an edited file config-class. A default taken, not an
+/// owner ruling; `CMakeLists.txt` and `requirements.txt` fall here by `txt`.
+pub const CONFIG_EXTENSIONS: [&str; 11] = [
+    "txt", "json", "toml", "yaml", "yml", "ini", "cfg", "conf", "lock", "xml", "plist",
+];
+/// Files renamed or moved at which a session is a refactor.
+pub const REFACTOR_MIN_RENAMES: u32 = 3;
+/// Edited files at which balanced line counts make a session a refactor.
+pub const REFACTOR_MIN_FILES: u32 = 5;
+/// Net lines (`|added - removed|`) within this share of lines changed
+/// (`added + removed`) count as balanced.
+pub const REFACTOR_NET_LINES: Ratio = Ratio::new(1, 10);
 
 #[cfg(test)]
 mod tests {
@@ -287,9 +413,9 @@ mod tests {
     fn held_and_default_decisions() {
         const { assert!(!ADVICE_SHOWN) };
         const { assert!(EDIT_FAIL_EDIT_CARD) };
-        const { assert!(!CODEX_PER_TURN_SERIES) };
+        const { assert!(CODEX_PER_TURN_SERIES) };
         const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
-        const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
+        const { assert!(LEDGER_MONEY_IN_INSIGHTS) };
         assert_eq!(DIGEST_KEY_CUSTODY, DigestKeyCustody::OsKeychain);
     }
 
@@ -310,6 +436,24 @@ mod tests {
         assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);
         assert_eq!(COUNTER_STORE_MAX_TURNS, 131_072);
         assert_eq!(COUNTER_STORE_MAX_TOOL_CALLS, 131_072);
+        assert_eq!(COUNTER_STORE_MAX_CODEX_SERIES_TURNS, 196_608);
+        assert_eq!(COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS, 196_608);
+        // The newest Codex session always keeps its series: one session's
+        // own caps fit inside the budget.
+        const {
+            assert!(
+                COUNTER_STORE_MAX_CODEX_SERIES_TURNS
+                    >= trace_commons_protocol::insights_usage_series::MAX_SERIES_TURNS
+            )
+        };
+        const {
+            assert!(
+                COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS
+                    >= trace_commons_protocol::insights_usage_series::MAX_SERIES_TOOL_CALLS
+            )
+        };
+        assert_eq!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS, 1_024);
+        const { assert!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS < COUNTER_STORE_MAX_SESSIONS) };
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
@@ -331,6 +475,35 @@ mod tests {
         assert!(!LEVER_RATIO.reached_by(124, 100));
         // No overflow at the extremes.
         assert!(half.reached_by(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn codex_denial_follows_the_confirmed_marker() {
+        // false: the 2026-10-20 search found exec rejections only in turns
+        // that carry no `approvals_reviewer`, and none of an edit; Codex
+        // `denied` is always None.
+        const { assert!(!CODEX_DENIAL_CONFIRMED) };
+        assert_eq!(CODEX_REVIEWER_MODEL, "codex-auto-review");
+    }
+
+    #[test]
+    fn task_classifier_constants() {
+        assert_eq!(CLASSIFIER_VERSION, 1);
+        assert_eq!(SESSION_FACTS_VERSION, 1);
+        assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
+        assert_eq!(DOC_DIRS, ["docs", "doc"]);
+        assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);
+        assert_eq!(TEST_NAME_MARKS, ["_test.", ".test.", ".spec."]);
+        assert_eq!(TEST_NAME_PREFIX, "test_");
+        assert_eq!(
+            CONFIG_EXTENSIONS,
+            [
+                "txt", "json", "toml", "yaml", "yml", "ini", "cfg", "conf", "lock", "xml", "plist"
+            ]
+        );
+        assert_eq!(REFACTOR_MIN_RENAMES, 3);
+        assert_eq!(REFACTOR_MIN_FILES, 5);
+        assert_eq!(REFACTOR_NET_LINES, Ratio::new(1, 10));
     }
 
     #[test]
