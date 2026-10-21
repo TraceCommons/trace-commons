@@ -5,8 +5,8 @@
 //! review) is approved: Ron approved the words in his 2026-10-11 owner
 //! review of #1287 (owner decision D17), and the owner adopted that review.
 //! User-facing words say "trace", not "session", except the Sessions tab
-//! (with its card title and drill-down column header) and the context tip's
-//! "current session". No shell authors any of these sentences; each reads
+//! (with its card title, drill-down column header and Analyze's lines that
+//! name it) and the context tip's "current session". No shell authors any of these sentences; each reads
 //! this table through `ui_copy()` (`tc_insights_copy_json`, or the `copy`
 //! operation of `tc_insights_call`).
 //!
@@ -482,6 +482,42 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_label_save_failed",
         "The label couldn't be saved.",
+    ),
+    // Analyze reads a watched trace by its Sessions row, never a file the
+    // person picks (Insights PM, 2026-10-21: terminal users never see their
+    // trace files). The open row's one action analyzes it and saves the
+    // snapshot, which then opens in Analyze.
+    ("analytics_analyze_save", "Analyze & save"),
+    ("analytics_analyze_save_a11y", "Analyze and save, {label}"),
+    // Under the open row when the daemon could not analyze it.
+    (
+        "analytics_analyze_failed",
+        "This trace couldn't be analyzed.",
+    ),
+    // Its file was moved or deleted since it was counted.
+    (
+        "analytics_analyze_file_gone",
+        "This trace's file is no longer where it was found.",
+    ),
+    // The row was listed again under a new reference (its file grew) or
+    // its folder became Never.
+    (
+        "analytics_analyze_unknown",
+        "This trace has changed since it was listed. Try again once the list refreshes.",
+    ),
+    // Analyze's head while nothing is saved, and once something is.
+    (
+        "analytics_analyze_empty",
+        "No saved insights yet. Open a trace in Sessions and choose Analyze & save.",
+    ),
+    (
+        "analytics_analyze_how",
+        "To add a trace, open it in Sessions and choose Analyze & save.",
+    ),
+    // Behind Analyze's "i".
+    (
+        "analytics_analyze_intro",
+        "Analyze & save reads a watched trace on this Mac and keeps a dated snapshot of what it found. Nothing is uploaded. Analyze it again to refresh it.",
     ),
     ("analytics_turn", "Turn {n}"),
     (
