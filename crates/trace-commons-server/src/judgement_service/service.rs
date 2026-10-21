@@ -43,7 +43,7 @@ use trace_commons_protocol::insights_judgement::{
 
 use super::claim::{IssuerKeys, verify_judgement_claim};
 use super::digest::marked_event_count;
-use super::limiter::LimiterKeys;
+use super::limiter::{ClaimTime, LimiterKeys};
 use super::receipt_check::JudgementCaller;
 
 /// The tracing target of the request log line.
@@ -224,6 +224,10 @@ impl JudgementService {
         *digest_sha256 = Some(request.digest_sha256());
         let account = verify_judgement_claim(&self.issuer, request.claim(), now)?;
         let account_key = self.limiter_keys.account_key(account.account_ref());
+        let time = ClaimTime {
+            iat: account.iat(),
+            now,
+        };
         // The raw account reference is not needed past this point.
         drop(account);
         // The digest goes to the model as text, so it must be UTF-8.
@@ -249,7 +253,7 @@ impl JudgementService {
                 JudgementKind::Task | JudgementKind::Finished => {
                     results.push(
                         self.caller
-                            .judge(&account_key, digest, kind, None, now)
+                            .judge(&account_key, digest, kind, None, time)
                             .await?,
                     );
                 }
@@ -257,7 +261,7 @@ impl JudgementService {
                     for index in 0..events {
                         let result = if index < JUDGEMENT_EVENT_KIND_MAX {
                             self.caller
-                                .judge(&account_key, digest, kind, Some(index), now)
+                                .judge(&account_key, digest, kind, Some(index), time)
                                 .await?
                         } else {
                             JudgementResult::unjudged_event(index)
@@ -276,7 +280,7 @@ impl JudgementService {
                 account_month_remaining_bucket: self
                     .caller
                     .limiter()
-                    .remaining_bucket(&account_key, now),
+                    .remaining_bucket(&account_key, time),
             },
         })
     }

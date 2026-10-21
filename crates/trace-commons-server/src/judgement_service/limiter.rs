@@ -29,6 +29,9 @@
 //! failure errs toward over-counting. Arithmetic is checked; an overflow
 //! refuses, it never wraps or saturates into a pass.
 //!
+//! The ledger month follows the verified claim's `iat`, not the service
+//! clock; see [`roll_month`].
+//!
 //! Every reserve and every settle is written to the sealed ledger before
 //! the call goes on. A write that fails rolls the in-memory change back
 //! toward the larger charge and refuses with `judgement_saturated`.
@@ -145,6 +148,26 @@ impl LimiterCaps {
     }
 }
 
+/// The two clocks a reservation is made under: the verified claim's
+/// issuer-signed `iat`, which the ledger month follows, and the service's
+/// own `now`, which the claim check has already bounded to within 60 s of
+/// the issuer's times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimTime {
+    pub iat: i64,
+    pub now: i64,
+}
+
+impl ClaimTime {
+    /// Both clocks at one instant. Tests and the drill.
+    pub fn at(instant: i64) -> Self {
+        Self {
+            iat: instant,
+            now: instant,
+        }
+    }
+}
+
 /// The UTC month of `now` as `year * 12 + (month - 1)`. `None` outside
 /// chrono's range or before year 0.
 pub fn month_index(now: i64) -> Option<u32> {
@@ -226,14 +249,20 @@ impl Limiter {
         &self,
         account: &AccountKey,
         amount_nanousd: u64,
-        now: i64,
+        time: ClaimTime,
     ) -> Result<Reservation, JudgementRefusal> {
-        // An unrepresentable month is not a month any budget covers.
-        let now_month = month_index(now).ok_or(JudgementRefusal::OperatorBudgetExhausted)?;
+        // A verified claim's iat is always a representable month. One that is
+        // not means the clocks are broken: an internal fault, never a budget
+        // the account or the operator could be told to wait for.
+        let iat_month = month_index(time.iat).ok_or(JudgementRefusal::ServiceFault)?;
+        let now_month = month_index(time.now);
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let before = state.clone();
-        roll_month(&mut state, now_month);
+        roll_month(&mut state, iat_month, now_month);
         let month = state.month;
+        // What a cap refusal leaves behind: the rolled month, uncharged, so
+        // `reset_at` names it. Not written: nothing was spent.
+        let rolled = state.clone();
 
         let account_spent = state.accounts.get(account.as_bytes()).copied().unwrap_or(0);
         let account_after = account_spent
@@ -243,7 +272,7 @@ impl Limiter {
         let account_after = match account_after {
             Ok(after) => after,
             Err(refusal) => {
-                *state = before;
+                *state = rolled;
                 return Err(refusal);
             }
         };
@@ -254,7 +283,7 @@ impl Limiter {
         {
             Some(after) => after,
             None => {
-                *state = before;
+                *state = rolled;
                 return Err(JudgementRefusal::OperatorBudgetExhausted);
             }
         };
@@ -320,7 +349,9 @@ impl Limiter {
     /// The account's remaining monthly budget, as the coarse bucket the
     /// response carries: `over_half` when more than half remains,
     /// `under_tenth` when less than a tenth remains, `under_half` otherwise.
-    pub fn remaining_bucket(&self, account: &AccountKey, now: i64) -> SpendBucket {
+    pub fn remaining_bucket(&self, account: &AccountKey, time: ClaimTime) -> SpendBucket {
+        // The month the reservations were made against, not the CVM's.
+        let now = time.iat;
         let cap = u128::from(self.caps.account_nanousd);
         let remaining = u128::from(
             self.caps
@@ -334,6 +365,27 @@ impl Limiter {
         } else {
             SpendBucket::UnderHalf
         }
+    }
+
+    /// The ledger's month, `year * 12 + (month - 1)`: the month the last
+    /// reservation was made against. 0 before any.
+    pub fn ledger_month(&self) -> u32 {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).month
+    }
+
+    /// The `reset_at` of a capacity refusal: the first instant of the month
+    /// after the ledger's month. `None` before any reservation.
+    pub fn reset_at(&self) -> Option<i64> {
+        let month = self.ledger_month();
+        if month == 0 {
+            return None;
+        }
+        let start =
+            chrono::NaiveDate::from_ymd_opt(i32::try_from(month / 12).ok()?, month % 12 + 1, 1)?
+                .and_hms_opt(0, 0, 0)?
+                .and_utc()
+                .timestamp();
+        trace_commons_protocol::insights_judgement::judgement_budget_reset_at(start)
     }
 
     /// What the account has spent this month. For tests and the drill.
@@ -355,13 +407,24 @@ impl Limiter {
     }
 }
 
-/// Drop every figure from before `month`. The ledger never holds more than
-/// one month, and it only rolls forward: a clock that steps back across the
-/// 1st keeps charging the later month rather than reopening an empty one.
-fn roll_month(state: &mut LedgerState, month: u32) {
-    if month > state.month {
+/// Move the ledger to the verified claim's month, dropping every figure from
+/// before it (spec section 6, "The ledger month follows a signed clock").
+///
+/// - It only rolls forward: a clock that steps back across the 1st keeps
+///   charging the later month rather than reopening an empty one.
+/// - It moves only to `iat`'s month, never to the service clock's, so a
+///   CVM clock reading in the future cannot persist that month.
+/// - It moves by one month on `iat` alone. A larger jump (a long idle
+///   period, or a fresh ledger) also needs the service clock in that same
+///   month, so neither clock alone can skip the ledger ahead. When the two
+///   disagree the ledger stays where it is and keeps charging that month,
+///   which errs toward over-counting.
+fn roll_month(state: &mut LedgerState, iat_month: u32, now_month: Option<u32>) {
+    let next = state.month.saturating_add(1);
+    let advance = iat_month == next || (iat_month > next && now_month == Some(iat_month));
+    if advance {
         *state = LedgerState {
-            month,
+            month: iat_month,
             ..LedgerState::default()
         };
     }
@@ -493,7 +556,9 @@ pub(crate) mod tests {
         let store = Arc::new(MemoryStore::default());
         let limiter = limiter(store.clone());
         let account = keys().account_key("near-a");
-        let reservation = limiter.reserve(&account, 1_000, NOW).expect("reserves");
+        let reservation = limiter
+            .reserve(&account, 1_000, ClaimTime::at(NOW))
+            .expect("reserves");
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 1_000);
         assert_eq!(limiter.operator_spent_nanousd(NOW), 1_000);
         limiter.settle(reservation, Some(300)).expect("settles");
@@ -509,7 +574,9 @@ pub(crate) mod tests {
     fn a_charge_above_the_reservation_is_charged_in_full() {
         let limiter = limiter(Arc::new(MemoryStore::default()));
         let account = keys().account_key("near-a");
-        let reservation = limiter.reserve(&account, 100, NOW).expect("reserves");
+        let reservation = limiter
+            .reserve(&account, 100, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(reservation, Some(250)).expect("settles");
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 250);
     }
@@ -519,7 +586,9 @@ pub(crate) mod tests {
         let store = Arc::new(MemoryStore::default());
         let limiter = limiter(store.clone());
         let account = keys().account_key("near-a");
-        let reservation = limiter.reserve(&account, 1_000, NOW).expect("reserves");
+        let reservation = limiter
+            .reserve(&account, 1_000, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(reservation, None).expect("settles");
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 1_000);
     }
@@ -532,7 +601,9 @@ pub(crate) mod tests {
             let (ledger, state) =
                 SealedLedger::open(dir.path(), keys().ledger_seal_key(), [1u8; 20]).expect("opens");
             let limiter = Limiter::new(caps(), state, Arc::new(ledger));
-            let reservation = limiter.reserve(&account, 7_000, NOW).expect("reserves");
+            let reservation = limiter
+                .reserve(&account, 7_000, ClaimTime::at(NOW))
+                .expect("reserves");
             // The process dies here: the reservation is never settled, and
             // the limiter goes with it.
             drop(reservation);
@@ -551,14 +622,20 @@ pub(crate) mod tests {
         let limiter = limiter(store.clone());
         let account = keys().account_key("near-a");
         let cap = caps().account_nanousd();
-        let reservation = limiter.reserve(&account, cap - 10, NOW).expect("reserves");
+        let reservation = limiter
+            .reserve(&account, cap - 10, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(reservation, None).expect("settles");
         // Exactly at the cap is allowed.
-        let reservation = limiter.reserve(&account, 10, NOW).expect("reaches the cap");
+        let reservation = limiter
+            .reserve(&account, 10, ClaimTime::at(NOW))
+            .expect("reaches the cap");
         limiter.settle(reservation, None).expect("settles");
         let writes = store.writes.load(Ordering::SeqCst);
         assert_eq!(
-            limiter.reserve(&account, 1, NOW).unwrap_err(),
+            limiter
+                .reserve(&account, 1, ClaimTime::at(NOW))
+                .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
         // A refusal writes nothing and changes nothing.
@@ -567,7 +644,7 @@ pub(crate) mod tests {
         // Another account is unaffected.
         assert!(
             limiter
-                .reserve(&keys().account_key("near-b"), 1, NOW)
+                .reserve(&keys().account_key("near-b"), 1, ClaimTime::at(NOW))
                 .is_ok()
         );
     }
@@ -582,20 +659,22 @@ pub(crate) mod tests {
         let first = keys().account_key("near-a");
         let second = keys().account_key("near-b");
         let five = 5 * NANOUSD_PER_USD;
-        let r = limiter.reserve(&first, five, NOW).expect("reserves");
+        let r = limiter
+            .reserve(&first, five, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(r, None).expect("settles");
         let r = limiter
-            .reserve(&second, 2 * NANOUSD_PER_USD, NOW)
+            .reserve(&second, 2 * NANOUSD_PER_USD, ClaimTime::at(NOW))
             .expect("reaches the budget");
         limiter.settle(r, None).expect("settles");
         let third = keys().account_key("near-c");
         assert_eq!(
-            limiter.reserve(&third, 1, NOW).unwrap_err(),
+            limiter.reserve(&third, 1, ClaimTime::at(NOW)).unwrap_err(),
             JudgementRefusal::OperatorBudgetExhausted
         );
         // The account cap is checked first.
         assert_eq!(
-            limiter.reserve(&first, 1, NOW).unwrap_err(),
+            limiter.reserve(&first, 1, ClaimTime::at(NOW)).unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
     }
@@ -609,7 +688,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             limiter
-                .reserve(&keys().account_key("near-a"), 1, NOW)
+                .reserve(&keys().account_key("near-a"), 1, ClaimTime::at(NOW))
                 .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
@@ -619,10 +698,14 @@ pub(crate) mod tests {
     fn an_overflowing_reservation_is_refused_not_wrapped() {
         let limiter = limiter(Arc::new(MemoryStore::default()));
         let account = keys().account_key("near-a");
-        let r = limiter.reserve(&account, 10, NOW).expect("reserves");
+        let r = limiter
+            .reserve(&account, 10, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(r, None).expect("settles");
         assert_eq!(
-            limiter.reserve(&account, u64::MAX, NOW).unwrap_err(),
+            limiter
+                .reserve(&account, u64::MAX, ClaimTime::at(NOW))
+                .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 10);
@@ -634,15 +717,19 @@ pub(crate) mod tests {
         let limiter = limiter(store.clone());
         let account = keys().account_key("near-a");
         let cap = caps().account_nanousd();
-        let r = limiter.reserve(&account, cap, NOW).expect("reserves");
+        let r = limiter
+            .reserve(&account, cap, ClaimTime::at(NOW))
+            .expect("reserves");
         limiter.settle(r, None).expect("settles");
         assert_eq!(
-            limiter.reserve(&account, 1, NOW).unwrap_err(),
+            limiter
+                .reserve(&account, 1, ClaimTime::at(NOW))
+                .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
         assert_eq!(limiter.account_spent_nanousd(&account, NEXT_MONTH), 0);
         let r = limiter
-            .reserve(&account, 1, NEXT_MONTH)
+            .reserve(&account, 1, ClaimTime::at(NEXT_MONTH))
             .expect("a new month");
         limiter.settle(r, None).expect("settles");
         let persisted = store.last.lock().expect("lock").clone().expect("written");
@@ -656,9 +743,11 @@ pub(crate) mod tests {
         let limiter = limiter(Arc::new(MemoryStore::default()));
         let account = keys().account_key("near-a");
         let old = limiter
-            .reserve(&account, 500, NEXT_MONTH - 1)
+            .reserve(&account, 500, ClaimTime::at(NEXT_MONTH - 1))
             .expect("reserves");
-        let new = limiter.reserve(&account, 7, NEXT_MONTH).expect("reserves");
+        let new = limiter
+            .reserve(&account, 7, ClaimTime::at(NEXT_MONTH))
+            .expect("reserves");
         limiter.settle(old, Some(1)).expect("settles");
         limiter.settle(new, None).expect("settles");
         assert_eq!(limiter.account_spent_nanousd(&account, NEXT_MONTH), 7);
@@ -671,14 +760,18 @@ pub(crate) mod tests {
         let account = keys().account_key("near-a");
         store.fail.store(true, Ordering::SeqCst);
         assert_eq!(
-            limiter.reserve(&account, 100, NOW).unwrap_err(),
+            limiter
+                .reserve(&account, 100, ClaimTime::at(NOW))
+                .unwrap_err(),
             JudgementRefusal::Saturated
         );
         // A refused reservation is not charged in memory either.
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 0);
 
         store.fail.store(false, Ordering::SeqCst);
-        let r = limiter.reserve(&account, 100, NOW).expect("reserves");
+        let r = limiter
+            .reserve(&account, 100, ClaimTime::at(NOW))
+            .expect("reserves");
         store.fail.store(true, Ordering::SeqCst);
         assert_eq!(
             limiter.settle(r, Some(10)).unwrap_err(),
@@ -697,31 +790,33 @@ pub(crate) mod tests {
         );
         let account = keys().account_key("near-a");
         assert_eq!(
-            limiter.remaining_bucket(&account, NOW),
+            limiter.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::OverHalf
         );
         let spend = |amount: u64| {
-            let r = limiter.reserve(&account, amount, NOW).expect("reserves");
+            let r = limiter
+                .reserve(&account, amount, ClaimTime::at(NOW))
+                .expect("reserves");
             limiter.settle(r, None).expect("settles");
         };
         spend(4 * NANOUSD_PER_USD); // 6 of 10 remain.
         assert_eq!(
-            limiter.remaining_bucket(&account, NOW),
+            limiter.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::OverHalf
         );
         spend(NANOUSD_PER_USD); // exactly half remains.
         assert_eq!(
-            limiter.remaining_bucket(&account, NOW),
+            limiter.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::UnderHalf
         );
         spend(4 * NANOUSD_PER_USD); // exactly a tenth remains.
         assert_eq!(
-            limiter.remaining_bucket(&account, NOW),
+            limiter.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::UnderHalf
         );
         spend(1); // less than a tenth.
         assert_eq!(
-            limiter.remaining_bucket(&account, NOW),
+            limiter.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::UnderTenth
         );
         let zero = Limiter::new(
@@ -730,7 +825,7 @@ pub(crate) mod tests {
             Arc::new(MemoryStore::default()),
         );
         assert_eq!(
-            zero.remaining_bucket(&account, NOW),
+            zero.remaining_bucket(&account, ClaimTime::at(NOW)),
             SpendBucket::UnderTenth
         );
     }
@@ -741,17 +836,160 @@ pub(crate) mod tests {
         let account = keys().account_key("near-a");
         let cap = caps().account_nanousd();
         let r = limiter
-            .reserve(&account, cap, NEXT_MONTH)
+            .reserve(&account, cap, ClaimTime::at(NEXT_MONTH))
             .expect("reserves");
         limiter.settle(r, None).expect("settles");
         // The clock steps back across the 1st: last month's ledger must not
         // come back as an empty one.
         assert_eq!(
-            limiter.reserve(&account, 1, NEXT_MONTH - 1).unwrap_err(),
+            limiter
+                .reserve(&account, 1, ClaimTime::at(NEXT_MONTH - 1))
+                .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
         );
         assert_eq!(limiter.account_spent_nanousd(&account, NEXT_MONTH - 1), cap);
         assert_eq!(limiter.operator_spent_nanousd(NEXT_MONTH - 1), cap);
+    }
+
+    /// 2027-10-20T00:00:00Z: a CVM clock a year ahead.
+    const A_YEAR_AHEAD: i64 = NOW + 365 * 86_400;
+    /// 2027-01-10T00:00:00Z.
+    const JANUARY: i64 = 1_799_539_200;
+
+    fn persisted_month(store: &MemoryStore) -> u32 {
+        store
+            .last
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .expect("written")
+            .month
+    }
+
+    #[test]
+    fn a_future_clock_month_is_never_persisted() {
+        let store = Arc::new(MemoryStore::default());
+        let limiter = limiter(store.clone());
+        let account = keys().account_key("near-a");
+        let october = month_index(NOW).expect("month");
+        let r = limiter
+            .reserve(&account, 10, ClaimTime::at(NOW))
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        // The service clock reads a year ahead; the claim's iat does not.
+        let r = limiter
+            .reserve(
+                &account,
+                10,
+                ClaimTime {
+                    iat: NOW + 60,
+                    now: A_YEAR_AHEAD,
+                },
+            )
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        assert_eq!(persisted_month(&store), october);
+        // An iat a year ahead with a service clock that disagrees: the month
+        // does not skip ahead either.
+        let r = limiter
+            .reserve(
+                &account,
+                10,
+                ClaimTime {
+                    iat: A_YEAR_AHEAD,
+                    now: NOW,
+                },
+            )
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        assert_eq!(persisted_month(&store), october);
+        assert_eq!(limiter.ledger_month(), october);
+        // All three were charged to October.
+        assert_eq!(limiter.account_spent_nanousd(&account, NOW), 30);
+    }
+
+    #[test]
+    fn a_long_gap_skips_months_only_when_both_clocks_agree() {
+        let store = Arc::new(MemoryStore::default());
+        let limiter = limiter(store.clone());
+        let account = keys().account_key("near-a");
+        let r = limiter
+            .reserve(&account, 10, ClaimTime::at(NOW))
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        // Three months on, both clocks in January: the ledger moves there.
+        let r = limiter
+            .reserve(&account, 7, ClaimTime::at(JANUARY))
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        assert_eq!(
+            persisted_month(&store),
+            month_index(JANUARY).expect("month")
+        );
+        assert_eq!(limiter.account_spent_nanousd(&account, JANUARY), 7);
+    }
+
+    #[test]
+    fn reset_at_comes_from_the_ledger_month() {
+        let limiter = limiter(Arc::new(MemoryStore::default()));
+        let account = keys().account_key("near-a");
+        assert_eq!(limiter.reset_at(), None);
+        let r = limiter
+            .reserve(&account, 10, ClaimTime::at(NOW))
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        assert_eq!(limiter.reset_at(), Some(NEXT_MONTH));
+        // A service clock a year ahead does not move it.
+        let r = limiter
+            .reserve(
+                &account,
+                10,
+                ClaimTime {
+                    iat: NOW,
+                    now: A_YEAR_AHEAD,
+                },
+            )
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        assert_eq!(limiter.reset_at(), Some(NEXT_MONTH));
+    }
+
+    #[test]
+    fn a_refused_first_reservation_still_names_its_month_for_reset_at() {
+        let limiter = Limiter::new(
+            LimiterCaps::from_usd(0, 100).expect("caps"),
+            LedgerState::default(),
+            Arc::new(MemoryStore::default()),
+        );
+        assert_eq!(
+            limiter
+                .reserve(&keys().account_key("near-a"), 1, ClaimTime::at(NOW))
+                .unwrap_err(),
+            JudgementRefusal::AccountBudgetExhausted
+        );
+        assert_eq!(limiter.reset_at(), Some(NEXT_MONTH));
+    }
+
+    #[test]
+    fn an_unrepresentable_time_is_a_service_fault_not_a_budget() {
+        let limiter = limiter(Arc::new(MemoryStore::default()));
+        let account = keys().account_key("near-a");
+        for time in [
+            ClaimTime {
+                iat: i64::MAX,
+                now: NOW,
+            },
+            ClaimTime {
+                iat: i64::MIN,
+                now: NOW,
+            },
+        ] {
+            assert_eq!(
+                limiter.reserve(&account, 1, time).unwrap_err(),
+                JudgementRefusal::ServiceFault
+            );
+        }
+        assert_eq!(limiter.account_spent_nanousd(&account, NOW), 0);
     }
 
     #[test]

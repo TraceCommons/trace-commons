@@ -43,7 +43,7 @@ use trace_commons_protocol::insights_judgement::{
     JudgementLabel, JudgementReceipt, JudgementRefusal, JudgementResult,
 };
 
-use super::limiter::{AccountKey, Limiter, charge_nanousd, reservation_nanousd};
+use super::limiter::{AccountKey, ClaimTime, Limiter, charge_nanousd, reservation_nanousd};
 use super::model::{DecisionCall, JudgementModel, ModelAnswer, ModelError};
 use super::production::ProductionCheck;
 use super::prompts::{bucket_for_probability, fallback_label, prompt_for};
@@ -227,18 +227,19 @@ impl JudgementCaller {
         &self.limiter
     }
 
-    /// One judgement over `digest` for `account` at `now`.
+    /// One judgement over `digest` for `account`, under the verified claim's
+    /// `iat` and the service clock.
     pub async fn judge(
         &self,
         account: &AccountKey,
         digest: &str,
         kind: JudgementKind,
         event_index: Option<u32>,
-        now: i64,
+        time: ClaimTime,
     ) -> Result<JudgementResult, JudgementRefusal> {
         let model_id = self.model.model_id();
         // 1. The production check: no call and no charge on a refusal.
-        let prices = self.check.call_check(model_id, now)?;
+        let prices = self.check.call_check(model_id, time.now)?;
         let pins = self
             .check
             .model_pins(model_id)
@@ -254,7 +255,7 @@ impl JudgementCaller {
         let request_body = self.model.request_body(&call);
         let amount = reservation_nanousd(request_body.len(), call.max_tokens, prices)
             .ok_or(JudgementRefusal::AccountBudgetExhausted)?;
-        let reservation = self.limiter.reserve(account, amount, now)?;
+        let reservation = self.limiter.reserve(account, amount, time)?;
 
         // 3. The call. On failure the reservation is dropped unsettled and
         //    stands as the charge: NEAR AI may have billed it.
@@ -634,7 +635,13 @@ mod tests {
         let h = harness();
         let result = h
             .caller
-            .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+            .judge(
+                &h.account,
+                DIGEST,
+                JudgementKind::Task,
+                None,
+                ClaimTime::at(NOW),
+            )
             .await
             .expect("judged");
         let call = DecisionCall {
@@ -688,7 +695,13 @@ mod tests {
             h.model.set_fault(Some(fault));
             assert_eq!(
                 h.caller
-                    .judge(&h.account, DIGEST, JudgementKind::Finished, None, NOW)
+                    .judge(
+                        &h.account,
+                        DIGEST,
+                        JudgementKind::Finished,
+                        None,
+                        ClaimTime::at(NOW)
+                    )
                     .await
                     .unwrap_err(),
                 JudgementRefusal::ModelUnattested,
@@ -707,7 +720,13 @@ mod tests {
         let h = harness_with(Some("cb".repeat(32)), 5);
         assert_eq!(
             h.caller
-                .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+                .judge(
+                    &h.account,
+                    DIGEST,
+                    JudgementKind::Task,
+                    None,
+                    ClaimTime::at(NOW)
+                )
                 .await
                 .unwrap_err(),
             JudgementRefusal::ModelUnattested
@@ -720,7 +739,13 @@ mod tests {
         let h = harness();
         h.model.set_fault(Some(MockFault::NoUsage));
         h.caller
-            .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+            .judge(
+                &h.account,
+                DIGEST,
+                JudgementKind::Task,
+                None,
+                ClaimTime::at(NOW),
+            )
             .await
             .expect("judged");
         let call = DecisionCall {
@@ -750,7 +775,13 @@ mod tests {
         h.model.set_fault(Some(MockFault::Unparseable));
         let result = h
             .caller
-            .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+            .judge(
+                &h.account,
+                DIGEST,
+                JudgementKind::Task,
+                None,
+                ClaimTime::at(NOW),
+            )
             .await
             .expect("judged");
         assert_eq!(result.label(), JudgementLabel::Other);
@@ -762,7 +793,13 @@ mod tests {
         h.model.set_fault(Some(MockFault::LabelOutsideChoices));
         let result = h
             .caller
-            .judge(&h.account, DIGEST, JudgementKind::EventKind, Some(0), NOW)
+            .judge(
+                &h.account,
+                DIGEST,
+                JudgementKind::EventKind,
+                Some(0),
+                ClaimTime::at(NOW),
+            )
             .await
             .expect("judged");
         assert_eq!(result.label(), JudgementLabel::Unclear);
@@ -779,7 +816,13 @@ mod tests {
             h.model.set_fault(Some(fault));
             assert_eq!(
                 h.caller
-                    .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+                    .judge(
+                        &h.account,
+                        DIGEST,
+                        JudgementKind::Task,
+                        None,
+                        ClaimTime::at(NOW)
+                    )
                     .await
                     .unwrap_err(),
                 refusal
@@ -793,7 +836,13 @@ mod tests {
         let h = harness_with(None, 0);
         assert_eq!(
             h.caller
-                .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+                .judge(
+                    &h.account,
+                    DIGEST,
+                    JudgementKind::Task,
+                    None,
+                    ClaimTime::at(NOW)
+                )
                 .await
                 .unwrap_err(),
             JudgementRefusal::AccountBudgetExhausted
@@ -808,7 +857,13 @@ mod tests {
         let later = NOW + crate::judgement_service::catalog::CATALOG_STALE_AFTER_SECS + 1;
         assert_eq!(
             h.caller
-                .judge(&h.account, DIGEST, JudgementKind::Task, None, later)
+                .judge(
+                    &h.account,
+                    DIGEST,
+                    JudgementKind::Task,
+                    None,
+                    ClaimTime::at(later)
+                )
                 .await
                 .unwrap_err(),
             JudgementRefusal::ModelUnattested
@@ -828,7 +883,13 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             h.caller
-                .judge(&h.account, DIGEST, JudgementKind::Task, None, NOW)
+                .judge(
+                    &h.account,
+                    DIGEST,
+                    JudgementKind::Task,
+                    None,
+                    ClaimTime::at(NOW)
+                )
                 .await
                 .unwrap_err(),
             JudgementRefusal::Saturated
