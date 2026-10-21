@@ -2260,6 +2260,21 @@ extension DaemonData {
         public let session: InsightsWatchedSession?
     }
 
+    /// `insights_analyze_session`: one listed watched trace analyzed by the
+    /// daemon from the file its watcher found, and with `save` stored as a
+    /// dated snapshot in the standard Insights store. `analysis` is the
+    /// core's own `analyze` response, kept as the JSON it came as so the app
+    /// decodes it with the same `TCBridge` type the in-process call returns.
+    /// The same three shapes as the list: off, unreadable, and the analysis.
+    /// No path crosses.
+    public struct InsightsAnalyzeSessionAnswer: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        public let readable: Bool?
+        public let reason: String?
+        public let analysis: CoreJSON?
+    }
+
     /// `insights_session_drill`: one watched trace turn by turn, in the
     /// core's own `session_drill` shape (`session`), kept as the JSON it
     /// came as so the app decodes it with the same `TCBridge` type the

@@ -269,6 +269,15 @@ public protocol DaemonDataClient: Sendable {
     func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
                               outcome: DaemonData.InsightsLabelChange) async throws
         -> DaemonData.InsightsSessionLabelAnswer
+    /// `insights_analyze_session`: analyze one listed watched trace by its
+    /// `sessionRef`, from the file the daemon's watcher finds (the app never
+    /// names one), and with `save` store it as a dated snapshot in the
+    /// standard Insights store. Read and written on this Mac only. An
+    /// unknown or remade reference is refused as `insights-session-unknown`,
+    /// a file that has gone as `insights-session-file-gone`; an older daemon
+    /// refuses it as `unknown_method`.
+    func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
+        -> DaemonData.InsightsAnalyzeSessionAnswer
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
