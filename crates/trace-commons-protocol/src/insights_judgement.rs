@@ -77,11 +77,25 @@ pub enum JudgementRefusal {
     ModelUnattested,
     /// The model call timed out. Not today.
     Timeout,
+    /// The sealed request did not open, usually because the service
+    /// restarted and has new per-boot keys. Re-verify a fresh quote and
+    /// retry once.
+    SealStale,
+    /// This request nonce was already accepted. Never retried: a daemon
+    /// never resends a request nonce, so this is a replay on the path.
+    RequestReplayed,
+    /// `GET /v1/attestation` only: the quote could not be produced within
+    /// its own bound. Retry after 30 seconds. Not judgement capacity.
+    QuoteUnavailable,
+    /// An internal fault after spend may already be recorded: the response
+    /// could not be signed, or the settle could not be written. Not today,
+    /// because a retry would be charged again.
+    ServiceFault,
 }
 
 impl JudgementRefusal {
     /// Every refusal, for tests and exhaustive mappings.
-    pub const ALL: [JudgementRefusal; 10] = [
+    pub const ALL: [JudgementRefusal; 14] = [
         JudgementRefusal::Saturated,
         JudgementRefusal::AccountBudgetExhausted,
         JudgementRefusal::OperatorBudgetExhausted,
@@ -92,6 +106,10 @@ impl JudgementRefusal {
         JudgementRefusal::AccountIneligible,
         JudgementRefusal::ModelUnattested,
         JudgementRefusal::Timeout,
+        JudgementRefusal::SealStale,
+        JudgementRefusal::RequestReplayed,
+        JudgementRefusal::QuoteUnavailable,
+        JudgementRefusal::ServiceFault,
     ];
 
     /// The wire label, which is what the service puts in the `error` field.
@@ -107,14 +125,23 @@ impl JudgementRefusal {
             Self::AccountIneligible => "judgement_account_ineligible",
             Self::ModelUnattested => "judgement_model_unattested",
             Self::Timeout => "judgement_timeout",
+            Self::SealStale => "judgement_seal_stale",
+            Self::RequestReplayed => "judgement_request_replayed",
+            Self::QuoteUnavailable => "judgement_quote_unavailable",
+            Self::ServiceFault => "judgement_service_fault",
         }
     }
 
     /// The status this refusal is sent with.
     pub const fn status(self) -> u16 {
         match self {
-            Self::Saturated | Self::AccountBudgetExhausted | Self::OperatorBudgetExhausted => 503,
-            Self::RequestMalformed | Self::WireVersionUnsupported => 400,
+            Self::Saturated
+            | Self::AccountBudgetExhausted
+            | Self::OperatorBudgetExhausted
+            | Self::QuoteUnavailable => 503,
+            Self::RequestMalformed | Self::WireVersionUnsupported | Self::SealStale => 400,
+            Self::RequestReplayed => 409,
+            Self::ServiceFault => 500,
             Self::DigestTooLarge => 413,
             Self::CredentialRefused => 401,
             Self::AccountIneligible => 403,
@@ -126,6 +153,8 @@ impl JudgementRefusal {
     /// Whether this is a capacity refusal. Only these are retryable on a
     /// timer; a model or timeout failure is not capacity, because a daemon
     /// that retried it would spend the account's cap on a broken path.
+    /// `judgement_quote_unavailable` shares the 503 status but belongs to the
+    /// attestation route, so it is not judgement capacity either.
     pub const fn is_capacity(self) -> bool {
         matches!(
             self,
@@ -1238,6 +1267,10 @@ mod tests {
                 ("judgement_account_ineligible", 403),
                 ("judgement_model_unattested", 502),
                 ("judgement_timeout", 504),
+                ("judgement_seal_stale", 400),
+                ("judgement_request_replayed", 409),
+                ("judgement_quote_unavailable", 503),
+                ("judgement_service_fault", 500),
             ]
         );
     }
@@ -1262,6 +1295,14 @@ mod tests {
         assert!(!is_judgement_capacity(503, "judgement_timeout"));
         assert!(!is_judgement_capacity(502, "judgement_model_unattested"));
         assert!(!is_judgement_capacity(504, "judgement_timeout"));
+        // The attestation route's 503 is not judgement capacity, and the
+        // other new refusals are not capacity on any status.
+        assert!(!is_judgement_capacity(503, "judgement_quote_unavailable"));
+        assert!(!is_judgement_capacity(500, "judgement_service_fault"));
+        assert!(!is_judgement_capacity(503, "judgement_service_fault"));
+        assert!(!is_judgement_capacity(400, "judgement_seal_stale"));
+        assert!(!is_judgement_capacity(409, "judgement_request_replayed"));
+        assert_eq!(JudgementRefusal::ALL.len(), 14);
         let capacity: Vec<_> = JudgementRefusal::ALL
             .into_iter()
             .filter(|r| r.is_capacity())
