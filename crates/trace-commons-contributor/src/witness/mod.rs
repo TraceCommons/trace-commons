@@ -58,9 +58,10 @@ pub const WITNESS_EXPECTED_MEASUREMENT_CONTROL: &str = "witness_expected_measure
 /// the report-data layout around it.
 ///
 /// Re-exported from `trace_commons_attestation::report_data`, which holds the
-/// layout shared by every attested Trace Commons service (the witness's
-/// `tcwitns1`, the Insights judgement service's `tcjudge1`) and the rebuild
-/// [`verify::check_quote`] uses. The producing side,
+/// report-data layouts of every attested Trace Commons service (the
+/// witness's `tcwitns1 | address | nonce | zeros`, the Insights judgement
+/// service's `tcjudge1 | boot binding | nonce`) and the rebuild
+/// [`verify::check_quote`] uses. These constants are the witness layout's. The producing side,
 /// `trace_commons_server::witness_service::enclave`, is AGPL and keeps its own
 /// copy, so the layout is still pinned on both sides by literal tests:
 /// `the_report_data_layout_matches_the_witness_service` in `verify.rs` here,
