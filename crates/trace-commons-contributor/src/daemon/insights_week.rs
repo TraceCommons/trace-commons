@@ -162,7 +162,8 @@ use crate::insights::analytics_constants::{
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_AUTOMATED_SESSIONS, COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
     COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS,
-    COUNTER_STORE_MAX_TURNS, DIGEST_KEY_CUSTODY, DigestKeyCustody, SESSION_FACTS_VERSION,
+    COUNTER_STORE_MAX_TURNS, DIGEST_KEY_CUSTODY, DigestKeyCustody, LEDGER_MONEY_IN_INSIGHTS,
+    SESSION_FACTS_VERSION,
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
@@ -1855,7 +1856,8 @@ impl CounterPass {
                 rows.sort_by_key(|row| row.seq);
                 let available = ledger_feed && ledger_present;
                 let routes = route_map(&rows, &store.routing, available);
-                let charges = charge_map(&rows, &store.routing, available);
+                let charges =
+                    charge_map(&rows, &store.routing, available, LEDGER_MONEY_IN_INSIGHTS);
                 let inputs: Vec<SessionInput> =
                     rows.iter().map(|row| row.session_input()).collect();
                 (inputs, routes, charges)
@@ -2058,7 +2060,13 @@ impl CounterPass {
         if plan.rows.is_empty() && plan.next == store.fold_cursor() {
             return Ok(FoldSummary::default());
         }
-        let summary = fold_into(&mut store.routing, &key, &plan, &speakers);
+        let summary = fold_into(
+            &mut store.routing,
+            &key,
+            &plan,
+            &speakers,
+            LEDGER_MONEY_IN_INSIGHTS,
+        );
         // A Never folder leaves nothing: a session the last pass found in
         // one keeps no tally, charge or model label.
         self.never_sessions
@@ -2933,14 +2941,16 @@ fn route_map(
 
 /// Each row's NEAR AI charge for the Models answers, by the engine's
 /// session reference: absent when its session sent no call through NEAR AI
-/// (or routing is unavailable, as in `route_map`), `None` when the charge is
-/// unknown.
+/// (or routing is unavailable, as in `route_map`). Empty while
+/// `ledger_money` (`LEDGER_MONEY_IN_INSIGHTS`, owner decision D5) is held,
+/// so no stored charge is read.
 fn charge_map(
     rows: &[&CounterRow],
     routing: &BTreeMap<KeyedDigest, RouteTally>,
     routing_available: bool,
-) -> BTreeMap<String, Option<u64>> {
-    if !routing_available {
+    ledger_money: bool,
+) -> BTreeMap<String, crate::insights::model_answers::SessionCharge> {
+    if !routing_available || !ledger_money {
         return BTreeMap::new();
     }
     rows.iter()
@@ -5220,6 +5230,22 @@ mod tests {
             off.keys().collect::<Vec<_>>(),
             on.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// `LEDGER_MONEY_IN_INSIGHTS` held: no stored charge reaches the
+    /// Models answers, whatever the tally holds.
+    #[test]
+    fn held_ledger_money_reads_no_stored_charge() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let mut call = ledger_call(1, 30, "PRIVATE-CODEX-ID");
+        call.cost_usd = Some(0.25);
+        fold_with(&f.pass, true, vec![call]).unwrap();
+        let store = f.pass.load_cached().unwrap().unwrap();
+        let rows: Vec<&CounterRow> = store.rows.values().collect();
+        assert_eq!(charge_map(&rows, &store.routing, true, true).len(), 1);
+        assert!(charge_map(&rows, &store.routing, true, false).is_empty());
     }
 
     #[test]

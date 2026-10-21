@@ -44,10 +44,17 @@
 //!   were sent and how many charges are unknown. It is never added to a
 //!   list-priced figure, and a session's charge and its list estimate never
 //!   meet in one figure: the list-priced figures take unrouted sessions
-//!   only. The row's figure counts every such session; a model's counts
-//!   those whose majority label is the model's. A session with no call
-//!   through NEAR AI is in no charge figure; with none in the window the
-//!   figure is `None`, never zero.
+//!   only. The row's figure counts every such session, whichever model
+//!   served it. A model's counts only the sessions whose route is verified
+//!   and whose calls all named that model as served, with it as the
+//!   majority label (`attributed_to`): a transcript label may not name the
+//!   model NEAR AI served, so any other session's charge is on the row's
+//!   figure alone. The median is held to the session floor
+//!   (`MODEL_ANSWER_MIN_SESSIONS` known charges); under it the counts stand
+//!   and the median is `None`. A session with no call through NEAR AI is in
+//!   no charge figure; with none in the window the figure is `None`, never
+//!   zero. With `LEDGER_MONEY_IN_INSIGHTS` held (owner decision D5) the cost
+//!   row carries no money at all: `not_priced`, no figure, no charge.
 //! - `basis` is set on a rejection row that compares two models, `None`
 //!   elsewhere. A cost figure's `sessions` is its priced sessions, the
 //!   median's sample; a time figure's is its finished sessions.
@@ -94,6 +101,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use trace_commons_protocol::insights_pricing::PricingAccounting;
 
+use super::analytics_constants::LEDGER_MONEY_IN_INSIGHTS;
 use super::analytics_constants::{
     MODEL_ANSWER_BOOTSTRAP_DRAWS, MODEL_ANSWER_BOOTSTRAP_SEED, MODEL_ANSWER_LEAD_SHARE,
     MODEL_ANSWER_MIN_EDITS, MODEL_ANSWER_MIN_MIX_COVERAGE, MODEL_ANSWER_MIN_SESSIONS,
@@ -180,9 +188,22 @@ pub struct ModelFigure {
     pub figure: Figure,
     pub interrupts_per_session_permille: Option<u32>,
     /// On a cost figure only: what NEAR AI charged for this model's
-    /// sessions through it, apart from `figure` and never added to it.
-    /// `None` when none of them went through NEAR AI.
+    /// sessions through it, apart from `figure` and never added to it: only
+    /// sessions whose route is verified and whose calls all named this
+    /// model as served. `None` when there are none.
     pub near_ai_charge: Option<NearAiChargeFigure>,
+}
+
+/// One session's NEAR AI charge, as its route tally kept it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCharge {
+    /// Everything NEAR AI charged in the session, in integer USD micros;
+    /// `None` when it is unknown (a call without a charge, or an overflow).
+    pub usd_micros: Option<u64>,
+    /// The normalized label of the one model every NEAR AI call in the
+    /// session named as served; `None` when a call named none, or calls
+    /// named more than one.
+    pub served_model: Option<String>,
 }
 
 /// What a NEAR AI charge figure is: the proxy ledger's `cost_usd` (owner
@@ -291,9 +312,8 @@ struct Candidate {
     own: OwnCounts,
     cost_usd_micros: Option<u64>,
     tables: Vec<PricingTableRef>,
-    /// The NEAR AI charge: `None` with no call through NEAR AI,
-    /// `Some(None)` when it is unknown.
-    near_ai_charge: Option<Option<u64>>,
+    /// The NEAR AI charge: `None` with no call through NEAR AI.
+    near_ai_charge: Option<SessionCharge>,
 }
 
 struct Prepared {
@@ -399,7 +419,7 @@ fn own_counts(models: &[ModelFacts], labels: &[String], majority: &str) -> OwnCo
 fn prepare(
     sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
-    charges: &BTreeMap<String, Option<u64>>,
+    charges: &BTreeMap<String, SessionCharge>,
     catalog: &PricingCatalog,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -490,7 +510,7 @@ fn prepare(
             own,
             cost_usd_micros: price.total_usd_micros,
             tables: price.tables,
-            near_ai_charge: charges.get(&session.session_ref).copied(),
+            near_ai_charge: charges.get(&session.session_ref).cloned(),
         });
     }
     prepared
@@ -1069,25 +1089,47 @@ fn empty_row(
 
 /// The NEAR AI charge figure over `candidates`, or `None` when none went
 /// through NEAR AI. Only the ledger's charge enters it, never a list price.
+/// Its median is held to the session floor, as every figure is: under
+/// `MODEL_ANSWER_MIN_SESSIONS` known charges it is `None`, so one session's
+/// exact charge never crosses as a median.
 fn near_ai_charge<'c>(
     candidates: impl Iterator<Item = &'c Candidate>,
 ) -> Option<NearAiChargeFigure> {
     let mut known = Vec::new();
     let mut routed = 0u32;
     let mut unknown = 0u32;
-    for charge in candidates.filter_map(|candidate| candidate.near_ai_charge) {
+    for charge in candidates.filter_map(|candidate| candidate.near_ai_charge.as_ref()) {
         bump(&mut routed);
-        match charge {
+        match charge.usd_micros {
             Some(micros) => known.push(micros),
             None => bump(&mut unknown),
         }
     }
+    let floor = usize::try_from(MODEL_ANSWER_MIN_SESSIONS).unwrap_or(usize::MAX);
     (routed > 0).then(|| NearAiChargeFigure {
         basis: ChargeBasis::NearAiLedger,
-        median: median(&mut known).map(|value| Figure::UsdMicros { value }),
+        median: (known.len() >= floor)
+            .then(|| median(&mut known))
+            .flatten()
+            .map(|value| Figure::UsdMicros { value }),
         routed_sessions: routed,
         charge_unknown: unknown,
     })
+}
+
+/// Whether a session's NEAR AI charge is `label`'s: its route verified,
+/// the one model its calls named as served `label`, and `label` its
+/// majority. A transcript label may not name the model that served the
+/// call (`ModelRoute::compared`), and a model override serves another model
+/// under a verified route, so the label alone never attributes a charge.
+fn attributed_to(candidate: &Candidate, label: &str) -> bool {
+    candidate.route == ModelRoute::RoutedVerified
+        && candidate.majority.as_deref() == Some(label)
+        && candidate
+            .near_ai_charge
+            .as_ref()
+            .and_then(|charge| charge.served_model.as_deref())
+            == Some(label)
 }
 
 /// Questions 1-3 (one task type) and 5 (every task type with edits).
@@ -1193,13 +1235,21 @@ fn rejection_row(
 }
 
 /// Question 4: median cost per Docs session over priced sessions.
+///
+/// `money` is `LEDGER_MONEY_IN_INSIGHTS` (owner decision D5): held, the row
+/// is `not_priced` with no figure, no charge and no pricing table.
 fn cost_row(
     prepared: &Prepared,
     tables: &mut BTreeSet<PricingTableRef>,
     draws: &mut u32,
+    money: bool,
 ) -> ModelAnswerRow {
     let (cells, left_out) = cost_cells(prepared, &[InferredTask::Docs]);
     let mut row = empty_row(ModelQuestion::DocsCost, session_counts(&cells), left_out);
+    if !money {
+        row.state = AnswerState::NotPriced;
+        return row;
+    }
     // The Docs sessions sent through NEAR AI: the route tally leaves them
     // out of the list-priced figures, and their charge is its own figure.
     let docs: Vec<&Candidate> = prepared.of_tasks(&[InferredTask::Docs]).collect();
@@ -1266,10 +1316,13 @@ fn cost_row(
                 edits: None,
                 figure: Figure::UsdMicros { value: usd },
                 interrupts_per_session_permille: None,
+                // Only a charge NEAR AI proved was for this model: the route
+                // verified and its one served model this label. Any other
+                // is on the row's figure alone (`attributed_to`).
                 near_ai_charge: near_ai_charge(
                     docs.iter()
                         .copied()
-                        .filter(|candidate| candidate.majority.as_deref() == Some(label)),
+                        .filter(|candidate| attributed_to(candidate, label)),
                 ),
             },
             cells,
@@ -1395,12 +1448,13 @@ pub fn model_answers(
 }
 
 /// [`model_answers`] with each session's NEAR AI charge, by `session_ref`:
-/// absent when the session sent no call through NEAR AI, `None` when its
-/// charge is unknown. The charges enter only `near_ai_charge` figures.
+/// absent when the session sent no call through NEAR AI. The charges enter
+/// only `near_ai_charge` figures. Money of either kind is shown only while
+/// `LEDGER_MONEY_IN_INSIGHTS` holds (owner decision D5).
 pub fn model_answers_with_charges(
     sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
-    charges: &BTreeMap<String, Option<u64>>,
+    charges: &BTreeMap<String, SessionCharge>,
     catalog: &PricingCatalog,
     now: DateTime<Utc>,
 ) -> ModelAnswers {
@@ -1410,6 +1464,7 @@ pub fn model_answers_with_charges(
         charges,
         catalog,
         now,
+        LEDGER_MONEY_IN_INSIGHTS,
         &mut BTreeMap::new(),
     )
 }
@@ -1419,9 +1474,10 @@ pub fn model_answers_with_charges(
 fn model_answers_counting(
     sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
-    charges: &BTreeMap<String, Option<u64>>,
+    charges: &BTreeMap<String, SessionCharge>,
     catalog: &PricingCatalog,
     now: DateTime<Utc>,
+    money: bool,
     draws: &mut BTreeMap<ModelQuestion, u32>,
 ) -> ModelAnswers {
     let window_start = now - Duration::weeks(MODEL_ANSWER_WINDOW_WEEKS);
@@ -1441,7 +1497,7 @@ fn model_answers_counting(
                 ModelQuestion::TestsRejected => {
                     rejection_row(&prepared, *question, &[InferredTask::Tests], draws)
                 }
-                ModelQuestion::DocsCost => cost_row(&prepared, &mut tables, draws),
+                ModelQuestion::DocsCost => cost_row(&prepared, &mut tables, draws, money),
                 ModelQuestion::RejectedAcrossTasks => {
                     rejection_row(&prepared, *question, &EDIT_TASKS, draws)
                 }
