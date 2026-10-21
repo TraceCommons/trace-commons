@@ -998,7 +998,16 @@ impl JudgementResponse {
 
 /// Parse a `200` body, closed: unknown fields, unknown labels and
 /// inconsistent results are refused.
+///
+/// The wire version is read leniently first, as [`parse_judgement_request`]
+/// does, so a later version that also adds fields is reported as
+/// [`JudgementWireError::WireVersionUnsupported`], not as malformed.
 pub fn parse_judgement_response(body: &[u8]) -> Result<JudgementResponse, JudgementWireError> {
+    let version: VersionOnly =
+        serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("response"))?;
+    if version.wire_version != JUDGEMENT_WIRE_VERSION {
+        return Err(JudgementWireError::WireVersionUnsupported);
+    }
     let raw: RawResponse =
         serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("response"))?;
     if raw.wire_version != JUDGEMENT_WIRE_VERSION {
@@ -1825,6 +1834,34 @@ mod tests {
         second["event_index"] = 5.into();
         value["results"].as_array_mut().unwrap().push(second);
         assert!(parse_judgement_response(value.to_string().as_bytes()).is_ok());
+    }
+
+    /// A later wire version is reported as a version even when it also adds
+    /// fields, so the client can tell "update the daemon" from garbage.
+    #[test]
+    fn a_later_response_version_is_unsupported_not_malformed() {
+        let mut value: serde_json::Value = serde_json::from_str(&response().to_json()).unwrap();
+        value["wire_version"] = 2.into();
+        assert_eq!(
+            parse_judgement_response(value.to_string().as_bytes()),
+            Err(JudgementWireError::WireVersionUnsupported)
+        );
+        value["new_field"] = 1.into();
+        assert_eq!(
+            parse_judgement_response(value.to_string().as_bytes()),
+            Err(JudgementWireError::WireVersionUnsupported)
+        );
+        // A v1 body with an unknown field is still malformed.
+        value["wire_version"] = 1.into();
+        assert_eq!(
+            parse_judgement_response(value.to_string().as_bytes()),
+            Err(JudgementWireError::Malformed("response"))
+        );
+        // No version at all is malformed, not unsupported.
+        assert_eq!(
+            parse_judgement_response(b"{}"),
+            Err(JudgementWireError::Malformed("response"))
+        );
     }
 
     // ---- signing bytes ----
