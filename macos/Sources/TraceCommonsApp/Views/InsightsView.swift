@@ -52,7 +52,9 @@ struct InsightsView: View {
             }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
-        // the store's analytics answers (`InsightsSampleWeek`).
+        // the store's answers, Analyze's saved traces included
+        // (`InsightsSampleWeek`). Analyze & save is not offered: it would
+        // save to the real store.
         if InsightsSampleWeek.enabled {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
@@ -189,8 +191,9 @@ struct InsightsView: View {
         }
     }
 
-    /// Debug builds: the sample week as the daemon's week (feed T) and one
-    /// sample trace for Sessions, when `TRACE_COMMONS_INSIGHTS_SAMPLE=1`.
+    /// Debug builds: the sample week as the daemon's week (feed T), when
+    /// `TRACE_COMMONS_INSIGHTS_SAMPLE=1`. Sessions shows one sample trace
+    /// until the sample's saved list arrives.
     private func showSampleWeekIfAsked() {
         #if DEBUG
         guard InsightsSampleWeek.enabled,

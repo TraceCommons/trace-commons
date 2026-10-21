@@ -57,11 +57,13 @@ It's replaced by **"Analyze & save" on a watched session in Insights > Sessions*
 Known gaps:
 - With a custom `--insights-store` the button is hidden, because the daemon writes only the standard store.
 - The GTK client still has its own file picker.
-- The button hasn't been tried in the running app with real data yet. In sample data mode Sessions has no rows, so use real data to try it.
+- The button hasn't been tried in the running app with real data yet. In sample data mode the button is not offered, so use real data to try it.
 
 ## Running it
 
 This build is meant to be tried in **sample data mode**. The Models card is then filled with sample answers, so every state can be seen without months of real sessions. Sample mode is a launch switch in debug builds, not a code change. In sample mode the Sessions labels say "not available", because the sample has no watched sessions.
+
+Analyze is filled in sample mode too: five saved snapshots from the sample week (three Claude Code, two Codex) with their models, three assessed and one with a linked commit and test report, the saved history summary for them, and one group of two snapshots with its assessment. Nothing you do there is kept. Saving an assessment, linking evidence, deleting a snapshot or changing the group is answered with the sample unchanged. Making a new group, comparison tasks and Analyze & save aren't available in sample mode. None of this touches your real saved analyses.
 
 ```bash
 cd macos
