@@ -2,10 +2,14 @@
 //!
 //! The service runs three pinned judgements (`task`, `event_kind`,
 //! `finished`) over one session's judgement digest and returns labels signed
-//! by its attested key. This module holds the shared vocabulary only: the
-//! request and response shapes, the closed refusal set, the capacity rule,
-//! the digest cap and the signing-bytes encoder. It grants no trust. The
-//! service verifies its own claims and receipts, and the client verifies the
+//! by its per-boot key. This module holds the shared vocabulary only: the
+//! attestation response, the request plaintext and the response that travel
+//! inside the judgement seal, the two nonces, the closed refusal set, the
+//! capacity rule, the digest and plaintext caps, the signing-bytes encoder
+//! and the pure check that a response answers its send. It grants no trust
+//! and does no cryptography: the seal, the report-data rebuild and the
+//! signature recovery live in `trace-commons-attestation`. The service
+//! verifies its own claims and receipts, and the client verifies the
 //! service's quote and signature against its own pins.
 //!
 //! Design: `docs/superpowers/specs/2026-10-20-insights-judgement-service-design.md`,
@@ -13,7 +17,8 @@
 //!
 //! Every type parses closed: unknown fields, unknown labels and inconsistent
 //! combinations are refused rather than carried. The digest is scrubbed
-//! contributor text, so no `Debug` or error here ever contains it.
+//! contributor text and the claim is a bearer credential, so no `Debug` or
+//! error here ever contains either.
 
 use std::collections::BTreeSet;
 
