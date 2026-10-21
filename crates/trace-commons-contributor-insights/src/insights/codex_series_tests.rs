@@ -311,6 +311,70 @@ fn shell_only_sessions_have_edits_unknown_not_zero() {
     assert_eq!(f.finished, Some(false));
 }
 
+/// A `local_shell_call` item: Codex's built-in shell, its command an
+/// argument list, paired with its `function_call_output` by `call_id`.
+fn local_shell_call(secs: u32, id: &str, command: &[&str]) -> Value {
+    json!({"timestamp": ts(secs), "type": "response_item", "payload": {
+        "type": "local_shell_call", "call_id": id, "status": "completed",
+        "action": {"type": "exec", "command": command}}})
+}
+
+#[test]
+fn shell_command_and_local_shell_sessions_have_edits_unknown_not_zero() {
+    // `shell_command`, the shell our managed Codex declares.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        function_call(
+            1,
+            "c1",
+            "shell_command",
+            json!({"command": "PRIVATE_CMD edit-in-place && mv a b"}),
+        ),
+        output(2, "c1", "Process exited with code 0"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, None);
+    assert_eq!(f.shape.renamed_files, 1);
+    assert_eq!(e.series.tool_calls[0].tool, ToolKind::Bash);
+    assert!(e.series.tool_calls[0].paired);
+
+    // `local_shell_call`, paired with its output by `call_id`.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        local_shell_call(1, "c1", &["bash", "-lc", "PRIVATE_CMD edit-in-place"]),
+        output(2, "c1", "Process exited with code 1"),
+        local_shell_call(3, "c2", &["bash", "-lc", "PRIVATE_CMD edit-in-place"]),
+        output(4, "c2", "Process exited with code 0"),
+        tokens(5, 10, 5, 0, 0, 5),
+        complete(6),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, None);
+    let calls = &e.series.tool_calls;
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| (c.tool, c.paired, c.success))
+            .collect::<Vec<_>>(),
+        vec![
+            (ToolKind::Bash, true, Some(false)),
+            (ToolKind::Bash, true, Some(true)),
+        ]
+    );
+
+    // A stopped local shell command is an interrupt, as an exec one is.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        local_shell_call(1, "c1", &["bash", "-lc", "PRIVATE_CMD long"]),
+        output(5, "c1", "aborted by user after 4.0s"),
+        aborted(6, "interrupted"),
+    ]);
+    assert_eq!(model(&e, &f, A).interrupted, Some(1));
+}
+
 #[test]
 fn apply_patch_hunks_count_edits_and_feed_undone() {
     let two_files = "*** Begin Patch\n*** Add File: docs/PRIVATE_NEW.md\n+PRIVATE_A\n+PRIVATE_B\n\
