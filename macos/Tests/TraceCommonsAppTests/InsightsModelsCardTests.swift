@@ -59,6 +59,14 @@ final class InsightsModelsCardTests: XCTestCase {
         "analytics_models_info_cost": "INFO COST",
         "analytics_models_info_time": "INFO TIME",
         "analytics_models_left_out_unknown_facts": "OUT UNKNOWN {n}",
+        "analytics_models_left_out_automated": "OUT AGENT {n}",
+        "analytics_models_near_ai_charge": "{x} NEAR {n} TRACES",
+        "analytics_models_near_ai_charge_one": "{x} NEAR {n} TRACE",
+        "analytics_models_near_ai_charge_unknown": "UNKNOWN {n} TRACES",
+        "analytics_models_near_ai_charge_unknown_one": "UNKNOWN {n} TRACE",
+        "analytics_models_near_ai_charge_all_unknown": "NEAR ALL UNKNOWN {n} TRACES",
+        "analytics_models_near_ai_charge_all_unknown_one": "NEAR ALL UNKNOWN {n} TRACE",
+        "analytics_models_info_near_ai_charge": "INFO NEAR AI",
         "analytics_models_left_out_delegated": "OUT DELEGATED {n}",
         "analytics_models_left_out_capped": "OUT CAPPED {n}",
         "analytics_models_left_out_routed": "OUT ROUTED {n}",
@@ -74,7 +82,11 @@ final class InsightsModelsCardTests: XCTestCase {
     /// The daemon's printed reply over its `docs_priced` fixture (see
     /// `InsightsModelAnswersContractTests.recorded`): one answered cost row,
     /// the rest without enough traces.
-    static let recorded = #"{"enabled":true,"feed":"counter_pass","readable":true,"updated_at":"2026-09-20T12:00:00+00:00","window_start":"2026-06-21T12:00:00+00:00","window_end":"2026-09-20T12:00:00+00:00","pricing":{"basis":"api_list","tables":[{"table_id":"sha256:cc9f2ae4075adad77dc148f24e3d7a4e52b1fbd1452b5be140090a2751e7eecd","version":1}]},"rows":[{"question":"bug_fix_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0}},{"question":"refactor_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0}},{"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0}},{"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,"leader":{"label":"claude-sonnet-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":1900},"interrupts_per_session_permille":null},"next":{"label":"claude-opus-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":85400},"interrupts_per_session_permille":null},"sessions_by_model":[["claude-opus-5-5",5],["claude-sonnet-5-5",5]],"left_out":{"unknown_facts":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0}},{"question":"rejected_across_tasks","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[["claude-opus-5-5",5],["claude-sonnet-5-5",5]],"left_out":{"unknown_facts":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":10,"mix_too_different":0}},{"question":"finish_time","state":"not_enough_sessions","basis":null,"edit_mode":"prompting","leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":10,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0}}]}"#
+    static let recorded = #"{"enabled":true,"feed":"counter_pass","readable":true,"updated_at":"2026-09-20T12:00:00+00:00","window_start":"2026-06-21T12:00:00+00:00","window_end":"2026-09-20T12:00:00+00:00","pricing":{"basis":"api_list","tables":[{"table_id":"sha256:cc9f2ae4075adad77dc148f24e3d7a4e52b1fbd1452b5be140090a2751e7eecd","version":1}]},"rows":[{"question":"bug_fix_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},{"question":"refactor_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},{"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},{"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,"leader":{"label":"claude-sonnet-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":1900},"interrupts_per_session_permille":null,"near_ai_charge":null},"next":{"label":"claude-opus-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":85400},"interrupts_per_session_permille":null,"near_ai_charge":null},"sessions_by_model":[["claude-opus-5-5",5],["claude-sonnet-5-5",5]],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},{"question":"rejected_across_tasks","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[["claude-opus-5-5",5],["claude-sonnet-5-5",5]],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":10,"mix_too_different":0},"near_ai_charge":null},{"question":"finish_time","state":"not_enough_sessions","basis":null,"edit_mode":"prompting","leader":null,"next":null,"sessions_by_model":[],"left_out":{"unknown_facts":10,"automated":0,"delegated":0,"capped":0,"routed":0,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null}]}"#
+
+    /// The docs cost row of `InsightsModelAnswersContractTests.recordedCharged`:
+    /// three traces sent through NEAR AI, two with a known charge.
+    static let chargedRow = #"{"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,"leader":{"label":"claude-sonnet-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":1900},"interrupts_per_session_permille":null,"near_ai_charge":{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":25000},"routed_sessions":3,"charge_unknown":1}},"next":{"label":"claude-opus-5-5","sessions":5,"edits":null,"figure":{"kind":"usd_micros","value":85400},"interrupts_per_session_permille":null,"near_ai_charge":null},"sessions_by_model":[["claude-opus-5-5",5],["claude-sonnet-5-5",5]],"left_out":{"unknown_facts":0,"automated":0,"delegated":0,"capped":0,"routed":3,"reviewer":0,"no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":25000},"routed_sessions":3,"charge_unknown":1}}"#
 
     static let undoneRow = #"{"question":"bug_fix_rejected","state":"answered","basis":"undone","edit_mode":null,"leader":{"label":"claude-opus-4-7","sessions":31,"edits":412,"figure":{"kind":"rate_permille","value":42},"interrupts_per_session_permille":1500},"next":{"label":"claude-sonnet-4-6","sessions":14,"edits":160,"figure":{"kind":"rate_permille","value":91},"interrupts_per_session_permille":null},"sessions_by_model":[["claude-opus-4-7",31],["claude-sonnet-4-6",14]],"left_out":{"unknown_facts":3,"delegated":1,"capped":0,"routed":0,"reviewer":0,"no_majority":2,"unpriced":0,"too_few_edits":0,"mix_too_different":0}}"#
 
@@ -124,6 +136,74 @@ final class InsightsModelsCardTests: XCTestCase {
             "NEXT claude-opus-5-5 <\(InsightsModelsWords.money(85400)) AT API PRICES> 5 TRACES",
         ])
         XCTAssertNil(InsightsModelsWords.basisLine(row, copy: words))
+    }
+
+    // MARK: The NEAR AI charge
+
+    func testTheNearAIChargeIsItsOwnLineBesideTheAPIPrice() throws {
+        let row = try Self.row(Self.chargedRow)
+        XCTAssertEqual(InsightsModelsWords.lines(row, copy: words), [
+            "claude-sonnet-5-5 <\(InsightsModelsWords.money(1900)) AT API PRICES> 5 TRACES",
+            "NEXT claude-opus-5-5 <\(InsightsModelsWords.money(85400)) AT API PRICES> 5 TRACES",
+            "\(InsightsModelsWords.money(25000)) NEAR 2 TRACES \u{b7} UNKNOWN 1 TRACE",
+        ], "the median over the two known charges, never added to the API-price figures")
+    }
+
+    func testAChargeIsCountedInTheSingularAndAnUnknownOneIsNeverZero() throws {
+        func charge(_ json: String) throws -> String? {
+            let row = try Self.row(Self.chargedRow.replacingOccurrences(
+                of: #""near_ai_charge":{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":25000},"routed_sessions":3,"charge_unknown":1}}"#,
+                with: #""near_ai_charge":"# + json + "}"))
+            XCTAssertEqual(InsightsModelsWords.lines(row, copy: words).count, 3)
+            return InsightsModelsWords.chargeLine(row, copy: words)
+        }
+        let money = InsightsModelsWords.money(4000)
+        XCTAssertEqual(try charge(#"{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":4000},"routed_sessions":1,"charge_unknown":0}"#),
+                       "\(money) NEAR 1 TRACE", "no unknown part when every charge is known")
+        XCTAssertEqual(try charge(#"{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":4000},"routed_sessions":5,"charge_unknown":2}"#),
+                       "\(money) NEAR 3 TRACES \u{b7} UNKNOWN 2 TRACES")
+        XCTAssertEqual(try charge(#"{"basis":"near_ai_ledger","median":null,"routed_sessions":2,"charge_unknown":2}"#),
+                       "NEAR ALL UNKNOWN 2 TRACES", "unknown is said, never shown as a zero")
+        XCTAssertEqual(try charge(#"{"basis":"near_ai_ledger","median":null,"routed_sessions":1,"charge_unknown":1}"#),
+                       "NEAR ALL UNKNOWN 1 TRACE")
+    }
+
+    /// No trace through NEAR AI, or a charge this build cannot read, draws
+    /// no charge line and no (i) sentence for it.
+    func testNoChargeLineWithoutRoutedTracesOrWithAnUnknownBasis() throws {
+        let docs = try XCTUnwrap(try Self.answers().rows?[3])
+        XCTAssertNil(InsightsModelsWords.chargeLine(docs, copy: words))
+        XCTAssertFalse(InsightsModelsWords.info(docs, copy: words).contains("INFO NEAR AI"))
+        let later = try Self.row(Self.chargedRow.replacingOccurrences(of: "near_ai_ledger", with: "later_basis"))
+        XCTAssertNil(InsightsModelsWords.chargeLine(later, copy: words))
+        XCTAssertEqual(InsightsModelsWords.lines(later, copy: words).count, 2)
+        let none = try Self.row(Self.chargedRow.replacingOccurrences(
+            of: #""routed_sessions":3,"charge_unknown":1"#, with: #""routed_sessions":0,"charge_unknown":0"#))
+        XCTAssertNil(InsightsModelsWords.chargeLine(none, copy: words), "no routed traces, no figure")
+    }
+
+    func testTheChargedRowsInfoExplainsTheCharge() throws {
+        let row = try Self.row(Self.chargedRow)
+        XCTAssertEqual(InsightsModelsWords.info(row, copy: words),
+                       ["INFO COST", "INFO NEAR AI", "INFO FLOOR", "INFO MAJORITY", "INFO NOISE", "OUT ROUTED 3"])
+    }
+
+    func testTheSpokenChargedRowReadsTheChargeApart() throws {
+        let row = try Self.row(Self.chargedRow)
+        XCTAssertEqual(InsightsModelsWords.accessibilityLabel(row, copy: words), [
+            "DOCS COST",
+            "claude-sonnet-5-5 <\(InsightsModelsWords.money(1900)) AT API PRICES> 5 TRACES",
+            "NEXT claude-opus-5-5 <\(InsightsModelsWords.money(85400)) AT API PRICES> 5 TRACES",
+            "\(InsightsModelsWords.money(25000)) NEAR 2 TRACES \u{b7} UNKNOWN 1 TRACE",
+            "SCOPE",
+        ].joined(separator: ". "))
+    }
+
+    func testAgentRunTracesAreListedAsLeftOut() throws {
+        let row = try Self.row(Self.undoneRow.replacingOccurrences(of: #""unknown_facts":3,"#,
+                                                                   with: #""unknown_facts":3,"automated":4,"#))
+        XCTAssertEqual(Array(InsightsModelsWords.info(row, copy: words).suffix(4)),
+                       ["OUT UNKNOWN 3", "OUT AGENT 4", "OUT DELEGATED 1", "OUT NO MAJORITY 2"])
     }
 
     func testNoClearDifferenceShowsBothFiguresAndTheMode() throws {

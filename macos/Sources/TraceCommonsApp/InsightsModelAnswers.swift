@@ -197,6 +197,28 @@ enum InsightsModelsWords {
         return line + " \u{b7} " + interrupts(permille, copy: copy)
     }
 
+    /// What NEAR AI charged for the documentation traces sent through it,
+    /// as its own line: the median per trace over the known charges and
+    /// how many those are, then how many are unknown. With none known, only
+    /// that they are unknown, never a zero. `nil` when no trace went
+    /// through NEAR AI, or the charge is of a basis this build cannot read.
+    static func chargeLine(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> String? {
+        guard row.question == "docs_cost", let charge = row.nearAiCharge,
+              charge.basis == "near_ai_ledger", charge.routedSessions > 0 else { return nil }
+        let unknown = max(0, min(charge.chargeUnknown, charge.routedSessions))
+        let known = charge.routedSessions - unknown
+        guard let micros = charge.median?.usdMicros, known > 0 else {
+            let key = unknown == 1 ? "analytics_models_near_ai_charge_all_unknown_one"
+                : "analytics_models_near_ai_charge_all_unknown"
+            return fill(text(key, copy), ["n": String(charge.routedSessions)])
+        }
+        let line = fill(text(known == 1 ? "analytics_models_near_ai_charge_one" : "analytics_models_near_ai_charge", copy),
+                        ["x": money(micros), "n": String(known)])
+        guard unknown > 0 else { return line }
+        let rest = unknown == 1 ? "analytics_models_near_ai_charge_unknown_one" : "analytics_models_near_ai_charge_unknown"
+        return line + " \u{b7} " + fill(text(rest, copy), ["n": String(unknown)])
+    }
+
     /// Each model's traces, for a row that does not compare.
     private static func counts(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> [String] {
         row.sessionsByModel.map { count in
@@ -207,8 +229,13 @@ enum InsightsModelsWords {
 
     /// The row's lines under its question: the leader and the next model;
     /// "No clear difference" and both figures, neither leading; or the
-    /// state with each model's traces.
+    /// state with each model's traces. On the docs cost row, what NEAR AI
+    /// charged follows as its own line.
     static func lines(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> [String] {
+        stateLines(row, copy: copy) + [chargeLine(row, copy: copy)].compactMap { $0 }
+    }
+
+    private static func stateLines(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> [String] {
         switch row.state {
         case "answered":
             if let leader = row.leader, let next = row.next {
@@ -253,6 +280,7 @@ enum InsightsModelsWords {
                         "analytics_models_info_interrupts"]
         } else if row.question == "docs_cost" {
             measured = ["analytics_models_info_cost"]
+                + (chargeLine(row, copy: copy) == nil ? [] : ["analytics_models_info_near_ai_charge"])
         } else {
             measured = ["analytics_models_info_time"]
         }
