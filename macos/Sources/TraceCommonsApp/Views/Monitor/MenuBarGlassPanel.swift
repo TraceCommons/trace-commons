@@ -406,7 +406,7 @@ struct MenuBarMaterialMask: NSViewRepresentable {
 }
 
 /// Sizes the `MenuBarExtra` window and holds its top edge under the menu
-/// bar: the one writer of the panel's frame.
+/// bar: the one writer of the panel's size.
 ///
 /// SwiftUI used to size this window to its content itself, from inside
 /// the window's layout pass (`NSHostingView.updateAnimatedWindowSize`), and
@@ -414,12 +414,14 @@ struct MenuBarMaterialMask: NSViewRepresentable {
 /// crash reported from 0.16 to 0.20.4, every report through a borderless
 /// window's frame (`NSNextStepFrame`). The edge rail had the same signature
 /// until #1402 took its sizing away from its hosting view; this does the
-/// same for the panel. The hosting view no longer sizes the window or
-/// takes safe-area insets, and the window is set here, on the next turn,
-/// to the content's measured size (`PanelSurface` measures it with the
-/// content at its ideal height, so it never depends on the window), with
-/// its top at the menu bar's bottom edge. The sizing is taken over on the
-/// next turn too, after SwiftUI has placed and first sized the window.
+/// same for the panel. The hosting view takes no sizing options or
+/// safe-area insets, and the window is set here, on the next turn, to the
+/// content's measured size (`PanelSurface` measures it with the content at
+/// its ideal height, so it never depends on the window), with its top at
+/// the menu bar's bottom edge. The sizing is taken over on the next turn
+/// too, after SwiftUI has placed and first sized the window. Empty sizing
+/// options do not stop the hosting view's animated resize of its window;
+/// the window drops that (`MenuBarPanelFrame`).
 ///
 /// The top: an `NSWindow` that is resized keeps its bottom edge, so a panel
 /// that grew used to rise into the menu bar and one that shrank dropped
@@ -512,7 +514,8 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
         /// Places the window on the next turn of the run loop, once however
         /// many changes ask for it in this one, taking its sizing over from
         /// SwiftUI first: by then SwiftUI has placed and first sized the
-        /// window, which it does after the content lands in it.
+        /// window, which it does after the content lands in it. From then
+        /// on the window keeps only the sizes placed here.
         private func schedule() {
             guard !scheduled else { return }
             scheduled = true
@@ -521,6 +524,7 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
                 self.scheduled = false
                 guard let window = self.window else { return }
                 MenuBarTopEdgePin.takeOverSizing(from: self)
+                MenuBarPanelFrame.hold(window)
                 self.place(window)
             }
         }
@@ -530,7 +534,7 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
             let top = MenuBarTopEdgePin.menuBarBottom(
                 screen: screen.frame, visible: screen.visibleFrame, thickness: NSStatusBar.system.thickness)
             if let frame = MenuBarTopEdgePin.frame(current: window.frame, content: content, top: top) {
-                window.setFrame(frame, display: true)
+                MenuBarPanelFrame.place(frame, in: window)
             }
         }
 
