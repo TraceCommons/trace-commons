@@ -611,6 +611,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -5027,6 +5028,60 @@ reads. Older daemons report the existing unknown-method error; clients should
 request an app update rather than writing settings files directly. See the
 [agent CLI guide](agent-configuration.md) for the discover/inspect/preview/apply
 workflow and trace-estimate and project-policy discovery.
+
+### `insights_model_answers`
+
+Takes no params. The Models card's six answers over the stored sessions
+(feed T), computed by `insights::model_answers` at answer time from the
+facts and tokens each counter row holds. It is gated as `insights_week` and
+`insights_sessions` are: with `insights_counter_pass` off it answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; on, an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason (`store_unreadable`,
+`key_unavailable` or `policy_unreadable`), never empty rows.
+Sessions in a Never folder enter no answer. Read-only, no network, local in
+a dry-run daemon.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, window_start, window_end, pricing, rows}`:
+
+- `window_start`, `window_end`: RFC 3339. The window is the 13 weeks ending
+  now, whatever week another screen shows; a session older than that is not
+  counted even when its row is still stored.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`. Cost is
+  priced at published API list prices when the answer is built; the store
+  holds tokens and facts, never a price. `table_id` is the content digest of
+  a shipped price table, the one digest on this wire.
+- `rows`: always six, in this order, each
+  `{question, state, basis, edit_mode, leader, next, sessions_by_model,
+  left_out}`:
+  - `question`: `bug_fix_rejected`, `refactor_rejected`, `tests_rejected`,
+    `docs_cost`, `rejected_across_tasks`, `finish_time`.
+  - `state`: `not_enough_sessions`, `not_priced`, `no_clear_difference` or
+    `answered`. With `no_clear_difference` both figures are present.
+  - `basis`: `rejected` or `undone` on the rejection questions, else `null`.
+  - `edit_mode`: `prompting` or `not_prompting` on `finish_time`, else
+    `null`. `unknown` is never compared.
+  - `leader`, `next`: `null`, or `{label, sessions, edits,
+    figure, interrupts_per_session_permille}`. `label` is a model label the
+    session declared, not a verified serving identity. `figure` is
+    `{kind: "rate_permille", value}`, `{kind: "usd_micros", value}` or
+    `{kind: "finish_time", median_active_secs, median_user_turns}`.
+  - `sessions_by_model`: `[[label, sessions], ...]`.
+  - `left_out`: counts of sessions left out of that question, per reason:
+    `unknown_facts`, `delegated`, `capped`, `routed`, `reviewer`,
+    `no_majority`, `unpriced`, `too_few_edits`, `mix_too_different`. A fact
+    that could not be read is left out and counted here, never read as zero.
+
+Money crosses only as `figure.value` under `kind: "usd_micros"` on the
+`docs_cost` row. No other key or value carries a price, and no session
+reference, path, folder name, backend or commit hash crosses. With the
+ledger feed off, or no proxy ledger declared, every session is treated as
+unobserved and no stored route tally is read. No label or field name is a
+ranking word.
+
+`insights_week` keeps its contract: it carries no price, whatever facts the
+rows store.
 
 ### `set_settings`
 
