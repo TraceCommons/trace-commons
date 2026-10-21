@@ -24,7 +24,7 @@ struct InsightsModelsCard: View {
                     Text(window).insightsNote()
                 }
                 VStack(spacing: 0) {
-                    ForEach(Array((answers.rows ?? []).enumerated()), id: \.element.id) { index, row in
+                    ForEach(Array(InsightsModelsWords.rows(answers).enumerated()), id: \.element.id) { index, row in
                         GlassTableRow(first: index == 0) {
                             InsightsModelsRow(row: row, copy: copy)
                         }

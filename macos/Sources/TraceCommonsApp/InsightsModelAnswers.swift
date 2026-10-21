@@ -36,7 +36,7 @@ final class InsightsModelAnswersModel {
             read = nil
         }
         guard generation == token, !Task.isCancelled else { return }
-        answers = read.flatMap { $0.showsAnswers ? $0 : nil }
+        answers = read.flatMap { $0.showsAnswers && !InsightsModelsWords.rows($0).isEmpty ? $0 : nil }
     }
 
     @discardableResult
@@ -67,11 +67,52 @@ enum InsightsModelsWords {
         "bug_fix_rejected", "refactor_rejected", "tests_rejected", "rejected_across_tasks",
     ]
 
+    /// The questions this build has words for, in the daemon's order.
+    static let questions = ["bug_fix_rejected", "refactor_rejected", "tests_rejected",
+                            "docs_cost", "rejected_across_tasks", "finish_time"]
+    static let states: Set<String> = ["answered", "no_clear_difference", "not_priced", "not_enough_sessions"]
+    static let editModes: Set<String> = ["prompting", "not_prompting"]
+
+    /// The words a rejection basis is drawn with: the suffix on the
+    /// question's title key and the figure's key. A basis that is not here,
+    /// such as a judged one, is not drawn at all; adding one is an entry
+    /// here plus its title, rate and `analytics_models_basis_` keys.
+    static let bases: [String: (title: String, rate: String)] = [
+        "rejected": ("", "analytics_models_rate_rejected"),
+        "undone": ("_undone", "analytics_models_rate_undone"),
+    ]
+
+    private static func comparesTwo(_ row: DaemonData.InsightsModelAnswerRow) -> Bool {
+        row.state == "answered" || row.state == "no_clear_difference"
+    }
+
+    /// Whether this build can say what the row means. A question, state,
+    /// basis or approval mode a later daemon adds is left off the card
+    /// rather than drawn as another state, under a blank heading, or in
+    /// the rejected wording; so is a comparison missing one of its models.
+    static func isDrawable(_ row: DaemonData.InsightsModelAnswerRow) -> Bool {
+        guard questions.contains(row.question), states.contains(row.state) else { return false }
+        guard comparesTwo(row) else { return true }
+        guard row.leader != nil, row.next != nil else { return false }
+        if rejectionQuestions.contains(row.question) {
+            return row.basis.map { bases[$0] != nil } ?? false
+        }
+        if row.question == "finish_time" {
+            return row.editMode.map(editModes.contains) ?? false
+        }
+        return true
+    }
+
+    /// The rows the card draws, in the daemon's order.
+    static func rows(_ answers: DaemonData.InsightsModelAnswers) -> [DaemonData.InsightsModelAnswerRow] {
+        (answers.rows ?? []).filter(isDrawable)
+    }
+
     /// The question as a scoped fact. A rejection question on the undone
     /// basis says undone edits in the question itself.
     static func title(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> String {
-        let undone = rejectionQuestions.contains(row.question) && row.basis == "undone"
-        return text("analytics_models_" + row.question + (undone ? "_undone" : ""), copy)
+        let suffix = rejectionQuestions.contains(row.question) ? row.basis.flatMap { bases[$0]?.title } ?? "" : ""
+        return text("analytics_models_" + row.question + suffix, copy)
     }
 
     /// Every row's scope: in your traces, labels as recorded, task type
@@ -128,8 +169,7 @@ enum InsightsModelsWords {
                        copy: [String: String]) -> String {
         switch value.kind {
         case "rate_permille":
-            guard let permille = value.value else { break }
-            let key = basis == "undone" ? "analytics_models_rate_undone" : "analytics_models_rate_rejected"
+            guard let permille = value.value, let key = basis.flatMap({ bases[$0]?.rate }) else { break }
             return fill(text(key, copy), ["p": rate(permille)])
         case "usd_micros":
             guard let micros = value.value else { break }
@@ -193,12 +233,12 @@ enum InsightsModelsWords {
     /// What the figures beside it rest on, shown only beside figures: the
     /// rejection basis, or the approval mode a time is compared within.
     static func basisLine(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> String? {
-        guard ["answered", "no_clear_difference"].contains(row.state) else { return nil }
-        if rejectionQuestions.contains(row.question), let basis = row.basis {
-            return text("analytics_models_basis_" + basis, copy)
+        guard comparesTwo(row) else { return nil }
+        if rejectionQuestions.contains(row.question), let basis = row.basis, bases[basis] != nil {
+            return copy["analytics_models_basis_" + basis]
         }
-        if row.question == "finish_time", let mode = row.editMode {
-            return text("analytics_models_mode_" + mode, copy)
+        if row.question == "finish_time", let mode = row.editMode, editModes.contains(mode) {
+            return copy["analytics_models_mode_" + mode]
         }
         return nil
     }

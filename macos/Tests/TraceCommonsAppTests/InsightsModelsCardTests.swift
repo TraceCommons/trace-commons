@@ -190,6 +190,63 @@ final class InsightsModelsCardTests: XCTestCase {
         }
     }
 
+    // MARK: Words a later daemon may send
+
+    /// The six questions, in the daemon's order, every one of them drawn.
+    func testTheRecordedReplyIsAllDrawable() throws {
+        let answers = try Self.answers()
+        XCTAssertEqual(answers.rows?.map(\.question), InsightsModelsWords.questions)
+        XCTAssertEqual(InsightsModelsWords.rows(answers).count, 6)
+    }
+
+    /// A question, state or basis this build has no words for is left off
+    /// the card, never drawn as "Not enough traces yet", with a blank
+    /// heading, or in the rejected wording.
+    func testARowThisBuildCannotReadIsLeftOff() throws {
+        let unknownQuestion = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""question":"bug_fix_rejected""#, with: #""question":"later_question""#))
+        let unknownState = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""state":"answered""#, with: #""state":"later_state""#))
+        let judged = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""basis":"undone""#, with: #""basis":"judged""#))
+        let noBasis = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""basis":"undone""#, with: #""basis":null"#))
+        let noNext = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""next":{"label":"claude-sonnet-4-6","sessions":14,"edits":160,"figure":{"kind":"rate_permille","value":91},"interrupts_per_session_permille":null}"#,
+            with: #""next":null"#))
+        let unknownMode = try Self.row(Self.finishRow.replacingOccurrences(
+            of: #""edit_mode":"not_prompting""#, with: #""edit_mode":"later_mode""#))
+        for row in [unknownQuestion, unknownState, judged, noBasis, noNext, unknownMode] {
+            XCTAssertFalse(InsightsModelsWords.isDrawable(row), "\(row)")
+        }
+        for row in [try Self.row(Self.undoneRow), try Self.row(Self.finishRow), try Self.row(Self.notPricedRow)] {
+            XCTAssertTrue(InsightsModelsWords.isDrawable(row), row.question)
+        }
+    }
+
+    /// A judged basis never borrows the rejected words: its figure is the
+    /// dash and there is no basis caption, rather than an empty one.
+    func testAnUnknownBasisNeverReadsAsRejected() throws {
+        let judged = try Self.row(Self.undoneRow.replacingOccurrences(
+            of: #""basis":"undone""#, with: #""basis":"judged""#))
+        XCTAssertEqual(InsightsModelsWords.figure(try XCTUnwrap(judged.leader).figure, basis: "judged", copy: words),
+                       "DASH")
+        XCTAssertNil(InsightsModelsWords.basisLine(judged, copy: words))
+        let unknownMode = try Self.row(Self.finishRow.replacingOccurrences(
+            of: #""edit_mode":"not_prompting""#, with: #""edit_mode":"later_mode""#))
+        XCTAssertNil(InsightsModelsWords.basisLine(unknownMode, copy: words))
+    }
+
+    /// A reply with no row this build can draw hides the card.
+    @MainActor func testAReplyWithNoDrawableRowHidesTheCard() async throws {
+        let json = Self.recorded
+            .replacingOccurrences(of: #""state":"not_enough_sessions""#, with: #""state":"later_state""#)
+            .replacingOccurrences(of: #""state":"answered""#, with: #""state":"later_state""#)
+        let model = InsightsModelAnswersModel(reader: { try Self.answers(json) })
+        await model.load()
+        XCTAssertNil(model.answers)
+    }
+
     // MARK: The (i)
 
     func testEachRowsInfoSaysHowItIsMeasuredAndWhatWasLeftOut() throws {
