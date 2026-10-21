@@ -128,7 +128,9 @@ pins that no path, file name or raw text beyond the scrubbed excerpts appears.
 
 - A call carries the contributor's existing account credential. The service
   checks it, then keys the limiter on a **keyed digest of the account ID**,
-  under a key sealed to the enclave measurement, never the raw ID.
+  under a key derived from the dstack guest agent (bound to the service's app
+  id and released only to measurements its KMS admits; see the judgement
+  service spec, section 6), never the raw ID.
 - **Cap:** the limiter meters spend, not calls. Each call's cost is taken from
   the NEAR AI usage the response reports. The cap is $5 per account per
   calendar month (decision 3). A call that would pass the cap is refused with
@@ -194,9 +196,10 @@ The owner put this in scope. With it, the service is no longer stateless:
   never digests or labels. Opting in to contribute is separate from opting in
   to judgements.
 - **Sealed store:** the figures are held only inside the enclave, encrypted
-  under a key sealed to its measurement, keyed by the keyed account digest so
-  a contributor can replace or delete theirs. A new enclave measurement needs a
-  defined key migration, or the store starts over.
+  under a key derived from the dstack guest agent (bound to the app id, released
+  only to measurements its KMS admits), keyed by the keyed account digest so a
+  contributor can replace or delete theirs. An in-place upgrade the KMS admits
+  keeps the store; a new app id starts it over.
 - **Answers:** the service answers only aggregates. An example is "your Opus
   rejection rate in bug-fix sessions vs. the median of N contributors".
   - Minimum cohort: at least 20 contributors per cell, with no aggregate
