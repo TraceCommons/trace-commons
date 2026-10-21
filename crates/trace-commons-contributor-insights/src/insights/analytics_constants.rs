@@ -224,6 +224,24 @@ pub const COUNTER_STORE_MAX_CODEX_SERIES_TURNS: usize = 196_608;
 /// ...and at most this many tool calls across every Codex row's series.
 /// See `COUNTER_STORE_MAX_CODEX_SERIES_TURNS` for the sizing.
 pub const COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS: usize = 196_608;
+/// Automated sessions' own allowance (owner decision, 2026-10-20, option
+/// (b)): a session started by a tool rather than the person (a Codex
+/// session its harness spawned itself: the automatic approvals reviewer or
+/// a delegated thread) does not count toward `COUNTER_STORE_MAX_SESSIONS`
+/// or the shared turn and tool-call caps. At most this many are kept
+/// besides, the oldest evicted first within the allowance, so they never
+/// crowd the contributor's own sessions out. Their Codex series stay under
+/// the Codex series budget above. A session that cannot be told apart
+/// counts as the person's.
+///
+/// They stay in the overview's token totals, since they cost tokens, but
+/// past the allowance the oldest are gone from those totals. Sized to keep
+/// two busy weeks of them, several hundred a week on a heavy Codex user's
+/// machine, so the current week and the one before it, the two the
+/// overview's change compares, stay whole; older weeks may undercount
+/// automated tokens. Half the shared cap, so the store grows by at most
+/// half as many rows.
+pub const COUNTER_STORE_MAX_AUTOMATED_SESSIONS: usize = 1_024;
 /// Sessions last written longer ago than this many weeks are not read, and
 /// their rows are dropped: enough for six weekly marks and a four-week
 /// baseline. Owner decision D4, open.
@@ -434,6 +452,8 @@ mod tests {
                     >= trace_commons_protocol::insights_usage_series::MAX_SERIES_TOOL_CALLS
             )
         };
+        assert_eq!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS, 1_024);
+        const { assert!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS < COUNTER_STORE_MAX_SESSIONS) };
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);

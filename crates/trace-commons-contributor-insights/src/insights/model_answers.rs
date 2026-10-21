@@ -11,7 +11,10 @@
 //! - A session is in the window when its latest dated turn (or, with none,
 //!   its `placed_at`) is in `[now - MODEL_ANSWER_WINDOW_WEEKS, now]`. A
 //!   session with no date at all is in no window and is not counted.
-//! - `left_out` counts sessions. `unknown_facts` sessions have no known task,
+//! - `left_out` counts sessions. `automated` sessions (started by a tool,
+//!   not the person: `SessionInput::automated`) are compared nowhere and
+//!   counted on every row, before any other reason, facts or not.
+//!   `unknown_facts` sessions have no known task,
 //!   so they are counted on every row; a Codex session with no per-turn
 //!   series (read before the reader, or trimmed by the counter store's
 //!   Codex budget) is one of them, since which model served it is
@@ -159,6 +162,9 @@ pub struct ModelFigure {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct LeftOut {
     pub unknown_facts: u32,
+    /// Sessions known to be automated (`SessionInput::automated`): never
+    /// compared, counted on every row.
+    pub automated: u32,
     pub delegated: u32,
     pub capped: u32,
     pub routed: u32,
@@ -235,6 +241,7 @@ struct Prepared {
     /// order whatever the input order.
     candidates: Vec<Candidate>,
     unknown_facts: u32,
+    automated: u32,
     reviewer: BTreeMap<InferredTask, u32>,
 }
 
@@ -242,6 +249,7 @@ impl Prepared {
     fn left_out(&self, tasks: &[InferredTask]) -> LeftOut {
         LeftOut {
             unknown_facts: self.unknown_facts,
+            automated: self.automated,
             reviewer: tasks
                 .iter()
                 .filter_map(|task| self.reviewer.get(task))
@@ -345,6 +353,7 @@ fn prepare(
     let mut prepared = Prepared {
         candidates: Vec::new(),
         unknown_facts: 0,
+        automated: 0,
         reviewer: BTreeMap::new(),
     };
     for session in ordered {
@@ -352,6 +361,11 @@ fn prepare(
             continue;
         };
         if at < window_start || at > now {
+            continue;
+        }
+        // Started by a tool, not the person: compared nowhere, facts or not.
+        if session.automated {
+            bump(&mut prepared.automated);
             continue;
         }
         let Some(facts) = &session.facts else {

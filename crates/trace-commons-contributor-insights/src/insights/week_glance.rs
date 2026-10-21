@@ -332,6 +332,7 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
                 import_seq: seq as u64,
                 placed_at,
                 harness_session,
+                automated: false,
                 facts: None,
                 body,
             }

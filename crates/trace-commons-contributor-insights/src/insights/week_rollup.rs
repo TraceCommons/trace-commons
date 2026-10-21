@@ -162,6 +162,14 @@ pub struct SessionInput {
     /// digest key; `None` when unknown or made under another key. Two
     /// snapshots that both carry one overlap only when it is the same.
     pub harness_session: Option<KeyedDigest>,
+    /// Whether the session is known to be automated: started by a tool,
+    /// not by the person (a Codex session its harness spawned itself, such
+    /// as the automatic approvals reviewer or a delegated thread). `false`
+    /// when it is not, or when that cannot be told: a guess never takes the
+    /// contributor's own work out. Weekly token figures count it; the
+    /// Models answers and the Patterns cards leave it out. Always `false`
+    /// for a saved snapshot.
+    pub automated: bool,
     pub body: SessionBody,
     /// The session's facts beyond its tokens, for the Models answers.
     /// `None` for a saved snapshot and for a counter row stored without
@@ -803,6 +811,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
@@ -821,6 +830,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
@@ -843,6 +853,7 @@ mod tests {
             import_seq: 0,
             placed_at: placed,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Unknown {
                 source: Some(AnalyticsSource::ClaudeCode),

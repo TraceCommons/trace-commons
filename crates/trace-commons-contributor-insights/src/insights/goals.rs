@@ -373,6 +373,7 @@ mod tests {
             import_seq: 1,
             placed_at: None,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
