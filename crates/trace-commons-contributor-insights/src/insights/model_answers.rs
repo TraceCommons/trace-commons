@@ -46,15 +46,21 @@
 //! - `basis` is set on a rejection row that compares two models, `None`
 //!   elsewhere. A cost figure's `sessions` is its priced sessions, the
 //!   median's sample; a time figure's is its finished sessions.
-//! - Across task types (Q5, Q6), a type's weight is the sessions of that
-//!   type in the question's cells, across every model with at least one
-//!   qualifying cell in the question (the spec's "compared models": the
-//!   mix rule only removes models from that set, so the weights do not
-//!   depend on their own outcome). A model with no qualifying cell anywhere
-//!   is never compared and does not weigh in. `mix_too_different` counts every session in the question of a model
-//!   with a qualifying cell whose qualifying types carry less than
-//!   `MODEL_ANSWER_MIN_MIX_COVERAGE` of the weight. Q1-Q4 have one type,
-//!   so every model with a qualifying cell covers it.
+//! - Across task types (Q5, Q6), two models are compared over the task
+//!   types where both have a qualifying cell, each type weighted by the two
+//!   models' sessions in it, so a model worse in every shared type never
+//!   leads on the types only it qualifies in. A pair whose shared types
+//!   carry less than `MODEL_ANSWER_MIN_MIX_COVERAGE` of the two models'
+//!   sessions in the question is not compared. A model with no qualifying
+//!   cell anywhere is never compared. `mix_too_different` counts every
+//!   session in the question of a model with a qualifying cell that no
+//!   other such model can be compared with. Q1-Q4 have one type, so every
+//!   pair shares all of it.
+//! - The leader is the model lower in the most of its comparisons, then
+//!   higher in the fewest, then with more sessions in the question, then
+//!   first in label byte order; the next model is, of the models compared
+//!   with it, the one first in that same standing. Both figures are the
+//!   pair's, the lower first. With one type this is the total order.
 //! - Q6: a cell qualifies on `MODEL_ANSWER_MIN_SESSIONS` finished sessions
 //!   with known time and turns; unfinished sessions count as sessions and
 //!   in the weights, not in the medians. Its figure is the weighted mean of
@@ -68,15 +74,15 @@
 //!   other case (including when neither mode has two). The mix rule and the
 //!   bootstrap then run within that mode only, so a qualifier that fails
 //!   the mix leaves the row on `NotPrompting` reading not enough sessions.
-//! - The bootstrap compares the leader and the next model only. Per draw it
-//!   resamples the leader's qualifying cells, then the next model's, each
-//!   in task order and each cell's sessions in `session_ref` order, with
-//!   one SplitMix64 stream per question from the fixed seed; the type
-//!   weights stay those of the whole sample. A draw whose figure is
+//! - The bootstrap compares the leader and the next model only, over their
+//!   shared types. Per draw it resamples the leader's cells there, then the
+//!   next model's, each in task order and each cell's sessions in
+//!   `session_ref` order, with one SplitMix64 stream per question from the
+//!   fixed seed; the type weights stay the pair's, from the whole sample. A draw whose figure is
 //!   undefined (a resample with no edits) is not a lead. A row with no
 //!   clear difference still carries both figures, in the total order.
 
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
@@ -651,35 +657,6 @@ fn session_counts<T>(cells: &Cells<T>) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// Each task type's weight: the contributor's sessions of that type in the
-/// question, across every model.
-fn mix_weights<T>(cells: &Cells<T>) -> BTreeMap<InferredTask, u64> {
-    weights_of(cells.values())
-}
-
-/// Each task type's weight across the entrants: the models with at least
-/// one qualifying cell in the question.
-fn entrant_weights<T, U>(cells: &Cells<T>, entrants: &[Entrant<U>]) -> BTreeMap<InferredTask, u64> {
-    weights_of(
-        entrants
-            .iter()
-            .filter_map(|entrant| cells.get(&entrant.label)),
-    )
-}
-
-fn weights_of<'c, T: 'c>(
-    cells: impl Iterator<Item = &'c BTreeMap<InferredTask, Vec<T>>>,
-) -> BTreeMap<InferredTask, u64> {
-    let mut weights: BTreeMap<InferredTask, u64> = BTreeMap::new();
-    for by_task in cells {
-        for (task, samples) in by_task {
-            let weight = weights.entry(*task).or_default();
-            *weight = weight.saturating_add(samples.len() as u64);
-        }
-    }
-    weights
-}
-
 fn saturating_len(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }
@@ -758,8 +735,8 @@ impl Point for TimePoint {
     }
 }
 
-/// The weighted mean of the cells' figures, weights renormalized over the
-/// cells given. With one cell, its figure.
+/// The weighted mean of the cells' figures under a pair's weights, which
+/// name exactly the cells given. With one cell, its figure.
 fn weighted<P: Point>(
     cells: &[(InferredTask, Vec<P>)],
     weights: &BTreeMap<InferredTask, u64>,
@@ -782,24 +759,63 @@ struct Entrant<T> {
     in_question: u32,
 }
 
-/// The entrants whose qualifying task types carry at least
-/// `MODEL_ANSWER_MIN_MIX_COVERAGE` of the question's weight; the others'
-/// sessions are counted in `mix_too_different`. A one-type question's
-/// entrants always pass.
-fn covering<T>(
-    entrants: Vec<Entrant<T>>,
-    weights: &BTreeMap<InferredTask, u64>,
-    left_out: &mut LeftOut,
-) -> Vec<Entrant<T>> {
-    let total = weights
+impl<T> Entrant<T> {
+    /// The qualifying cells in the types a pair's weights name.
+    fn shared<'e>(
+        &'e self,
+        weights: &'e BTreeMap<InferredTask, u64>,
+    ) -> impl Iterator<Item = &'e (InferredTask, Vec<T>)> {
+        self.cells
+            .iter()
+            .filter(|(task, _)| weights.contains_key(task))
+    }
+}
+
+/// The weights two entrants are compared under: each task type both
+/// qualify in, weighted by the two models' sessions there. `None` when
+/// those types carry less than `MODEL_ANSWER_MIN_MIX_COVERAGE` of the two
+/// models' sessions in the question. A one-type question's pairs always
+/// pass.
+fn pair_weights<T>(a: &Entrant<T>, b: &Entrant<T>) -> Option<BTreeMap<InferredTask, u64>> {
+    let mut weights = BTreeMap::new();
+    for (task, ours) in &a.cells {
+        if let Some((_, theirs)) = b.cells.iter().find(|(other, _)| other == task) {
+            weights.insert(
+                *task,
+                (ours.len() as u64).saturating_add(theirs.len() as u64),
+            );
+        }
+    }
+    let shared = weights
         .values()
         .fold(0u64, |sum, weight| sum.saturating_add(*weight));
+    let total = u64::from(a.in_question).saturating_add(u64::from(b.in_question));
+    MODEL_ANSWER_MIN_MIX_COVERAGE
+        .reached_by(shared, total)
+        .then_some(weights)
+}
+
+/// The entrants that can be compared with at least one other entrant.
+/// With two or more entrants, the sessions of the others are counted in
+/// `mix_too_different`; a lone entrant is kept, and reads not enough
+/// sessions.
+fn comparable<T>(entrants: Vec<Entrant<T>>, left_out: &mut LeftOut) -> Vec<Entrant<T>> {
+    if entrants.len() < 2 {
+        return entrants;
+    }
+    let paired: Vec<bool> = entrants
+        .iter()
+        .enumerate()
+        .map(|(ix, entrant)| {
+            entrants
+                .iter()
+                .enumerate()
+                .any(|(other, rival)| other != ix && pair_weights(entrant, rival).is_some())
+        })
+        .collect();
     let mut kept = Vec::new();
-    for entrant in entrants {
-        let covered = entrant.cells.iter().fold(0u64, |sum, (task, _)| {
-            sum.saturating_add(weights.get(task).copied().unwrap_or(0))
-        });
-        if MODEL_ANSWER_MIN_MIX_COVERAGE.reached_by(covered, total) {
+    for (entrant, paired) in entrants.into_iter().zip(paired) {
+        if paired {
             kept.push(entrant);
         } else {
             left_out.mix_too_different = left_out
@@ -872,7 +888,8 @@ fn resampled<P: Point>(
 /// Whether the leader leads the next model in at least
 /// `MODEL_ANSWER_LEAD_SHARE` of the draws. One PRNG from the fixed seed per
 /// question; each draw resamples the leader's cells, then the next model's,
-/// each cell's sessions in `session_ref` order.
+/// each cell's sessions in `session_ref` order. Both hold only the pair's
+/// shared types, and `weights` are the pair's.
 fn clear_lead<P: Point>(
     leader: &Contender<P>,
     next: &Contender<P>,
@@ -895,21 +912,97 @@ fn clear_lead<P: Point>(
     MODEL_ANSWER_LEAD_SHARE.reached_by(leads, u64::from(MODEL_ANSWER_BOOTSTRAP_DRAWS))
 }
 
-/// Sorts the contenders and settles the row: fewer than two is not enough
-/// sessions; otherwise the bootstrap decides between no clear difference
-/// and an answer, and both figures are shown either way.
-fn settle<P: Point>(
+/// One comparison of two entrants over their shared types: the pair's
+/// weights and both figures, the lower in the total order first.
+struct Pairing<P> {
+    weights: BTreeMap<InferredTask, u64>,
+    lower: (usize, Contender<P>),
+    higher: (usize, Contender<P>),
+}
+
+impl<P> Pairing<P> {
+    fn has(&self, ix: usize) -> bool {
+        self.lower.0 == ix || self.higher.0 == ix
+    }
+
+    fn rival_of(&self, ix: usize) -> usize {
+        if self.lower.0 == ix {
+            self.higher.0
+        } else {
+            self.lower.0
+        }
+    }
+}
+
+/// Compares every pair of entrants over the types both qualify in, under
+/// the pair's weights (`figure` builds an entrant's contender from its
+/// cells there), and settles the row. With no pair whose two figures are
+/// defined, not enough sessions. Otherwise the leader is the entrant that
+/// is lower in the most of its comparisons, then higher in the fewest, then
+/// has more sessions in the question, then comes first in label byte
+/// order; the next model is, of the entrants compared with it, the one
+/// first in that same standing. The two are shown as their comparison
+/// reads them, the lower figure first, and the bootstrap over their shared
+/// cells decides between no clear difference and an answer. With one task
+/// type every figure is the model's whole cell, so this is the total order.
+fn settle<T, P: Point>(
     row: &mut ModelAnswerRow,
-    mut contenders: Vec<Contender<P>>,
-    weights: &BTreeMap<InferredTask, u64>,
+    entrants: &[Entrant<T>],
+    figure: impl Fn(&Entrant<T>, &BTreeMap<InferredTask, u64>) -> Option<Contender<P>>,
     draws: &mut u32,
 ) {
-    contenders.sort_by(|a, b| a.order(b));
-    let [leader, next, ..] = contenders.as_slice() else {
+    let mut lower_in = vec![0u32; entrants.len()];
+    let mut higher_in = vec![0u32; entrants.len()];
+    let mut pairings = Vec::new();
+    for (ix, entrant) in entrants.iter().enumerate() {
+        for (other, rival) in entrants.iter().enumerate().skip(ix + 1) {
+            let Some(weights) = pair_weights(entrant, rival) else {
+                continue;
+            };
+            let (Some(ours), Some(theirs)) = (figure(entrant, &weights), figure(rival, &weights))
+            else {
+                continue;
+            };
+            let (lower, higher) = if ours.order(&theirs).is_le() {
+                ((ix, ours), (other, theirs))
+            } else {
+                ((other, theirs), (ix, ours))
+            };
+            bump(&mut lower_in[lower.0]);
+            bump(&mut higher_in[higher.0]);
+            pairings.push(Pairing {
+                weights,
+                lower,
+                higher,
+            });
+        }
+    }
+    let standing = |ix: usize| {
+        (
+            Reverse(lower_in[ix]),
+            higher_in[ix],
+            Reverse(entrants[ix].in_question),
+            entrants[ix].label.as_bytes(),
+        )
+    };
+    let Some(top) = pairings
+        .iter()
+        .flat_map(|pairing| [pairing.lower.0, pairing.higher.0])
+        .min_by_key(|ix| standing(*ix))
+    else {
         row.state = AnswerState::NotEnoughSessions;
         return;
     };
-    row.state = if clear_lead(leader, next, weights, draws) {
+    let Some(pairing) = pairings
+        .iter()
+        .filter(|pairing| pairing.has(top))
+        .min_by_key(|pairing| standing(pairing.rival_of(top)))
+    else {
+        row.state = AnswerState::NotEnoughSessions;
+        return;
+    };
+    let (leader, next) = (&pairing.lower.1, &pairing.higher.1);
+    row.state = if clear_lead(leader, next, &pairing.weights, draws) {
         AnswerState::Answered
     } else {
         AnswerState::NoClearDifference
@@ -1002,8 +1095,7 @@ fn rejection_row(
             });
         }
     }
-    let weights = entrant_weights(&cells, &entrants);
-    let compared = covering(entrants, &weights, &mut left_out);
+    let compared = comparable(entrants, &mut left_out);
     let mut row = empty_row(question, session_counts(&cells), left_out);
     if compared.len() < 2 {
         return row;
@@ -1018,13 +1110,12 @@ fn rejection_row(
     } else {
         RejectionBasis::Undone
     };
-    let mut contenders = Vec::new();
-    for entrant in compared {
+    let figure = |entrant: &Entrant<RejectionSample>, weights: &BTreeMap<InferredTask, u64>| {
         let mut edits = 0u64;
         let mut sessions = 0u64;
         let mut interrupts = Some(0u64);
         let mut cells = Vec::new();
-        for (task, samples) in &entrant.cells {
+        for (task, samples) in entrant.shared(weights) {
             let mut points = Vec::new();
             for sample in samples {
                 let rejected = match basis {
@@ -1047,15 +1138,11 @@ fn rejection_row(
             }
             cells.push((*task, points));
         }
-        let Some(value) = weighted(&cells, &weights) else {
-            continue;
-        };
-        let Some(rate) = fixed_permille(value) else {
-            continue;
-        };
-        contenders.push(Contender {
+        let value = weighted(&cells, weights)?;
+        let rate = fixed_permille(value)?;
+        Some(Contender {
             figure: ModelFigure {
-                label: entrant.label,
+                label: entrant.label.clone(),
                 sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
                 edits: Some(u32::try_from(edits).unwrap_or(u32::MAX)),
                 figure: Figure::RatePermille { value: rate },
@@ -1066,10 +1153,10 @@ fn rejection_row(
             value,
             support: edits,
             sessions,
-        });
-    }
+        })
+    };
     row.basis = Some(basis);
-    settle(&mut row, contenders, &weights, draws);
+    settle(&mut row, &compared, figure, draws);
     row
 }
 
@@ -1080,7 +1167,6 @@ fn cost_row(
     draws: &mut u32,
 ) -> ModelAnswerRow {
     let (cells, left_out) = cost_cells(prepared, &[InferredTask::Docs]);
-    let weights = mix_weights(&cells);
     let mut row = empty_row(ModelQuestion::DocsCost, session_counts(&cells), left_out);
     // The Docs sessions sent through NEAR AI: the route tally leaves them
     // out of the list-priced figures, and their charge is its own figure.
@@ -1090,39 +1176,55 @@ fn cost_row(
         .values()
         .filter(|by_task| sessions_of(by_task) >= MODEL_ANSWER_MIN_SESSIONS)
         .count();
-    let mut contenders = Vec::new();
+    let priced = |samples: &[&Candidate]| -> Vec<CostPoint> {
+        samples
+            .iter()
+            .filter_map(|candidate| candidate.cost_usd_micros.map(CostPoint))
+            .collect()
+    };
+    let mut entrants = Vec::new();
     for (label, by_task) in &cells {
-        let mut priced_cells = Vec::new();
-        let mut priced_count = 0u64;
+        let mut qualifying = Vec::new();
         for (task, samples) in by_task {
-            let priced: Vec<CostPoint> = samples
-                .iter()
-                .filter_map(|candidate| candidate.cost_usd_micros.map(CostPoint))
-                .collect();
             for candidate in samples
                 .iter()
                 .filter(|candidate| candidate.cost_usd_micros.is_some())
             {
                 tables.extend(candidate.tables.iter().cloned());
             }
-            if saturating_len(priced.len()) < MODEL_ANSWER_MIN_SESSIONS {
-                continue;
+            if saturating_len(priced(samples).len()) >= MODEL_ANSWER_MIN_SESSIONS {
+                qualifying.push((*task, samples.clone()));
             }
-            priced_count += priced.len() as u64;
-            priced_cells.push((*task, priced));
         }
-        if priced_cells.is_empty() {
-            continue;
-        }
-        let Some(value) = weighted(&priced_cells, &weights) else {
-            continue;
-        };
-        let Some(usd) = fixed_units(value).and_then(|units| u64::try_from(units).ok()) else {
-            continue;
-        };
-        contenders.push(Contender {
-            figure: ModelFigure {
+        if !qualifying.is_empty() {
+            entrants.push(Entrant {
                 label: label.clone(),
+                cells: qualifying,
+                in_question: sessions_of(by_task),
+            });
+        }
+    }
+    if enough < 2 {
+        return row;
+    }
+    if entrants.len() < 2 {
+        row.state = AnswerState::NotPriced;
+        return row;
+    }
+    let figure = |entrant: &Entrant<&Candidate>, weights: &BTreeMap<InferredTask, u64>| {
+        let mut sessions = 0u64;
+        let mut cells = Vec::new();
+        for (task, samples) in entrant.shared(weights) {
+            sessions += samples.len() as u64;
+            cells.push((*task, priced(samples)));
+        }
+        let priced_count = cells.iter().map(|(_, points)| points.len() as u64).sum();
+        let value = weighted(&cells, weights)?;
+        let usd = fixed_units(value).and_then(|units| u64::try_from(units).ok())?;
+        let label = entrant.label.as_str();
+        Some(Contender {
+            figure: ModelFigure {
+                label: label.to_owned(),
                 sessions: u32::try_from(priced_count).unwrap_or(u32::MAX),
                 edits: None,
                 figure: Figure::UsdMicros { value: usd },
@@ -1130,23 +1232,16 @@ fn cost_row(
                 near_ai_charge: near_ai_charge(
                     docs.iter()
                         .copied()
-                        .filter(|candidate| candidate.majority.as_deref() == Some(label.as_str())),
+                        .filter(|candidate| candidate.majority.as_deref() == Some(label)),
                 ),
             },
-            cells: priced_cells,
+            cells,
             value,
             support: priced_count,
-            sessions: u64::from(sessions_of(by_task)),
-        });
-    }
-    if enough < 2 {
-        return row;
-    }
-    if contenders.len() < 2 {
-        row.state = AnswerState::NotPriced;
-        return row;
-    }
-    settle(&mut row, contenders, &weights, draws);
+            sessions,
+        })
+    };
+    settle(&mut row, &entrants, figure, draws);
     row
 }
 
@@ -1177,68 +1272,56 @@ fn time_entrants(
     (cells, left_out, entrants)
 }
 
-/// Question 6's contenders among the entrants of one `edit_mode`, after the
-/// mix rule.
-fn time_contenders(
-    cells: &Cells<TimeSample>,
-    entrants: Vec<Entrant<TimeSample>>,
-    left_out: &mut LeftOut,
-) -> (BTreeMap<InferredTask, u64>, Vec<Contender<TimePoint>>) {
-    let weights = entrant_weights(cells, &entrants);
-    let mut contenders = Vec::new();
-    for entrant in covering(entrants, &weights, left_out) {
-        let sessions = entrant
-            .cells
-            .iter()
-            .map(|(_, samples)| samples.len() as u64)
-            .sum::<u64>();
-        let cells: Vec<(InferredTask, Vec<TimePoint>)> = entrant
-            .cells
-            .into_iter()
-            .map(|(task, samples)| (task, samples.into_iter().flatten().collect()))
-            .collect();
-        let finished = cells.iter().map(|(_, points)| points.len() as u64).sum();
-        // Turns beside the time, weighted the same way; not compared.
-        let turns: Vec<(InferredTask, Vec<CostPoint>)> = cells
-            .iter()
-            .map(|(task, points)| {
-                (
-                    *task,
-                    points
-                        .iter()
-                        .map(|point| CostPoint(point.user_turns))
-                        .collect(),
-                )
-            })
-            .collect();
-        let (Some(value), Some(turns)) = (weighted(&cells, &weights), weighted(&turns, &weights))
-        else {
-            continue;
-        };
-        let wire = |fixed: u128| {
-            fixed_units(fixed)
-                .and_then(|units| u32::try_from(units).ok())
-                .unwrap_or(u32::MAX)
-        };
-        contenders.push(Contender {
-            figure: ModelFigure {
-                label: entrant.label,
-                sessions: u32::try_from(finished).unwrap_or(u32::MAX),
-                edits: None,
-                figure: Figure::FinishTime {
-                    median_active_secs: wire(value),
-                    median_user_turns: wire(turns),
-                },
-                interrupts_per_session_permille: None,
-                near_ai_charge: None,
-            },
-            cells,
-            value,
-            support: finished,
-            sessions,
-        });
+/// An entrant's time contender over a pair's shared types: unfinished
+/// sessions count as sessions, not in the medians.
+fn time_figure(
+    entrant: &Entrant<TimeSample>,
+    weights: &BTreeMap<InferredTask, u64>,
+) -> Option<Contender<TimePoint>> {
+    let mut sessions = 0u64;
+    let mut cells: Vec<(InferredTask, Vec<TimePoint>)> = Vec::new();
+    for (task, samples) in entrant.shared(weights) {
+        sessions += samples.len() as u64;
+        cells.push((*task, samples.iter().flatten().copied().collect()));
     }
-    (weights, contenders)
+    let finished = cells.iter().map(|(_, points)| points.len() as u64).sum();
+    // Turns beside the time, weighted the same way; not compared.
+    let turns: Vec<(InferredTask, Vec<CostPoint>)> = cells
+        .iter()
+        .map(|(task, points)| {
+            (
+                *task,
+                points
+                    .iter()
+                    .map(|point| CostPoint(point.user_turns))
+                    .collect(),
+            )
+        })
+        .collect();
+    let value = weighted(&cells, weights)?;
+    let turns = weighted(&turns, weights)?;
+    let wire = |fixed: u128| {
+        fixed_units(fixed)
+            .and_then(|units| u32::try_from(units).ok())
+            .unwrap_or(u32::MAX)
+    };
+    Some(Contender {
+        figure: ModelFigure {
+            label: entrant.label.clone(),
+            sessions: u32::try_from(finished).unwrap_or(u32::MAX),
+            edits: None,
+            figure: Figure::FinishTime {
+                median_active_secs: wire(value),
+                median_user_turns: wire(turns),
+            },
+            interrupts_per_session_permille: None,
+            near_ai_charge: None,
+        },
+        cells,
+        value,
+        support: finished,
+        sessions,
+    })
 }
 
 /// Question 6: sessions of one `edit_mode`, `NotPrompting` when at least
@@ -1254,10 +1337,10 @@ fn time_row(prepared: &Prepared, draws: &mut u32) -> ModelAnswerRow {
             time_entrants(prepared, EditMode::Prompting),
         )
     };
-    let (weights, contenders) = time_contenders(&cells, entrants, &mut left_out);
+    let compared = comparable(entrants, &mut left_out);
     let mut row = empty_row(ModelQuestion::FinishTime, session_counts(&cells), left_out);
     row.edit_mode = Some(mode);
-    settle(&mut row, contenders, &weights, draws);
+    settle(&mut row, &compared, time_figure, draws);
     row
 }
 

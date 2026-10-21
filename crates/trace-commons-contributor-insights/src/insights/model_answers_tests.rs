@@ -1256,9 +1256,10 @@ fn timed_in(
 
 #[test]
 fn finish_time_keeps_not_prompting_when_a_qualifier_there_fails_the_mix() {
-    // Not prompting: model-a qualifies in BugFix (5) but not Docs (4), so it
-    // covers 5 of 14 sessions' weight; model-b qualifies in both. Two models
-    // qualify there, so the row stays on not_prompting with one compared,
+    // Not prompting: model-a qualifies in BugFix (5) but not Docs (4);
+    // model-b qualifies in both. Their shared BugFix carries 10 of their 19
+    // sessions, so neither can be compared with the other. Two models
+    // qualify there, so the row stays on not_prompting with none compared,
     // even though prompting would compare two.
     let mut sessions = Vec::new();
     for ix in 0..5 {
@@ -1316,7 +1317,7 @@ fn finish_time_keeps_not_prompting_when_a_qualifier_there_fails_the_mix() {
     assert_eq!(q6.edit_mode, Some(EditMode::NotPrompting));
     assert_eq!(q6.state, AnswerState::NotEnoughSessions);
     assert!(q6.leader.is_none());
-    assert_eq!(q6.left_out.mix_too_different, 9);
+    assert_eq!(q6.left_out.mix_too_different, 19);
     assert_eq!(counts(q6), vec![("model-a", 9), ("model-b", 10)]);
 }
 
@@ -1368,6 +1369,99 @@ fn a_model_with_no_qualifying_cell_does_not_weigh_in_the_mix() {
         counts(q5),
         vec![("model-a", 5), ("model-b", 5), ("model-c", 4)]
     );
+}
+
+#[test]
+fn a_model_worse_in_every_shared_type_never_leads_across_types() {
+    // model-a: 10 BugFix and 10 Docs at 10%, 5 Refactor at 30%. model-b: 10
+    // BugFix and 10 Docs at 11%, 2 Refactor (under the session floor). Each
+    // model over its own types, model-a reads 130 permille and model-b 110;
+    // over the types both qualify in, model-a is 100 and model-b 110.
+    let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 100, &[10; 10]);
+    sessions.extend(spread("ad", "model-a", InferredTask::Docs, 100, &[10; 10]));
+    sessions.extend(spread(
+        "ar",
+        "model-a",
+        InferredTask::Refactor,
+        100,
+        &[30; 5],
+    ));
+    sessions.extend(spread(
+        "bb",
+        "model-b",
+        InferredTask::BugFix,
+        100,
+        &[11; 10],
+    ));
+    sessions.extend(spread("bd", "model-b", InferredTask::Docs, 100, &[11; 10]));
+    sessions.extend(spread(
+        "br",
+        "model-b",
+        InferredTask::Refactor,
+        100,
+        &[0; 2],
+    ));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.state, AnswerState::Answered);
+    assert_eq!(ranked(q5), ("model-a".to_owned(), "model-b".to_owned()));
+    let a = figure_of(q5, "model-a");
+    assert_eq!((rate(a), a.sessions, a.edits), (100, 20, Some(2_000)));
+    let b = figure_of(q5, "model-b");
+    assert_eq!((rate(b), b.sessions, b.edits), (110, 20, Some(2_000)));
+
+    // The same shape in finish time: model-a 100 s in BugFix and Docs and
+    // 1000 s in Refactor, model-b 110 s with 2 Refactor sessions.
+    let mut sessions = Vec::new();
+    for (prefix, label, task, n, secs) in [
+        ("ab", "model-a", InferredTask::BugFix, 10, 100),
+        ("ad", "model-a", InferredTask::Docs, 10, 100),
+        ("ar", "model-a", InferredTask::Refactor, 5, 1_000),
+        ("bb", "model-b", InferredTask::BugFix, 10, 110),
+        ("bd", "model-b", InferredTask::Docs, 10, 110),
+        ("br", "model-b", InferredTask::Refactor, 2, 1),
+    ] {
+        for ix in 0..n {
+            sessions.push(timed_in(
+                &format!("{prefix}-{ix}"),
+                label,
+                task,
+                EditMode::NotPrompting,
+                secs,
+            ));
+        }
+    }
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.state, AnswerState::Answered);
+    assert_eq!(ranked(q6), ("model-a".to_owned(), "model-b".to_owned()));
+    assert_eq!(finish(figure_of(q6, "model-a")), (100, 2));
+    assert_eq!(figure_of(q6, "model-a").sessions, 20);
+    assert_eq!(finish(figure_of(q6, "model-b")), (110, 2));
+}
+
+#[test]
+fn two_models_whose_shared_types_carry_under_eighty_percent_are_not_compared() {
+    // model-a qualifies in BugFix and Docs, model-b in BugFix and Refactor.
+    // Their shared BugFix carries 20 of their 40 sessions.
+    let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 10, &[1; 10]);
+    sessions.extend(spread("ad", "model-a", InferredTask::Docs, 10, &[1; 10]));
+    sessions.extend(spread("bb", "model-b", InferredTask::BugFix, 10, &[3; 10]));
+    sessions.extend(spread(
+        "br",
+        "model-b",
+        InferredTask::Refactor,
+        10,
+        &[3; 10],
+    ));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.state, AnswerState::NotEnoughSessions);
+    assert!(q5.leader.is_none() && q5.next.is_none());
+    assert_eq!(q5.left_out.mix_too_different, 40);
+    // In BugFix alone they are compared.
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(ranked(q1), ("model-a".to_owned(), "model-b".to_owned()));
 }
 
 /// A session classified as no edits only because its edits could not be
