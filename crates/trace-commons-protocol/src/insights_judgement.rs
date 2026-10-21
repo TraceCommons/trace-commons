@@ -1327,6 +1327,83 @@ impl JudgementResponse {
     }
 }
 
+/// Why a well-formed response does not answer the send it came back for.
+/// Carries no input bytes. Any of these discards every label in the
+/// response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum JudgementBindingError {
+    #[error("judgement response wire version is not 1")]
+    WireVersionUnsupported,
+    #[error("judgement response request nonce does not match this send")]
+    RequestNonceMismatch,
+    #[error("judgement response digest hash does not match the digest sent")]
+    DigestMismatch,
+    #[error("judgement response is missing a requested judgement")]
+    JudgementMissing,
+    #[error("judgement response carries a judgement that was not requested")]
+    JudgementUnrequested,
+    #[error("judgement response names an event mark the digest does not have")]
+    EventIndexOutOfRange,
+    #[error("judgement response is missing an event mark the digest has")]
+    EventMarkMissing,
+}
+
+impl JudgementResponse {
+    /// Whether this response answers `sent`, whose digest carries
+    /// `event_marker_count` event markers. Pure, and shared by the daemon
+    /// client and the ingest drill. It does not check the signature: run it
+    /// on a response whose signer was already recovered and compared.
+    ///
+    /// Requires, in order: `wire_version == 1`; the signed request nonce and
+    /// digest hash equal the ones sent; `task` and `finished` appear exactly
+    /// once if requested and not at all otherwise; and, if `event_kind` was
+    /// requested, exactly one result for every mark `0..event_marker_count`,
+    /// no other index, and none if it was not requested. The result
+    /// constructors already hold that only the first
+    /// [`JUDGEMENT_EVENT_KIND_MAX`] marks are judged and that no
+    /// `(judgement, event_index)` repeats. A digest with no marks has no
+    /// `event_kind` results even when `event_kind` was requested.
+    pub fn check_binding(
+        &self,
+        sent: &JudgementRequest,
+        event_marker_count: u32,
+    ) -> Result<(), JudgementBindingError> {
+        if self.wire_version != JUDGEMENT_WIRE_VERSION {
+            return Err(JudgementBindingError::WireVersionUnsupported);
+        }
+        if self.request_nonce != *sent.request_nonce() {
+            return Err(JudgementBindingError::RequestNonceMismatch);
+        }
+        if self.digest_sha256 != sent.digest_sha256() {
+            return Err(JudgementBindingError::DigestMismatch);
+        }
+        let requested = |kind| sent.judgements().contains(&kind);
+        let mut marks = 0u32;
+        for result in &self.results {
+            if !requested(result.judgement) {
+                return Err(JudgementBindingError::JudgementUnrequested);
+            }
+            if let Some(index) = result.event_index {
+                if index >= event_marker_count {
+                    return Err(JudgementBindingError::EventIndexOutOfRange);
+                }
+                marks += 1;
+            }
+        }
+        for kind in [JudgementKind::Task, JudgementKind::Finished] {
+            if requested(kind) && !self.results.iter().any(|r| r.judgement == kind) {
+                return Err(JudgementBindingError::JudgementMissing);
+            }
+        }
+        // Indices are distinct (the constructor refuses a repeat) and each is
+        // below the count, so equal counts mean every mark is present.
+        if requested(JudgementKind::EventKind) && marks != event_marker_count {
+            return Err(JudgementBindingError::EventMarkMissing);
+        }
+        Ok(())
+    }
+}
+
 /// Parse a `200` body, closed: unknown fields, unknown labels and
 /// inconsistent results are refused.
 ///
@@ -2521,6 +2598,182 @@ mod tests {
         assert_eq!(
             parse_judgement_response(b"{}"),
             Err(JudgementWireError::Malformed("response"))
+        );
+    }
+
+    // ---- response binding ----
+
+    fn judged_event(index: u32) -> JudgementResult {
+        JudgementResult::judged(
+            JudgementKind::EventKind,
+            Some(index),
+            JudgementLabel::Redirect,
+            JudgementConfidence {
+                bucket: ConfidenceBucket::Medium,
+                basis: ConfidenceBasis::Probability,
+            },
+            version("event-kind-v1+sha256:0123456789ab"),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn sent(judgements: Vec<JudgementKind>) -> JudgementRequest {
+        JudgementRequest::new(
+            request_nonce(),
+            CLAIM.to_string(),
+            b"{\"turns\":3}".to_vec(),
+            judgements,
+        )
+        .unwrap()
+    }
+
+    /// Task, event marks `0..marks` (the first four judged, the rest
+    /// unjudged), finished.
+    fn full_results(marks: u32) -> Vec<JudgementResult> {
+        let all = results();
+        let mut out = vec![all[0].clone()];
+        for index in 0..marks {
+            out.push(if index < JUDGEMENT_EVENT_KIND_MAX {
+                judged_event(index)
+            } else {
+                JudgementResult::unjudged_event(index).unwrap()
+            });
+        }
+        out.push(all[2].clone());
+        out
+    }
+
+    fn answer(request: &JudgementRequest, results: Vec<JudgementResult>) -> JudgementResponse {
+        JudgementResponse::new(
+            *request.request_nonce(),
+            request.digest_sha256(),
+            results,
+            spend(SpendBucket::OverHalf),
+            1_792_540_800,
+            format!("0x{}", "ef".repeat(65)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_response_bound_to_its_send_passes() {
+        let request = sent(all_kinds());
+        for marks in [1, 4, 6] {
+            let response = answer(&request, full_results(marks));
+            assert_eq!(response.check_binding(&request, marks), Ok(()), "{marks}");
+        }
+        // No marks in the digest: no event results, task and finished still
+        // required.
+        let no_marks = vec![results()[0].clone(), results()[2].clone()];
+        assert_eq!(
+            answer(&request, no_marks).check_binding(&request, 0),
+            Ok(())
+        );
+        // Order of results is not part of the binding.
+        let mut reordered = full_results(2);
+        reordered.reverse();
+        assert_eq!(
+            answer(&request, reordered).check_binding(&request, 2),
+            Ok(())
+        );
+        // Only what was asked for.
+        let task_only = sent(vec![JudgementKind::Task]);
+        assert_eq!(
+            answer(&task_only, vec![results()[0].clone()]).check_binding(&task_only, 3),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_response_for_another_send_is_refused() {
+        let request = sent(all_kinds());
+        let response = answer(&request, full_results(2));
+        // Another request nonce, same digest.
+        let mut other_nonce = *request_nonce().as_bytes();
+        other_nonce[0] ^= 1;
+        let other = JudgementRequest::new(
+            JudgementRequestNonce::from_bytes(other_nonce),
+            CLAIM.to_string(),
+            request.digest().to_vec(),
+            all_kinds(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.check_binding(&other, 2),
+            Err(JudgementBindingError::RequestNonceMismatch)
+        );
+        // Same nonce, another digest.
+        let other = JudgementRequest::new(
+            request_nonce(),
+            CLAIM.to_string(),
+            b"another session".to_vec(),
+            all_kinds(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.check_binding(&other, 2),
+            Err(JudgementBindingError::DigestMismatch)
+        );
+        // A wire version other than 1, however it got there.
+        let mut later = response.clone();
+        later.wire_version = 2;
+        assert_eq!(
+            later.check_binding(&request, 2),
+            Err(JudgementBindingError::WireVersionUnsupported)
+        );
+    }
+
+    #[test]
+    fn a_response_must_answer_exactly_what_was_asked() {
+        let request = sent(all_kinds());
+        let full = full_results(2);
+        // Task missing.
+        assert_eq!(
+            answer(&request, full[1..].to_vec()).check_binding(&request, 2),
+            Err(JudgementBindingError::JudgementMissing)
+        );
+        // Finished missing.
+        assert_eq!(
+            answer(&request, full[..full.len() - 1].to_vec()).check_binding(&request, 2),
+            Err(JudgementBindingError::JudgementMissing)
+        );
+        // A judgement that was not asked for.
+        let task_only = sent(vec![JudgementKind::Task]);
+        assert_eq!(
+            answer(&task_only, vec![results()[0].clone(), results()[2].clone()])
+                .check_binding(&task_only, 0),
+            Err(JudgementBindingError::JudgementUnrequested)
+        );
+        let no_events = sent(vec![JudgementKind::Task, JudgementKind::Finished]);
+        assert_eq!(
+            answer(&no_events, full_results(1)).check_binding(&no_events, 1),
+            Err(JudgementBindingError::JudgementUnrequested)
+        );
+        // An event mark the digest does not have.
+        assert_eq!(
+            answer(&request, full_results(3)).check_binding(&request, 2),
+            Err(JudgementBindingError::EventIndexOutOfRange)
+        );
+        assert_eq!(
+            answer(&request, full_results(6)).check_binding(&request, 5),
+            Err(JudgementBindingError::EventIndexOutOfRange)
+        );
+        // A mark the digest has, missing from the response.
+        assert_eq!(
+            answer(&request, full_results(2)).check_binding(&request, 3),
+            Err(JudgementBindingError::EventMarkMissing)
+        );
+        assert_eq!(
+            answer(&request, full_results(4)).check_binding(&request, 6),
+            Err(JudgementBindingError::EventMarkMissing)
+        );
+        // A gap: marks 0 and 2 for a two-mark digest.
+        let mut gap = full_results(1);
+        gap.insert(2, judged_event(2));
+        assert_eq!(
+            answer(&request, gap).check_binding(&request, 2),
+            Err(JudgementBindingError::EventIndexOutOfRange)
         );
     }
 
