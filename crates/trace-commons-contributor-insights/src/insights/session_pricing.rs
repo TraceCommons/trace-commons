@@ -34,6 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_pricing::{
     BillableTokenCategory, BillableTokenCount, PricingAccounting, PricingError, PricingUsageInput,
@@ -57,6 +58,8 @@ const MICROS_ROUNDING_DENOMINATOR: u128 = 1_000_000_000;
 pub struct PricingTableRef {
     pub table_id: String,
     pub version: u32,
+    /// When the table's prices were fetched: the "prices as of" date.
+    pub retrieved_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -68,6 +71,9 @@ pub enum UnpricedReason {
     CacheLifetimeUnknown,
     MissingPrice,
     WindowUnresolved,
+    /// The table that prices the model was fetched more than
+    /// `PRICE_STALE_AFTER_DAYS` before the turn.
+    StalePrice,
     Overflow,
     InvalidCatalog,
 }
@@ -94,6 +100,9 @@ pub struct SessionPrice {
     pub total_usd_micros: Option<u64>,
     /// Tables the priced turns used, sorted and distinct.
     pub tables: Vec<PricingTableRef>,
+    /// The oldest `retrieved_at` among `tables`: the date to show as "prices
+    /// as of". `None` when no turn priced.
+    pub prices_as_of: Option<DateTime<Utc>>,
 }
 
 /// Lowercase a declared model label and drop one trailing `-YYYYMMDD` or
@@ -227,6 +236,7 @@ pub fn price_session(
         None
     };
     price.tables = tables.into_iter().collect();
+    price.prices_as_of = price.tables.iter().map(|table| table.retrieved_at).min();
     price
 }
 
@@ -266,6 +276,7 @@ fn price_turn(
         .map_err(|error| match error {
             PricingCatalogError::MissingPrice => UnpricedReason::MissingPrice,
             PricingCatalogError::UnresolvedWindow => UnpricedReason::WindowUnresolved,
+            PricingCatalogError::StalePrices => UnpricedReason::StalePrice,
             PricingCatalogError::InvalidQuery
             | PricingCatalogError::InvalidCatalog
             | PricingCatalogError::DuplicateTable
@@ -291,6 +302,7 @@ fn price_turn(
         PricingTableRef {
             table_id: table.table_id.clone(),
             version: table.version,
+            retrieved_at: table.provenance.retrieved_at,
         },
     ))
 }
@@ -1008,10 +1020,12 @@ mod tests {
             PricingTableRef {
                 table_id: first.table_id.clone(),
                 version: 1,
+                retrieved_at: first.provenance.retrieved_at,
             },
             PricingTableRef {
                 table_id: second.table_id.clone(),
                 version: 2,
+                retrieved_at: second.provenance.retrieved_at,
             },
         ];
         expected.sort();
@@ -1312,5 +1326,87 @@ mod tests {
             price("gpt-5.6-luna", day(11, 22, 0, 0, 0)).total_usd_micros,
             Some(200)
         );
+    }
+
+    /// A build whose tables were fetched long before the turn reads "stale",
+    /// not a price; the answer carries the date its prices are as of.
+    #[test]
+    fn stale_prices_are_unpriced_and_priced_turns_name_their_fetch_date() {
+        use crate::insights::pricing_catalog::{
+            PRICE_STALE_AFTER_DAYS, production_pricing_catalog,
+        };
+
+        let catalog = production_pricing_catalog();
+        let openai = &catalog.tables()[1];
+        let retrieved = openai.provenance.retrieved_at;
+        let price = |when: DateTime<Utc>| {
+            let mut record = turn(
+                0,
+                Some(0),
+                Some(0),
+                [Some(1_000), Some(0), Some(0)],
+                Some(CacheWrite::TotalOnly(0)),
+            );
+            record.at = Some(when);
+            price_session(
+                &catalog,
+                PricingAccounting::Codex,
+                &labels(&["gpt-6-astra"]),
+                &[record],
+            )
+        };
+        let last_fresh = retrieved + chrono::Duration::days(PRICE_STALE_AFTER_DAYS);
+        let fresh = price(last_fresh);
+        assert_eq!(fresh.total_usd_micros, Some(10_000));
+        assert_eq!(fresh.prices_as_of, Some(retrieved));
+
+        let stale = price(last_fresh + chrono::Duration::seconds(1));
+        assert_eq!(stale.total_usd_micros, None);
+        assert_eq!(
+            stale.by_model["gpt-6-astra"].unpriced_reasons[&UnpricedReason::StalePrice],
+            1
+        );
+        assert_eq!(stale.prices_as_of, None, "no priced turn, no date");
+    }
+
+    /// With two tables in use, the date shown is the older fetch, so the
+    /// answer never claims fresher prices than its oldest input.
+    #[test]
+    fn prices_as_of_is_the_oldest_table_used() {
+        let mut older = table(
+            1,
+            vec![entry(
+                PricingAccounting::ClaudeCode,
+                "test-model-a",
+                0,
+                Some(1_000),
+                synthetic_rate,
+            )],
+        );
+        older.provenance.retrieved_at = at(5);
+        older.provenance.reviewed_at = at(5);
+        older.table_id = older.canonical_table_id().unwrap();
+        let newer = table(
+            2,
+            vec![entry(
+                PricingAccounting::ClaudeCode,
+                "test-model-a",
+                1_000,
+                None,
+                synthetic_rate,
+            )],
+        );
+        let mut early = priced_claude_turn(0, 0);
+        early.at = Some(at(10));
+        let mut late = priced_claude_turn(1, 0);
+        late.at = Some(at(1_500));
+        let price = price_session(
+            &catalog(vec![older.clone(), newer]),
+            PricingAccounting::ClaudeCode,
+            &labels(&["test-model-a"]),
+            &[early, late],
+        );
+        assert_eq!(price.tables.len(), 2);
+        assert_eq!(price.prices_as_of, Some(at(5)));
     }
 }
