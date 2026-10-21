@@ -325,6 +325,7 @@ mod tests {
     };
     use crate::judgement_service::production::ProductionCheck;
     use crate::judgement_service::receipt_check::JudgementCaller;
+    use crate::judgement_service::service::tests::LOG_LINE;
     use crate::witness_service::enclave::{address_of, sign_eip191_with};
     use axum::body::Body;
     use axum::http::{Method, Request as HttpRequest};
@@ -498,6 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_judgement_is_signed_over_the_callers_nonce() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let claim = h.issuer.valid_claim();
         let (status, headers, body) = send(
@@ -527,6 +530,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_or_malformed_nonce_is_refused_before_any_call() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let claim = h.issuer.valid_claim();
         for nonce in [None, Some("abc"), Some(&NONCE_HEX.to_uppercase()[..])] {
@@ -552,6 +557,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_or_foreign_credential_is_refused() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let (status, _, body) = send(&h.router, post(request_body(), None, Some(NONCE_HEX))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -574,6 +581,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversized_body_is_refused_by_name() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let claim = h.issuer.valid_claim();
         let oversized = "x".repeat(JUDGEMENT_REQUEST_MAX_BYTES + 1);
@@ -588,6 +597,8 @@ mod tests {
 
     #[tokio::test]
     async fn another_wire_version_is_refused_by_name() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let claim = h.issuer.valid_claim();
         let v2 = serde_json::json!({"wire_version": 2, "digest": digest(), "judgements": ["task"]})
@@ -601,6 +612,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_budget_refusal_carries_the_next_month() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness_with(
             LimiterCaps::from_usd(0, 100).expect("caps"),
             StubIdentity::new(),
@@ -619,6 +632,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_timeout_is_504_and_not_capacity() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         h.model.set_fault(Some(MockFault::Timeout));
         let claim = h.issuer.valid_claim();
@@ -637,6 +652,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_service_refuses_with_retry_after_and_still_attests() {
+        // The request log line's callsite; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let h = harness();
         let _held = Arc::clone(&h.load.permits)
             .try_acquire_many_owned(4)

@@ -287,7 +287,7 @@ impl JudgementService {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::judgement_service::catalog::{CatalogEntry, TokenPrices};
     use crate::judgement_service::claim::tests::{ACCOUNT, NOW, TestIssuer};
@@ -313,7 +313,7 @@ mod tests {
     /// installs (observed: an empty capture under the default test
     /// threads, a full one with `--test-threads=1`). Serialising the
     /// emitters removes the race without weakening the assertion.
-    static LOG_LINE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static LOG_LINE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     /// A string that appears only in the digest's excerpt, so its presence
     /// anywhere in the logs means digest text leaked.
     const CANARY: &str = "zebra-canary-excerpt-4417";
