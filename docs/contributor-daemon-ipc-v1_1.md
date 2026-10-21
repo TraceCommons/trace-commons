@@ -4622,9 +4622,20 @@ The charge is the store's one money figure, and only
 `insights_model_answers` reads it. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
-settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
-for a Never folder, or, once no stored row matches it, when its last call is
-more than 13 weeks old; at most 3072 are kept (one per stored session, the
+settled 2026-10-09) and `insights_counter_pass` are on. A session in a Never
+folder keeps no tally (owner decision D4): it is never read, so it has no
+row, and the counter pass names it from its file name instead (a Claude Code
+session file's stem; the UUID a Codex `rollout-<timestamp>-<uuid>` name ends
+with), without opening the file. The pass resolves the folder of every
+session whose tally no row matches, a session still being written included,
+and drops the tally of each one in a Never folder; under a global Never
+override it drops every tally. The daemon then keeps those sessions in
+memory, never on disk, and each fold drops their tallies before it writes.
+Calls folded before the first pass that sees the session (after a restart,
+or in the poll interval after it starts) are written until that pass, and
+gone after it. A tally also goes when its session is dropped for a Never
+folder, or, once no stored row matches it, when its last call is more than
+13 weeks old; at most 3072 are kept (one per stored session, the
 person's and the automated), oldest last call first.
 `unenroll` removes them with the store. The answer joins each row to its
 session's tally by that digest, at answer time and inside the daemon; see

@@ -273,7 +273,8 @@ fn tick_over(
 /// pass at a time. This collects what the job needs (paths, sizes, last
 /// writes, which source found each) under the tick, and stats only a
 /// session whose source gave no group time; a session's folder is resolved
-/// later, on the pass's thread, and only for a session about to be read.
+/// later, on the pass's thread, and only for a session about to be read or
+/// one that may hold a Never folder's route tally.
 fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
