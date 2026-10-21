@@ -60,8 +60,19 @@ and reuses their code wherever it can.
   from the app id and the `GetKey` path; measurements gate key *release*, not
   *derivation* (`deploy/witness/README.md`, "Upgrades"; `enclave.rs` module
   docs). Different `path` values give different keys; the `algorithm` argument
-  does not separate anything. The addendum's "key sealed to the enclave
-  measurement" is imprecise, and this spec corrects it in section 6.
+  does not separate anything. So any image the app's KMS admits derives the
+  same `GetKey` material as the pinned image. A `GetKey` key therefore cannot
+  identify the pinned image, and this service never uses one to bind a
+  request or a response to the instance (section 3, "Per-boot keys").
+- **The witness relies on dstack-gateway's TLS and binds no request to the
+  instance.** `deploy/witness/README.md` ("The two routes are
+  unauthenticated"): "dstack-gateway terminates TLS". Its quote binds only the
+  `GetKey` signing address and the nonce. That leaves the gap #1501 review
+  point 1 describes: an operator who admits a second image under the same app
+  id can route `/v1/attestation` to the pinned image and the data route to the
+  other one, and every client check passes. This service does not copy the
+  witness on that point. Its bodies are sealed to a per-boot key that only the
+  attested process holds (section 3).
 - **The client verification core is permissive and reusable.**
   `crates/trace-commons-contributor/src/witness/verify.rs` has `VerifiedWitness`
   (private fields, one constructor, `verify_witness`) and `check_quote`, which
@@ -203,16 +214,20 @@ the binary resolves its libraries (`--version`); boot refuses with no model
 configured; a production image refuses a development model; boot refuses with no dstack guest agent; boot refuses with no
 limiter volume.
 
-**Keys, all via `GetKey` on `/v0/GetKey`**, each on its own path:
+**Keys.** One key comes from `GetKey` on `/v0/GetKey`; the other two are born
+in memory at each boot and never leave it:
 
-| Path | Use |
-|---|---|
-| `judgement-signing` | secp256k1 key that signs every response (section 3). |
-| `judgement-limiter` | 32-byte root; HKDF-SHA256 gives `account-digest` (HMAC key) and `ledger-seal` (AEAD key). |
+| Key | Source | Use |
+|---|---|---|
+| `judgement-limiter` | `GetKey` path `judgement-limiter` (app-id-bound, survives upgrades) | 32-byte root; HKDF-SHA256 gives `account-digest` (HMAC key) and `ledger-seal` (AEAD key). |
+| Sealing key | Generated at boot, in memory (section 3) | Key agreement for the sealed request and response bodies. |
+| Response-signing key | Generated at boot, in memory (section 3) | secp256k1 key that signs every response. |
 
-Neither path is `vms`, so neither equals the witness's key even under one app
-id. The NEAR AI API key is the one secret in `allowed_envs`, injected encrypted
-at deploy, as on the witness.
+There is no `judgement-signing` `GetKey` path. An earlier draft derived the
+signing key from `GetKey`, which any admitted image can derive too (#1501
+review point 1). The limiter root is not `vms`, so it never equals the
+witness's key even under one app id. The NEAR AI API key is the one secret in
+`allowed_envs`, injected encrypted at deploy, as on the witness.
 
 **Persistent volume.** One named volume at `/data`, holding only the sealed
 ledger. The root filesystem stays read-only with a small `tmpfs`, as on the
@@ -221,43 +236,153 @@ dstack also encrypts the volume does not affect confidentiality.
 
 ## 3. The wire
 
-Two routes, unauthenticated at the transport (dstack-gateway terminates TLS),
-and nothing else: no health or metrics route that reports state.
+Two routes, and nothing else: no health or metrics route that reports state.
+
+**What the outer TLS does and does not do.** dstack-gateway terminates the
+outer TLS. The gateway, and any instance the operator routes a request to,
+therefore sees every byte of the HTTP exchange. The design relies on that TLS
+for nothing except hiding paths, sizes and timing from the network. Request
+and response bodies are sealed end to end to a key that exists only inside the
+attested process. Neither the claim (which carries `account_ref`) nor the
+digest ever crosses the gateway in the clear. (#1501 review point 1.)
+
+### Per-boot keys
+
+At boot, after the dstack agent answers and before the listener binds, the
+service generates two secp256k1 key pairs in memory. Each secret is 32 bytes
+from `ring::rand::SystemRandom`, retried until it is a valid scalar:
+
+- the **sealing key** `seal_sk`, public key `seal_pk` (33 bytes, SEC1
+  compressed), used only for the key agreement below;
+- the **response-signing key** `sign_sk`, EIP-191 address `signing_address`
+  (20 bytes, the witness's address derivation), used only to sign responses.
+
+Neither comes from `GetKey`. Neither is written to disk, logged, or returned
+by any route except as a public key. Both die with the process, so a restart,
+an upgrade and a second instance each have different keys. That is the
+property point 1 needs: `GetKey` material is released to every image the app's
+KMS admits, so it cannot tell the pinned image from another admitted one. A
+key born in the pinned image's memory can. Two key pairs rather than one keep
+the ECDH use and the ECDSA use of a secp256k1 key apart.
 
 ### `GET /v1/attestation?nonce=<64 hex>`
 
-Same shape as the witness: `{"quote_hex", "signing_address"}`. The report data
-is `"tcjudge1" | address(20) | nonce(32) | zeros(4)`. A new 8-byte tag, because
-the tag is domain separation: a witness quote must never read as a judgement
-quote, or the reverse. Not bounded by the request limiter, so load on the
-judgement route cannot make the service unpinnable.
+Response: `{"quote_hex", "seal_public_key", "signing_address"}` (hex). The
+64-byte report data is:
+
+```
+report_data = "tcjudge1"            (8 bytes,  [0..8])
+           || boot_binding[0..24]   (24 bytes, [8..32])
+           || nonce                 (32 bytes, [32..64])
+
+boot_binding = SHA-256("trace_commons.insights_judgement.boot_keys.v1\n"
+                       || seal_pk (33) || signing_address (20))
+```
+
+- The daemon recomputes `boot_binding` from the two returned public values and
+  requires the quote's report data to equal the line above byte for byte.
+- Substituting other keys needs a second preimage of 24 bytes of SHA-256
+  (2^192 work), and the nonce sits at `[32..64]`, NEAR AI's own convention.
+- The 8-byte tag stays domain separation: the witness's report data is
+  `"tcwitns1" | address(20) | nonce(32) | zeros(4)`, so a witness quote never
+  reads as a judgement quote, or the reverse. The tag is not bumped from
+  `tcjudge1`, because no instance ever served the earlier
+  `tcjudge1 | address | nonce | zeros` layout (slice 5, #1531, is unmerged and
+  undeployed).
+- **Bounded on its own** (#1531 review point 7): at most 4 concurrent quote
+  calls, each under a 10 s timeout. Either limit returns `503
+  judgement_quote_unavailable` (retry after 30 s). This bound is separate from
+  the judgement permits, so load on the judgement route cannot make the service
+  unpinnable, and a flood of quote requests cannot starve judgements.
 
 ### `POST /v1/judgement`
 
-Headers:
+`Content-Type: application/octet-stream`. There is **no `Authorization` and no
+nonce header**. The claim and the request nonce travel inside the sealed body,
+so neither the gateway nor a misrouted instance learns the account.
 
-- `Authorization: Bearer <judgement claim>` -- the account credential (below).
-- `x-trace-judgement-nonce: <64 hex>` -- the nonce the daemon verified the
-  quote with. It goes into the signed response, binding the answer to the
-  exchange that was verified.
+**Sealed request** (at most 16 KiB of plaintext, so at most 16,434 bytes on the
+wire):
 
-Body (`application/json`, total cap 16 KiB):
+```
+0x01 (seal version) || eph_pk (33, SEC1 compressed) || ciphertext || tag (16)
+```
+
+**The judgement seal.** It lives in `trace-commons-attestation` (permissive), so
+the daemon and the service run one implementation:
+
+1. For each request the daemon generates a fresh secp256k1 key `eph_sk`.
+   `shared` is the x coordinate of `eph_sk * seal_pk` (32 bytes), computed with
+   k256's point arithmetic. That is its default `arithmetic` feature, not the
+   `ecdh` feature, so no feature, lockfile or dependency changes. An identity
+   result is refused.
+2. HKDF-SHA256 (`ring::hkdf`):
+   `prk = Extract(salt = "trace_commons.insights_judgement.seal.v1", ikm = shared)`.
+   `k_req = Expand(prk, "request" || eph_pk || seal_pk, 32)` and
+   `k_resp = Expand(prk, "response" || eph_pk || seal_pk, 32)`.
+3. AEAD is ChaCha20-Poly1305 (`ring::aead`). Each key seals exactly one
+   message, so the nonce is 12 zero bytes. The AAD is `"tcjudge1/request" ||
+   0x01` for the request and `"tcjudge1/response" || 0x01` for the response.
+
+**Why this construction and not RFC 9180 HPKE.** No HPKE crate is in the
+workspace, and the repository's dependency rule forbids adding one without
+approval. `ring`'s X25519 consumes its private key on every agreement
+(`agreement::EphemeralPrivateKey`), so it cannot hold a per-boot static key.
+k256 can, and `trace-commons-attestation` already depends on both `k256` and
+`ring` (the contributor crate reaches them through it). The construction keeps
+HPKE's base-mode shape: an ephemeral-static DH, a key schedule bound to both
+public keys, and one AEAD message per key. It is **not** RFC 9180
+interoperable, and RFC 9180 defines no secp256k1 KEM. Frozen test vectors pin
+it. Moving to the `hpke` crate is open item O4 (section 12).
+
+**Request plaintext** (JSON, closed, unknown fields refused):
 
 ```json
 {
   "wire_version": 1,
-  "digest": "<the judgement digest, UTF-8 JSON as built by contributor-insights>",
+  "request_nonce": "<64 hex, fresh per send>",
+  "claim": "<judgement claim, an EdDSA JWT>",
+  "digest_b64": "<standard base64 of the digest bytes>",
   "judgements": ["task", "event_kind", "finished"]
 }
 ```
 
-- `digest` is at most `JUDGEMENT_DIGEST_MAX_BYTES` (8192) bytes. The daemon
-  drops an oversized digest whole and never sends it. The service refuses one
-  that arrives anyway.
-- The service hashes the digest bytes (`digest_sha256`) and logs only that.
+- The digest is at most `JUDGEMENT_DIGEST_MAX_BYTES` (8192) bytes, and the
+  addendum's byte budgets keep every digest under it by construction
+  (addendum, "Size"). The service refuses an oversized one anyway.
+- `digest_b64` is base64 rather than a JSON string, so the digest is not
+  escaped a second time. An escape-heavy digest would nearly double as a
+  string; base64 is a fixed 4/3.
+- The service hashes the decoded digest bytes (`digest_sha256`) and logs only
+  that.
+- `request_nonce` is generated by the daemon for this one send and never
+  reused (section 4). The service keeps every request nonce it accepted in
+  memory for 20 minutes (the claim's 15-minute lifetime plus skew). A repeat is
+  refused as `judgement_request_replayed`. The set holds at most 65,536
+  entries. When it is full, requests get `judgement_saturated`, so the check
+  fails closed. A restart empties the set, and it also changes `seal_pk`, so a
+  request sealed before the restart no longer opens.
 - `event_kind` is judged for at most 4 marked events per digest, in digest
   order. Further marks come back `unjudged`, so one session costs at most six
   model calls.
+
+**The service's check order** is chosen so an unauthenticated caller cannot
+hold a judgement slot (#1531 review point 4):
+
+1. **Read** the body under its own bound: at most 32 concurrent reads, 10 s per
+   body, 16,434 bytes. Over the size gives `413 judgement_digest_too_large`.
+   Over the time drops the connection.
+2. **Open** the seal. If it does not open, the response is `400
+   judgement_seal_stale`. The usual cause is a daemon that sealed to a
+   previous boot's key.
+3. **Parse** the request, then check the wire version and the digest cap.
+4. **Verify the claim** offline and refuse pooled tenants (below).
+5. **Record the request nonce**, refusing a repeat.
+6. Only now **take a judgement permit** (`try_acquire`, 8 by default). If none
+   is free, `judgement_saturated`.
+7. Check the rotation latch and the catalog (section 5), reserve (section 6),
+   make the model calls, check each receipt, settle.
+8. **Build, sign and seal** the response under `k_resp`.
 
 **The account credential** is a new claim kind from the upload-claim issuer:
 EdDSA, `aud = "trace-commons-insights-judgement"`, `exp` at most 15 minutes,
@@ -271,11 +396,15 @@ service verifies the claim offline against the issuer's Ed25519 public key(s)
 in its measured compose environment (`TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS`).
 It makes no call to ingest.
 
-**Response, `200`:**
+**Response, `200`:** `application/octet-stream`, `0x01 || ciphertext || tag`,
+sealed under `k_resp`. Only the daemon that made `eph_sk` can open it, so the
+labels do not cross the gateway in the clear either. The plaintext is this
+signed JSON:
 
 ```json
 {
   "wire_version": 1,
+  "request_nonce": "<64 hex, echoed>",
   "digest_sha256": "<hex>",
   "results": [
     {"judgement": "task", "label": "bug_fix",
@@ -306,12 +435,19 @@ It makes no call to ingest.
 - **Signing bytes** use a length-prefixed encoder in `insights_judgement.rs`,
   not `Serialize`, for the reason the witness certificate gives
   (`serde_json/preserve_order` once shifted every untyped-JSON digest). The
-  domain is `trace_commons.insights_judgement.v1\n`. The signed fields are the
-  nonce, `digest_sha256`, every result field, and `signed_at`.
+  domain is `trace_commons.insights_judgement.v1\n`. The signed fields are,
+  in order: `wire_version`, `request_nonce`, `digest_sha256`, every result
+  field (`judgement`, `event_index`, `label`, confidence, judge version,
+  receipt), the `spend` bucket, and `signed_at`. (#1501 review point 12:
+  `wire_version` and `spend` were unsigned, and the quote nonce stood in for a
+  per-request one.) The signature is by `sign_sk`, the per-boot key bound in
+  the quote.
 
-**Refusals** are `{"error": "<label>"}` with a closed label set in
-`insights_judgement.rs`, mirroring `AdmissionRefusal` in `admission.rs`. The
-client matches the label against the set and never echoes the body.
+**Refusals** are plaintext `{"error": "<label>"}` with a closed label set in
+`insights_judgement.rs`, mirroring `AdmissionRefusal` in `admission.rs`. They
+carry no data, so they are not sealed. A forged refusal can only defer a
+judgement, because the daemon never treats a refusal as an answer. The client
+matches the label against the set and never echoes the body.
 
 | Status | Label | Retry |
 |---|---|---|
@@ -322,6 +458,9 @@ client matches the label against the set and never echoes the body.
 | 413 | `judgement_digest_too_large` | Never, for this digest. |
 | 400 | `judgement_wire_version_unsupported` | After a daemon update. |
 | 401 | `judgement_credential_refused` | After minting a fresh claim, once. |
+| 400 | `judgement_seal_stale` | After re-verifying a fresh quote, once. The seal did not open, usually because the service restarted and has new keys. |
+| 409 | `judgement_request_replayed` | Never. A daemon never resends a request nonce, so this means a replay on the path. |
+| 503 | `judgement_quote_unavailable` | `GET /v1/attestation` only. Retry after 30 s. Not a judgement capacity label. |
 | 403 | `judgement_account_ineligible` | Not this month. |
 | 502 | `judgement_model_unattested` | Not today. The receipt or catalog check failed (section 5). |
 | 504 | `judgement_timeout` | Not today. |
@@ -334,35 +473,61 @@ daemon that retried it would spend the account's cap on a broken path.
 ## 4. Client verification
 
 **Order is the design, as for the witness:** fetch the quote with a fresh
-nonce, verify it, and only then send the digest. The digest is scrubbed
-counts and excerpts, not a raw transcript, but it is still the first Insights
-data to leave the machine (addendum, principle 3).
+nonce, verify it, and only then seal and send. Whatever the owner decides the
+digest holds (addendum, owner decision O1), it is the first Insights data to
+leave the machine (addendum, principle 3).
+
+**Two nonces, with separate jobs** (#1501 review point 12):
+
+- The **quote nonce** proves the quote is fresh. The daemon makes one per
+  verification and uses it only in `GET /v1/attestation`.
+- The **request nonce** binds one response to one send. `send_digest`
+  generates it inside, with the ephemeral key, for that call alone. It is
+  never a parameter and never stored, so it cannot be reused.
 
 **Reuse.**
 
 - `check_quote` in `crates/trace-commons-contributor/src/witness/verify.rs`
-  takes the domain tag as a parameter instead of reading
-  `WITNESS_QUOTE_DOMAIN`. The witness passes `tcwitns1`; the judgement client
-  passes `tcjudge1`. Its tests keep running against the witness tag, and new
-  tests cover the second tag, including that a witness quote is refused as a
-  judgement quote.
-- The report-data rebuild and the response-signature recovery move into
-  `crates/trace-commons-attestation`, so the ingest drill (section 10) can
-  verify the service without depending on the contributor crate.
-- A new `crates/trace-commons-contributor/src/judgement/` mirrors `witness/`:
-  `VerifiedJudgementService` (private fields, one constructor that verifies),
-  and a `send_digest(&VerifiedJudgementService, ...)` in a module that cannot
-  construct one. "Send first, check after" does not compile.
-- After the response arrives, the daemon recovers the signer from `signature`
-  and requires it to equal the address bound in the quote it verified for this
-  nonce. It requires the signed nonce to equal its own. Labels from an unsigned
-  or mis-signed response are discarded.
+  and the attestation crate's `expected_report_data` take a **report-data
+  layout**, not just a domain tag. The judgement layout hashes
+  `seal_pk || signing_address` into `[8..32]` and puts the nonce at `[32..64]`
+  (section 3). That is a different rebuild from the witness's
+  `tag | address | nonce | zeros`, so a tag parameter alone cannot express it.
+  The witness passes its existing layout and its tests stay unchanged. New
+  tests cover the judgement layout, and that a witness quote is refused as a
+  judgement quote and the reverse.
+- The report-data rebuild, the response-signature recovery and the judgement
+  seal live in `crates/trace-commons-attestation`, so the ingest drill (section
+  10) can verify the service without depending on the contributor crate.
+- A new `crates/trace-commons-contributor/src/judgement/` mirrors `witness/`.
+  `VerifiedJudgementService` has private fields and one constructor that
+  verifies. It holds `seal_pk`, `signing_address` and the verification time.
+  `send_digest(&VerifiedJudgementService, ...)` lives in a module that cannot
+  construct one, so "send first, check after" does not compile.
+- A verified service is reused for at most one hour, then verified again with
+  a new quote nonce. It is also verified again after `judgement_seal_stale`,
+  and the send is retried once.
+
+**What the daemon checks on a response.** Any failure discards every label in
+it:
+
+1. The body opens under `k_resp`.
+2. The signer recovered from `signature` equals `signing_address` from the
+   quote verified for this service.
+3. The signed `request_nonce` equals the one this send generated.
+4. The signed `digest_sha256` equals SHA-256 of the digest bytes this send
+   sealed. Swapping two signed responses between sessions therefore fails.
+5. `wire_version` is 1. Each requested judgement appears exactly once, and
+   `event_kind` appears once per judged mark.
+6. Every `event_index` is less than the number of event markers in the digest
+   that was sent, and only the first 4 are judged.
 
 **A release daemon accepts only production measurements.**
 
-- The production pin set (`mrtd`, `mrconfigid`, signing address) is a
-  compiled-in constant in `judgement/`. There is no configuration key for it in
-  a release build.
+- The production pin set is (`mrtd`, `mrconfigid`), a compiled-in constant in
+  `judgement/`. It holds no signing address. The address and the sealing key
+  are per boot, and the daemon takes both from the quote it verified. There is
+  no configuration key for any of it in a release build.
 - A development pin can be configured only when the crate is built with a
   `judgement-development` feature, which release builds do not enable. A test
   over the release feature set asserts that the config parser has no
@@ -510,8 +675,11 @@ The month is the UTC calendar month. A cap change is a new measurement.
 - In memory: a map from `account_key` to `(month, spent_nanousd)`, plus the
   operator `(month, spent_nanousd)`.
 - On disk: `/data/limiter.v1.sealed`, AEAD-encrypted under the `ledger-seal`
-  key, with the file name, the format version and the app's signing address as
-  associated data. Written by temp file, fsync and atomic rename after every
+  key, with the file name, the format version and the fixed label
+  `insights-judgement/ledger` as associated data. It no longer binds the
+  signing address, which is now per boot (section 3) and would make the ledger
+  unreadable after every restart. The binding to the app comes from
+  `ledger-seal` itself, which derives from the app-id-bound limiter root. Written by temp file, fsync and atomic rename after every
   reserve and every settle, before the response leaves.
 - At a month rollover, the previous month's entries are dropped, so the file
   never holds more than one month. At about 50 bytes an entry it stays small.
@@ -568,7 +736,11 @@ prompts, the digest, the claim, or NEAR AI response text.
 
 | Condition | Behaviour |
 |---|---|
-| No dstack agent, key derivation fails, or quote does not carry own report data | Boot refuses (witness rule). |
+| No dstack agent, limiter key derivation fails, per-boot key generation fails, or quote does not carry own report data (the `boot_binding` layout of section 3) | Boot refuses (witness rule). |
+| Sealed body does not open | `judgement_seal_stale`; nothing else is read. |
+| Request nonce seen before, or the nonce set is full | `judgement_request_replayed`, or `judgement_saturated` when full. No model call. |
+| Body read exceeds 10 s or the read bound is full | Connection dropped, or `judgement_saturated`. No judgement permit was taken. |
+| Quote call exceeds 10 s or the attestation bound is full | `judgement_quote_unavailable`. |
 | No model configured, model not on the production allowlist, catalog check or signer pin fails at boot | Boot refuses. |
 | Issuer public key absent or malformed | Boot refuses. |
 | Limiter volume absent, or ledger unreadable or missing with the marker present | Boot refuses. |
@@ -577,8 +749,8 @@ prompts, the digest, the claim, or NEAR AI response text.
 | `usage` absent | Reservation stands as the charge. |
 | Ledger write fails | The response is not sent; `judgement_saturated`. A service that cannot record spend does not spend. |
 | Per-account or operator cap reached | Capacity refusal with `reset_at`; no NEAR AI call. |
-| Daemon: quote fails, measurement not in the compiled-in set, or nonce mismatch | Nothing sent. The session keeps its heuristic basis. |
-| Daemon: response signature or nonce wrong | Labels discarded. |
+| Daemon: quote fails, measurement not in the compiled-in set, quote nonce or `boot_binding` mismatch | Nothing sent. The session keeps its heuristic basis. |
+| Daemon: response does not open, or its signer, request nonce, `digest_sha256`, wire version or an `event_index` is wrong (section 4) | Labels discarded. |
 | Daemon: any refusal | Session stays on the heuristic basis. The answer's (i) counts it among sessions without a judgement. A missing judgement is never treated as `no`/`other`. |
 
 ## 9. Operator runbook outline
@@ -592,9 +764,10 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
   `deploy/judgement/docker-compose.yml`. Deploy with `phala deploy` and an
   explicit `--kms-id`. Read `compose_hash` from `phala cvms get --json`, and
   poll a signed response until it carries the new measurement (the witness's
-  stale-container trap). Record app id, measurement and signing address.
-- **Pin.** Add the production measurement and signing address to the daemon's
-  compiled-in set in a release. Development pins go only into development
+  stale-container trap). Record app id and measurement. The signing address
+  and sealing key are per boot, so they are not recorded or pinned.
+- **Pin.** Add the production measurement (`mrtd`, `mrconfigid`) to the
+  daemon's compiled-in set in a release. Development pins go only into development
   config.
 - **Upgrade.** In place, same app id. Spend carries over. Release daemons
   refuse the new measurement until a release adds it. Ship that release, then
@@ -620,7 +793,14 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
   - claim verification: wrong audience, expired, pooled tenant, unknown key;
   - the limiter: reserve, settle, absent usage, month rollover, both caps,
     crash between reserve and settle;
-  - ledger seal round trip and refusal on a wrong key;
+  - ledger seal round trip and refusal on a wrong key, and a ledger written
+    under one boot's keys read back under the next boot's;
+  - per-boot keys: two boots give different `seal_pk` and `signing_address`,
+    and neither is ever derived from `GetKey` (a structural test over
+    `enclave.rs`);
+  - the check order: a body that does not open, a bad claim and a replayed
+    request nonce each take no judgement permit, and a slow body is cut at
+    10 s;
   - the boot rules, each refusing;
   - the production allowlist test with the development feature off;
   - prompt-hash pins;
@@ -630,10 +810,20 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
 - **Receipt path**, against the captured live fixtures the attestation crate
   already uses for `provider_tee`, plus refusal tests for `gateway`,
   two-part, wrong model and unpinned signer.
-- **Protocol:** the exact refusal strings, and `is_judgement_capacity`, pinned
-  like `witness_pacing::tests`.
+- **Protocol and attestation crate:** the exact refusal strings, and
+  `is_judgement_capacity`, pinned like `witness_pacing::tests`. The judgement
+  seal against frozen vectors (fixed `eph_sk`, `seal_sk`, plaintext), a
+  tampered ciphertext, AAD or `eph_pk` refusing to open, and a response that
+  does not open under another request's keys. The `boot_binding` report-data
+  layout against a frozen vector.
 - **Client:**
-  - `check_quote` with both domain tags, and cross-tag refusal;
+  - `check_quote` with both report-data layouts, and cross-layout refusal;
+  - the misrouting scenario of #1501 review point 1: a quote from instance P,
+    a request answered by instance M with other per-boot keys. M cannot open
+    the body, and a response M signs is discarded;
+  - each response check of section 4 discards on its own: wrong signer, wrong
+    request nonce, a response for another digest, an `event_index` out of
+    range, a wrong wire version;
   - a structural test that `VerifiedJudgementService` has one construction
     site, like `there_is_no_way_to_build_a_verified_witness_but_verification`;
   - a release-feature test that no judgement pin key parses;
@@ -652,7 +842,8 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
   `rollout_smoke_evidence` required-check list. It:
   - fetches a quote with a fresh nonce and verifies it against
     ingest-configured production pins, using the attestation-crate
-    verification from section 4;
+    verification from section 4, then seals its request to the quoted
+    `seal_pk`;
   - mints a drill claim for a dedicated drill account;
   - sends a fixed synthetic digest and verifies the signature;
   - requires every result to carry a verified `provider_tee` receipt and the

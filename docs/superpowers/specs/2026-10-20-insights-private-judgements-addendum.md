@@ -73,12 +73,19 @@ on 2026-10-20: "there is also a decision model coming to near.ai soon" and
 ## Architecture
 
 ```
-contributor daemon --(attested TLS, digest only)--> judgement service (CVM)
-                                                    |  pinned prompt + model
-                                                    +--> NEAR AI private inference
-                                                    |    (decision model; per-request receipt)
-contributor daemon <--(labels + receipt evidence)-- +
+contributor daemon --(body sealed to the CVM's per-boot key)--> judgement service (CVM)
+                                                                |  pinned prompt + model
+                                                                +--> NEAR AI private inference
+                                                                |    (decision model; per-request receipt)
+contributor daemon <--(sealed, signed labels + receipt evidence)-- +
 ```
+
+dstack-gateway terminates the outer TLS, so the transport is not what
+protects the data. The daemon seals the request to a key that is generated
+inside the service's process at boot and bound in its quote. Only the attested
+process can open it: not the gateway, and not another image the app's KMS
+admits. The response comes back sealed and signed by a second per-boot key in
+the same quote. (Service spec, section 3; #1501 review point 1.)
 
 ### The judgement service
 
@@ -142,7 +149,9 @@ pins that no path, file name or raw text beyond the scrubbed excerpts appears.
 - **Mitigations for linkability:**
   - The service logs only digest hashes and fixed labels (CLAUDE.md).
   - It stores no digests or labels, only the limiter's spend per keyed account.
-  - The operator sees the measurement, not the data.
+  - Digests and claims reach only the attested process: the bodies are
+    sealed to its per-boot key (above), so neither the gateway nor another
+    admitted image can read them.
   - The consent copy says calls are tied to the account.
 - Refusal shapes follow `witness_pacing`: capacity refusal is retryable;
   policy and timeout refusals are distinct.
