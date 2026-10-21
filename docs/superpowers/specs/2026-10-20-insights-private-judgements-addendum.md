@@ -164,6 +164,32 @@ logs only the hash (CLAUDE.md, hash-only logging). The digest builder is pure
 and lives in the contributor-insights crate. A test over the serialized bytes
 pins that no path, file name or raw text beyond the scrubbed excerpts appears.
 
+### Folder rules (O2: the design's default, for PM sign-off)
+
+The counter pass skips only Never folders (`daemon/insights_week.rs`, module
+docs). It reads Ask folders. Judgements must not inherit that, because a
+contributor who sets a client repository to Ask expects nothing from it to
+leave without review (#1501 review point 5). The judgement send has its own
+rule, over the three folder modes (`ProjectMode` in `daemon/policy.rs`:
+`AutoUpload` is Automatic, `NotifyOnly` is Ask me, `Ignore` is Never):
+
+| Folder mode or state | Judged? |
+|---|---|
+| Automatic | Yes, once the person has turned on private judgements. |
+| Ask me | Never automatically. Only a session the person approves, one at a time, after being shown exactly what would be sent. |
+| Never, by its own rule or the global Never override | Never. Its transcript is not opened for a digest. |
+| Contribution paused, the counter pass off (`insights_counter_pass`), or private judgements off | Nothing is sent from any folder. |
+| Folder rules unreadable | Nothing is sent. Every folder is treated as Never, as `insights_week.rs` does for the counter pass. |
+
+- The mode is read **at send time**, not when the session was counted. A
+  folder moved to Ask or Never after counting sends nothing.
+- When two policy entries collapse into one key, the more restrictive mode
+  wins (`ProjectMode::more_restrictive`).
+- Tests: a session in an Ask folder produces no request (a recording double
+  sees no call); an approved Ask session produces exactly one; a Never folder
+  and the global Never override produce none and never open the transcript;
+  pausing contribution between counting and sending stops the send.
+
 ### Per-user rate limiting (account-bound, owner decision 4)
 
 - A call carries the contributor's existing account credential. The service
