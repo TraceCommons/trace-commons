@@ -687,6 +687,13 @@ struct QueuedJob {
     cleared: u64,
 }
 
+/// A ledger fold to run on the worker: the ledger's window as the refresh
+/// left it, and the time it was read.
+struct FoldJob {
+    window: Vec<crate::routing::RoutedExchange>,
+    now: DateTime<Utc>,
+}
+
 /// The background pass's dispatch state. A leaf lock.
 #[derive(Default)]
 struct WorkerSlot {
@@ -694,6 +701,10 @@ struct WorkerSlot {
     running: bool,
     /// The newest job not yet started. A newer one replaces it.
     pending: Option<QueuedJob>,
+    /// The newest ledger fold not yet started. A newer one replaces it: its
+    /// window holds every call the older one did that has not aged out,
+    /// and the store's cursor takes each call once.
+    fold: Option<FoldJob>,
 }
 
 /// Hand `job` to the background pass and return at once.
@@ -720,9 +731,28 @@ pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
         slot.pending = Some(queued);
         !std::mem::replace(&mut slot.running, true)
     };
-    if !start {
-        return;
+    if start {
+        start_worker(shared);
     }
+}
+
+/// Hand a ledger fold to the worker and return at once, as
+/// [`submit_counter_pass`] hands it a pass. Folds and passes run one at a
+/// time on the one worker, a waiting fold first.
+fn submit_ledger_fold(shared: &Arc<DaemonShared>, job: FoldJob) {
+    let start = {
+        let mut slot = shared.insights_counter.worker_slot();
+        slot.fold = Some(job);
+        !std::mem::replace(&mut slot.running, true)
+    };
+    if start {
+        start_worker(shared);
+    }
+}
+
+/// Start the worker on the runtime's blocking pool, or, outside a runtime,
+/// run it here.
+fn start_worker(shared: &Arc<DaemonShared>) {
     let worker = Arc::clone(shared);
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
@@ -745,26 +775,35 @@ fn run_counter_jobs(shared: &DaemonShared) {
         fn drop(&mut self) {
             if std::thread::panicking() {
                 let mut slot = self.0.worker_slot();
-                // The waiting job goes too: the next tick submits a fresh
-                // one, and a test waiting for idle must not hang on it.
+                // The waiting jobs go too: the next tick submits fresh
+                // ones, and a test waiting for idle must not hang on them.
                 slot.pending = None;
+                slot.fold = None;
                 self.0.worker_stopped(&mut slot);
             }
         }
     }
     let _guard = StopOnPanic(counter);
     loop {
-        let next = {
+        let (fold, pass) = {
             let mut slot = counter.worker_slot();
-            match slot.pending.take() {
-                Some(next) => next,
-                None => {
-                    counter.worker_stopped(&mut slot);
-                    return;
-                }
+            match slot.fold.take() {
+                Some(fold) => (Some(fold), None),
+                None => match slot.pending.take() {
+                    Some(next) => (None, Some(next)),
+                    None => {
+                        counter.worker_stopped(&mut slot);
+                        return;
+                    }
+                },
             }
         };
-        run_counter_job(shared, next);
+        if let Some(fold) = fold {
+            run_fold_job(shared, fold);
+        }
+        if let Some(pass) = pass {
+            run_counter_job(shared, pass);
+        }
     }
 }
 
@@ -880,8 +919,13 @@ fn is_uuid(text: &str) -> bool {
 pub struct CounterPass {
     rows_path: PathBuf,
     keys: Box<dyn DigestKeyStore + Send + Sync>,
-    /// The store as last read or written; `None` until first needed.
+    /// The store as last read or staged; `None` until first needed. The
+    /// answers read it; the file follows it (`flush`).
     cached: Mutex<Option<Arc<CounterStore>>>,
+    /// Bumped, under the cache lock, each time a changed store is staged.
+    staged: AtomicU64,
+    /// The writer lock, holding the `staged` count last written to the file.
+    writer: Mutex<u64>,
     /// When a pass last finished, for the answer's `updated_at`.
     last_pass_at: Mutex<Option<DateTime<Utc>>>,
     /// The last failure label logged, so a refused keychain is logged once.
@@ -914,6 +958,11 @@ struct TestSeams {
     before_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     passes_started: std::sync::atomic::AtomicUsize,
     detached: std::sync::atomic::AtomicBool,
+    /// Store files written, and how many of them with the cache lock held.
+    writes: std::sync::atomic::AtomicUsize,
+    writes_under_cache_lock: std::sync::atomic::AtomicUsize,
+    /// The thread the last ledger fold ran on.
+    fold_thread: Mutex<Option<std::thread::ThreadId>>,
 }
 
 impl CounterPass {
@@ -934,6 +983,8 @@ impl CounterPass {
             rows_path,
             keys,
             cached: Mutex::new(None),
+            staged: AtomicU64::new(0),
+            writer: Mutex::new(0),
             last_pass_at: Mutex::new(None),
             last_failure: Mutex::new(None),
             last_fold_failure: Mutex::new(None),
@@ -985,7 +1036,9 @@ impl CounterPass {
         let slot = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         let _idle = self
             .idle
-            .wait_while(slot, |slot| slot.running || slot.pending.is_some())
+            .wait_while(slot, |slot| {
+                slot.running || slot.pending.is_some() || slot.fold.is_some()
+            })
             .unwrap_or_else(|e| e.into_inner());
     }
 
@@ -1074,6 +1127,34 @@ impl CounterPass {
             }
         }
         result
+    }
+
+    /// Count a store write, and whether the cache lock is held across it.
+    #[cfg(test)]
+    fn count_write(&self) {
+        self.test_seams.writes.fetch_add(1, Ordering::SeqCst);
+        if self.cached.try_lock().is_err() {
+            self.test_seams
+                .writes_under_cache_lock
+                .fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Store files written so far, and how many with the cache lock held.
+    #[cfg(test)]
+    pub(crate) fn writes_for_test(&self) -> (usize, usize) {
+        (
+            self.test_seams.writes.load(Ordering::SeqCst),
+            self.test_seams
+                .writes_under_cache_lock
+                .load(Ordering::SeqCst),
+        )
+    }
+
+    /// The thread the last ledger fold ran on.
+    #[cfg(test)]
+    pub(crate) fn fold_thread_for_test(&self) -> Option<std::thread::ThreadId> {
+        *self.test_seams.fold_thread.lock().unwrap()
     }
 
     #[cfg(test)]
@@ -1401,8 +1482,10 @@ impl CounterPass {
         );
         never_sessions.purge(&mut store.routing);
         prune_routing(&mut store, &gone, cutoff);
-        self.save_into(&mut cached, store)?;
+        self.stage_into(&mut cached, store);
         self.mark_pass(now);
+        drop(cached);
+        self.flush()?;
         Ok(Some(summary))
     }
 
@@ -1605,6 +1688,12 @@ impl CounterPass {
     /// whether it will write a row, so a missing store does not mean a
     /// missing key. Forgetting an absent key is not an error.
     pub(crate) fn clear(&self) -> Result<(), &'static str> {
+        // The writer lock first, as `flush` takes it: a write in progress
+        // finishes before the file is removed, and one after finds no store.
+        let _writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut cached = self.cached.lock().map_err(|_| ERR_CLEAR_FAILED)?;
         match std::fs::remove_file(&self.rows_path) {
             Ok(()) => {}
@@ -1980,21 +2069,63 @@ impl CounterPass {
 
     #[cfg(test)]
     fn save(&self, store: CounterStore) -> Result<(), &'static str> {
-        let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
-        self.save_into(&mut cached, store)
+        {
+            let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
+            self.stage_into(&mut cached, store);
+        }
+        self.flush()
     }
 
-    /// `save` for a caller already holding the cache lock.
-    fn save_into(
-        &self,
-        cached: &mut Option<Arc<CounterStore>>,
-        store: CounterStore,
-    ) -> Result<(), &'static str> {
-        let body = serde_json::to_vec(&store).map_err(|_| STORE_WRITE_FAILED)?;
+    /// Make `store` the cached store, for a caller holding the cache lock;
+    /// the file is written by [`Self::flush`], after that lock is released.
+    /// A store equal to the cached one changes nothing and is not written.
+    fn stage_into(&self, cached: &mut Option<Arc<CounterStore>>, store: CounterStore) {
+        if cached.as_deref() == Some(&store) {
+            return;
+        }
+        *cached = Some(Arc::new(store));
+        self.staged.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Write the cached store to the file, if it changed since the last
+    /// write, with the cache lock released, so an answer never waits on
+    /// the write.
+    ///
+    /// Writes are serialized by the writer lock, and each writes the store
+    /// as cached when it begins, never one a caller held: the file always
+    /// ends as the newest store. `clear` takes the writer lock before it
+    /// removes the file and empties the cache, so a write either finishes
+    /// before the removal or finds the cache empty and writes nothing. Lock
+    /// order: writer, then cache; nothing holds the cache lock while it
+    /// takes the writer lock.
+    ///
+    /// A write that fails leaves the cached store unwritten; the next flush
+    /// writes it.
+    fn flush(&self) -> Result<(), &'static str> {
+        let mut written = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (store, staged) = {
+            let cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
+            (
+                cached.as_ref().map(Arc::clone),
+                self.staged.load(Ordering::SeqCst),
+            )
+        };
+        let Some(store) = store else {
+            return Ok(());
+        };
+        if staged <= *written {
+            return Ok(());
+        }
+        #[cfg(test)]
+        self.count_write();
+        let body = serde_json::to_vec(&*store).map_err(|_| STORE_WRITE_FAILED)?;
         let dir = self.rows_path.parent().ok_or(STORE_WRITE_FAILED)?;
         crate::config::write_atomic_0600(dir, &self.rows_path, &body)
             .map_err(|_| STORE_WRITE_FAILED)?;
-        *cached = Some(Arc::new(store));
+        *written = staged;
         Ok(())
     }
 
@@ -2017,16 +2148,20 @@ impl CounterPass {
     /// Lock order: `enabled` (the settings lock) and `speakers` (the tools'
     /// config files, the private-inference state and settings locks) are
     /// asked with no lock of this pass held. The cache lock is then held
-    /// across load, fold and write, as `clear` holds it across removal, so
-    /// the two cannot interleave. The key is read before that lock, so a
-    /// keychain's latency never holds an `insights_week` answer.
+    /// across load, fold and staging the result, as `clear` holds it across
+    /// removal, so the two cannot interleave; the file is written after it
+    /// is released (`flush`), so an answer never waits on the write. The
+    /// key is read before that lock, so a keychain's latency never holds an
+    /// `insights_week` answer.
     ///
-    /// The counter pass runs on its own thread, so a fold can land while a
-    /// pass is reading. The pass plans and reads from the store it loaded
-    /// when it began, but writes under this same cache lock onto the store
-    /// as it stands then, so a fold made meanwhile keeps its tallies and
-    /// cursor; were the pass to write its starting store back, the next fold
-    /// would take the rows still in the window again.
+    /// The daemon runs folds on the counter pass's worker
+    /// (`fold_ledger_after_refresh`), one job at a time with the passes,
+    /// off the async tick that refreshed the ledger. A pass plans and reads
+    /// from the store it loaded when it began, but stages under this same
+    /// cache lock onto the store as it stands then, so a fold made
+    /// meanwhile keeps its tallies and cursor; were the pass to write its
+    /// starting store back, the next fold would take the rows still in the
+    /// window again.
     pub(crate) fn fold_ledger(
         &self,
         enabled: &dyn Fn() -> bool,
@@ -2059,6 +2194,10 @@ impl CounterPass {
         speakers: &mut dyn FnMut() -> Speakers,
         now: DateTime<Utc>,
     ) -> Result<FoldSummary, &'static str> {
+        #[cfg(test)]
+        {
+            *self.test_seams.fold_thread.lock().unwrap() = Some(std::thread::current().id());
+        }
         let window = ledger
             .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS));
         // A first look, without the lock, to learn whether anything is new
@@ -2117,7 +2256,9 @@ impl CounterPass {
             &BTreeSet::new(),
             now - Duration::weeks(COUNTER_STORE_KEEP_WEEKS),
         );
-        self.save_into(&mut cached, store)?;
+        self.stage_into(&mut cached, store);
+        drop(cached);
+        self.flush()?;
         Ok(summary)
     }
 
@@ -2677,21 +2818,49 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 /// clears the store, and a fold gated on the feed alone would write it back.
 /// A poisoned settings lock reads as off. Failures are logged inside, by
 /// fixed label only.
+///
+/// The fold itself runs on the counter pass's worker, as the pass runs off
+/// the watcher tick: this reads the switches and, when both are on, the
+/// ledger's 24-hour window (already in memory), hands both to the worker
+/// and returns. The worker asks the switches again before it folds.
 pub(crate) fn fold_ledger_after_refresh(
-    shared: &DaemonShared,
+    shared: &Arc<DaemonShared>,
     ledger: &dyn crate::routing::RoutingLedger,
 ) {
-    let enabled = || {
-        shared
-            .settings
-            .lock()
-            .is_ok_and(|settings| settings.insights_ledger_feed && settings.insights_counter_pass)
-    };
+    if !fold_enabled(shared) {
+        return;
+    }
+    let now = Utc::now();
+    let window = ledger
+        .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS));
+    submit_ledger_fold(shared, FoldJob { window, now });
+    // A test waits for the fold, unless it asked to watch it run on its
+    // own; the daemon never does.
+    #[cfg(test)]
+    if !shared.insights_counter.detached_for_test() {
+        shared.insights_counter.await_idle_for_test();
+    }
+}
+
+/// Both switches the fold needs, `insights_ledger_feed` and
+/// `insights_counter_pass`. A poisoned settings lock reads as off.
+fn fold_enabled(shared: &DaemonShared) -> bool {
+    shared
+        .settings
+        .lock()
+        .is_ok_and(|settings| settings.insights_ledger_feed && settings.insights_counter_pass)
+}
+
+/// Run one fold job on the worker. Failures are logged inside, by fixed
+/// label only.
+fn run_fold_job(shared: &DaemonShared, job: FoldJob) {
+    let enabled = || !shared.shutdown.load(Ordering::Relaxed) && fold_enabled(shared);
     let mut speakers =
         || super::inference_map::speakers_from_rows(&super::harness::rows_now(shared));
+    let ledger = crate::routing::FixedLedger::new(job.window);
     let _ = shared
         .insights_counter
-        .fold_ledger(&enabled, ledger, &mut speakers, Utc::now());
+        .fold_ledger(&enabled, &ledger, &mut speakers, job.now);
 }
 
 /// Drop the oldest sessions, by last write and then by the order they were
@@ -5536,6 +5705,24 @@ mod tests {
         let row_digest = stored_rows(&f.pass)[0].harness_session.unwrap();
         let tally = &tallies(&f.reopened())[&row_digest];
         assert_eq!((tally.calls.verified, tally.calls.outside), (2, 1));
+    }
+
+    /// The store file is written with the cache lock released, so an
+    /// answer never waits on a write; and a fold or pass that changes
+    /// nothing writes nothing.
+    #[test]
+    fn the_store_is_written_off_the_cache_lock_and_only_on_change() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        let (writes, locked) = f.pass.writes_for_test();
+        assert_eq!(writes, 2, "one pass and one fold, each a change");
+        assert_eq!(locked, 0, "no write holds the cache lock");
+        // Nothing new: no write.
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        assert_eq!(f.pass.writes_for_test().0, 2);
     }
 
     #[test]

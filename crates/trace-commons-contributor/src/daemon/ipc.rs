@@ -2157,7 +2157,7 @@ impl DaemonShared {
     /// Infallible by construction: `IronWireLedger::refresh` never returns
     /// an error and carries its own short timeout, so awaiting it here
     /// cannot fail or stall the poll tick that calls this.
-    pub(crate) async fn refresh_routing(&self) {
+    pub(crate) async fn refresh_routing(self: &Arc<Self>) {
         let derived = self.routing.read().is_ok_and(|held| held.derived);
         if derived {
             // The periodic pass previously refreshed before noticing proxy
@@ -10329,7 +10329,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         s.routing.write().unwrap().ledger = Some(Arc::new(
             crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
         ));
@@ -10410,7 +10410,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         {
             let mut settings = s.settings.lock().unwrap();
             settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
@@ -15754,7 +15754,7 @@ mod tests {
 
     #[tokio::test]
     async fn derived_routing_refresh_withdraws_an_observed_exited_proxy_first() {
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         s.adopt_runtime();
         let home = tempfile::tempdir().unwrap();
         s.install_private_inference_for_test(home.path().to_path_buf(), 0);
@@ -18528,7 +18528,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let dir = declared_token_dir();
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
         assert_eq!(
             s.status_value()["routing"]["state"],
@@ -18557,7 +18557,7 @@ mod tests {
         drop(listener);
 
         let dir = declared_token_dir();
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
         s.refresh_routing().await;
 

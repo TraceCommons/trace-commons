@@ -583,7 +583,7 @@ async fn unenroll_clears_the_insights_counter_store() {
 /// feed still on, does not write them back.
 #[tokio::test]
 async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     enroll_fixture(&s);
     {
         let mut settings = s.settings.lock().unwrap();
@@ -615,12 +615,40 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
+/// The fold runs on the counter pass's worker, off the async tick that
+/// refreshed the ledger, as the pass runs off the watcher tick.
+#[tokio::test]
+async fn the_ledger_fold_runs_off_the_refresh_tick() {
+    let s = std::sync::Arc::new(shared());
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let ledger = crate::routing::FixedLedger::new(vec![crate::routing::RoutedExchange {
+        id: Some(1),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    }]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert_ne!(
+        s.insights_counter.fold_thread_for_test(),
+        Some(std::thread::current().id())
+    );
+}
+
 /// The fold is gated on the counter pass as well as the ledger feed: with
 /// the pass off and the feed on, the store and key still there, nothing is
 /// folded.
 #[test]
 fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     {
         let mut settings = s.settings.lock().unwrap();
         settings.insights_counter_pass = true;
@@ -658,7 +686,7 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
 /// there, the daemon's fold reads no ledger row and writes nothing.
 #[test]
 fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     {
         let mut settings = s.settings.lock().unwrap();
         settings.insights_counter_pass = true;

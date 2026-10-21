@@ -2901,7 +2901,9 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let store = crate::config::ConfigStore::open(state.path().to_path_buf()).expect("store");
-        let shared = crate::daemon::ipc::DaemonShared::load(store).expect("daemon state");
+        let shared = std::sync::Arc::new(
+            crate::daemon::ipc::DaemonShared::load(store).expect("daemon state"),
+        );
         {
             let mut settings = shared.settings.lock().expect("settings lock");
             settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
