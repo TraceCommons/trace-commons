@@ -25,12 +25,21 @@ within noise, it says which.
 
 ## Constraints
 
-- **Local only.** Like all of Insights, nothing here leaves the machine.
-  Rows store counts, keyed digests and fixed labels only: no prompt or
-  response text, no paths, no file names, no commit hashes, no prices.
-- **Read each file once.** Session facts are collected by the counter pass,
-  which since #1499 streams every watched Claude Code and Codex session
-  line by line on its own worker, off the watcher tick. No second pass.
+- **Local only, with one opt-in exception.** Nothing in this design leaves
+  the machine. The exception is the opt-in private judgements of
+  [`2026-10-20-insights-private-judgements-addendum.md`](2026-10-20-insights-private-judgements-addendum.md):
+  off by default, with its own consent, and sending only what its open owner
+  decision O1 settles. Rows store counts, keyed digests and fixed labels only:
+  no prompt or response text, no paths, no file names, no commit hashes, no
+  prices. That holds with judgements on too. A judged row gains labels, never
+  text.
+- **Read each file once, for counting.** Session facts are collected by the
+  counter pass, which since #1499 streams every watched Claude Code and Codex
+  session line by line on its own worker, off the watcher tick. The counter
+  pass makes no second pass. The one other read is the addendum's: when
+  private judgements are on, a session's file is read once more, at send time
+  and in memory, to build its digest. That is never during the counter pass,
+  and nothing it reads is stored (addendum, "When the digest is built").
 - **Never zero for unknown.** A fact that could not be read is unknown and
   stays out of every figure it would change. Each answer's (i) gives the
   number of sessions left out and why.

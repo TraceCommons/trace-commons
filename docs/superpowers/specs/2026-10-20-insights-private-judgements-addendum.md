@@ -163,6 +163,37 @@ The digest has a hash, and the daemon logs only the hash (CLAUDE.md,
 hash-only logging). The digest builder is pure and lives in the
 contributor-insights crate.
 
+#### When the digest is built, and where it sits (#1501 review point 4)
+
+The counter row holds no prompt text, and the counter pass reads each file
+once. So excerpts would have to come from either a second read or text kept on
+disk until the send, and sends can be refused for days. The design takes the
+second read and keeps **no queue on disk**:
+
+- **Built at send time, in memory.** The digest is built from one more read of
+  the session's transcript, immediately before the send. Never during the
+  counter pass. It lives only for that send (at most the request's 240 s
+  deadline), is never serialized to the daemon's store or any file, and is
+  dropped whatever the outcome.
+- **Preconditions, checked before the file is opened:** private judgements on;
+  the folder rule allows this session, read now ("Folder rules"); a verified
+  service is in hand; no account or operator `reset_at` lies in the future;
+  and the session is finished: its file is the same size and modification
+  time the counter row recorded, and has not been written for 30 minutes.
+- **A refused or failed send keeps no text.** The counter row records only a
+  fixed state (`judgement: pending | refused:<label> | judged`) and, for a
+  capacity refusal, the retry-not-before time. The next attempt rebuilds the
+  digest from the file. If the file has gone, changed, or left the 13-week
+  window, the session is never judged.
+- **The parent design's constraints are amended** to say this
+  (`2026-10-20-insights-model-answers-design.md`, "Constraints"): local only
+  except this opt-in path, and one send-time read beside the counter pass.
+- **Test:** after one judged session and one refused session (built from
+  fixtures with distinctive strings), a byte scan of the daemon's whole data
+  directory finds none of the fixture strings. After opt-out, unenroll, a move
+  to Never, and the 13-week expiry, no judgement field or state remains on any
+  affected row.
+
 #### The scrub (#1501 review point 3)
 
 "After the privacy filter runs" named no filter. The scrub is defined here,
@@ -343,8 +374,11 @@ rule, over the three folder modes (`ProjectMode` in `daemon/policy.rs`:
   - Each label carries a confidence bucket, the judge version and the receipt
     evidence.
 - **Stored** on the counter row beside the local facts, under the counter key,
-  with the same retention (13 weeks) and the same clearing on unenroll or
-  opt-out. Never on the wire to other parties.
+  with the same retention (13 weeks). Labels and the judgement state are
+  cleared on opt-out from judgements, on unenroll, when the session's folder
+  becomes Never (its own rule or the global override), and at the 13-week
+  expiry. No digest or excerpt is ever stored, so there is nothing else to
+  clear. Never on the wire to other parties.
 - **Plugged into the existing seams:**
   - task type goes through the reserved `TaskClassifier` interface, as a second
     implementation;
