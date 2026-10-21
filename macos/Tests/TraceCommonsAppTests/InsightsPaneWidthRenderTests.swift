@@ -28,8 +28,7 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
     func test_everyTabRendersAtThePaneWidth() async throws {
         let copy = try XCTUnwrap(TCInsights.copy())
         let service: InsightsModel.Service = { request in
-            guard let answer = try InsightsSampleWeek.response(request.operation.type,
-                                                               snapshotID: request.operation.snapshot_id) else {
+            guard let answer = try InsightsSampleWeek.response(request.operation) else {
                 throw InsightsError.invalidResponse
             }
             return answer
