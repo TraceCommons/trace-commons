@@ -53,11 +53,11 @@ final class InsightsModelsCardTests: XCTestCase {
             "Bug fixing", "Refactoring", "Tests", "Docs cost", "All task types", "Time to finish",
         ])
         XCTAssertEqual(rows.map(\.lead), [
-            "Fewest rejected edits in your bug-fix traces",
-            "Fewest rejected edits in your refactoring traces",
-            "Fewest rejected edits in your test traces",
+            "Lowest share of edits rejected in your bug-fix traces",
+            "Lowest share of edits rejected in your refactoring traces",
+            "Lowest share of edits rejected in your test traces",
             "Lowest cost per docs trace, at API prices",
-            "Fewest rejected edits across your task types",
+            "Lowest share of edits rejected across your task types, weighted by task mix",
             "Least active time to finish, in your finished traces",
         ])
         for row in rows {
@@ -130,7 +130,7 @@ final class InsightsModelsCardTests: XCTestCase {
         ])
         XCTAssertFalse(row.models.contains { $0.text.hasPrefix("Next:") })
         XCTAssertTrue(row.info.contains("The gap didn't hold when the traces were resampled, so neither model is named first."))
-        XCTAssertEqual(row.lead, "Fewest undone edits in your refactoring traces")
+        XCTAssertEqual(row.lead, "Lowest share of edits undone in your refactoring traces")
         XCTAssertEqual(row.notes, ["Undone edits we could see"])
     }
 
@@ -143,7 +143,7 @@ final class InsightsModelsCardTests: XCTestCase {
             copy: try copy())
         let bugFix = rows[0]
         XCTAssertNil(bugFix.state)
-        XCTAssertEqual(bugFix.lead, "Fewest undone edits in your bug-fix traces")
+        XCTAssertEqual(bugFix.lead, "Lowest share of edits undone in your bug-fix traces")
         XCTAssertEqual(bugFix.models, [
             .init(text: "claude-opus-4-7 (4.2%, 31 traces)", detail: "Interrupts per trace: 0.2"),
             .init(text: "Next: claude-sonnet-4-6 (9.1%, 14 traces)", detail: "Interrupts per trace: 0.4"),
@@ -151,7 +151,7 @@ final class InsightsModelsCardTests: XCTestCase {
         XCTAssertEqual(bugFix.notes, ["Undone edits we could see"])
         XCTAssertTrue(bugFix.info.first?.hasPrefix("Not every trace records the edits you declined") == true)
         let across = rows[4]
-        XCTAssertEqual(across.lead, "Fewest rejected edits across your task types")
+        XCTAssertEqual(across.lead, "Lowest share of edits rejected across your task types, weighted by task mix")
         XCTAssertEqual(across.notes, ["Rejected edits: ones you declined or undid"])
         let finish = rows[5]
         let leaderTime = InsightsModelsWords.duration(312)
