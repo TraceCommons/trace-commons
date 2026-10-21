@@ -774,9 +774,45 @@ The month is the UTC calendar month. A cap change is a new measurement.
   own money; neither reveals anything, because the file is sealed. The
   operator is the payer, so this is not a defence against the operator. The
   per-account cap defends the operator's budget against contributors.
-- **What the operator cannot do:** read which accounts used the service or how
-  much each spent. The ledger holds keyed digests under a key only the enclave
-  derives.
+- **What the operator can learn, stated plainly** (#1501 review point 10).
+  An earlier draft said the operator could not read which accounts used the
+  service. That was wrong in two ways:
+  - **Through KMS admission.** The limiter root comes from `GetKey`, and the
+    KMS releases it to every image the app admits. The operator controls
+    admission. An admitted debug image can derive `account-digest` and
+    `ledger-seal` and open the ledger. `account_ref` is a tenant id the
+    operator already holds, so HMAC over the known ids links every entry to
+    its account. The boundary is the app's KMS admission policy, not the
+    enclave. What admission does **not** give: the digests, claims and labels.
+    Those are sealed to the pinned instance's per-boot keys (section 3), and
+    daemons send only to a pinned measurement.
+  - **Through the issuer.** Every send needs a fresh judgement claim from the
+    issuer on ingest, which authenticates the device, and so the account. The
+    issuer process therefore sees which account asked for a claim, and when.
+    The operator can match mint times against the service's request times and
+    the client IPs Phala's gateway sees.
+- **What reduces that, and what it does not remove:**
+  - The judgement-claim route logs no tenant, account, device key id or
+    `device_ref`, unlike the upload-claim route
+    (`trace_upload_claim_issuer.rs`). A tracing-capture test mints once and
+    hits every refusal, and asserts that no captured line contains the tenant
+    id or the device key id. That includes the malformed-stored-key path in
+    `device_public_key_bytes`, which logs `device_key_id` today (#1530 review
+    point 1).
+  - The edge access log drops the device headers. In
+    `deploy/pilot-gcp/Caddyfile.template`, the issuer host's log filter (and
+    the ingest host's, for parity) gains
+    `request>headers>X-Trace-Device-Key-Id delete` and
+    `request>headers>X-Trace-Device-Signature delete`. Caddy logs request
+    headers by default, so without this every claim request leaves the
+    plaintext device key id beside the path and the time.
+  - The daemon mints judgement claims on a fixed schedule while judgements
+    are on, one every 10 minutes whether or not it sends, and holds at most
+    one unexpired claim. Mint times then mark "judgements are on", which the
+    issuer knows anyway, rather than each send.
+  - None of this hides from the issuer process which accounts have
+    judgements on. The consent copy never says "the operator cannot see",
+    and it says calls are tied to the account.
 
 **Logging is hash-only.** A log line may carry a random request id,
 `digest_sha256`, the model id, the refusal label or `ok`, and a latency bucket.

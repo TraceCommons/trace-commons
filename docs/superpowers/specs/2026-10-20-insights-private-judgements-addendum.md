@@ -359,7 +359,14 @@ rule, over the three folder modes (`ProjectMode` in `daemon/policy.rs`:
   - Digests and claims reach only the attested process: the bodies are
     sealed to its per-boot key (above), so neither the gateway nor another
     admitted image can read them.
-  - The consent copy says calls are tied to the account.
+  - **What these do not cover** (#1501 review point 10). The operator can
+    learn which accounts use judgements and when, in two ways. One is the
+    issuer on ingest, which authenticates each claim request. The other is the
+    app's KMS admission, since an admitted debug image can open the spend
+    ledger and match its keyed digests against tenant ids the operator holds.
+    The service spec, section 6, says what reduces this and what does not.
+  - The consent copy says calls are tied to the account, and never says "the
+    operator cannot see".
 - Refusal shapes follow `witness_pacing`: capacity refusal is retryable;
   policy and timeout refusals are distinct.
 - An operator-wide monthly budget sits above the per-account cap. Spending
@@ -397,8 +404,20 @@ O1 chose. It must say plainly:
 - what leaves the machine (a short scrubbed summary per session);
 - where it goes (an attested service, then NEAR AI's attested inference);
 - who pays (Trace Commons, not you);
-- what is kept (labels only, on this machine);
-- how to turn it off.
+- what is kept, and where (#1501 review point 11):
+  - **on this machine:** a label set and a fixed judgement state per judged
+    session, on the counter row, for 13 weeks. No digest and no excerpt is
+    stored ("When the digest is built");
+  - **at the judgement service:** one spend entry per account (a keyed
+    account digest, the month, and the amount spent), kept until the month
+    ends. No digests and no labels;
+  - **at NEAR AI and its gateway:** their own per-call records, under NEAR AI's
+    retention terms. The copy quotes those terms once they are confirmed from
+    NEAR AI's published policy. This spec has not verified them;
+- how to turn it off, and what turning it off does: it deletes the labels and
+  states on this machine, and it stops all sends. It cannot recall a digest
+  already sent. The service's spend entry lapses at the month's end, and NEAR
+  AI's records follow NEAR AI's terms.
 
 Answers that use judged fields say "judged privately" in their (i).
 
