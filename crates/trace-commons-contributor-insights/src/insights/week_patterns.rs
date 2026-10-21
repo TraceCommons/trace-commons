@@ -557,6 +557,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
@@ -575,6 +576,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
             facts: None,
             body: SessionBody::Codex {
                 observed: Some(crate::insights::week_rollup::CodexObserved {

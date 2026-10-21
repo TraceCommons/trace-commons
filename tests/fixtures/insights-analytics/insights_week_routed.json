@@ -4,6 +4,7 @@
   "readable": true,
   "updated_at": "2026-09-14T12:00:00+00:00",
   "sessions_stored": 2,
+  "automated_stored": 0,
   "iso_week": "2026-W38",
   "week_start": "2026-09-14",
   "comparable": false,

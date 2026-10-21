@@ -139,6 +139,7 @@ fn input(session_ref: &str, body: SessionBody, facts: Option<SessionFacts>) -> S
         import_seq: 0,
         placed_at: None,
         harness_session: None,
+        automated: false,
         body,
         facts,
     }
@@ -671,6 +672,43 @@ fn reviewer_and_no_edit_sessions_are_left_out() {
         {
             expected.left_out.reviewer = 1;
         }
+        assert_eq!(with, &expected, "{:?}", with.question);
+    }
+}
+
+/// An automated session (a Codex session its harness spawned itself) is
+/// in no comparison, whatever its facts, and is counted as left out on
+/// every row under its own reason, facts or not.
+#[test]
+fn automated_sessions_are_left_out_of_every_comparison() {
+    let base = answer(&bugfix_pair());
+    let mut sessions = bugfix_pair();
+    let automated = |mut session: SessionInput| {
+        session.automated = true;
+        session
+    };
+    // Enough to qualify as a third model, and to move model-a's rate.
+    sessions.extend(many("auto-c", 5, |id| {
+        automated(solo(&id, "model-c", InferredTask::BugFix, 10, Some(9), 9))
+    }));
+    sessions.push(automated(solo(
+        "auto-a",
+        "model-a",
+        InferredTask::BugFix,
+        10,
+        Some(9),
+        9,
+    )));
+    sessions.push(automated(claude(
+        "auto-none",
+        &["model-a"],
+        &[Some(0)],
+        None,
+    )));
+    let answers = answer(&sessions);
+    for (with, without) in answers.rows.iter().zip(&base.rows) {
+        let mut expected = without.clone();
+        expected.left_out.automated = 7;
         assert_eq!(with, &expected, "{:?}", with.question);
     }
 }
