@@ -43,6 +43,30 @@ final class InsightsSummaryModelTests: XCTestCase {
         XCTAssertEqual(InsightsSummaryFormatting.value(nil, unknown: "Unknown fixture"), "Unknown fixture")
     }
 
+    /// Only metrics something recorded are listed (Kristi, 2026-10-21): the
+    /// saved history drops a metric no snapshot has, and a result drops a
+    /// metric whose value is unknown. A zero is a value and stays.
+    func testOnlyRecordedMetricsAreListed() throws {
+        let summaryMetrics = try JSONDecoder().decode([SavedInsightsSummary.Metric].self, from: Data("""
+        [{"id":"events","observed_value_sum":null,"available_snapshots":0,"missing_snapshots":3,
+          "record_coverage":{"observed":0,"total":0},"coverage_unit":"normalized_events","evidence_snapshot_ids":[]},
+         {"id":"tool_calls","observed_value_sum":0,"available_snapshots":2,"missing_snapshots":1,
+          "record_coverage":{"observed":2,"total":3},"coverage_unit":"tool_results","evidence_snapshot_ids":["a"]},
+         {"id":"sessions","observed_value_sum":4,"available_snapshots":0,"missing_snapshots":0,
+          "record_coverage":{"observed":4,"total":4},"coverage_unit":"session_snapshots","evidence_snapshot_ids":[]}]
+        """.utf8))
+        XCTAssertEqual(InsightsSummaryFormatting.recorded(summaryMetrics).map(\.id), ["tool_calls", "sessions"])
+        XCTAssertTrue(InsightsSummaryFormatting.recorded(Array(summaryMetrics.prefix(1))).isEmpty,
+                      "with nothing recorded there is no list, and the view drops its heading")
+
+        let resultMetrics = try JSONDecoder().decode([LocalInsight.Metric].self, from: Data("""
+        [{"id":"input_tokens","value":null,"coverage":{"observed":0,"total":5},"evidence_ids":[]},
+         {"id":"tool_calls","value":0,"coverage":{"observed":5,"total":5},"evidence_ids":[]},
+         {"id":"events","value":12,"coverage":{"observed":5,"total":5},"evidence_ids":[]}]
+        """.utf8))
+        XCTAssertEqual(InsightsSummaryFormatting.known(resultMetrics).map(\.id), ["tool_calls", "events"])
+    }
+
     @MainActor
     func testPartialSummaryRendersAndEvidenceNavigationClearsMissingSelection() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -92,6 +116,10 @@ final class InsightsSummaryModelTests: XCTestCase {
         XCTAssertEqual(calls.available_snapshots, 2)
         XCTAssertLessThan(calls.record_coverage.observed, calls.record_coverage.total)
         XCTAssertNil(summary.metrics.first { $0.id == "input_tokens" }?.observed_value_sum)
+        // The view lists the recorded zero and leaves out the unknown.
+        let shown = InsightsSummaryFormatting.recorded(summary.metrics).map(\.id)
+        XCTAssertTrue(shown.contains("tool_calls"))
+        XCTAssertFalse(shown.contains("input_tokens"))
         let renderer = ImageRenderer(content: InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
             .padding(20).frame(width: 740).background(Color.white))
         let image = try XCTUnwrap(renderer.nsImage)
