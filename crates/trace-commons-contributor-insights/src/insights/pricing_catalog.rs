@@ -21,7 +21,12 @@
 //!   `c0735a5bd831d52feb823dbf578a7c6d5d2f5ecd2ea0c598d36ee14460cce1bc`;
 //!   the provenance holds one hash, so this one is recorded here.
 //!   Standard tier only (not batch, flex, fast or priority). A model whose
-//!   row shows no cache-write rate has no entry.
+//!   row shows "-" (or has no column) for the cache write has no separate
+//!   write charge, so its write is priced at its uncached-input rate; this
+//!   covers gpt-5.5, gpt-5.4 and its mini and nano, gpt-5.3-codex and the
+//!   older gpt-5 rows. A model with no cached-input rate on the page (the
+//!   "-pro" models, the GPT-4 and o-series) has no entry: pricing one would
+//!   need a rate the page does not publish.
 //!
 //! Neither page dates its rates, so every `effective_from` is the start of
 //! the 13-week Insights window before the fetch (the Monday, 00:00 UTC),
@@ -186,7 +191,7 @@ pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     ),
     (
         2,
-        "sha256:18fb3575c45e8f10c09231aa47d134de3ab1010e7ff845dd61186dc9954df4d7",
+        "sha256:d5d1bac294e9c504244f930865c7ddc3e83928b0351795e302e42690f21c150d",
     ),
 ];
 
