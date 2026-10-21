@@ -157,6 +157,16 @@ impl MockKeyedPayoutRail {
     }
 }
 
+impl KeyedReceipt {
+    /// Whether this receipt, stored under a line's key, is that line: the
+    /// same recipient, program and delta.
+    fn answers(&self, line: &RailLine<'_>) -> bool {
+        self.recipient == *line.recipient
+            && self.program == line.program
+            && self.delta == line.delta
+    }
+}
+
 impl KeyedState {
     fn take_refusal(&mut self) -> Result<(), RailRefusal> {
         match self.next_refusal.take() {
@@ -220,10 +230,7 @@ impl PayoutRail for MockKeyedPayoutRail {
         let mut state = self.state();
         state.take_refusal()?;
         if let Some(existing) = state.receipts.get(line.line_ref_hash) {
-            let same = existing.recipient == *line.recipient
-                && existing.program == line.program
-                && existing.delta == line.delta;
-            return if same {
+            return if existing.answers(line) {
                 Ok(committed(existing))
             } else {
                 Err(RailRefusal::Failed("payout_line_conflict"))
@@ -231,9 +238,16 @@ impl PayoutRail for MockKeyedPayoutRail {
         }
         let current = state.total(line.recipient, line.program);
         if line.delta == AtomicUnits::ZERO {
-            return Ok(SendOutcome::AlreadyAtOrAbove {
-                total: AtomicUnits::from_raw(current),
-            });
+            // A zero delta means our confirmed total already equals the
+            // target. The rail agrees only if it holds at least that much;
+            // below it, the two totals disagree and the line is held.
+            return if current >= line.target_total.get() {
+                Ok(SendOutcome::AlreadyAtOrAbove {
+                    total: AtomicUnits::from_raw(current),
+                })
+            } else {
+                Err(RailRefusal::HoldLine("payout_total_mismatch"))
+            };
         }
         if !state.sending_enabled {
             return Err(RailRefusal::StopPass("payout_rail_sending_disabled"));
@@ -273,19 +287,19 @@ impl PayoutRail for MockKeyedPayoutRail {
     ) -> Result<ReceiptLookup, RailRefusal> {
         let mut state = self.state();
         state.take_refusal()?;
-        Ok(match state.receipts.get(line.line_ref_hash) {
-            Some(receipt)
-                if receipt.recipient == *line.recipient
-                    && receipt.program == line.program
-                    && !exclude.contains(&receipt.receipt_hash) =>
-            {
-                ReceiptLookup::Found {
-                    receipt_hash: receipt.receipt_hash.clone(),
-                    delta: receipt.delta,
-                }
+        // A key reused with other content is refused here exactly as `send`
+        // refuses it, so a recovery that rebuilt the line differently cannot
+        // be answered with the first line's receipt.
+        match state.receipts.get(line.line_ref_hash) {
+            Some(receipt) if !receipt.answers(line) => {
+                Err(RailRefusal::Failed("payout_line_conflict"))
             }
-            _ => ReceiptLookup::NotFound,
-        })
+            Some(receipt) if !exclude.contains(&receipt.receipt_hash) => Ok(ReceiptLookup::Found {
+                receipt_hash: receipt.receipt_hash.clone(),
+                delta: receipt.delta,
+            }),
+            _ => Ok(ReceiptLookup::NotFound),
+        }
     }
 
     async fn history(
@@ -517,6 +531,188 @@ mod tests {
             rail.read_total(&recipient, &program).await.unwrap(),
             AtomicUnits::from_raw(3)
         );
+    }
+
+    #[tokio::test]
+    async fn keyed_mock_refuses_a_reused_key_whatever_field_changed() {
+        let rail = MockKeyedPayoutRail::new();
+        let recipient = recipient();
+        let other_recipient = RecipientRef::new("synthetic-recipient-2").unwrap();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(10));
+        let other_program = rail.program_for_link(uuid::Uuid::from_u128(11));
+        let original = line(LINE_A, &recipient, &program, 40, 0);
+        rail.send(&original).await.unwrap();
+
+        let conflict = RailRefusal::Failed("payout_line_conflict");
+        for rebuilt in [
+            line(LINE_A, &other_recipient, &program, 40, 0),
+            line(LINE_A, &recipient, &other_program, 40, 0),
+            line(LINE_A, &recipient, &program, 45, 0),
+        ] {
+            assert_eq!(rail.send(&rebuilt).await, Err(conflict), "{rebuilt:?}");
+            // The lookup path answers a reused key the same way as send,
+            // never with the first line's receipt.
+            assert_eq!(
+                rail.find_receipt(&rebuilt, &[]).await,
+                Err(conflict),
+                "{rebuilt:?}"
+            );
+        }
+        assert_eq!(rail.effects(), 1);
+        assert!(matches!(
+            rail.find_receipt(&original, &[]).await.unwrap(),
+            ReceiptLookup::Found { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn keyed_mock_send_honours_the_switch_and_an_inclusive_max() {
+        let rail = MockKeyedPayoutRail::new();
+        let recipient = recipient();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(12));
+        let pending = line(LINE_A, &recipient, &program, 5, 0);
+
+        rail.set_sending_enabled(false);
+        assert_eq!(
+            rail.send(&pending).await,
+            Err(RailRefusal::StopPass("payout_rail_sending_disabled"))
+        );
+        assert_eq!(rail.effects(), 0);
+
+        rail.set_sending_enabled(true);
+        rail.set_per_send_max(AtomicUnits::from_raw(5));
+        // A delta equal to the maximum is within it.
+        assert!(matches!(
+            rail.send(&pending).await.unwrap(),
+            SendOutcome::Committed { .. }
+        ));
+        let over = line(LINE_B, &recipient, &program, 11, 5);
+        assert_eq!(
+            rail.send(&over).await,
+            Err(RailRefusal::HoldLine("payout_send_over_max"))
+        );
+        assert_eq!(rail.effects(), 1);
+    }
+
+    #[tokio::test]
+    async fn keyed_mock_answers_a_zero_delta_by_the_rail_total() {
+        let rail = MockKeyedPayoutRail::new();
+        let recipient = recipient();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(13));
+        // We think 5 is confirmed; the rail holds nothing. That is a
+        // disagreement to hold, not "already at or above".
+        let disagreeing = line(LINE_A, &recipient, &program, 5, 5);
+        assert_eq!(
+            rail.send(&disagreeing).await,
+            Err(RailRefusal::HoldLine("payout_total_mismatch"))
+        );
+        rail.send(&line(LINE_B, &recipient, &program, 5, 0))
+            .await
+            .unwrap();
+        let settled = line(
+            "sha256:00000000000000000000000000000000000000000000000000000000000000cc",
+            &recipient,
+            &program,
+            5,
+            5,
+        );
+        assert_eq!(
+            rail.send(&settled).await.unwrap(),
+            SendOutcome::AlreadyAtOrAbove {
+                total: AtomicUnits::from_raw(5)
+            }
+        );
+        assert_eq!(rail.effects(), 1);
+    }
+
+    #[tokio::test]
+    async fn keyed_mock_history_is_per_recipient_and_program() {
+        let rail = MockKeyedPayoutRail::new();
+        let first = recipient();
+        let second = RecipientRef::new("synthetic-recipient-2").unwrap();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(14));
+        rail.send(&line(LINE_A, &first, &program, 3, 0))
+            .await
+            .unwrap();
+        rail.send(&line(LINE_B, &second, &program, 7, 0))
+            .await
+            .unwrap();
+        let history = rail.history(&first, &program).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].delta, AtomicUnits::from_raw(3));
+        let history = rail.history(&second, &program).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].delta, AtomicUnits::from_raw(7));
+    }
+
+    #[tokio::test]
+    async fn every_refusal_the_keyed_mock_returns_has_a_safe_label() {
+        let rail = MockKeyedPayoutRail::new();
+        let recipient = recipient();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(15));
+        let mut seen = Vec::new();
+
+        rail.set_sending_enabled(false);
+        let capacity = rail.preflight().await.unwrap();
+        let stop = capacity.stop_label.expect("a stopped rail names why");
+        assert!(RailRefusal::StopPass(stop).label_is_safe(), "{stop}");
+        seen.push(
+            rail.send(&line(LINE_A, &recipient, &program, 1, 0))
+                .await
+                .unwrap_err(),
+        );
+        rail.set_sending_enabled(true);
+
+        rail.set_per_send_max(AtomicUnits::from_raw(1));
+        seen.push(
+            rail.send(&line(LINE_A, &recipient, &program, 2, 0))
+                .await
+                .unwrap_err(),
+        );
+        rail.set_per_send_max(AtomicUnits::from_raw(u128::MAX));
+
+        rail.lose_next_response();
+        seen.push(
+            rail.send(&line(LINE_A, &recipient, &program, u128::MAX, 0))
+                .await
+                .unwrap_err(),
+        );
+        seen.push(
+            rail.send(&line(LINE_B, &recipient, &program, 1, 0))
+                .await
+                .unwrap_err(),
+        );
+        seen.push(
+            rail.send(&line(LINE_A, &recipient, &program, 1, 0))
+                .await
+                .unwrap_err(),
+        );
+        let fresh = rail.program_for_link(uuid::Uuid::from_u128(16));
+        seen.push(
+            rail.send(&line(LINE_B, &recipient, &fresh, 1, 1))
+                .await
+                .unwrap_err(),
+        );
+        rail.mark_recipient_unavailable(&recipient);
+        seen.push(rail.probe_recipient(&recipient).await.unwrap_err());
+
+        assert_eq!(
+            seen.iter()
+                .map(|refusal| refusal.label())
+                .collect::<Vec<_>>(),
+            [
+                "payout_rail_sending_disabled",
+                "payout_send_over_max",
+                "lost_response",
+                "payout_amount_out_of_range",
+                "payout_line_conflict",
+                "payout_total_mismatch",
+                "payout_recipient_unavailable",
+            ]
+        );
+        for refusal in seen {
+            assert!(refusal.label_is_safe(), "{refusal:?}");
+        }
     }
 
     #[tokio::test]
