@@ -12,8 +12,11 @@
 //!   its `placed_at`) is in `[now - MODEL_ANSWER_WINDOW_WEEKS, now]`. A
 //!   session with no date at all is in no window and is not counted.
 //! - `left_out` counts sessions. `unknown_facts` sessions have no known task,
-//!   so they are counted on every row; a session read as no edits while a
-//!   model's `edits` is unknown (Codex shell-only work) is one of them,
+//!   so they are counted on every row; a Codex session with no per-turn
+//!   series (read before the reader, or trimmed by the counter store's
+//!   Codex budget) is one of them, since which model served it is
+//!   unknown; a session read as no edits while a model's `edits` is
+//!   unknown (Codex shell-only work) is one of them,
 //!   while a known no-edit session is in no question and no count. Every
 //!   other reason is counted on the
 //!   rows whose task types the session's task belongs to. A session whose

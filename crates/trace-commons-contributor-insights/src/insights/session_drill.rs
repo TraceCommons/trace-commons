@@ -166,7 +166,8 @@ pub fn session_drill(
             series: None,
         } => {
             drill.source = Some(AnalyticsSource::Codex);
-            // Read before the per-turn reader: no chart.
+            // Read before the per-turn reader, or its series trimmed by
+            // the counter store's Codex budget: no chart.
             drill.series_unavailable = Some(SeriesUnavailable::NotRecorded);
             match observed {
                 Some(observed) => {
