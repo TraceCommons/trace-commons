@@ -1,6 +1,7 @@
 # NEAR AI starter advance for new contributors -- design
 
-Date: 2026-10-21. Owner: Zaki. Status: draft, nothing built.
+Date: 2026-10-21. Owner: Zaki. Status: draft. Slice 1 (section 7) is built:
+features are recorded and a dry-run report reads them; nothing is sent.
 
 Builds on the NEAR AI payout rail in
 [`2026-10-21-nearai-credit-payout-design.md`](2026-10-21-nearai-credit-payout-design.md)
@@ -95,27 +96,30 @@ it ships (CLAUDE.md, no new notices without approval).
 
 ## 3. Plausibility check
 
-`starter-plausibility-v1` runs at ingest on each accepted envelope of an
-account that has no advance yet, after admission, redaction and the
-residual scan. It grants when every rule passes. There is no weighted
+`starter-plausibility-v1` reads the features ingest records for each
+envelope after admission, redaction and the residual scan, counting only
+submissions that stayed `accepted`. It grants when every rule passes. There is no weighted
 score, so a refusal names the rule that failed and the thresholds stay easy
 to reason about. Thresholds are proposals to tune in dry run (section 5).
 
-The evaluator keeps a per-account running summary, hash-only: counts of
-distinct session hashes, UTC day buckets, tool-name counts, model families,
-and small distribution sketches. It never stores trace text.
+Each envelope is reduced to a hash-only record: a session hash, a content
+hash, hour-truncated first and last event times, counts (tool calls,
+results, failures, known tool names, turns, think-time gaps, token and cost
+events), power-of-two bucket masks for turn gaps and tool latencies, and a
+model family. It never stores trace text, a tool argument, a model name or a
+session id. The evaluator folds an account's records at report time.
 
 | Rule | Proposed threshold | Why it suggests real use | Cost to fake |
 |---|---|---|---|
 | Accepted by ingest | Every counted envelope passed admission, redaction and residual scan | The bar every upload already meets | None extra |
 | Source agent | `source_session.adapter` is `claude-code` or `codex`, with UUID native ids | Scope of A1 | Trivial |
 | Volume | At least 8 distinct sessions and 150 tool calls | A few days of real work produces dozens of sessions | Low with an LLM |
-| Span | Sessions on at least 3 distinct UTC days, first to last at least 48 h, none in the future, none older than 180 days | "A few days" | Trivial |
+| Span | Sessions on at least 3 distinct UTC days, first to last at least 48 h, none in the future (envelopes older than 180 days are not counted) | "A few days" | Trivial |
 | Rhythm | Gaps between turns are irregular, with human think-time pauses; tool latencies are not constant | Scripted generators tend to be regular | Moderate |
-| Agent signature | Model names match the adapter (Claude models for Claude Code, OpenAI models for Codex); tool-call ids have the provider's shape; tool names fit the agent's tool set | Mixed or unknown shapes point at a synthetic source | Low once known |
+| Agent signature | Model names match the adapter where one is named (Claude models for Claude Code, OpenAI models for Codex); at least 60% of tool names fit the agent's tool set (MCP tools count for both) | Mixed or unknown shapes point at a synthetic source | Low once known |
 | Tool pairing | Over 95% of tool calls have a matching result; some calls fail and are retried | Real agent runs pair calls and include failures | Moderate |
-| Usage | Token counts present and growing within a session (cache reads rise turn by turn); list-price cost present | Real CLIs report usage this way | Moderate |
-| Not copied | No envelope duplicates one already in the corpus (exact content hash) or nearly duplicates another account's (simhash); sessions within the account are not near-duplicates of each other | Catches replayed or shared corpora | High for replay, low for fresh fakes |
+| Usage | Token counts on at least half the assistant messages, input tokens growing step to step at least half the time (context grows); some list-price cost present | Real CLIs report usage this way | Moderate |
+| Not copied | No two of the account's envelopes share a content hash. Cross-account duplicates (exact hash, simhash) are checked at send time, with the identity rules (section 4) | Catches replayed or shared corpora | High for replay, low for fresh fakes |
 
 ### Self-declared input
 
@@ -260,8 +264,10 @@ The reconciliation drill reports counts by state and outstanding exposure
   role in the style of `trace_payout_enumerator`, with `SELECT` on
   `(rail_id, subject_index, recipient_index, state)` only, assumed with
   `SET ROLE` for that one query, under the rail's single-flight lock.
-- Per-account plausibility summaries live in their own hash-only table,
-  deleted once an advance exists or the account is past its first 30 days.
+- Plausibility features live in their own hash-only table, one record per
+  submission (V131, `trace_starter_plausibility_features`), deleted with
+  their submission. Pruning records once an advance exists, or once an
+  account is past its first 30 days, comes with the advance schema.
 - Every state change writes a `trace_payout_audit` row (rail id, action,
   advance id hash, prior and new state, label, time).
 - Logs and audit stay hash-only: no recipient, subject, tenant or account
@@ -272,10 +278,25 @@ The reconciliation drill reports counts by state and outstanding exposure
 Four small PRs. The first has no dependency on the payout design and can
 start now; the rest stack after payout plan Task 5 (the pass).
 
-1. **Evaluator and dry-run report.** A pure function in
-   `trace-commons-server` over the per-account summary, updated at ingest
-   after admission; the summary table; a dry-run report route; the backfill.
-   Sends nothing.
+1. **Evaluator and dry-run report (built).**
+   - `trace_commons_server::starter_plausibility`: `extract_features` reduces
+     an envelope to a hash-only `StarterEnvelopeFeatures` record; `evaluate`
+     applies `starter-plausibility-v1` to an account's records. Both pure.
+   - V131 `trace_starter_plausibility_features`: one record per submission,
+     written once by ingest after the submission lands, while
+     `TRACE_COMMONS_NEAR_AI_STARTER_MODE=dry_run` (default `disabled`; `live`
+     refuses startup until PR 3). The write runs on its own task and never
+     blocks or fails an upload. The account read counts only `accepted`,
+     unwithdrawn submissions of live principal links.
+   - `POST /v1/admin/starter-advance/dry-run-report?limit=N`, admin only:
+     label-only counts (accounts scanned, with features, would grant, first
+     rule not met). It enumerates accounts through the earned-trust worker
+     seam, so the ingest login needs `trace_account_trust_worker`
+     (`docs/operator/account-trust.md`).
+   - Not yet: the backfill over existing first uploads. Features exist only
+     for submissions received in `dry_run`, because building them needs the
+     envelope, which is stored encrypted. A backfill would read the stored
+     artifacts through the same path the rescrub uses; it is its own PR.
 2. **Advance schema.** `trace_payout_advances`, the cross-tenant uniqueness
    role, audit actions.
 3. **Pass change and advance credential.** The new target formula, the

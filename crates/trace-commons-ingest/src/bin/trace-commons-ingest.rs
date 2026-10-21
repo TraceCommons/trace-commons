@@ -2014,6 +2014,9 @@ struct AppState {
     /// what the evaluator's `applied` mode runs and admission reads.
     account_trust_applied_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
+    /// `TRACE_COMMONS_NEAR_AI_STARTER_MODE`: whether submissions record the
+    /// starter advance's plausibility features. See `starter_advance`.
+    near_ai_starter_mode: starter_advance::StarterMode,
     /// Unattended fact recording and evaluation under the scoped
     /// `account_trust_worker` token.
     account_trust_scheduler: Option<account_trust_growth_routes::AccountTrustSchedulerConfig>,
@@ -4589,6 +4592,7 @@ impl AppState {
             account_trust_growth_routes::applied_policy_from_env(account_admission.as_ref())?
                 .map(Arc::new);
         let account_trust_scheduler = account_trust_growth_routes::scheduler_config_from_env()?;
+        let near_ai_starter_mode = starter_advance::starter_mode_from_env(db_mirror.is_some())?;
         if let Some(account_config) = account_admission.as_ref() {
             let db = db_mirror
                 .as_ref()
@@ -4994,6 +4998,7 @@ impl AppState {
             admission,
             account_admission,
             account_trust_shadow_policy,
+            near_ai_starter_mode,
             account_trust_applied_policy,
             account_trust_scheduler,
             benchmark_registry_scheduler,
@@ -9177,6 +9182,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/account-trust-drill",
             post(account_trust_growth_routes::account_trust_drill_handler),
+        )
+        .route(
+            "/v1/admin/starter-advance/dry-run-report",
+            post(starter_advance::starter_dry_run_report_handler),
         )
         .route(
             "/v1/admin/scores-by-submission",
@@ -16237,6 +16246,16 @@ async fn submit_trace_handler(
             }
         }
 
+        // The starter advance's plausibility features, hash-only, when its
+        // mode is on. Never blocks or fails the upload.
+        starter_advance::observe_submission(
+            state.as_ref(),
+            tenant.tenant_id(),
+            record.submission_id,
+            &envelope,
+            record.received_at,
+        );
+
         // The record has only just landed (or been re-scrubbed from
         // quarantine): the gate has not seen it, so there is no decision to
         // look up and the receipt carries the labelled estimate.
@@ -21192,6 +21211,8 @@ use native_passkey::{
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
 
+#[path = "trace_commons_ingest_internal/starter_advance.rs"]
+mod starter_advance;
 #[path = "trace_commons_ingest_internal/step_up_page.rs"]
 mod step_up_page;
 

@@ -482,6 +482,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "account_trust_worker_unavailable".into(),
         ))
     }
+    /// Records one accepted submission's starter-advance plausibility
+    /// features (V131) once. Returns whether a row was written. See
+    /// `crate::starter_plausibility`.
+    async fn record_starter_plausibility_features(
+        &self,
+        _tenant_id: &str,
+        _submission_id: uuid::Uuid,
+        _features: &crate::starter_plausibility::StarterEnvelopeFeatures,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("starter_features_unavailable".into()))
+    }
+    /// The starter-advance features of one account's own accepted,
+    /// unwithdrawn submissions, oldest first. Tenant-scoped.
+    async fn starter_plausibility_features_for_account(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::starter_plausibility::StarterEnvelopeFeatures>, DatabaseError> {
+        Err(DatabaseError::Pool("starter_features_unavailable".into()))
+    }
     /// Sources naming this account that have no trust fact yet.
     async fn list_account_trust_fact_candidates(
         &self,
