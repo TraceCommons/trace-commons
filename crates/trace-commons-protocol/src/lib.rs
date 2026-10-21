@@ -6,6 +6,7 @@ pub mod device_invite_subject;
 pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;
+pub mod insights_judgement;
 pub mod insights_pricing;
 pub mod insights_usage_series;
 pub mod invite_lookup;
