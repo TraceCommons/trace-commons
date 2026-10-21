@@ -12,7 +12,8 @@
 //! an equal total is a repeat and is skipped, and a smaller one makes that
 //! turn's usage unknown and becomes the new baseline. An event with no
 //! running total is a turn of unknown usage and leaves the baseline as it
-//! was. Counters come from
+//! was. A turn's usage is also unknown when `info.last_token_usage` does not
+//! add up to what the running total grew by. Counters come from
 //! `info.last_token_usage` through `session_pricing::codex_turn_usage`, the
 //! one pricing mapping: `uncached_input = input - cached - cache_write`, `cache_read =
 //! cached`, `cache_write = TotalOnly(cache_write)`, `output = output`. The
@@ -373,23 +374,24 @@ impl<'k> CodexTurnSeriesScan<'k> {
         let total = info
             .pointer("/total_token_usage/total_tokens")
             .and_then(Value::as_u64);
-        let known = match total {
+        // What the running total grew by: the turn's usage when known.
+        let grew = match total {
             Some(total) if total > self.baseline => {
+                let grew = total - self.baseline;
                 self.baseline = total;
-                true
+                Some(grew)
             }
             Some(total) if total == self.baseline => return,
             Some(total) => {
                 self.baseline = total;
-                false
+                None
             }
-            None => false,
+            None => None,
         };
-        let counters = if known {
-            info.get("last_token_usage").and_then(codex_counters)
-        } else {
-            None
-        };
+        let counters = grew.and_then(|grew| {
+            info.get("last_token_usage")
+                .and_then(|usage| codex_counters(usage, grew))
+        });
         if self.turns.len() >= MAX_SERIES_TURNS {
             self.truncated = true;
             return;
@@ -797,14 +799,25 @@ impl<'k> CodexTurnSeriesScan<'k> {
 
 /// The stored counters for a `last_token_usage` object, through the one
 /// pricing mapping ([`codex_turn_usage`]), or `None` when any field is
-/// missing, does not fit, or the cached and written tokens exceed the input.
-fn codex_counters(usage: &Value) -> Option<KnownTurnUsage> {
+/// missing, does not fit, or the cached and written tokens exceed the input,
+/// or when the response's tokens (`input + output`, and its own
+/// `total_tokens` when stated) are not `grew`, what the running total grew
+/// by: a turn whose two readings disagree is unknown, never a partial.
+fn codex_counters(usage: &Value, grew: u64) -> Option<KnownTurnUsage> {
     let field = |name: &str| usage.get(name).and_then(Value::as_u64);
+    let (input, output) = (field("input_tokens")?, field("output_tokens")?);
+    if input.checked_add(output)? != grew
+        || usage
+            .get("total_tokens")
+            .is_some_and(|total| total.as_u64() != Some(grew))
+    {
+        return None;
+    }
     codex_turn_usage(
-        field("input_tokens")?,
+        input,
         field("cached_input_tokens")?,
         field("cache_write_input_tokens")?,
-        field("output_tokens")?,
+        output,
     )
 }
 
