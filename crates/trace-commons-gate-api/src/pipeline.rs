@@ -984,6 +984,8 @@ pub enum ContractError {
     InvalidRecipientRef,
     #[error("payout rail line is malformed")]
     InvalidRailLine,
+    #[error("payout rail descriptor is malformed")]
+    InvalidRailDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

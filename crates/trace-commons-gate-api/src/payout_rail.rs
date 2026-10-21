@@ -42,6 +42,9 @@ pub const TRACE_CREDIT_RAIL_ID: &str = "trace_credit";
 pub const NEAR_AI_ORG_RECIPIENT_KIND: &str = "near_ai_org";
 /// Longest accepted rate version label.
 pub const MAX_RAIL_RATE_VERSION_LEN: usize = 64;
+/// What [`RailRefusal::safe_label`] and `Display` print in place of a
+/// rail's label that is not a safe identifier.
+pub const RAIL_REFUSAL_FALLBACK_LABEL: &str = "payout_rail_label_invalid";
 /// Longest accepted opaque recipient value, in bytes.
 pub const MAX_RECIPIENT_REF_LEN: usize = 4096;
 
@@ -148,12 +151,13 @@ pub struct RailDescriptor {
 }
 
 impl RailDescriptor {
-    /// Checks the instrument descriptor (kind, location, `decimals`) and
-    /// refuses a `wire_max` of zero, which no send could fit under.
+    /// Checks the instrument descriptor (kind, location, `decimals`), then
+    /// refuses a `wire_max` of zero, which no send could fit under, as a
+    /// fault in the rail's own descriptor.
     pub fn validate(&self) -> Result<(), ContractError> {
         self.instrument.validate()?;
         if self.wire_max == Some(AtomicUnits::ZERO) {
-            return Err(ContractError::InvalidInstrumentDescriptor);
+            return Err(ContractError::InvalidRailDescriptor);
         }
         Ok(())
     }
@@ -174,6 +178,12 @@ fn is_safe_rate_version(value: &str) -> bool {
 
 /// One immutable rate: `rail_units = floor(award_atomic_units * numerator /
 /// denominator)`. A version names one rate forever.
+///
+/// The fraction is kept as given, not reduced: `(2, 1)` and `(4, 2)` are
+/// different terms, so a caller that checks whether a version's rate
+/// changed compares the raw `(numerator, denominator)` pair on purpose.
+/// [`RailRate::price`] refuses when `award * numerator` overflows `u128`,
+/// even where the quotient would fit: a refusal, never an approximation.
 ///
 /// `Debug` prints the version only: rates stay out of logs.
 #[derive(Clone, PartialEq, Eq)]
@@ -266,7 +276,44 @@ impl RecipientRef {
 /// once the line lands; `confirmed_total` is what we have confirmed on the
 /// program; `delta` is the difference. A rail uses whichever of `delta` and
 /// `target_total` its exactly-once mechanism needs.
+///
+/// Outside this crate a line is built only through [`RailLine::new`], which
+/// derives `delta` and checks the reference; its fields stay readable:
+///
+/// ```
+/// use trace_commons_gate_api::payout_rail::{RailLine, RecipientRef};
+/// use trace_commons_gate_api::pipeline::AtomicUnits;
+///
+/// let recipient = RecipientRef::new("r").unwrap();
+/// let line = RailLine::new(
+///     "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+///     &recipient,
+///     "p",
+///     AtomicUnits::from_raw(3),
+///     AtomicUnits::from_raw(1),
+/// )
+/// .unwrap();
+/// assert_eq!(line.delta, AtomicUnits::from_raw(2));
+/// ```
+///
+/// A struct literal, which would skip those checks, does not compile:
+///
+/// ```compile_fail
+/// use trace_commons_gate_api::payout_rail::{RailLine, RecipientRef};
+/// use trace_commons_gate_api::pipeline::AtomicUnits;
+///
+/// let recipient = RecipientRef::new("r").unwrap();
+/// let _line = RailLine {
+///     line_ref_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+///     recipient: &recipient,
+///     program: "p",
+///     target_total: AtomicUnits::from_raw(3),
+///     delta: AtomicUnits::from_raw(9),
+///     confirmed_total: AtomicUnits::from_raw(1),
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RailLine<'a> {
     /// `sha256:` reference that identifies the line. A rail derives any
     /// idempotency key from this.
@@ -356,8 +403,10 @@ pub struct RailHistoryEntry {
 }
 
 /// Every rail error, mapped into one closed set. The pass acts on the
-/// variant only, never on a rail's raw error. Each carried label is a safe
-/// identifier (the [`InstrumentId`] rule).
+/// variant only, never on a rail's raw error. Each carried label must be a
+/// safe identifier (the [`InstrumentId`] rule); a rail is outside this
+/// crate, so that is checked at run time ([`RailRefusal::label_is_safe`]),
+/// and `Display` prints [`RailRefusal::safe_label`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailRefusal {
     /// Try again later; the line stays pending.
@@ -381,11 +430,26 @@ impl RailRefusal {
             Self::RecipientUnavailable => "payout_recipient_unavailable",
         }
     }
+
+    /// Whether [`RailRefusal::label`] is a safe identifier.
+    pub fn label_is_safe(self) -> bool {
+        is_safe_identifier(self.label())
+    }
+
+    /// The label when it is safe, otherwise [`RAIL_REFUSAL_FALLBACK_LABEL`].
+    /// The payout pass logs and stores this, never [`RailRefusal::label`].
+    pub fn safe_label(self) -> &'static str {
+        if self.label_is_safe() {
+            self.label()
+        } else {
+            RAIL_REFUSAL_FALLBACK_LABEL
+        }
+    }
 }
 
 impl fmt::Display for RailRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.label())
+        formatter.write_str(self.safe_label())
     }
 }
 
@@ -396,10 +460,21 @@ impl std::error::Error for RailRefusal {}
 /// **Exactly-once contract.** A send is identified by its line
 /// ([`RailLine::line_ref_hash`]). A repeated `send` for the same line never
 /// repeats the effect: it returns the first call's outcome, or
-/// `AlreadyAtOrAbove`. Each rail meets this with its own mechanism. Recovery
-/// depends on it: the pass records a line as pending before it calls `send`,
-/// so a crash or a lost response makes the next pass call `find_receipt`
-/// and then, if nothing answers the line, `send` again for the same line.
+/// `AlreadyAtOrAbove`. Each rail meets this with its own mechanism.
+///
+/// **Recovery** depends on it (payout spec section 4, "Crash recovery, per
+/// rail"). The pass records a line as pending before it calls `send`, so
+/// after a crash or a lost response the next pass:
+///
+/// 1. calls `send` again for the **same** line first. If the first send
+///    never committed, it lands now (`Committed`); if it did, a keyed rail
+///    answers `Committed` with the first receipt and a running-total rail
+///    answers `AlreadyAtOrAbove`;
+/// 2. only on `AlreadyAtOrAbove`, calls `find_receipt` for the line,
+///    excluding receipts already claimed by other lines;
+/// 3. if that finds no record, holds the line as
+///    `payout_recovery_unmatched` for an operator. It never treats
+///    `AlreadyAtOrAbove` alone as proof that this line was paid.
 ///
 /// A rail that cannot answer `read_total`, `find_receipt` and `history`
 /// exactly cannot meet the recovery and close rules, and does not qualify.
@@ -577,12 +652,16 @@ mod tests {
             bad_contract.validate(),
             Err(ContractError::InvalidInstrumentDescriptor)
         );
+        // A zero wire bound is the rail descriptor's own fault, not the
+        // instrument's.
         let mut zero_wire = keyed_descriptor(18);
         zero_wire.wire_max = Some(AtomicUnits::ZERO);
         assert_eq!(
             zero_wire.validate(),
-            Err(ContractError::InvalidInstrumentDescriptor)
+            Err(ContractError::InvalidRailDescriptor)
         );
+        zero_wire.wire_max = Some(AtomicUnits::from_raw(1));
+        assert_eq!(zero_wire.validate(), Ok(()));
     }
 
     #[test]
@@ -687,5 +766,29 @@ mod tests {
         assert_eq!(RailRefusal::StopPass("y").label(), "y");
         assert_eq!(RailRefusal::HoldLine("z").label(), "z");
         assert_eq!(RailRefusal::Failed("w").label(), "w");
+    }
+
+    #[test]
+    fn an_unsafe_refusal_label_is_replaced_before_it_can_be_logged() {
+        for refusal in [
+            RailRefusal::Retry("payout_rail_unavailable"),
+            RailRefusal::RecipientUnavailable,
+        ] {
+            assert!(refusal.label_is_safe());
+            assert_eq!(refusal.safe_label(), refusal.label());
+            assert_eq!(refusal.to_string(), refusal.label());
+        }
+        for refusal in [
+            RailRefusal::Retry("has a space"),
+            RailRefusal::StopPass("Token=abc"),
+            RailRefusal::HoldLine(""),
+            RailRefusal::Failed("https://example.invalid/x"),
+        ] {
+            assert!(!refusal.label_is_safe(), "{refusal:?}");
+            assert_eq!(refusal.safe_label(), RAIL_REFUSAL_FALLBACK_LABEL);
+            // Display is what a log line carries: never the unsafe label.
+            assert_eq!(refusal.to_string(), RAIL_REFUSAL_FALLBACK_LABEL);
+        }
+        assert!(is_safe_identifier(RAIL_REFUSAL_FALLBACK_LABEL));
     }
 }
