@@ -20,6 +20,9 @@ use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
 
 use crate::db::{PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore};
 
+/// The NEAR AI rail's id as a log field.
+pub const NEAR_AI_PAYOUT_RAIL_LABEL: &str = trace_commons_gate_api::NEAR_AI_RAIL_ID;
+
 /// The NEAR AI rail's mode setting. Every mode defaults to `disabled`.
 pub const NEAR_AI_PAYOUT_MODE_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_MODE";
 

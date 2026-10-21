@@ -4856,6 +4856,41 @@ impl AppState {
         let near_attestation_key_report_client =
             near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
 
+        // Payout rails (docs/superpowers/specs/2026-10-21-nearai-credit-
+        // payout-design.md, section 4 "Rate"): unless the NEAR AI rail is
+        // disabled, the default, record the installed settlement table's
+        // rate as that rail's epoch. A version re-installed with a different
+        // rate refuses boot. Disabled touches nothing, so an ingest login
+        // without the payout writer role boots as before. Logs carry the
+        // rail and a label, never the rate.
+        let credit_settlement_table = credit_estimate::settlement_table_from_env()?;
+        let near_ai_payout_mode = trace_commons_server::payout_rate::PayoutMode::near_ai_from_env()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "{} refused: {}",
+                    trace_commons_server::payout_rate::NEAR_AI_PAYOUT_MODE_ENV,
+                    error.label()
+                )
+            })?;
+        let payout_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.as_ref() as &dyn trace_commons_server::db::PayoutStore
+        });
+        match trace_commons_server::payout_rate::near_ai_rate_epoch_at_boot(
+            near_ai_payout_mode,
+            credit_settlement_table.as_deref(),
+            payout_store,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => tracing::info!(
+                rail = trace_commons_server::payout_rate::NEAR_AI_PAYOUT_RAIL_LABEL,
+                outcome = outcome.as_label(),
+                "payout rate epoch at boot"
+            ),
+            Ok(None) => {}
+            Err(error) => anyhow::bail!("near_ai payout refused to start: {}", error.label()),
+        }
+
         let state = Self {
             root,
             near_attestation_client,
@@ -5040,7 +5075,7 @@ impl AppState {
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
-            credit_settlement_table: credit_estimate::settlement_table_from_env()?,
+            credit_settlement_table,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
