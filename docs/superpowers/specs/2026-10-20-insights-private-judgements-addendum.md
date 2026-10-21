@@ -141,28 +141,91 @@ the fallback if the scrub cannot pass its byte tests.
 The shape below is option B's. Under A, `excerpts` and `final_line` are always
 empty. Under C they are empty unless that session was approved.
 
-A **judgement digest**, built locally after the privacy filter runs:
+A **judgement digest**, built locally. Every text field passes the scrub
+(below) whole, before it is cut:
 
 - **Counts:** the ones the model-answers design already stores (tool kinds,
   edit counts, failing and passing commands, denial and interrupt markers),
   plus per-turn edit and command outcomes.
-- **Contributor prompts:** at most 12 per session, each scrubbed and cut to
-  240 characters. With more than 12, take the first 4, the last 4, and the 4
+- **Contributor prompts:** at most 12 per session, each scrubbed whole and
+  then cut to its budget ("Size", below). With more than 12, take the first 4, the last 4, and the 4
   just before each denial, interrupt or undo (the 4 up to and including the
   prompt whose turn carried it; earlier events win when slots run out).
   Slots the events leave free go to the middle prompts not yet chosen, at
   evenly spaced positions, so a session with more than 12 prompts always
   sends 12. Never more than 12.
-- **Final message:** the first line of the model's final message, scrubbed and
-  cut to 160 characters.
+- **Final message:** the first line of the model's final message, scrubbed
+  whole and then cut to its budget.
 - **Edited files:** each file's extension class, never its path.
 - **Never:** file contents, diffs, paths, repository names or identifiers.
 
-The digest has a byte cap of 8 KiB, and is dropped whole rather than truncated
-mid-field. It also has a hash. The daemon
-logs only the hash (CLAUDE.md, hash-only logging). The digest builder is pure
-and lives in the contributor-insights crate. A test over the serialized bytes
-pins that no path, file name or raw text beyond the scrubbed excerpts appears.
+The digest has a hash, and the daemon logs only the hash (CLAUDE.md,
+hash-only logging). The digest builder is pure and lives in the
+contributor-insights crate.
+
+#### The scrub (#1501 review point 3)
+
+"After the privacy filter runs" named no filter. The scrub is defined here,
+and the digest builder runs it itself, so its order cannot be got wrong by a
+caller. contributor-insights already depends on `trace-commons-protocol`, so
+it can.
+
+1. **The redactor:**
+   `DeterministicTraceRedactor::deterministic_only(known_path_prefixes)`
+   (`trace-commons-protocol`). It is deterministic and ignores the
+   environment by construction. The builder never calls `build_redactor` or
+   `build_redactor_with` (`contributor/src/envelope.rs`). Those can attach a
+   NEAR AI privacy filter through `pii_filter = "near-ai"` or
+   `TRACE_PRIVACY_FILTER_BACKEND`, which is a network call before consent.
+   `known_path_prefixes` are the home directory and the session's recorded
+   working directory, as `build_deterministic_preview_redactor` uses.
+2. **The whole text first.** The redactor runs on the whole prompt and the
+   whole final line, before any cut. A secret that straddles the cut is
+   therefore masked whole and cannot leave half visible.
+3. **The excerpt masker**, a pure function in `judgement_digest.rs`. It runs
+   after the redactor, because the redactor masks only secrets and known
+   absolute path prefixes:
+   - email addresses become `<email>`;
+   - URLs (`scheme://...` and `www.` forms) become `<url>`;
+   - any token containing `/` or `\` with text on both sides, and any token
+     ending in a file extension the file-class table knows, becomes
+     `<path:class>` (for example `<path:source>`). This covers relative paths,
+     and backticked names such as the "Updated `src/...`" final line;
+   - the repository and folder name, case-insensitive, becomes `<repo>`. That
+     is the last component of the session's working directory, and its parts
+     split on `-`, `_` and `.` that are at least 4 characters long;
+   - runs of two or more capitalised words that do not start a sentence
+     become `<name>`. This over-masks code identifiers in prose, which is the
+     safe direction;
+   - digit runs of 6 or more become `<number>`.
+4. **The residual gate.** The redactor's secret detector runs again over each
+   masked excerpt. An excerpt with any surviving label is dropped and counted
+   in `excerpts_dropped`. A session whose `ResidualPiiRisk`, computed by the
+   existing `residual_risk` rules over its redaction report, is not `Low` sends
+   no excerpts and no final line: counts only, as option A.
+5. **Then the cut** to the byte budget ("Size").
+
+**What leaves anyway, stated plainly:** words that none of these rules
+recognise. A client name written in lower case, or a product name, can pass.
+That residual is what O1 weighs, and it is why option C exists.
+
+**The test covers the excerpts.** A test over the serialized digest bytes
+(excerpts included, not "beyond the excerpts") asserts that none of a
+fixture's sensitive substrings appears anywhere. The fixtures:
+
+- "fix the refund bug in acme-billing/src/invoices/stripe_refund.rs for Jane
+  Doe <jane@acme.com>", with the working directory `.../acme-billing`: no
+  `acme`, `billing`, `invoices`, `stripe_refund`, `Jane`, `Doe` or
+  `jane@acme.com`;
+- a final line "Updated `src/payments/refund.rs`": no `src/`, `payments` or
+  `refund.rs`;
+- a secret (an API-key pattern the deterministic redactor knows) that starts
+  at character 230 of a 400-character prompt: neither half appears;
+- a URL with a query string, and an absolute path under the home directory;
+- the same input built with `TRACE_PRIVACY_FILTER_BACKEND=near-ai` and
+  `pii_filter = "near-ai"` set: byte-identical output. A structural test also
+  asserts that the builder's module constructs a redactor only through
+  `deterministic_only`.
 
 ### Folder rules (O2: the design's default, for PM sign-off)
 
