@@ -3210,6 +3210,37 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<Option<PayoutLink>, DatabaseError>;
 
+    /// The account-agnostic read the pass needs: every link on `rail` in
+    /// this tenant whose state is one of `states`, by account then age.
+    async fn payout_links(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        states: &[PayoutLinkState],
+    ) -> Result<Vec<PayoutLink>, DatabaseError>;
+
+    /// Records a confirmed unlink on an `active` link (spec section 5,
+    /// "Unlink"), with an audit row; the pass then closes it. False, with
+    /// nothing changed, when the link is not active or is already marked.
+    async fn mark_payout_link_unlink_requested(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Marks an `active` or `closing` link's recipient unavailable (the
+    /// rail answered that the recipient is gone), with an audit row. A mark,
+    /// not a state: the link keeps its slot until it is closed. False, with
+    /// nothing changed, when the link is in neither state or already marked.
+    async fn mark_payout_link_recipient_unavailable(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError>;
+
     /// Inserts a `waiting` or `active` link and its audit row together.
     async fn insert_payout_link(
         &self,
@@ -3326,6 +3357,11 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
         handle_hash: &str,
     ) -> Result<Option<PayoutLinkRequest>, DatabaseError>;
+
+    /// Deletes this tenant's requests whose `expires_at` has passed by the
+    /// database clock; returns how many. Requests are audited when made, so
+    /// a discard writes no audit row.
+    async fn purge_expired_payout_link_requests(&self, tenant: &str) -> Result<u64, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(

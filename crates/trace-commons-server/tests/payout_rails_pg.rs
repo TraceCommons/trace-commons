@@ -1984,3 +1984,160 @@ async fn a_closed_link_is_final_and_links_move_only_forward() {
         assert!(is_check_violation(&error), "{what}: {error}");
     }
 }
+
+#[tokio::test]
+async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let store = &fixture.runtime;
+    let near_ai = rail("near_ai");
+    let active = link(accounts[0], "near_ai", PayoutLinkState::Active, "m1");
+    let waiting = link(accounts[1], "near_ai", PayoutLinkState::Waiting, "m2");
+    let other_rail = link(accounts[0], "test_keyed", PayoutLinkState::Waiting, "m3");
+    for l in [&active, &waiting, &other_rail] {
+        store.insert_payout_link(&tenant, l).await.unwrap();
+    }
+
+    // Waiting and closing links are readable per rail and state.
+    let read = store
+        .payout_links(&tenant, &near_ai, &[PayoutLinkState::Waiting])
+        .await
+        .unwrap();
+    assert_eq!(
+        read.iter().map(|l| l.link_id).collect::<Vec<_>>(),
+        vec![waiting.link_id]
+    );
+    let read = store
+        .payout_links(
+            &tenant,
+            &near_ai,
+            &[PayoutLinkState::Active, PayoutLinkState::Waiting],
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.len(), 2);
+
+    // A confirmed unlink marks the active link once.
+    assert!(
+        store
+            .mark_payout_link_unlink_requested(&tenant, active.link_id, ACTOR)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_payout_link_unlink_requested(&tenant, active.link_id, ACTOR)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_payout_link_unlink_requested(&tenant, waiting.link_id, ACTOR)
+            .await
+            .unwrap(),
+        "only a live link is unlinked"
+    );
+    // A 404 from the rail marks the link's recipient unavailable once.
+    assert!(
+        store
+            .mark_payout_link_recipient_unavailable(
+                &tenant,
+                active.link_id,
+                ACTOR,
+                Some("organization_unavailable")
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .mark_payout_link_recipient_unavailable(&tenant, active.link_id, ACTOR, None)
+            .await
+            .unwrap()
+    );
+    let marked = store
+        .payout_live_link(&tenant, accounts[0], &near_ai)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(marked.unlink_requested_at.is_some());
+    assert!(marked.recipient_unavailable_at.is_some());
+    assert_eq!(marked.version, 3, "each mark is a new version");
+
+    // An operator release records its own audit action.
+    store
+        .transition_payout_link(
+            &tenant,
+            active.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkReleased,
+            ACTOR,
+            Some("operator_release"),
+        )
+        .await
+        .unwrap();
+    let audit = store.payout_audit_actions(&tenant, &near_ai).await.unwrap();
+    for action in [
+        PayoutAuditAction::UnlinkRequested,
+        PayoutAuditAction::LinkRecipientUnavailable,
+        PayoutAuditAction::LinkReleased,
+    ] {
+        assert!(audit.contains(&action), "{action:?} not audited");
+    }
+    let closing = store
+        .payout_links(&tenant, &near_ai, &[PayoutLinkState::Closing])
+        .await
+        .unwrap();
+    assert_eq!(closing.len(), 1);
+    assert_eq!(closing[0].link_id, active.link_id);
+
+    // Expired requests are purged; a live one stays.
+    let request = |key: Uuid, expires: chrono::DateTime<chrono::Utc>| PayoutLinkRequestWrite {
+        account_id: accounts[0],
+        rail_id: near_ai.clone(),
+        idempotency_key: key,
+        handle_hash: sha(&format!("purge-handle:{key}")),
+        request_digest: sha(&format!("purge-digest:{key}")),
+        action: PayoutLinkAction::Unlink,
+        expected_current_version: None,
+        recipient: None,
+        expires_at: expires,
+        actor_ref_hash: ACTOR.into(),
+    };
+    let soon = request(
+        Uuid::new_v4(),
+        chrono::Utc::now() + chrono::Duration::milliseconds(800),
+    );
+    let later = request(
+        Uuid::new_v4(),
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    );
+    for r in [&soon, &later] {
+        store.insert_payout_link_request(&tenant, r).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        store
+            .purge_expired_payout_link_requests(&tenant)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .take_payout_link_request(&tenant, accounts[0], &near_ai, &soon.handle_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .take_payout_link_request(&tenant, accounts[0], &near_ai, &later.handle_hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

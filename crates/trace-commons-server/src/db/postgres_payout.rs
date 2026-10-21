@@ -326,6 +326,109 @@ impl PayoutStore for PgBackend {
         row.as_ref().map(link_from_row).transpose()
     }
 
+    async fn payout_links(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        states: &[PayoutLinkState],
+    ) -> Result<Vec<PayoutLink>, DatabaseError> {
+        let states: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT {LINK_COLUMNS} FROM trace_payout_links
+                      WHERE tenant_id = $1 AND rail_id = $2 AND state = ANY($3::TEXT[])
+                      ORDER BY account_id, created_at, link_id"
+                ),
+                &[&tenant, &rail.as_str(), &states],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(link_from_row).collect()
+    }
+
+    async fn mark_payout_link_unlink_requested(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE trace_payout_links
+                    SET unlink_requested_at = clock_timestamp(), version = version + 1,
+                        updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'active'
+                    AND unlink_requested_at IS NULL
+                  RETURNING rail_id",
+                &[&tenant, &link_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let rail: String = row.get(0);
+        insert_audit(
+            &tx,
+            tenant,
+            &rail,
+            PayoutAuditAction::UnlinkRequested,
+            actor_ref_hash,
+            Some(link_id),
+            Some(PayoutLinkState::Active),
+            Some(PayoutLinkState::Active),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn mark_payout_link_recipient_unavailable(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE trace_payout_links
+                    SET recipient_unavailable_at = clock_timestamp(), version = version + 1,
+                        updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND link_id = $2 AND state IN ('active', 'closing')
+                    AND recipient_unavailable_at IS NULL
+                  RETURNING rail_id, state",
+                &[&tenant, &link_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let rail: String = row.get(0);
+        let state = parse_link_state(row.get(1))?;
+        insert_audit(
+            &tx,
+            tenant,
+            &rail,
+            PayoutAuditAction::LinkRecipientUnavailable,
+            actor_ref_hash,
+            Some(link_id),
+            Some(state),
+            Some(state),
+            label,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     async fn insert_payout_link(
         &self,
         tenant: &str,
@@ -933,6 +1036,20 @@ impl PayoutStore for PgBackend {
             recipient,
             expires_at: row.get(11),
         }))
+    }
+
+    async fn purge_expired_payout_link_requests(&self, tenant: &str) -> Result<u64, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let purged = tx
+            .execute(
+                "DELETE FROM trace_payout_link_requests
+                  WHERE tenant_id = $1 AND expires_at <= clock_timestamp()",
+                &[&tenant],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(purged)
     }
 
     async fn payout_audit_actions(
