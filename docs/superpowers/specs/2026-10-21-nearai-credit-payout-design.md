@@ -1,9 +1,17 @@
-# Paying contributors in NEAR AI credits -- design
+# Parallel payout rails, starting with NEAR AI credit -- design
 
 Date: 2026-10-21. Owner: Zaki. Status: draft, nothing built. The owner
-settled every design decision on 2026-10-21 (below). What is still open is
-listed in section 12. Section 11 maps each point of the review of the
-earlier settlement-rail draft (#1415) to where this design handles it.
+settled every design decision on 2026-10-21 (below). What is still open,
+and the defaults the owner may override, are listed in section 12. Section
+11 maps each point of the review of the earlier settlement-rail draft
+(#1415) to where this design handles it, per rail. The implementation plan
+is [`../plans/2026-10-21-nearai-credit-payout.md`](../plans/2026-10-21-nearai-credit-payout.md).
+
+The payout flow is a set of **parallel settlement rails**, each settled from
+the same award (D8). Trace Credit is the award and the first rail. NEAR AI
+credit is the first external rail and the only one this design builds.
+Later rails (a NEP-141 Trace Credit token, BAT) plug into the same
+interface (section 3) and are not designed here.
 
 ## Owner decisions
 
@@ -54,12 +62,23 @@ All dated 2026-10-21. The owner's words are quoted.
   credit. No review flag: it would mean widening the cross-tenant
   enumeration role (section 4) to the org blind index, and nothing would act
   on it.
+- **(D8) Many rails, settled in parallel.** "our general model is that we
+  should imagine a future of multiple settlement in the payout flow. Our
+  current settlement is trace credit and near ai but there can and will be
+  more." So the payout flow is N rails behind one interface (section 3).
+  Each enabled rail pays its own instrument from the same finalized award,
+  independently: a failure, hold or halt on one rail never blocks or delays
+  another. Every exactly-once, crash-recovery, ceiling, kill-switch and
+  passkey rule in this design is stated per rail. D6 is the first instance
+  of this rule.
 
-This spec covers paying Trace Commons contributors in NEAR AI inference
-credit through the org-to-org transfer API that nearai/cloud-api PR #1271
-added. It covers the commons side (a transfer client, the payout pass, crash
-recovery and reconciliation), the contributor side (linking a NEAR AI
-organization), eligibility, a staging test plan and the threat model.
+This spec covers the rail interface and the payout pass that drives every
+external rail, and then the first external rail: paying Trace Commons
+contributors in NEAR AI inference credit through the org-to-org transfer
+API that nearai/cloud-api PR #1271 added. For that rail it covers the
+commons side (a transfer client, crash recovery and reconciliation), the
+contributor side (linking a NEAR AI organization), eligibility, a staging
+test plan and the threat model.
 
 It builds on, and does not repeat:
 
@@ -259,11 +278,14 @@ Our tree is `origin/main` at f164d68f9. cloud-api is the #1271 merge commit
 
 ## 1. Goal and non-goals
 
-**Goal.** A contributor account that has linked a NEAR AI organization
-receives NEAR AI inference credit for the Trace Credit it settles, as soon
-as it settles. The commons sends from its own reseller org with a scoped
-credential. Every send is exactly-once, budget-capped and reconcilable
-against #1271's transfer history.
+**Goal.** One payout pass drives any number of external rails, each paying
+its own instrument from the same settled award (D8). The first rail: a
+contributor account that has linked a NEAR AI organization receives NEAR AI
+inference credit for the Trace Credit it settles, as soon as it settles.
+The commons sends from its own reseller org with a scoped credential. Every
+send, on every rail, is exactly-once, budget-capped and reconcilable
+against that rail's own external history (for NEAR AI, #1271's transfer
+history).
 
 **Funding model** (owner, 2026-10-19). The commons runs one reseller org.
 NEAR AI funds it first with an admin grant. Later the commons buys payment
@@ -273,7 +295,14 @@ credits in the org they chose.
 **Non-goals.**
 
 - Changing Trace Credit. A payout leaves the ledger, the batches and the
-  NEP-141 rail exactly as they are (D6).
+  NEP-141 rail exactly as they are (D6). Trace Credit is a rail in the
+  sense of section 3, but its settlement is the existing code: nothing here
+  refactors `trace_credit_ledger`, `trace_credit_settlement_batches`,
+  `trace_near_credit_outbox`, `NearPayoutAdapter`, `process_payouts` or
+  `SettlementAdapter` onto the new interface.
+- Designing any rail other than NEAR AI. A NEP-141 Trace Credit token rail
+  and a BAT rail are named as future rails only; how each proves a
+  recipient and answers the interface's reads is open (section 12).
 - Clawback. #1271 has no reversal. Over-payment is netted against the same
   account's later credit (section 4).
 - Attributing what a recipient spends to the commons. #1271 defers it.
@@ -354,37 +383,151 @@ tokens and the rate never go in the repository, in a PR, or in a log.
 8. **Payout program.** Set nothing in cloud-api; programs are just names. Our
    side derives them (section 4).
 
-## 3. Placement
+## 3. Placement and the rail interface
 
-Payout is a separate pass beside `process_payouts`, sending in cumulative
-mode. `trace_credit` keeps settling internally, unchanged. The pass reads
-finalized settlement batches; it writes only its own tables.
+### The award and the rails
 
-A per-leg `SettlementAdapter` in amount mode was considered and not chosen.
-A leg is per trace and per run, not per account; it carries no recipient;
-and the withdrawal guard at `versioned_pipeline.rs:15139` would need a re-check first. A per-leg
-cumulative adapter does not compose at all: a retry after a lost response
-returns `no_op` with no transfer id, and two legs of one account settling
-close together leave the lower target with no receipt of its own. The pass
+The **award** is the settled Trace Credit on a finalized batch line
+(`TraceCreditAccountSettlementLineItem`, one per credit account per batch).
+A **rail** is one way that award is paid out. Every rail reads the same
+finalized lines; none reads another rail's records, and none consumes the
+award (D6, D8).
+
+| Rail | Instrument | Recipient | Settled by | Status |
+|---|---|---|---|---|
+| `trace_credit` | `trace_credit`, 6 decimals | the credit account itself | the existing ledger write at settlement; NEP-141 payout by the existing outbox | exists, unchanged |
+| `near_ai` | `near_ai_usd`, 9 decimals (1 atomic unit = 1 nano-USD) | a NEAR AI org the account links (section 5) | the payout pass, through #1271 | this design |
+| a NEP-141 Trace Credit token, BAT, ... | per rail | per rail | the payout pass | future; not designed (section 12) |
+
+`trace_credit` is a rail in name and in readiness reporting only. Its
+"send" is the batch line itself; the payout pass never drives it. The
+interface below is for **external** rails, of which `near_ai` is the
+first.
+
+### Rail ids
+
+A `RailId` is a validated newtype with the same rule as `InstrumentId`
+(1-64 lowercase ASCII letters, digits, `_`, `-`, `.`). The NEAR AI rail is
+`near_ai`. It is never `near`: `SettlementAdapter::payout_rail()` already
+returns `near` for the on-chain NEP-141 outbox rail, and readiness reports
+that label. The two must not be confused in logs, readiness or storage.
+
+### The interface
+
+The contract types and the trait live in `crates/trace-commons-gate-api`
+(AGPL), beside `SettlementAdapter`, in a new `payout_rail.rs`. They reuse
+`InstrumentId`, `InstrumentDescriptor` and `AtomicUnits` from
+`pipeline.rs`. The pass, its storage and the NEAR AI implementation live in
+`crates/trace-commons-server` and hold every rail as
+`Arc<dyn PayoutRail>`, never a concrete type, per the repo's seam rule.
+
+A rail declares:
+
+- **Identity:** `rail_id`, an `adapter_identity` label for hash-only
+  reports, and `production_qualified()` (false by default; readiness fails
+  closed on false).
+- **Instrument:** an `InstrumentId` and its `InstrumentDescriptor`
+  (`decimals` included). Every amount the pass handles for this rail is
+  `AtomicUnits` (`u128`) in this instrument; storage is `NUMERIC(39,0)`.
+  A rail whose wire is narrower (#1271 takes `i64`) narrows at its own
+  boundary and refuses out of range there (section 4,
+  `payout_amount_out_of_range`).
+- **Rate source:** a `RailRate { version, numerator, denominator }`,
+  meaning `rail_units = floor(award_atomic_units * numerator /
+  denominator)`, `u128`, checked. The server builds it at boot from the
+  rail's configured source and records it as a rate epoch per
+  `(rail_id, version)` (section 4, "Rate"). For `near_ai` the source is the
+  installed settlement table (D2): numerator `usd_micros_per_credit *
+  1000`, denominator `atomic_units_per_credit`. A future rail may use a
+  price feed; it still yields one immutable rational per version.
+- **Recipient-link kind:** a safe label (`near_ai_org` for this rail)
+  naming what a link holds and which proof verifier the link route runs
+  (section 5). The recipient itself is sealed in storage and handed to the
+  rail as an opaque value for the length of one call.
+- **Exactly-once send.** A send is identified by its **line**: a line ref
+  hash, the link's program, a `target_total` (everything this link's
+  program should have received once the line lands) and the `delta` (the
+  target minus our confirmed total on the program). The contract: **a
+  repeated `send` for the same line never repeats the effect.** It returns
+  `Committed { receipt_hash, delta, total_after }` or
+  `AlreadyAtOrAbove { total }`. Each rail meets the contract with its own
+  mechanism: `near_ai` sends `recipient_cumulative = target_total` and
+  ignores `delta`; an amount-mode rail sends `delta` under an idempotency
+  key derived from the line ref; an on-chain rail would carry the line ref
+  in a memo or nonce.
+- **Reads:** `read_total(recipient, program)` (the external total on this
+  program, exact), `find_receipt(line)` (the external record that answers
+  this line, or none), and `history(recipient, program)` for the
+  reconciliation drill. A rail that cannot answer these reads cannot meet
+  the recovery and close rules below, and does not qualify.
+- **Capacity:** `preflight()` returns whether sending is enabled, the
+  per-send maximum, and the sends left in the current window.
+- **Recipient liveness:** `probe_recipient(recipient)`, used at link time.
+- **Refusal mapping:** every rail error maps into one closed enum,
+  `RailRefusal`, each variant carrying a safe label: `Retry` (line stays
+  `pending`), `StopPass` (stop this rail's pass, change no row; any
+  credential fault), `HoldLine`, `RecipientUnavailable` (hold, mark the
+  link), `Failed` (a bug on our side). The pass acts on the variant only,
+  never on a rail's raw error. Section 4's table is the `near_ai` mapping.
+
+### Independence
+
+Each enabled rail runs as its own worker task with its own single-flight
+advisory lock (keyed on `payout-pass-v1:{rail_id}`), its own mode setting,
+its own control row (kill switch), its own capacity probe, its own ceilings
+and its own readiness entry. A `StopPass`, a halt, a hold, an exhausted
+budget or a crash in one rail's pass is invisible to every other rail: no
+shared lock, no shared loop, no shared row. A settlement wakes every rail's
+worker (section 7).
+
+### Why not `SettlementAdapter`
+
+`SettlementAdapter` performs the award instrument's own external effect,
+per settlement leg, per pipeline run, inside the pipeline's settle step. A
+leg is per trace and per run, not per account; it carries no recipient;
+and the withdrawal guard at `versioned_pipeline.rs:15139` would need a
+re-check first. A per-leg cumulative adapter does not compose at all: a
+retry after a lost response returns `no_op` with no transfer id, and two
+legs of one account settling close together leave the lower target with no
+receipt of its own. So the two seams stay separate: `SettlementAdapter`
+for awarding, `PayoutRail` for paying an award out per account. The pass
 gets "as quickly as possible" (D4) without any of that, because it is
 triggered by each settlement (section 7).
 
-Its trait is `NearAiCreditPayout`, not `NearPayoutAdapter`: that one is
-on-chain, its `payout_eligible` is wired to rail `near`, and its outbox is
-the NEP-141 rail's.
+`PayoutRail` is also not `NearPayoutAdapter`: that one is on-chain, its
+`payout_eligible` is wired to rail `near`, and its outbox is the NEP-141
+rail's. This design neither reads nor writes that outbox.
 
-## 4. The transfer client and the payout pass
+### What makes the interface real
+
+A second rail is implemented in tests (section 8): an amount-mode,
+idempotency-keyed rail with an 18-decimal instrument of kind other than
+`credit_account`, and its own rate. The generic pass, storage and drill
+run against it and against `near_ai` with the same code, and a test runs
+both rails at once with one stopped. An interface that only ever met
+#1271's cumulative mode would not pass that test.
+
+## 4. The payout pass and the NEAR AI rail
+
+Everything in this section is per rail unless it names `near_ai`. Where a
+rule names `near_ai` or #1271, it is that rail's implementation of a
+generic rule from section 3.
 
 ### Crate and licence
 
-All of it lives in `crates/trace-commons-server` (AGPL): a client module
-`near_ai_transfer.rs`, the pass, and storage in `db/`. The link request and
-response types go in `crates/trace-commons-protocol` (permissive), beside
-`inference_connection.rs`, because the daemon sends them. No permissive
-crate gains a server or gate dependency. `tests/license_boundary.rs` must
-stay unchanged.
+The rail contract (`payout_rail.rs`) is in `crates/trace-commons-gate-api`
+(AGPL). The pass, the storage in `db/`, the rate-epoch recorder and the
+NEAR AI rail (`near_ai_transfer.rs`, the client, and `near_ai_rail.rs`,
+its `PayoutRail` implementation) live in `crates/trace-commons-server`
+(AGPL). Routes, readiness and the drill live in `crates/trace-commons-ingest`
+(AGPL). The link request and response types go in
+`crates/trace-commons-protocol` (permissive), beside
+`inference_connection.rs`, because the daemon sends them; they carry the
+rail id as a plain string, so protocol never depends on gate-api. No
+permissive crate gains a server or gate dependency.
+`tests/license_boundary.rs` must stay unchanged.
 
-### Client
+### The NEAR AI client
 
 `NearAiTransferClient` holds the sender org, source type and the credential
 as `SecretString`. Its base URL is not a field anyone sets: it is the
@@ -396,110 +539,142 @@ a fixed user agent, a 15 s timeout (cloud-api bounds the send transaction at
 10 s, `credit_transfers.rs:51-53`), `bearer_auth`. It exposes three calls:
 `send_cumulative`, `capacity` and `history_page`. It parses the error body's
 `error.type` into a closed enum and keeps nothing else from an error.
+`near_ai_rail.rs` wraps it as `PayoutRail`: `send` is `send_cumulative`
+with `target_total` narrowed to `i64`; `read_total` is a
+`recipient_cumulative: 0` send; `find_receipt` and `history` page
+`history_page`; `preflight` is `capacity`; `probe_recipient` is the
+`tcprobe-v1` zero send (section 5). The error table below is its
+`RailRefusal` mapping.
 
-### Recipients are per account
+### Recipients are per account, per rail
 
 The unit of payment is a credit account, `(tenant_id, account_id)`, never a
-tenant. A tenant can hold many accounts; each links its own org, or none.
-Only the account itself can link, change or unlink (section 5), and only
-its own credit goes to its own link.
+tenant, on one rail. A tenant can hold many accounts; each account links
+its own recipient on each rail, or none. Only the account itself can link,
+change or unlink (section 5), and only its own credit goes to its own link.
+Linking or unlinking on one rail changes nothing on another.
 
-### Payout program and link generation
+### Program and link generation
 
-The cumulative total is scoped to sender + recipient + program. If one
-program name served every link, an account that moved from org X to org Y
-would get a fresh total at Y, and a cumulative target would pay all its
-history again. So:
+Every external total is scoped to one link generation, called its
+**program**. For `near_ai`, #1271 scopes a cumulative total to sender +
+recipient + program; if one program name served every link, an account
+that moved from org X to org Y would get a fresh total at Y, and a
+cumulative target would pay all its history again. The rule is generic:
 
-- Each link has a **generation id** (`link_id`, UUID) and its own program:
-  `tc1-` plus the first 32 hex of `sha256("nearai-payout-program-v1:" || link_id)`.
-  It is opaque to the recipient and fits in 100 bytes.
+- Each link has a **generation id** (`link_id`, UUID) and its own program,
+  derived by the rail. For `near_ai`: `tc1-` plus the first 32 hex of
+  `sha256("nearai-payout-program-v1:" || link_id)`. It is opaque to the
+  recipient and fits in 100 bytes.
 - When a link closes, the pass first resolves it (section 5, "Change and
-  unlink") and records `final_paid_nano` from #1271.
-- The target for the account's live link is
-  `owed_nano(account) - sum(final_paid_nano of the account's closed links)`.
-- Relinking to an org used before still gets a new generation, so a new
-  program. Nothing collides.
+  unlink") and records `final_paid` (rail atomic units, `NUMERIC(39,0)`)
+  from the rail's `read_total`.
+- The target for the account's live link on a rail is
+  `owed(account, rail) - sum(final_paid of the account's closed links on
+  that rail)`.
+- Relinking to a recipient used before still gets a new generation, so a
+  new program. Nothing collides.
 
 ### Rate
 
-D2: the rate is the installed settlement table's `usd_micros_per_credit`.
+Each rail has its own rate source (section 3) and its own epochs. For
+`near_ai`, D2: the rate is the installed settlement table's
+`usd_micros_per_credit`.
 
-- **Epochs follow table versions.** At boot, after the table validates,
-  ingest records the table's `(version, pricing_version,
-  atomic_units_per_credit, usd_micros_per_credit)` in an append-only
-  `trace_nearai_payout_rate_epochs` table with `observed_at` set by the
-  database clock, if that `version` is not already there. If the `version`
-  is there with a different rate or units, ingest refuses to start with
-  `payout_rate_version_conflict`: a table version names one rate forever.
-  Epochs are ordered by `observed_at`, which no one can set, so none can be
-  backdated.
-- **Which epoch prices a batch.** A finalized batch is priced at the epoch
-  in force at the batch's `created_at` (the latest epoch observed at or
-  before it). A batch older than the first epoch is priced at the first
-  epoch. This is a pure function of stored rows, so it gives the same
-  answer whenever accrual happens (at settlement, or later when an account
-  first links).
-- **No rate, no payout.** A table without a positive `usd_micros_per_credit`
-  records no epoch. With no epoch at all, nothing accrues and the pass
-  sends nothing. Nothing falls back to a default.
+- **Epochs follow source versions, per rail.** At boot, for each enabled
+  rail, ingest asks the rail's rate source for its `RailRate` and records
+  `(rail_id, version, numerator, denominator)` in an append-only
+  `trace_payout_rate_epochs` table with `observed_at` set by the database
+  clock, if that `(rail_id, version)` is not already there. For `near_ai`
+  the version is the settlement table's `version` (with `pricing_version`
+  kept beside it as a label). If `(rail_id, version)` is there with a
+  different numerator or denominator, ingest refuses to start with
+  `payout_rate_version_conflict`: a version names one rate forever. Epochs
+  are ordered by `observed_at`, which no one can set, so none can be
+  backdated. One rail's conflict refuses boot as a whole, because it is a
+  configuration fault, not a runtime one.
+- **Which epoch prices a batch.** On each rail, a finalized batch is priced
+  at that rail's epoch in force at the batch's `created_at` (the latest
+  epoch observed at or before it). A batch older than the rail's first
+  epoch is priced at the first epoch. This is a pure function of stored
+  rows, so it gives the same answer whenever accrual happens (at
+  settlement, or later when an account first links).
+- **No rate, no payout.** A source with no positive rate (for `near_ai`, a
+  table without a positive `usd_micros_per_credit`) records no epoch. With
+  no epoch at all, that rail accrues nothing and sends nothing. Nothing
+  falls back to a default. Other rails are unaffected.
 - **The number stays out of the repo.** Tests use synthetic rates, as the
-  settlement-estimate tests do. The rate is not logged; logs carry the epoch
-  `version` label only.
+  settlement-estimate tests do. The rate is not logged; logs carry the
+  rail id and epoch `version` label only.
 
 ### Accrual
 
-A new table, `trace_nearai_payout_accruals`, holds one row per settled
+A new table, `trace_payout_accruals`, holds one row per rail per settled
 account line, priced once:
 
-- Key `(tenant_id, settlement_batch_id, credit_account_hash)` for a credit
-  row, and `(tenant_id, reversal_event_id)` for a reversal row (below).
+- Key `(tenant_id, rail_id, settlement_batch_id, credit_account_hash)` for
+  a credit row, and `(tenant_id, rail_id, reversal_event_id)` for a
+  reversal row (below).
 - Columns: `account_id`, `kind` (`credit` or `reversal`),
-  `micros NUMERIC(39,0)` (signed), `rate_version`, `nano NUMERIC(39,0)`
-  (signed), `created_at`.
+  `award_units NUMERIC(39,0)` (signed, Trace Credit atomic units),
+  `rate_version`, `rail_units NUMERIC(39,0)` (signed, the rail's atomic
+  units), `instrument_id`, `created_at`.
 - The pass inserts with `ON CONFLICT DO NOTHING`, so re-running accrual is
-  harmless and a row is never re-priced. `nano =
-  floor(micros * usd_micros_per_credit * 1000 / atomic_units_per_credit)`,
-  in `u128`, checked; a reversal row uses the same formula on its absolute
-  value and is negated, so it takes back exactly what its credit added.
+  harmless and a row is never re-priced. `rail_units =
+  floor(award_units * numerator / denominator)` at the epoch, in `u128`,
+  checked; a reversal row uses the same formula on its absolute value and
+  is negated, so it takes back exactly what its credit added. For
+  `near_ai` this is `floor(micros * usd_micros_per_credit * 1000 /
+  atomic_units_per_credit)` nano-USD.
 - **Which lines accrue.** Every line of every `finalized` batch whose
   `credit_account_ref` names an account (`settlement_key_account_id` is
   `Some`) and whose `settled_credit_delta_micros` is positive. A line keyed
-  to a bare principal accrues nothing (section 6). `dry_run` and `failed`
-  batches never accrue.
-- **NEAR wallet holds do not block this rail.** `near_payout_hold_reason`
-  says the account has no NEAR wallet to pay. This rail does not pay a
-  wallet, so the label is not a reason to withhold NEAR AI credit; the
-  line accrues to its own account, and to no one else. What does hold this
+  to a bare principal accrues nothing (section 6; a default, section 12).
+  `dry_run` and `failed` batches never accrue. Each rail accrues the same
+  lines independently; a rail with no epoch yet accrues them later, at the
+  epoch rule above.
+- **NEAR wallet holds do not block the `near_ai` rail** (a default,
+  section 12). `near_payout_hold_reason` says the account has no NEAR
+  wallet to pay. `near_ai` does not pay a wallet, so the label is not a
+  reason to withhold NEAR AI credit; the line accrues to its own account,
+  and to no one else. A future rail that does pay a NEAR wallet (the
+  NEP-141 token rail) would treat the label as a hold. What does hold a
   rail is in "Holds" below.
-- **Owed** for an account is `sum(nano)` over its accrual rows. It is never
-  read from `trace_credit_ledger` sums or `account_credit_totals` (a display
-  path that sums `f32`).
+- **Owed** for an account on a rail is `sum(rail_units)` over its accrual
+  rows on that rail. It is never read from `trace_credit_ledger` sums or
+  `account_credit_totals` (a display path that sums `f32`).
 
 ### Reversals
 
 - A reversal row (`settlement_state = 'reversed'`, negative `points_delta`)
-  names the event it reverses in its `external_ref`. The pass finds the finalized
-  batch line whose `source_credit_event_ids` holds that event, and writes a
-  `reversal` accrual for the same account at that line's `rate_version`,
-  for the reversed event's own amount.
+  names the event it reverses in its `external_ref`. On each rail, the pass
+  finds the finalized batch line whose `source_credit_event_ids` holds that
+  event, and writes a `reversal` accrual for the same account at the rate
+  version that rail priced that line at, for the reversed event's own
+  amount.
 - If the reversed event was never in a finalized batch, nothing was accrued
   and nothing is written. If the line cannot be found for a reversal of a
-  settled event, the account is held as `payout_reversal_unpriced`.
-- **Netting, not clawback.** If owed drops below what the live link's
-  program has already received, the target is below the program total, so
-  the pass sends nothing. The account's later credit fills the gap before
-  anything more is sent. If the account never earns again, the difference
-  is a loss to the commons. Nothing is taken back unless #1271 adds a
-  reversal, and that would need its own design.
+  settled event, the account is held on that rail as
+  `payout_reversal_unpriced`.
+- **Netting, not clawback** (a default, section 12). If owed on a rail
+  drops below what the live link's program has already received, the
+  target is below the program total, so the pass sends nothing on that
+  rail. The account's later credit fills the gap before anything more is
+  sent. If the account never earns again, the difference is a loss to the
+  commons, bounded by the account ceiling and the rail's lifetime cap
+  ("Ceilings"). Nothing is taken back on any rail. For `near_ai`, that
+  stays so unless #1271 adds a reversal, which would need its own design.
 - Only a reversal row lowers owed. Per the roadmap (l.36-38) that is an
   operator-raised correction, not an automatic result of a revocation or a
   withdrawal, which leave settled Trace Credit, and so owed, as they are.
 
 ### Holds
 
-A held account accrues as usual and gets no send until the hold clears.
-Holds are per account and never move credit to another account.
+A held account accrues as usual and gets no send on that rail until the
+hold clears. Holds are per account and per rail, and never move credit to
+another account. The first two holds below derive from shared account
+state, so they hold every rail at once; each rail still checks them
+itself. The rest are recorded per rail and hold only that rail.
 
 - `payout_account_credit_hold`: an open `trace_credit_holds` row
   (`released_at IS NULL`) for any principal linked to the account in
@@ -513,181 +688,237 @@ Holds are per account and never move credit to another account.
 ### Ceilings
 
 There is no pulled statement for anyone to fetch; the commons only pushes.
-Every amount that leaves is bounded three times, and each bound is checked
-before the line is written `pending`:
+On every rail, every amount that leaves is bounded three times, and each
+bound is checked before the line is written `pending`:
 
-- **Per send:** the target is at most `program_total + max_amount_per_transfer`
-  (read from `capacity`), so back pay steps up over successive passes.
-- **Per account, lifetime:** a target above
-  `TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO` writes no line and
-  holds the account as `payout_over_ceiling`. An operator lifts it by
-  raising the setting; nothing is sent above it in the meantime.
-- **Whole rail, lifetime:** the credential's `max_total_amount`, enforced by
-  cloud-api under its own lock, and our `capacity` probe before the pass.
+- **Per send:** the target is at most `program_total + per_send_max` from
+  the rail's `preflight` (for `near_ai`, `max_amount_per_transfer` from
+  `capacity`), so back pay steps up over successive passes.
+- **Per account, lifetime, per rail:** a target above the rail's account
+  ceiling (for `near_ai`,
+  `TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO`) writes no line and
+  holds the account on that rail as `payout_over_ceiling`. An operator
+  lifts it by raising the setting; nothing is sent above it in the
+  meantime. A rail with no ceiling configured refuses to start in `dry_run`
+  or `live`.
+- **Whole rail, lifetime:** enforced by the external side where it can be
+  (for `near_ai`, the credential's `max_total_amount`, enforced by
+  cloud-api under its own lock), and by our `preflight` probe before the
+  pass.
 
-`u128` arithmetic, checked; a result above `i64::MAX` holds the account as
+`u128` arithmetic, checked, in the rail's atomic units. A result the rail's
+wire cannot carry (for `near_ai`, above `i64::MAX`) holds the account as
 `payout_amount_out_of_range`.
 
 ### Modes and the kill switch
 
-`TRACE_COMMONS_NEAR_AI_PAYOUT_MODE`:
+Each rail has its own mode setting; for `near_ai` it is
+`TRACE_COMMONS_NEAR_AI_PAYOUT_MODE`. Every mode defaults to `disabled`.
 
-- `disabled`: no accrual, no pass, no link probe. The link route answers
-  `payout_unavailable`.
+- `disabled`: no accrual, no pass, no link probe on that rail. Its link
+  route answers `payout_unavailable`.
 - `dry_run`: accrual runs (it moves no money and makes later live sends
   match). The pass computes each target and records a count-only report
-  (accounts that would be sent to, total nano, holds by label). It makes
-  **no POST to #1271 at all**, not even a zero read; it may call `capacity`.
-  No line is written.
+  (accounts that would be sent to, total rail units, holds by label). It
+  makes **no write call to the rail at all**, not even a zero read (for
+  `near_ai`, no POST to #1271); it may call `preflight`. No line is
+  written.
 - `live`: as specified below.
 
-The kill switch is runtime, not boot-time: an admin route
-`POST /v1/admin/nearai-payout/halt` sets a row in
-`trace_nearai_payout_control` (with an audit row: actor hash, time, label),
-and `.../resume` clears it. The pass reads it before each send, under the
-single-flight lock, and stops at once when it is set. Lines already
-`pending` stay `pending`; recovery resumes them after `resume`. Readiness
-reports `payout_halted`.
+The kill switch is runtime, not boot-time, and per rail: an admin route
+`POST /v1/admin/payout-rails/{rail_id}/halt` sets that rail's row in
+`trace_payout_control` (with an audit row: rail id, actor hash, time,
+label), and `.../resume` clears it. The rail's pass reads it before each
+send, under its single-flight lock, and stops at once when it is set.
+Lines already `pending` stay `pending`; recovery resumes them after
+`resume`. Readiness reports `payout_halted` for that rail. Halting one rail
+does not touch another; there is no global halt (an operator halts each
+rail).
 
 ### State and storage
 
-New tables, RLS forced, tenant predicates through
-`trace_current_tenant_id()`: the accruals above, and
+One set of tables serves every rail, each row carrying `rail_id`. New
+tables, RLS forced, tenant predicates through `trace_current_tenant_id()`:
+the accruals above, and
 
-- `trace_nearai_payout_links`: `tenant_id`, `account_id`, `link_id`, `state`
-  (`waiting`, `active`, `closing`, `closed`), `sealed_org_id JSONB`,
-  `org_index` (keyed blind index), `org_key_ref`, `index_pepper_ref`,
-  `subject_index` (keyed blind index of the NEAR AI subject that proved
-  the org, section 5), `payout_program`, `final_paid_nano NUMERIC(20,0)`
-  (set on close), `unlink_requested_at`, `version`, timestamps. Three
-  partial unique indexes allow at most one `active`, one `waiting` and one
-  `closing` row per `(tenant_id, account_id)`. There is no uniqueness on
-  `org_index`: many accounts may name one org (D7), so no org can be locked
-  away from its real owner by an earlier link.
-- `trace_nearai_payout_lines`: `tenant_id`, `account_id`, `line_id` (UUID),
-  `link_id`, `target_nano`, `owed_through_accrual_count`, `state`
-  (`pending`, `confirmed`, `no_op`, `held`, `failed`), `transfer_id_hash`,
-  `delta_nano`, `attempts`, `last_error_label`, timestamps. A partial unique
-  index on `(link_id) WHERE state = 'pending'` (a link has at most one
-  unresolved line), and one on `(transfer_id_hash) WHERE transfer_id_hash IS
-  NOT NULL` (one transfer answers one line).
-- `trace_nearai_payout_audit`: append-only, hash-only. One row per link
-  request, confirmation, change, unlink, close, operator release, hold set
-  or cleared, halt and resume: action, actor ref hash, link id hash, prior
-  and new state, label, time. Nothing is updated in place without a row
-  here.
-- `trace_nearai_payout_rate_epochs` and `trace_nearai_payout_control` are
-  not tenant data. They get forced RLS with a read-all policy, and writes
-  only through a narrow role used by the boot path and the admin route.
-- **Enumeration.** The pass and the drill need the tenants with an
-  `active` or `closing` link, which no tenant context can see under forced
-  RLS. A narrow role, `trace_nearai_payout_enumerator`, with a permissive
-  `SELECT` policy on `trace_nearai_payout_links (tenant_id, state)` only,
-  assumed with `SET ROLE` for that one query, as
+- `trace_payout_links`: `tenant_id`, `account_id`, `rail_id`, `link_id`,
+  `recipient_kind` (the rail's label, `near_ai_org` here), `state`
+  (`waiting`, `active`, `closing`, `closed`, plus the mark
+  `recipient_unavailable`), `sealed_recipient JSONB`, `recipient_index`
+  (keyed blind index), `recipient_key_ref`, `index_pepper_ref`,
+  `subject_index` (keyed blind index of whatever proved the recipient; for
+  `near_ai` the NEAR AI subject, section 5), `program`, `final_paid
+  NUMERIC(39,0)` (rail atomic units, set on close), `unlink_requested_at`,
+  `version`, timestamps. Three partial unique indexes allow at most one
+  `active`, one `waiting` and one `closing` row per `(tenant_id,
+  account_id, rail_id)`. There is no uniqueness on `recipient_index`: many
+  accounts may name one org (D7), so no recipient can be locked away from
+  its real owner by an earlier link.
+- `trace_payout_lines`: `tenant_id`, `account_id`, `rail_id`, `line_id`
+  (UUID), `link_id`, `target_total NUMERIC(39,0)`,
+  `owed_through_accrual_count`, `state` (`pending`, `confirmed`, `no_op`,
+  `held`, `failed`), `receipt_hash`, `delta NUMERIC(39,0)`, `attempts`,
+  `last_error_label`, timestamps. A partial unique index on `(link_id)
+  WHERE state = 'pending'` (a link has at most one unresolved line), and
+  one on `(rail_id, receipt_hash) WHERE receipt_hash IS NOT NULL` (one
+  external record answers one line).
+- `trace_payout_link_requests`: the pending link or unlink requests of
+  section 5 (rail id, sealed recipient, subject index, ceremony handle
+  hash, idempotency key, expiry), per account and rail.
+- `trace_payout_holds`: open and cleared holds per `(tenant_id,
+  account_id, rail_id)` with a label; cleared rows stay.
+- `trace_payout_audit`: append-only, hash-only. One row per link request,
+  confirmation, change, unlink, close, operator release, hold set or
+  cleared, halt and resume: rail id, action, actor ref hash, link id hash,
+  prior and new state, label, time. Nothing is updated in place without a
+  row here.
+- `trace_payout_rate_epochs` and `trace_payout_control` (one row per rail)
+  are not tenant data. They get forced RLS with a read-all policy, and
+  writes only through a narrow role used by the boot path and the admin
+  routes.
+- **Enumeration.** Each rail's pass and the drill need the tenants with an
+  `active` or `closing` link on that rail, which no tenant context can see
+  under forced RLS. A narrow role, `trace_payout_enumerator`, with a
+  permissive `SELECT` policy on `trace_payout_links (tenant_id, rail_id,
+  state)` only, assumed with `SET ROLE` for that one query, as
   `docs/operator/register-stats-role.md` does. It can read nothing else.
   Every per-tenant read and write after that runs under that tenant's
   `trace_current_tenant_id()`.
-- **Migration number:** the next free one at plan time. V129 was reserved by
-  #1415, which is closed; check the repo's numbering convention before
-  reusing it.
+- **Migration number:** the next free number above the highest on `main`
+  when the schema PR is written, never V129 (reserved by #1415, which is
+  closed, and possibly applied to someone's test database, where the
+  runner would silently skip a reuse). The plan says how to check.
 
-### One pass
+### One pass, per rail
 
-0. **Single flight.** The pass takes a session-level advisory lock on a
-   fixed key (`pg_try_advisory_lock(hashtextextended('nearai-payout-pass-v1',
-   0))`, the hashing at `versioned_pipeline.rs:2177`) on a connection it
-   pins for the whole run, and releases it with `pg_advisory_unlock` on
-   every exit path; a crash drops the connection and the lock. If the lock
-   is held, the trigger sets a "run again" flag and returns (section 7).
-   Every link state change (`active` to `closing`, `closing` to `closed`,
-   `waiting` to `active`) is made by the pass while holding it. The routes
-   only record requests.
-1. Enumerate tenants (above). Per tenant, under its context:
-   a. **Accrue** every finalized batch line and reversal not yet accrued.
+Each step below runs inside one rail's pass. Rails run these steps
+concurrently and never wait on each other.
+
+0. **Single flight, per rail.** The rail's pass takes a session-level
+   advisory lock on `pg_try_advisory_lock(hashtextextended('payout-pass-v1:'
+   || rail_id, 0))` (the hashing at `versioned_pipeline.rs:2177`) on a
+   connection it pins for the whole run, and releases it with
+   `pg_advisory_unlock` on every exit path; a crash drops the connection and
+   the lock. If the lock is held, the trigger sets that rail's "run again"
+   flag and returns (section 7). Every link state change on the rail
+   (`active` to `closing`, `closing` to `closed`, `waiting` to `active`) is
+   made by its pass while holding the lock. The routes only record
+   requests.
+1. Enumerate tenants with a link on this rail (above). Per tenant, under
+   its context:
+   a. **Accrue** every finalized batch line and reversal not yet accrued on
+      this rail.
    b. **Apply requests**: move a live link with `unlink_requested_at`, or
       with a confirmed `waiting` successor, to `closing`, and resolve it
       (section 5).
-   c. For each account with an `active` link: skip it if it is held, or if
-      its link has a `pending` line (that line goes to crash recovery
-      first). Read the link's program total with a `recipient_cumulative: 0`
-      send. Compute the target (owed minus closed links' final totals,
-      capped per send). Skip unless the target exceeds the program total.
-      Check the account ceiling.
-2. Write the line `pending` with its `target_nano`, committed, before any
-   network call.
-3. Probe `capacity` once per pass. If `sending_enabled`,
-   `sender_reconciled` or `credential_can_transfer` is false, stop the pass
-   with that label. Pace sends to `sends_remaining_in_window` and to a local
-   limit below `max_sends_per_minute`.
-4. Re-read the kill switch. Send `recipient_cumulative = target_nano` with
-   the link's program. Memo empty. Metadata
+   c. For each account with an `active` link: skip it if it is held on this
+      rail, or if its link has a `pending` line (that line goes to crash
+      recovery first). Read the link's program total with `read_total`
+      (for `near_ai`, a `recipient_cumulative: 0` send). Compute the target
+      (owed minus closed links' final totals, capped per send). Skip unless
+      the target exceeds the program total. Check the account ceiling.
+2. Write the line `pending` with its `target_total` and `delta`, committed,
+   before any network call.
+3. Call `preflight` once per pass. If sending is not enabled (for
+   `near_ai`: `sending_enabled`, `sender_reconciled` or
+   `credential_can_transfer` is false), stop this rail's pass with that
+   label. Pace sends to the sends left in the window and to a local limit
+   below the rail's quota (for `near_ai`, `max_sends_per_minute`).
+4. Re-read this rail's kill switch. Call `send` for the line. For
+   `near_ai`: `recipient_cumulative = target_total` with the link's
+   program, memo empty, metadata
    `{"tc": "<sha256 of 'nearai-payout-line-v1:' || line_id>"}`.
 5. Record the outcome:
-   - 201: `confirmed`, `transfer_id_hash = sha256("nearai-transfer-v1:" || id)`,
-     `delta_nano = amount`. If the returned program total is not the
-     target, hold as `payout_program_total_mismatch`.
-   - 200 `no_op`: if `recipient_cumulative >= target`, run recovery (below);
-     otherwise hold as `payout_program_total_mismatch`.
+   - `Committed`: `confirmed`, `receipt_hash`, `delta` as the rail reports
+     it. If the rail reports `total_after` and it is not the target, hold
+     as `payout_program_total_mismatch`. For `near_ai`, `Committed` is a
+     201, `receipt_hash = sha256("nearai-transfer-v1:" || id)`, `delta =
+     amount`.
+   - `AlreadyAtOrAbove { total }`: if `total >= target`, run recovery
+     (below); otherwise hold as `payout_program_total_mismatch`. For
+     `near_ai` this is the 200 `no_op`.
+   - A `RailRefusal`: as the variant says (section 3); the `near_ai` table
+     is below.
 
-### Crash recovery
+### Crash recovery, per rail
 
 A crash between step 2 and step 5 leaves a `pending` line whose send may or
 may not have committed. Because a link has at most one pending line and the
-pass is single-flight, nothing else was written or sent for that link in
-between. The next pass re-sends the **same** target first:
+rail's pass is single-flight, nothing else was written or sent for that
+link in between. The next pass of that rail calls `send` for the **same**
+line first, which the rail contract makes safe:
 
-- If the first send never committed, it is sent now (201).
-- If it did, the reply is `no_op`. The pass pages
+- If the first send never committed, it is sent now (`Committed`).
+- If it did, a cumulative rail answers `AlreadyAtOrAbove` and a keyed rail
+  answers `Committed` with the first receipt. On `AlreadyAtOrAbove` the
+  pass calls `find_receipt`. For `near_ai`, that pages
   `GET .../credit/transfers?direction=outgoing` and filters client-side for
-  this recipient, this program and `recipient_cumulative == target_nano`,
+  this recipient, this program and `recipient_cumulative == target_total`,
   skipping any transfer whose id hash is already on another line. History
   has no program filter, and the cursor is still returned on the last page,
-  so the pass stops on a short page.
-- If no row matches, hold the line as `payout_recovery_unmatched`. Under the
-  one-pending-line rule this cannot happen without a bug or an outside send
-  on our program.
+  so it stops on a short page.
+- If no record matches, hold the line as `payout_recovery_unmatched`. Under
+  the one-pending-line rule this cannot happen without a bug or an outside
+  send on our program.
 
-### Error mapping
+### `near_ai` refusal mapping
 
-| #1271 reply | Line state | Notes |
-|---|---|---|
-| 429 `transfer_rate_limited`, 503 `transfer_unavailable` / `accounting_busy`, timeout | stays `pending` | retried next pass, same target |
-| 409 `insufficient_posted_capacity`, `sender_not_reconciled` | pass stops, `held` | operator: fund or reconcile the sender |
-| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` | `held` | budget or recipient restriction; compare with `capacity` |
-| 409 `capacity_overflow` | `held` | the recipient's incoming total would overflow `i64`; operator review |
-| 404 `organization_unavailable` | `held`, link marked `recipient_unavailable` | contributor must relink |
-| 403 `credential_refused` | pass stops, fail closed | credential malformed, expired, revoked or wrong |
-| 403 `sender_not_enabled` | pass stops, fail closed | no policy row, or transfers disabled; ask NEAR AI |
-| 400 any | `failed` | a bug on our side; page the operator |
+| #1271 reply | `RailRefusal` | Line state | Notes |
+|---|---|---|---|
+| 429 `transfer_rate_limited`, 503 `transfer_unavailable` / `accounting_busy`, timeout | `Retry` | stays `pending` | retried next pass, same target |
+| 409 `insufficient_posted_capacity`, `sender_not_reconciled` | `StopPass` | stays `pending` | operator: fund or reconcile the sender |
+| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` | `HoldLine` | `held` | budget or recipient restriction; compare with `capacity` |
+| 409 `capacity_overflow` | `HoldLine` | `held` | the recipient's incoming total would overflow `i64`; operator review |
+| 404 `organization_unavailable` | `RecipientUnavailable` | `held`, link marked `recipient_unavailable` | contributor must relink |
+| 403 `credential_refused` | `StopPass` | unchanged | credential malformed, expired, revoked or wrong |
+| 403 `sender_not_enabled` | `StopPass` | unchanged | no policy row, or transfers disabled; ask NEAR AI |
+| 400 any | `Failed` | `failed` | a bug on our side; page the operator |
 
-A 403 or 401 on **any** call, read or send, stops the pass and changes no
-row: it is a fault in our credential, not in an account. No account or link
-is held, frozen or closed because of it.
+A `StopPass` stops that rail's pass and changes no row. In particular a 403
+or 401 on **any** `near_ai` call, read or send, is a fault in our
+credential, not in an account: no account or link is held, frozen or closed
+because of it, and no other rail notices.
 
 ### Fail-closed rules
 
-- Mode `dry_run` or `live` with any of the payout env values missing or
-  malformed: ingest refuses to start with `near_ai_payout_config_missing`.
-- The payout host is compiled in. A `near-ai-staging` build switches it for
-  introspection and payout together, is refused as a release build, and
-  reports itself in readiness. No env value names a host.
-- Readiness reports the rail as `near_ai` with `mode`, `halted`,
-  `rate_epoch` (the version label only) and `qualified`. `qualified` is true
-  only in `live`, outside `near-ai-staging`, with a rate epoch in force and
-  a startup `capacity` probe answering `sending_enabled: true`.
-- A link whose sealed org id fails to open: hold `payout_link_unreadable`.
+- A rail in `dry_run` or `live` with any of its settings missing or
+  malformed refuses ingest's start, with a per-rail label (for `near_ai`,
+  `near_ai_payout_config_missing`). A rail in `disabled` needs no settings.
+- An unknown rail id anywhere (a mode setting, a route segment, a stored
+  row) is refused, never defaulted.
+- The `near_ai` host is compiled in. A `near-ai-staging` build switches it
+  for introspection, payout and the daemon together, is refused as a
+  release build, and reports itself in readiness. No env value names a
+  host.
+- Readiness reports one entry per rail, `trace_credit` included, with
+  `rail_id`, `mode`, `halted`, `rate_epoch` (the version label only) and
+  `qualified`. For `near_ai`, `qualified` is true only in `live`, outside
+  `near-ai-staging`, with a rate epoch in force and a startup `capacity`
+  probe answering `sending_enabled: true`. One rail not qualified does not
+  make another unqualified.
+- A link whose sealed recipient fails to open: hold that rail as
+  `payout_link_unreadable`.
 
 ### Hash-only logging
 
-Logs and audit rows carry labels and `sha256:` values only: line, link,
-transfer, program and credential id hashes, amounts in nano-USD, and the
-rate epoch's version label. Never the recipient or sender org UUID, the org
-name, the token, the memo, the metadata, the tenant or account id, or the
-rate. This follows `docs/operator/hash-only-logging.md`.
+Logs and audit rows carry labels and `sha256:` values only: rail id, line,
+link, receipt, program and credential id hashes, amounts in the rail's
+atomic units, and the rate epoch's version label. Never a recipient (for
+`near_ai`, the recipient or sender org UUID or the org name), a token, a
+memo, metadata, the tenant or account id, or the rate. This follows
+`docs/operator/hash-only-logging.md`.
 
-## 5. Linking an account to a NEAR AI organization
+## 5. Linking an account to a recipient
 
-### Who can link
+Linking is generic in shape and per rail in proof. The routes, the request
+table, the passkey step-up and the audit are one mechanism with a rail
+segment. What proves the recipient is the rail's **recipient-proof
+verifier**, chosen by the rail's recipient-link kind; the body carries a
+per-rail proof, a tagged enum keyed by rail id. Only `near_ai` is accepted
+now; any other rail id is refused as `payout_rail_unknown`. The rest of
+this section is the `near_ai` verifier and the shared mechanism.
+
+### Who can link (`near_ai`)
 
 Any account whose person can sign in to NEAR AI in the app and owns the
 org they choose (D3). The proof is a fresh NEAR AI access token whose
@@ -733,7 +964,7 @@ grants nothing.
 6. Ingest stores a `pending_confirmation` request: sealed org id, subject
    index, the account it belongs to, a 5-minute expiry, and an opaque
    ceremony handle returned to the daemon. **Nothing changes yet.**
-7. The daemon opens the step-up page with `return=confirm-payout-org` (a
+7. The daemon opens the step-up page with `return=confirm-payout-link` (a
    fourth section). The person signs in **with a passkey**; the page shows
    "the organization you chose in the app" (the server does not hold the
    name) and a confirm button. Confirming writes the `waiting` link (or the
@@ -742,6 +973,8 @@ grants nothing.
 
 ### The passkey gate
 
+D5 holds on every rail: link, change and unlink on any rail are confirmed
+with a passkey, through the same gate and the same step-up page section.
 A new gate, `require_passkey_step_up`, guards the confirm call. It passes
 only a session whose `client_kind` is `passkey`, minted within the step-up
 window, on the account that started the request. It has no
@@ -753,36 +986,42 @@ existing NEAR payout redirect keeps its rules.
 
 ### The routes
 
-`POST /v1/account/near-ai/payout-org/requests` (start, step 3), copying the
-inference-connection stack
+`POST /v1/account/payout-rails/{rail_id}/link-requests` (start, step 3),
+copying the inference-connection stack
 (`crates/trace-commons-contributor/src/inference_connection.rs:190-230`,
 `trace_commons_ingest_internal/inference_connection.rs`):
 
 - account session only; `DeviceBearer` is refused with 403;
+- `rail_id` must name a rail whose mode is not `disabled`, else
+  `payout_unavailable`; an unknown id is `payout_rail_unknown`;
 - body `deny_unknown_fields`: `action` (`link` or `unlink`),
-  `organization_id` and `near_ai_access_token` (link only),
-  `idempotency_key` (non-nil UUID), `expected_current_version`;
+  `idempotency_key` (non-nil UUID), `expected_current_version`, and for
+  `link` a `proof` tagged by rail. For `near_ai` the proof is
+  `{"rail": "near_ai", "organization_id", "near_ai_access_token"}`;
 - outcomes: `pending_confirmation` (with the handle), `idempotency_conflict`,
-  `version_conflict`, `subject_mismatch`, `org_not_owned`,
-  `near_ai_org_unavailable`, `near_ai_org_not_permitted`,
-  `payout_unavailable`, `passkey_required`.
+  `version_conflict`, `payout_rail_unknown`, `payout_unavailable`,
+  `passkey_required`, and the verifier's own refusals (for `near_ai`:
+  `subject_mismatch`, `org_not_owned`, `near_ai_org_unavailable`,
+  `near_ai_org_not_permitted`).
 
-`POST /v1/account/near-ai/payout-org/requests/{handle}/confirm`, behind
-`require_passkey_step_up`, called only by the step-up page. Outcomes:
-`confirmed`, `expired`, `not_found`.
+`POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`,
+behind `require_passkey_step_up`, called only by the step-up page.
+Outcomes: `confirmed`, `expired`, `not_found`.
 
-`GET /v1/account/near-ai/payout-org` returns `{linked, org_ref, state,
-version, request_state}`, never the id or a name. `org_ref` is
+`GET /v1/account/payout-rails` returns one entry per rail that is not
+`disabled`: `{rail_id, linked, recipient_ref, state, version,
+request_state}`, never a recipient or a name. For `near_ai`,
+`recipient_ref` is
 `sha256("nearai-payout-org-ref-v1:" || idempotency_key || ":" || org_id)`;
 the daemon keeps the key and the org id together, so it can recompute the
 ref and check the server holds the same org without the server echoing it.
 
 ### Storage
 
-The send needs the raw UUID, so hash-only storage is impossible. The org id
-is sealed with the machinery behind `sealed_account_name`, with a keyed
-blind index and key and pepper refs for rotation. The key is not in the
-database.
+The send needs the raw recipient (for `near_ai`, the org UUID), so
+hash-only storage is impossible. The recipient is sealed with the
+machinery behind `sealed_account_name`, with a keyed blind index and key
+and pepper refs for rotation. The key is not in the database.
 
 ### Change and unlink
 
@@ -793,7 +1032,7 @@ database.
   only: a `recipient_cumulative: 0` read of the program total and, for the
   transfer id, history paging. A line whose target the total reached is
   `confirmed`; one it did not reach is `no_op`. Only then does it write
-  `final_paid_nano` (the read total), set the old link `closed` and the
+  `final_paid` (the read total), set the old link `closed` and the
   waiting one `active`, in one transaction, with an audit row.
 - **Old org gone.** If the zero read returns 404, the pass takes the program
   total from history alone. If history cannot be read either, the link
@@ -802,7 +1041,9 @@ database.
 - **Unlink** confirms `unlink_requested_at` on the live link; the pass
   closes it with no successor. Credit keeps accruing and is sent when the
   account links again.
-- **Operator release.** `POST /v1/admin/nearai-payout/links/{link_id_hash}/release`
+- **Per rail.** Change, unlink and release act on one rail's link. They
+  never close, open or hold a link on another rail.
+- **Operator release.** `POST /v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release`
   moves a link to `closing` (for example after a contributor reports lost
   access to the org) with an audit row naming the actor hash and a reason
   label. The account then links again through the passkey flow.
@@ -844,13 +1085,16 @@ it was displayed. macOS is the lead shell; the others follow it.
 
 ## 6. Eligibility
 
-D3, per account:
+D3, per account and per rail. The account rules below are shared by every
+rail; the link rule is the rail's own.
 
 - **Eligible:** any open account (`trace_accounts.closed_at IS NULL`) that
-  has completed the link in section 5. Tenant class does not matter.
+  has completed that rail's link in section 5. Tenant class does not
+  matter. An account can be eligible on one rail and not on another.
 - **What is paid:** only credit that settled on a line keyed
-  `account:{account_id}`. The NEAR wallet hold label on a line does not
-  matter (section 4, "Accrual"); a credit hold does (section 4, "Holds").
+  `account:{account_id}` (a default, section 12). On `near_ai` the NEAR
+  wallet hold label on a line does not matter (section 4, "Accrual"); a
+  credit hold does (section 4, "Holds").
 - **Pooled tenants** (`trace_legacy_invite_pooled_tenants`, V81). Each
   account in a pooled tenant links and is paid for its own lines only. No
   account is paid for another's credit, and nothing is paid at tenant level.
@@ -860,12 +1104,12 @@ D3, per account:
   make old lines payable.
 - **Legacy `tenant-...` tenants:** the same as pooled. The rule that a
   legacy tenant must first link to a NEAR account (V81) does not apply to
-  this rail; the NEAR AI proof replaces it.
-- **Wallet (`near-`) tenants:** eligible after the person signs in with
-  NEAR AI in the app.
+  the `near_ai` rail; the NEAR AI proof replaces it.
+- **Wallet (`near-`) tenants:** eligible on `near_ai` after the person
+  signs in with NEAR AI in the app.
 
-The predicate lives in one server function, checked at link time and on
-every send.
+The account predicate lives in one server function shared by every rail,
+checked at link time and on every send.
 
 ## 7. Schedule
 
@@ -873,18 +1117,20 @@ D4: as soon as credit settles.
 
 - **Trigger.** Every code path that commits a finalized settlement batch
   (the pipeline's `finalize_pending_credit_batch` and the ingest settlement
-  route) notifies the payout worker after its transaction commits (an
-  in-process `tokio::sync::Notify`; no payload, no tenant id). The worker
-  runs a pass. A notify while a pass runs sets the "run again" flag, so a
-  burst of settlements becomes at most one extra pass.
-- **Retry tick.** The worker also runs every 60 s (proposed). This catches a
-  notify lost to a crash, retries `pending` lines, and finishes closing
+  route) notifies every enabled rail's worker after its transaction commits
+  (one in-process `tokio::sync::Notify` per rail; no payload, no tenant
+  id). Each worker runs its own pass. A notify while that rail's pass runs
+  sets its "run again" flag, so a burst of settlements becomes at most one
+  extra pass per rail. A slow or stopped rail does not delay another
+  rail's pass.
+- **Retry tick.** Each worker also runs every 60 s (proposed). This catches
+  a notify lost to a crash, retries `pending` lines, and finishes closing
   links. A pass with nothing to do costs one enumeration query.
-- **Coalescing.** One send per account per pass covers everything accrued
-  since the last one, so the 60/min quota is per account-pass, not per
-  trace.
-- **No minimum send.** Owner asked for speed. A floor can be added later
-  without loss, since cumulative mode carries the remainder.
+- **Coalescing.** One send per account per rail per pass covers everything
+  accrued since the last one, so `near_ai`'s 60/min quota is per
+  account-pass, not per trace.
+- **No minimum send.** Owner asked for speed. A floor can be added later,
+  per rail, without loss, since the target carries the remainder.
 
 At 60 sends a minute a pass serves 3,600 accounts an hour, above the pilot.
 The quota can be raised by policy.
@@ -906,6 +1152,17 @@ against production with a closed recipient list.
    pricing and floor, reversal priced at its line's epoch, `u128` to `i64`
    bounds, the three ceilings, error mapping, program derivation, target
    after a closed link.
+2a. **The second rail (tests only).** A test rail implementing
+   `PayoutRail` in amount mode with an idempotency key per line, an
+   18-decimal `erc20` instrument (a synthetic contract address) and its own
+   fixed synthetic rate, backed by an in-memory ledger that counts effects.
+   The generic pass, storage and drill run against it unchanged. Tests: a
+   repeated send for one line has one effect; recovery after a lost
+   response finds the first receipt; amounts above `u64::MAX` and near
+   `10^38` round-trip through `NUMERIC(39,0)`; **two rails at once**, one
+   answering `StopPass` (or halted, or holding an account) while the other
+   sends to the same account in the same settlement; the stopped rail's
+   lines and holds are unchanged and the other rail's line is `confirmed`.
 3. Mock #1271 server: 201; `no_op` then history recovery; lost response;
    429 pacing; each 409 hold; both 403 causes stop the pass and change no
    row; a 403 on a read changes no row; a second pass refused while the
@@ -931,17 +1188,20 @@ against production with a closed recipient list.
 
 ### Reconciliation drill
 
-`POST /v1/admin/nearai-payout-reconcile-drill`, following
+`POST /v1/admin/payout-reconcile-drill`, following
 `docs/operator/drills.md`: admin bearer, `ready` plus label-only
 `blocking_gaps`, hash-only evidence, wired into `rollout-smoke/evidence`.
-It is read-only: it never holds, freezes or changes a row. It pages
-outgoing history and compares, per link: the sum of our confirmed
-`delta_nano` against the program total; every confirmed `transfer_id_hash`
-against a history row; and no history row in a `tc1-` program that we do
-not hold. Gaps: `payout_history_unmatched`, `payout_program_total_mismatch`,
-`payout_line_missing_transfer`. It also reports, as counts, accounts whose
-owed is below their paid total (netting in progress). cloud-api's admin
-reconciliation route is system admin only; NEAR AI can run it.
+It runs per enabled rail and reports per rail; one rail's gap is labelled
+with its rail id and does not hide another rail's result. It is read-only:
+it never holds, freezes or changes a row. Through the rail's `history`, it
+compares, per link: the sum of our confirmed `delta` against the program
+total; every confirmed `receipt_hash` against an external record; and no
+external record in one of our programs that we do not hold (for `near_ai`,
+a `tc1-` program). Gaps: `payout_history_unmatched`,
+`payout_program_total_mismatch`, `payout_line_missing_transfer`. It also
+reports, as counts, accounts whose owed is below their paid total (netting
+in progress). For `near_ai`, cloud-api's admin reconciliation route is
+system admin only; NEAR AI can run it.
 
 ## 9. Threat model
 
@@ -952,12 +1212,14 @@ reconciliation route is system admin only; NEAR AI can run it.
   the env, restart, resume.
 - **Stolen database.** Org ids are sealed; the key and the credential are
   not in the database.
-- **Double pay.** Cumulative targets converge, so retries and re-runs cannot
-  overpay one link. Per-link programs stop a relink from paying history
-  twice. The pass is single-flight, a link has at most one pending line,
-  and a link closes only after its pending lines are resolved by reads.
-  Accruals are unique per batch line and per reversal, so a batch is priced
-  once.
+- **Double pay on one rail.** The rail contract makes a repeated send for
+  one line a no-op (cumulative targets converge on `near_ai`; keys dedupe
+  on a keyed rail), so retries and re-runs cannot overpay one link.
+  Per-link programs stop a relink from paying history twice. Each rail's
+  pass is single-flight, a link has at most one pending line, and a link
+  closes only after its pending lines are resolved by reads. Accruals are
+  unique per rail, batch line and reversal, so a batch is priced once per
+  rail.
 - **Paid, then reversed (D4).** With no maturation window, credit can be
   sent and later reversed by an operator. The NEAR AI credit cannot be
   recovered. The account's later credit is netted first; an account that
@@ -966,10 +1228,17 @@ reconciliation route is system admin only; NEAR AI can run it.
   gates and is only later found to be bad. Limits on that exposure: the
   account ceiling, the credential's lifetime cap, and the existing gates
   before settlement. This is the owner's explicit choice.
-- **Paid twice for one trace (D6).** The same settled credit can be paid as
-  NEAR AI credit and also as NEP-141 Trace Credit (or redeemed later). That
-  is the owner's design, not a race: each rail keys its own exactly-once
-  record off the same finalized line, and neither reads the other's.
+- **Paid on every rail for one trace (D6, D8).** The same settled credit
+  can be paid as NEAR AI credit, as NEP-141 Trace Credit (or redeemed
+  later), and on any rail added later. That is the owner's design, not a
+  race: each rail keys its own exactly-once record off the same finalized
+  line, and none reads another's. The commons' total exposure per award is
+  therefore the sum over enabled rails; each rail's ceilings bound its own
+  share, and enabling a rail is an operator decision with that sum in view.
+- **One rail's fault spreading.** A stolen or revoked credential, a halt, a
+  budget exhausted or a bug on one rail stops that rail only (section 3,
+  "Independence"). Readiness shows each rail separately, so a stopped rail
+  is visible rather than masked by a healthy one.
 - **Wrong recipient.** The org must be in the person's own `/users/me`,
   active and owned, checked by the server with the person's own token
   against the host that pays. Only a passkey session on the same account
@@ -979,7 +1248,7 @@ reconciliation route is system admin only; NEAR AI can run it.
 - **Role lost after linking.** The server cannot re-check org ownership
   without the person's token, so a link stays valid if the person later
   loses the owner role. Credit then goes to an org they no longer own. The
-  person can unlink; the operator can release. Because `org_index` is not
+  person can unlink; the operator can release. Because `recipient_index` is not
   unique, the org's real owners can always link it themselves.
 - **Shared org (D7).** Credit sent to an org with other members is
   spendable by all of them. The consent copy says so.
@@ -993,106 +1262,137 @@ reconciliation route is system admin only; NEAR AI can run it.
 - **Rate.** Not in the repo, not in logs; only the epoch version label.
   The settlement table is served to clients, so the rate is visible to
   them, as S2 already accepts.
-- **Enumeration role.** Reads only `tenant_id` and `state` of the link
-  table. A leaked connection under it reveals which tenants have a linked
-  account, nothing about whom to.
+- **Enumeration role.** Reads only `tenant_id`, `rail_id` and `state` of
+  the link table. A leaked connection under it reveals which tenants have a
+  linked account on which rail, nothing about whom to.
 
 ## 10. Delivery plan
 
-Small stacked PRs. Each passes the repo checks on its own.
-
-1. **Protocol types** for link request, confirm and status (permissive).
-2. **Migration** for links, lines, accruals, audit, rate epochs and
-   control, with RLS tests.
-3. **Rate epochs** at boot from the installed table, with the conflict
-   refusal.
-4. **Transfer client** with the mock #1271 server and the error table.
-5. **Accrual** from finalized batches and reversals, per account.
-6. **Link request and confirm routes**, the passkey gate, the server-side
-   `/users/me` check, the liveness probe, audit, and the step-up page's
-   fourth section.
-7. **Daemon and macOS** link flow and copy keys (draft copy behind a
-   setting until the owner signs it off).
-8. **Payout pass** behind `dry_run`, with crash points, the single-flight
-   lock, the enumeration role, holds, ceilings and the kill switch; then
-   the settlement notify and the retry tick.
-9. **Reconciliation drill** and readiness wiring.
-10. **Staging feature** for the pinned hosts, then the staging run.
-11. **Operator runbook** under `docs/operator/`, listed in its README.
+Small stacked PRs, each passing the repo checks on its own. The plan,
+[`../plans/2026-10-21-nearai-credit-payout.md`](../plans/2026-10-21-nearai-credit-payout.md),
+has the files, tests and verification for each. In order: the rail
+interface and types with the test rail; the schema; rate epochs and
+accrual (no network); the #1271 client and the `near_ai` rail with the
+staging feature; the payout pass behind a mode that defaults to
+`disabled`; the link routes with the passkey gate; the daemon link flow;
+the macOS org picker and draft consent copy; the reconciliation drill and
+readiness; the operator runbook and staging steps.
 
 ## 11. Lessons from #1415
 
 The review of #1415 (2026-10-20) found fourteen problems in the earlier
-settlement-rail draft. Each one, and where this design handles it:
+settlement-rail draft. Each one, and where this design handles it. Every
+answer holds **per rail**: it is a property of the generic pass and
+storage, so a future rail inherits it, and `near_ai` is the first instance.
 
 1. **Whole batch paid to one tenant-level org; payout holds skipped.**
-   Recipients, links and accruals are per account, `(tenant_id,
-   account_id)`, and accrue per batch line from `line_items_json`
-   (section 4, "Recipients are per account", "Accrual"). Only the account
-   can link its own org (section 5). Holds that apply to this rail are
-   checked per account (section 4, "Holds"). The NEP-141 wallet hold label
-   is deliberately not one of them, because it is about the wallet target;
-   it never sends a held account's credit to anyone else.
+   On every rail, recipients, links and accruals are per account,
+   `(tenant_id, account_id, rail_id)`, and accrue per batch line from
+   `line_items_json` (section 4, "Recipients are per account, per rail",
+   "Accrual"). Only the account can link its own recipient on a rail
+   (section 5). Holds are checked per account and per rail (section 4,
+   "Holds"). On `near_ai` the NEP-141 wallet hold label is deliberately not
+   one of them, because it is about the wallet target (a default, section
+   12); a held account's credit is never sent to anyone else on any rail.
 2. **One-payout-path triggers race (check then insert, no shared lock).**
-   There is no cross-rail exclusivity to race on: D6 makes this rail
-   parallel to Trace Credit, so it never reads or writes the NEP-141
-   outbox, and there are no triggers. Inside this rail, exactly-once rests
-   on unique keys written with `ON CONFLICT DO NOTHING` (accruals), the
-   single-flight lock, one pending line per link, and cumulative targets
-   (section 4). If the owner ever makes the rails exclusive, the chosen
-   rail must be recorded on the batch line under `SELECT ... FOR UPDATE` of
-   the batch row, as the review proposed, not by triggers.
+   There is no cross-rail exclusivity to race on: D6 and D8 make every rail
+   parallel, so no rail reads or writes another's records (`near_ai` never
+   touches the NEP-141 outbox), and there are no triggers. Inside each
+   rail, exactly-once rests on unique keys written with `ON CONFLICT DO
+   NOTHING` (accruals per rail), the rail's single-flight lock, one pending
+   line per link, and the rail's send contract (section 3). If the owner
+   ever makes two rails exclusive, the chosen rail must be recorded on the
+   batch line under `SELECT ... FOR UPDATE` of the batch row, as the review
+   proposed, not by triggers.
 3. **Pull mode serves totals above the ceiling or not yet checked.** No
-   pull mode and no signed statement: the commons only pushes. Every bound
-   is checked before a line is written `pending` (section 4, "Ceilings"),
-   and cloud-api enforces the credential's caps under its own lock.
-4. **No dry run in pull mode; kill switch does not reach serving.** Mode is
-   `disabled`, `dry_run` or `live`; `dry_run` makes no POST at all. The
-   kill switch is a runtime row read before every send, not a boot setting
-   (section 4, "Modes and the kill switch").
+   pull mode and no signed statement on any rail: the commons only pushes.
+   Every bound is checked per rail before a line is written `pending`
+   (section 4, "Ceilings"); on `near_ai`, cloud-api also enforces the
+   credential's caps under its own lock.
+4. **No dry run in pull mode; kill switch does not reach serving.** Each
+   rail has its own mode, `disabled` (the default), `dry_run` or `live`;
+   `dry_run` makes no write call to the rail at all. Each rail's kill switch
+   is a runtime row read before every send, not a boot setting (section 4,
+   "Modes and the kill switch").
 5. **Award period ignores policy, so a policy change reprices the period.**
-   There is no period sum. Each batch line is priced once, at the epoch of
-   the table version in force at the batch's time, and stored; table
-   versions cannot change their rate (section 4, "Rate", "Accrual").
+   There is no period sum. On each rail each batch line is priced once, at
+   that rail's epoch in force at the batch's time, and stored; a rate
+   version cannot change its rate (section 4, "Rate", "Accrual").
 6. **Reconcile can falsely freeze a ledger.** Reconciliation is a read-only
-   drill that never freezes or changes a row (section 8). Crash recovery
-   runs inside the single-flight pass, so no publish and reconcile overlap.
-7. **A read-key 403 freezes every ledger.** A 401 or 403 on any call stops
-   the pass and changes no row (section 4, "Error mapping").
+   drill, per rail, that never freezes or changes a row (section 8). Crash
+   recovery runs inside each rail's single-flight pass, so no send and
+   reconcile overlap on one rail.
+7. **A read-key 403 freezes every ledger.** A credential fault maps to
+   `StopPass`, which stops only that rail's pass and changes no row
+   (section 3, "The interface"; section 4, "`near_ai` refusal mapping").
+   It cannot freeze another rail, let alone every account.
 8. **Accrual reads the recipient without a lock.** Routes only record
-   requests; every link state change is made by the pass under its lock,
-   and accrual is not tied to a recipient at all (it is per account, and
-   the link only decides where the cumulative total goes) (section 4,
-   "One pass").
-9. **Award period per recipient, not per account.** Owed is per account
-   across all its links: the target subtracts every closed link's final
-   total (section 4, "Payout program and link generation"). Pricing is
-   linear per line, so alternating orgs gains nothing.
-10. **An org is checked once and then locked forever.** `org_index` is not
-    unique, so no link can lock an org away from its owners. The account
-    can unlink, and the operator has an audited release (section 5,
-    "Change and unlink"). Re-checking the role before each send is not
-    possible without the person's token; section 9 records the residual
-    risk.
-11. **Unfreeze and rebind leave no audit trail.** `trace_nearai_payout_audit`
-    is append-only and gets a row for every request, confirmation, change,
-    unlink, close, release, hold, halt and resume (section 4, "State and
-    storage"). There is no unfreeze.
-12. **HTTPS check bypassed with a userinfo URL.** There is no base-URL
-    setting; the host is a compiled-in constant shared with login
-    introspection (section 2, step 6).
-13. **The "generic" ledger is hard-wired to NEAR AI.** This design claims no
-    generality: its tables are NEAR AI's. A future rail gets its own
-    tables, keyed off the same finalized batch lines.
+   requests; every link state change on a rail is made by that rail's pass
+   under its lock, and accrual is not tied to a recipient at all (it is per
+   account and rail; the link only decides where the program total goes)
+   (section 4, "One pass, per rail").
+9. **Award period per recipient, not per account.** Owed is per account and
+   rail across all its links on that rail: the target subtracts every
+   closed link's final total (section 4, "Program and link generation").
+   Pricing is linear per line, so alternating recipients gains nothing.
+10. **A recipient is checked once and then locked forever.**
+    `recipient_index` is not unique, so no link can lock a recipient away
+    from its owners on any rail. The account can unlink, and the operator
+    has an audited release per rail (section 5, "Change and unlink"). On
+    `near_ai`, re-checking the role before each send is not possible
+    without the person's token; section 9 records the residual risk.
+11. **Unfreeze and rebind leave no audit trail.** `trace_payout_audit` is
+    append-only, carries the rail id, and gets a row for every request,
+    confirmation, change, unlink, close, release, hold, halt and resume
+    (section 4, "State and storage"). There is no unfreeze.
+12. **HTTPS check bypassed with a userinfo URL.** No rail takes a base-URL
+    setting. The `near_ai` host is a compiled-in constant shared with login
+    introspection (section 2, step 6). A future rail's endpoint is
+    compiled in the same way, or is a chain RPC named by its instrument
+    descriptor, never an operator-typed URL.
+13. **The "generic" ledger is hard-wired to NEAR AI.** The design now
+    claims generality, and makes it testable. The rail interface (section
+    3) carries no #1271 concept: no `recipient_cumulative`, no org, no
+    nano-USD. Amounts are `u128` atomic units of the rail's own instrument
+    with its own `decimals`; storage is `NUMERIC(39,0)` with a `rail_id` on
+    every row; rates, locks, modes, kill switches, holds, ceilings,
+    readiness and the drill are keyed by rail. What makes the claim real
+    rather than asserted is the **second rail in tests** (section 8, step
+    2a): amount-mode and idempotency-keyed instead of cumulative, 18
+    decimals and an `erc20` instrument instead of `credit_account` and 9,
+    driven by the same pass, storage and drill with no rail-specific
+    branch, and run concurrently with a stopped rail. If adding that rail
+    needs a change outside its own module and tests, the interface is
+    wrong, and the PR that adds it must fix the interface rather than
+    special-case the rail.
 14. **Stale branch and citations.** Citations here are against
     `origin/main` f164d68f9, with the ingest binary at its new path
-    (`crates/trace-commons-ingest`). The migration number is picked at
-    plan time (section 4, "State and storage").
+    (`crates/trace-commons-ingest`). The migration number is picked when
+    the schema PR is written (section 4, "State and storage").
 
-## 12. Still open
+## 12. Still open, and defaults the owner may override
+
+### Defaults (owner may override)
+
+These are the design's current answers. The owner has not ruled on them;
+each can change without reshaping the design.
+
+1. **The NEAR wallet hold label does not block the `near_ai` rail**
+   (section 4, "Accrual"). `none_enrolled` and `ambiguous_no_designation`
+   are about a wallet target that `near_ai` does not use. A rail that pays
+   a NEAR wallet would treat them as holds.
+2. **Credit settled to a principal with no account is not paid** on any
+   external rail (section 6). Paying it once the principal joins an account
+   would need a re-keying rule for old batch lines.
+3. **Reversed-after-paid credit is netted against the account's later
+   credit on the same rail, never clawed back, and the exposure is bounded
+   by that rail's ceilings** (section 4, "Reversals", "Ceilings"; section
+   9).
+
+### Still open
 
 None of these is an owner decision about the design; each is a value or a
-fact to get before build.
+fact to get before build, or a later rail's design.
 
 1. **Account ceiling** value, **retry tick** interval, and **credential
    expiry**.
@@ -1104,7 +1404,13 @@ fact to get before build.
    before it is not.
 5. **Restriction vs budget.** One error code covers both; we infer from
    `capacity`.
-6. **Bare-principal credit** (section 6): unpaid by this design. If the
-   owner wants it paid once the principal joins an account, that needs a
-   re-keying rule for old batch lines.
-7. **Spending attribution.** Deferred in #1271.
+6. **Spending attribution.** Deferred in #1271.
+7. **Later rails.** For a NEP-141 Trace Credit token rail: whether its link
+   reuses the existing NEAR wallet designation or a new passkey-confirmed
+   link, and how it answers `read_total` and `find_receipt` (a memo index,
+   or our own outbox as the external record). For BAT: the price source
+   for its rate epochs, and the recipient proof. Each needs its own short
+   design against section 3 before it is built.
+8. **Whether `trace_credit` moves onto the interface.** Today it is a rail
+   in readiness only. Moving the NEP-141 outbox payout onto `PayoutRail`
+   would be a separate change with its own migration of outbox state.
