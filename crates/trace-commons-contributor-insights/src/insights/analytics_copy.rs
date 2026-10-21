@@ -15,8 +15,10 @@
 //! Held, and so absent, until owner decision D2: every advice sentence, the
 //! what-if sentences and anything that recommends an action (held again in
 //! Ron's 2026-10-11 review). No run of weeks is counted anywhere (owner
-//! decision D1: six weekly marks, no streaks). No money appears here (owner
-//! decision D5).
+//! decision D1: six weekly marks, no streaks). No sentence spells a currency:
+//! the only money is the Models card's documentation cost, a `{x}` hole the
+//! shell fills, labelled "at API prices" (owner decision D5, settled
+//! 2026-10-20).
 //!
 //! The glance, tip and news-mark words (`analytics_glance_*`,
 //! `analytics_tip_*`, `analytics_mark_a11y_tip`) stay in this table: the
@@ -513,4 +515,173 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The `insights_ledger_feed` switch (owner decision D3, settled
     // 2026-10-09: on by default, the switch turns it off).
     ("analytics_setting_ledger_feed", "Count Private AI tokens"),
+    // 24. The Patterns "Models" card (spec 2026-10-20 section 8; owner
+    // review pending). Scoped facts about the contributor's own traces,
+    // never a ranking: no "best", "better model", "fastest model",
+    // "benchmark" or "winner" (pinned in `service.rs`). A question's
+    // words are `analytics_models_<question>`, with `_undone` when its
+    // basis is undone edits. Money is only the `{x}` of
+    // `analytics_models_cost`, which the shell fills with a currency
+    // figure; no sentence spells a currency. `{n}` on a leader or next
+    // line is at least the session floor, so it is always plural.
+    ("analytics_models_title", "Models"),
+    (
+        "analytics_models_scope",
+        "In your traces \u{b7} labels as recorded \u{b7} task type inferred",
+    ),
+    ("analytics_models_window", "Traces from {range}"),
+    (
+        "analytics_models_bug_fix_rejected",
+        "Fewest rejected edits in your bug-fix traces",
+    ),
+    (
+        "analytics_models_bug_fix_rejected_undone",
+        "Fewest undone edits in your bug-fix traces",
+    ),
+    (
+        "analytics_models_refactor_rejected",
+        "Fewest rejected edits in your refactoring traces",
+    ),
+    (
+        "analytics_models_refactor_rejected_undone",
+        "Fewest undone edits in your refactoring traces",
+    ),
+    (
+        "analytics_models_tests_rejected",
+        "Fewest rejected edits in your test-writing traces",
+    ),
+    (
+        "analytics_models_tests_rejected_undone",
+        "Fewest undone edits in your test-writing traces",
+    ),
+    (
+        "analytics_models_docs_cost",
+        "Lowest cost per documentation trace, at API prices",
+    ),
+    (
+        "analytics_models_rejected_across_tasks",
+        "Fewest rejected edits across your task types",
+    ),
+    (
+        "analytics_models_rejected_across_tasks_undone",
+        "Fewest undone edits across your task types",
+    ),
+    (
+        "analytics_models_finish_time",
+        "Least active time to finish a trace",
+    ),
+    ("analytics_models_leader", "{label} ({x}, {n} traces)"),
+    ("analytics_models_next", "Next: {label} ({x}, {n} traces)"),
+    ("analytics_models_rate_rejected", "{p}% rejected"),
+    ("analytics_models_rate_undone", "{p}% undone"),
+    ("analytics_models_cost", "{x} per trace at API prices"),
+    (
+        "analytics_models_finish",
+        "median {span} active, {q} prompts",
+    ),
+    ("analytics_models_interrupts", "{x} interrupts per trace"),
+    ("analytics_models_not_enough", "Not enough traces yet"),
+    ("analytics_models_count_one", "{label}: {n} trace"),
+    ("analytics_models_count_other", "{label}: {n} traces"),
+    ("analytics_models_not_priced", "Not priced"),
+    (
+        "analytics_models_not_priced_line",
+        "No published API prices are known for these models, so no cost is shown.",
+    ),
+    (
+        "analytics_models_no_clear_difference",
+        "No clear difference",
+    ),
+    (
+        "analytics_models_basis_rejected",
+        "Rejected: declined, or undone after you stepped in",
+    ),
+    (
+        "analytics_models_basis_undone",
+        "Declined edits weren't recorded, so this counts undone edits",
+    ),
+    (
+        "analytics_models_mode_prompting",
+        "Traces where you were asked before each edit",
+    ),
+    (
+        "analytics_models_mode_not_prompting",
+        "Traces where edits weren't put to you",
+    ),
+    (
+        "analytics_models_info_scope",
+        "Counted from traces in your watched folders on this Mac. Nothing here leaves it.",
+    ),
+    (
+        "analytics_models_info_task",
+        "Task types are inferred from the files edited and the commands run, not from what you asked for.",
+    ),
+    (
+        "analytics_models_info_floor",
+        "A model is compared once it has 5 traces of a task type, and 30 edits for edit figures. Each answer needs two models.",
+    ),
+    (
+        "analytics_models_info_majority",
+        "A trace counts for the model that ran most of its turns. A trace with no such model counts for none.",
+    ),
+    (
+        "analytics_models_info_noise",
+        "No clear difference: the gap didn't hold in 95% of resamples, so it could be chance.",
+    ),
+    (
+        "analytics_models_info_rejected",
+        "Rejected edits are edits you declined, plus edits undone after you spoke, declined or interrupted. Only undone edits we could see count: edits made through a shell or an editor aren't seen.",
+    ),
+    (
+        "analytics_models_info_codex",
+        "Codex traces don't record declined edits, so their rejections are unknown, never zero.",
+    ),
+    (
+        "analytics_models_info_interrupts",
+        "Interrupts are shown beside edits, not added to them: an interrupt isn't always a rejection.",
+    ),
+    (
+        "analytics_models_info_cost",
+        "At API prices: what the published API list prices would charge for these tokens, not what a subscription costs. Cache writes are priced at their 5-minute and 1-hour rates.",
+    ),
+    (
+        "analytics_models_info_time",
+        "Active time runs from each prompt to the model's last action before the next one, less time waiting on your answers. Only finished traces count, compared within one approval mode.",
+    ),
+    (
+        "analytics_models_left_out_unknown_facts",
+        "Left out, facts couldn't be read: {n}",
+    ),
+    (
+        "analytics_models_left_out_delegated",
+        "Left out, work by subagents isn't read: {n}",
+    ),
+    (
+        "analytics_models_left_out_capped",
+        "Left out, too long to read in full: {n}",
+    ),
+    (
+        "analytics_models_left_out_routed",
+        "Left out, routed so the label may not match: {n}",
+    ),
+    (
+        "analytics_models_left_out_reviewer",
+        "Left out, automatic code review: {n}",
+    ),
+    (
+        "analytics_models_left_out_no_majority",
+        "Left out, no model ran most turns: {n}",
+    ),
+    (
+        "analytics_models_left_out_unpriced",
+        "Left out, not priced: {n}",
+    ),
+    (
+        "analytics_models_left_out_too_few_edits",
+        "Left out, too few edits: {n}",
+    ),
+    (
+        "analytics_models_left_out_mix_too_different",
+        "Left out, task mix too different to compare: {n}",
+    ),
 ];
