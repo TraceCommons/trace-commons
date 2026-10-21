@@ -4690,17 +4690,22 @@ The tally also keeps the session's **NEAR AI charge** (owner decision D5,
 settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
 charge is taken as the call is folded or not at all. For each call through
 the NEAR AI route (`verified`; `gateway_only`, `unattested`, `pending` or
-`unavailable`; `failed`), the ledger's `cost_usd` is added to a per-model
-sum: `{usd_micros, charged_calls, calls_without_charge}`, integer USD micros
-rounded to the nearest, with `overflowed: true` written only when the sum
-overflowed. The model is the call's served model label, else its requested
-one, normalized as the Models answers normalize labels (lower case, a date
-stamp or `-latest` removed), or `unlabelled`. A call with no `cost_usd`, or
+`unavailable`; `failed`), the ledger's `cost_usd` is added to the
+session's one charge: `{usd_micros, charged_calls, calls_without_charge}`,
+integer USD micros rounded to the nearest, with `overflowed: true` written
+only when the sum overflowed, and `served_model` written only while every
+call counted named the same served model, normalized as the Models answers
+normalize labels (lower case, a date stamp or `-latest` removed). A call
+that names no served model, or another one, leaves the charge with no
+`served_model` for good; the requested model is never read, since it is not
+who served the call. The served model is the one model name a tally keeps,
+and it is what the Models answers attribute a charge to a model by. With
+`LEDGER_MONEY_IN_INSIGHTS` held (owner decision D5) no charge is taken. A call with no `cost_usd`, or
 one that is not a finite, non-negative amount, is counted in
 `calls_without_charge` and makes that session's charge unknown, never zero;
 so does an overflow. `outside` calls add no charge (the proxy prices those
 whether or not anyone was billed), and neither do calls with no proof label
-(their route is unknown). A tally with no NEAR AI call writes no charges,
+(their route is unknown). A tally with no NEAR AI call writes no `charge`,
 and a tally written before charges loads with none. The store holds no list
 price: list prices are applied to stored tokens when an answer is built.
 The charge is the store's one money figure, and only
@@ -5154,8 +5159,13 @@ updated_at, window_start, window_end, pricing, rows}`:
     value}` or `{kind: "finish_time", median_active_secs,
     median_user_turns}`. On `docs_cost`, `figure` is at API list prices and
     takes only sessions with no route tally. `near_ai_charge` is as on the
-    row, over that model's Docs sessions (by majority label) sent through
-    NEAR AI; `null` on every other figure.
+    row, over only that model's Docs sessions whose route is
+    `routed_verified` and whose calls all named the model as served (with
+    it as the majority label); `null` on every other figure. A transcript
+    label may not name the model NEAR AI served, so a session declared as
+    one model and served another, or not verified, or whose calls named no
+    one served model, is counted on the row's `near_ai_charge` only, never
+    on a model's.
   - `sessions_by_model`: `[[label, sessions], ...]`.
   - `left_out`: counts of sessions left out of that question, per reason:
     `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
@@ -5180,10 +5190,17 @@ updated_at, window_start, window_end, pricing, rows}`:
     `charge_unknown` how many of them have an unknown charge. `median` is
     `{kind: "usd_micros", value}`, the median charge per session over those
     with a known charge (a session's charge is every NEAR AI call in it),
-    or `null` when none is known: never zero for unknown. The whole field is
+    or `null` when fewer than five are known, the session floor every
+    figure is held to, so one session's exact charge never crosses as a
+    median: never zero for unknown. The row's figure counts every Docs
+    session sent through NEAR AI, whichever model served it. The whole field is
     `null` on every other row, and on `docs_cost` when no session in the
     window was sent through NEAR AI. It is never added to `figure`: a
     session's charge and its list-price estimate never meet in one figure.
+
+While `LEDGER_MONEY_IN_INSIGHTS` is held (owner decision D5), `docs_cost`
+is `not_priced` with `leader`, `next` and `near_ai_charge` `null` and
+`pricing.tables` empty, and no stored charge is read.
 
 Money crosses only on the `docs_cost` row, as `{kind: "usd_micros", value}`:
 in `figure` at API list prices, and in `near_ai_charge.median` as the NEAR

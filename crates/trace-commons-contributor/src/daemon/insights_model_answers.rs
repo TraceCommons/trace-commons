@@ -154,9 +154,13 @@ mod tests {
         /// `docs_priced`, with three more Docs sessions on `SMALLER` sent
         /// through NEAR AI: one charged 0.0125 USD, one 0.0375 USD over two
         /// calls, one with a call the ledger did not charge.
+        /// `docs_priced`, plus seven Docs sessions declaring `SMALLER` sent
+        /// through NEAR AI and verified: six served by `SMALLER` (one with
+        /// an unknown charge), and one served by another model, the case a
+        /// declared label would misattribute.
         fn docs_charged() -> Self {
             let f = Self::docs_priced();
-            let sessions: Vec<(String, Vec<u8>)> = (0..3u64)
+            let sessions: Vec<(String, Vec<u8>)> = (0..7u64)
                 .map(|n| {
                     (
                         format!("PRIVATE-docs-near{n}.jsonl"),
@@ -165,35 +169,41 @@ mod tests {
                 })
                 .collect();
             f.run_generated(&sessions);
-            let call = |id: i64, session: &str, usd: Option<f64>| crate::routing::RoutedExchange {
-                id: Some(id),
-                started_at: now() - Duration::minutes(30 - id),
-                client_session_id: Some(session.to_string()),
-                facade: "anthropic".to_string(),
-                path: Some("/v1/messages".to_string()),
-                backend: "SECRET-BACKEND".to_string(),
-                served_model: Some("PRIVATE-SERVED-glm".to_string()),
-                input_tokens: Some(100),
-                cache_read_tokens: Some(40),
-                cache_write_tokens: Some(0),
-                output_tokens: Some(10),
-                cost_usd: usd,
-                proof: Some(crate::routing::ProofStatus::Verified),
-                ..Default::default()
+            let call = |id: i64, session: &str, served: &str, usd: Option<f64>| {
+                crate::routing::RoutedExchange {
+                    id: Some(id),
+                    started_at: now() - Duration::minutes(30 - id),
+                    client_session_id: Some(session.to_string()),
+                    facade: "anthropic".to_string(),
+                    path: Some("/v1/messages".to_string()),
+                    backend: "SECRET-BACKEND".to_string(),
+                    served_model: Some(served.to_string()),
+                    input_tokens: Some(100),
+                    cache_read_tokens: Some(40),
+                    cache_write_tokens: Some(0),
+                    output_tokens: Some(10),
+                    cost_usd: usd,
+                    proof: Some(crate::routing::ProofStatus::Verified),
+                    ..Default::default()
+                }
             };
             let ledger = crate::routing::FixedLedger::new(vec![
-                call(1, "PRIVATE-NEAR0", Some(0.0125)),
-                call(2, "PRIVATE-NEAR1", Some(0.025)),
-                call(3, "PRIVATE-NEAR1", Some(0.0125)),
-                call(4, "PRIVATE-NEAR2", Some(0.01)),
-                call(5, "PRIVATE-NEAR2", None),
+                call(1, "PRIVATE-NEAR0", SMALLER, Some(0.0125)),
+                call(2, "PRIVATE-NEAR1", SMALLER, Some(0.025)),
+                call(3, "PRIVATE-NEAR1", SMALLER, Some(0.0125)),
+                call(4, "PRIVATE-NEAR2", SMALLER, Some(0.01)),
+                call(5, "PRIVATE-NEAR2", SMALLER, None),
+                call(6, "PRIVATE-NEAR3", SMALLER, Some(0.02)),
+                call(7, "PRIVATE-NEAR4", SMALLER, Some(0.03)),
+                call(8, "PRIVATE-NEAR5", SMALLER, Some(0.04)),
+                call(9, "PRIVATE-NEAR6", "PRIVATE-SERVED-glm", Some(0.05)),
             ]);
             f.pass
                 .fold_ledger(&|| true, &ledger, &mut Vec::new, now())
                 .unwrap();
             assert_eq!(
                 f.pass.tallied_sessions_for_test(),
-                3,
+                7,
                 "the calls were folded"
             );
             f
@@ -459,23 +469,32 @@ mod tests {
         let v = f.answers(&[], true);
         let q4 = &v["rows"][3];
         assert_eq!(q4["question"], "docs_cost");
+        // Every Docs session sent through NEAR AI, whoever served it.
         let charge = serde_json::json!({
             "basis": "near_ai_ledger",
-            "median": {"kind": "usd_micros", "value": 25_000},
-            "routed_sessions": 3,
+            "median": {"kind": "usd_micros", "value": 33_750},
+            "routed_sessions": 7,
             "charge_unknown": 1,
         });
         assert_eq!(q4["near_ai_charge"], charge, "{v}");
         // The routed sessions are out of the list-priced figures, which are
         // those of the unrouted sessions alone.
-        assert_eq!(q4["left_out"]["routed"], 3);
+        assert_eq!(q4["left_out"]["routed"], 7);
         let plain = Fixture::docs_priced().answers(&[], true);
         for side in ["leader", "next"] {
             assert_eq!(q4[side]["figure"], plain["rows"][3][side]["figure"]);
             assert_eq!(q4[side]["sessions"], plain["rows"][3][side]["sessions"]);
         }
         assert_eq!(q4["leader"]["label"], SMALLER);
-        assert_eq!(q4["leader"]["near_ai_charge"], charge);
+        // The label's figure takes only the sessions NEAR AI proved it
+        // served: not the one served by another model.
+        let served = serde_json::json!({
+            "basis": "near_ai_ledger",
+            "median": {"kind": "usd_micros", "value": 30_000},
+            "routed_sessions": 6,
+            "charge_unknown": 1,
+        });
+        assert_eq!(q4["leader"]["near_ai_charge"], served);
         assert!(q4["next"]["near_ai_charge"].is_null());
         assert!(plain["rows"][3]["near_ai_charge"].is_null());
         for (ix, row) in v["rows"].as_array().unwrap().iter().enumerate() {

@@ -1209,6 +1209,7 @@ fn the_bootstrap_runs_exactly_the_configured_draws() {
         &BTreeMap::new(),
         &catalog(),
         now(),
+        LEDGER_MONEY_IN_INSIGHTS,
         &mut draws,
     );
     assert_eq!(answers, answer(&bugfix_pair()));
@@ -1588,14 +1589,14 @@ fn a_no_edit_session_whose_edits_are_unknown_is_counted_as_left_out() {
 }
 
 /// Five list-priced Docs sessions on each of model-a and model-b, all
-/// unobserved, plus model-a Docs sessions through NEAR AI with the charges
-/// given (`None` is an unknown charge).
+/// unobserved, plus model-a Docs sessions through NEAR AI, verified and
+/// served by model-a, with the charges given (`None` is an unknown charge).
 fn docs_with_charges(
     charges: &[Option<u64>],
 ) -> (
     Vec<SessionInput>,
     BTreeMap<String, ModelRoute>,
-    BTreeMap<String, Option<u64>>,
+    BTreeMap<String, SessionCharge>,
 ) {
     let mut sessions = many("a", 5, |id| {
         solo(&id, "model-a", InferredTask::Docs, 1, Some(0), 0)
@@ -1609,17 +1610,30 @@ fn docs_with_charges(
         let id = format!("near-{ix}");
         sessions.push(solo(&id, "model-a", InferredTask::Docs, 1, Some(0), 0));
         routes.insert(id.clone(), ModelRoute::RoutedVerified);
-        charged.insert(id, *charge);
+        charged.insert(id, served(*charge, Some("model-a")));
     }
     (sessions, routes, charged)
+}
+
+fn served(usd_micros: Option<u64>, model: Option<&str>) -> SessionCharge {
+    SessionCharge {
+        usd_micros,
+        served_model: model.map(str::to_owned),
+    }
 }
 
 #[test]
 fn the_near_ai_charge_is_its_own_figure_never_summed_with_list_prices() {
     // List prices would put each model-a session at 1 USD; the charges are
     // far from that, so any mixing would move a figure.
-    let (sessions, routes, charges) =
-        docs_with_charges(&[Some(2_000), Some(9_000), Some(4_000), None]);
+    let (sessions, routes, charges) = docs_with_charges(&[
+        Some(2_000),
+        Some(9_000),
+        Some(4_000),
+        Some(3_000),
+        Some(5_000),
+        None,
+    ]);
     let with = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
     let without = model_answers(&sessions, &routes, &catalog(), now());
     let q4 = row(&with, ModelQuestion::DocsCost);
@@ -1634,12 +1648,12 @@ fn the_near_ai_charge_is_its_own_figure_never_summed_with_list_prices() {
         );
         assert_eq!(figure_of(q4, label).sessions, 5);
     }
-    assert_eq!(q4.left_out.routed, 4);
+    assert_eq!(q4.left_out.routed, 6);
     // The charge is the median of the known charges, on its own.
     let expected = NearAiChargeFigure {
         basis: ChargeBasis::NearAiLedger,
         median: Some(Figure::UsdMicros { value: 4_000 }),
-        routed_sessions: 4,
+        routed_sessions: 6,
         charge_unknown: 1,
     };
     assert_eq!(q4.near_ai_charge, Some(expected));
@@ -1658,7 +1672,13 @@ fn the_near_ai_charge_is_its_own_figure_never_summed_with_list_prices() {
 
 #[test]
 fn the_near_ai_charge_payload_has_its_shape() {
-    let (sessions, routes, charges) = docs_with_charges(&[Some(1_500), Some(2_500)]);
+    let (sessions, routes, charges) = docs_with_charges(&[
+        Some(1_500),
+        Some(2_500),
+        Some(2_000),
+        Some(1_000),
+        Some(3_000),
+    ]);
     let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
     let wire = serde_json::to_value(&answers).unwrap();
     let q4 = &wire["rows"][3];
@@ -1666,7 +1686,7 @@ fn the_near_ai_charge_payload_has_its_shape() {
     let charge = serde_json::json!({
         "basis": "near_ai_ledger",
         "median": {"kind": "usd_micros", "value": 2_000},
-        "routed_sessions": 2,
+        "routed_sessions": 5,
         "charge_unknown": 0,
     });
     assert_eq!(q4["near_ai_charge"], charge);
@@ -1707,7 +1727,7 @@ fn an_all_unknown_charge_reads_unknown_never_zero() {
 
 #[test]
 fn a_charge_outside_the_docs_task_or_window_is_not_counted() {
-    let (mut sessions, mut routes, mut charges) = docs_with_charges(&[Some(1_000)]);
+    let (mut sessions, mut routes, mut charges) = docs_with_charges(&[Some(1_000); 5]);
     sessions.push(solo(
         "near-bug",
         "model-a",
@@ -1717,18 +1737,120 @@ fn a_charge_outside_the_docs_task_or_window_is_not_counted() {
         0,
     ));
     routes.insert("near-bug".into(), ModelRoute::RoutedVerified);
-    charges.insert("near-bug".into(), Some(50_000));
+    charges.insert("near-bug".into(), served(Some(50_000), Some("model-a")));
     sessions.push(with_facts(
         solo("near-auto", "model-a", InferredTask::Docs, 1, Some(0), 0),
         |_| {},
     ));
     sessions.last_mut().unwrap().automated = true;
     routes.insert("near-auto".into(), ModelRoute::RoutedVerified);
-    charges.insert("near-auto".into(), Some(70_000));
+    charges.insert("near-auto".into(), served(Some(70_000), Some("model-a")));
     let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
     let charge = row(&answers, ModelQuestion::DocsCost)
         .near_ai_charge
         .unwrap();
-    assert_eq!(charge.routed_sessions, 1);
+    assert_eq!(charge.routed_sessions, 5);
     assert_eq!(charge.median, Some(Figure::UsdMicros { value: 1_000 }));
+}
+
+/// The review example: a Docs session that declares one model but
+/// was served another through NEAR AI. Its charge paid for the model that
+/// served it, so it is on the row's figure only, never on the declared
+/// label's. So is a charge whose route is not verified, whose served model
+/// is not one label, or not named: only a verified route whose one served
+/// model is the label attributes a charge to it.
+#[test]
+fn a_charge_is_on_a_model_only_when_its_verified_served_model_is_that_label() {
+    let (mut sessions, mut routes, mut charges) = docs_with_charges(&[Some(1_000); 5]);
+    let mut add = |id: &str, route: ModelRoute, charge: SessionCharge| {
+        sessions.push(solo(id, "model-a", InferredTask::Docs, 1, Some(0), 0));
+        routes.insert(id.to_owned(), route);
+        charges.insert(id.to_owned(), charge);
+    };
+    // Declares model-a, served another model, verified.
+    add(
+        "glm-served",
+        ModelRoute::RoutedVerified,
+        served(Some(90_000), Some("glm-5")),
+    );
+    // Served model-a, but not proven.
+    for (id, route) in [
+        ("unverified", ModelRoute::RoutedUnverified),
+        ("check-failed", ModelRoute::CheckFailed),
+        ("mixed", ModelRoute::Mixed),
+    ] {
+        add(id, route, served(Some(80_000), Some("model-a")));
+    }
+    // Verified, but its calls named no single served model.
+    add(
+        "no-single-model",
+        ModelRoute::RoutedVerified,
+        served(Some(70_000), None),
+    );
+    let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let q4 = row(&answers, ModelQuestion::DocsCost);
+    // The row counts every Docs session sent through NEAR AI.
+    let on_row = q4.near_ai_charge.unwrap();
+    assert_eq!(on_row.routed_sessions, 10);
+    // model-a's figure counts only the five verified sessions served by it.
+    let on_model = figure_of(q4, "model-a").near_ai_charge.unwrap();
+    assert_eq!(on_model.routed_sessions, 5);
+    assert_eq!(on_model.median, Some(Figure::UsdMicros { value: 1_000 }));
+}
+
+/// A charge figure is held to the session floor, as every other figure
+/// is: under it the figure counts its sessions and shows no median, so a
+/// single session's exact charge never crosses as a median.
+#[test]
+fn a_charge_under_the_session_floor_has_no_median() {
+    let (sessions, routes, charges) = docs_with_charges(&[Some(1_234)]);
+    let answers = model_answers_with_charges(&sessions, &routes, &charges, &catalog(), now());
+    let q4 = row(&answers, ModelQuestion::DocsCost);
+    let expected = NearAiChargeFigure {
+        basis: ChargeBasis::NearAiLedger,
+        median: None,
+        routed_sessions: 1,
+        charge_unknown: 0,
+    };
+    assert_eq!(q4.near_ai_charge, Some(expected));
+    assert_eq!(figure_of(q4, "model-a").near_ai_charge, Some(expected));
+}
+
+/// `LEDGER_MONEY_IN_INSIGHTS` (owner decision D5) gates every money
+/// figure: held, the cost row shows no list-priced figure, no charge and no
+/// pricing table, and the other rows are unchanged.
+#[test]
+fn held_ledger_money_leaves_no_money_figure() {
+    let (sessions, routes, charges) = docs_with_charges(&[Some(1_000); 5]);
+    let shown = model_answers_counting(
+        &sessions,
+        &routes,
+        &charges,
+        &catalog(),
+        now(),
+        true,
+        &mut BTreeMap::new(),
+    );
+    let held = model_answers_counting(
+        &sessions,
+        &routes,
+        &charges,
+        &catalog(),
+        now(),
+        false,
+        &mut BTreeMap::new(),
+    );
+    let q4 = row(&held, ModelQuestion::DocsCost);
+    assert!(row(&shown, ModelQuestion::DocsCost).leader.is_some());
+    assert_eq!(q4.state, AnswerState::NotPriced);
+    assert_eq!((&q4.leader, &q4.next), (&None, &None));
+    assert_eq!(q4.near_ai_charge, None);
+    assert!(held.pricing_tables.is_empty());
+    let wire = serde_json::to_string(&held).unwrap();
+    assert!(!wire.contains("usd_micros"), "{wire}");
+    for (with, without) in held.rows.iter().zip(&shown.rows) {
+        if with.question != ModelQuestion::DocsCost {
+            assert_eq!(with, without, "{:?}", with.question);
+        }
+    }
 }

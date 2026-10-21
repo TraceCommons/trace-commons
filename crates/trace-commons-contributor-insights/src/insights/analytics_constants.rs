@@ -146,7 +146,11 @@ pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
 /// Owner decision D5, settled by the owner on 2026-10-20: Insights shows
 /// money, labelled. The proxy ledger's `cost_usd` is shown as a charge;
 /// everything else is at API list prices from reviewed tables shipped in
-/// the build, with no runtime fetch.
+/// the build, with no runtime fetch. It gates every money path: the ledger
+/// fold takes no charge (`insights_route_tally::fold_into`), the answer
+/// reads no stored charge (`insights_week::charge_map`), and the Docs cost
+/// row carries no list-priced figure and no `near_ai_charge`
+/// (`model_answers::cost_row`) while it is false.
 pub const LEDGER_MONEY_IN_INSIGHTS: bool = true;
 
 /// Whether the daemon setting `insights_ledger_feed` starts on. Owner
