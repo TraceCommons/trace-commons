@@ -455,6 +455,39 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_sessions_page_failed",
         "More traces couldn't be loaded.",
     ),
+    // A Sessions feed row's own labels (Insights PM request, 2026-10-21):
+    // the task, pre-filled from the inferred one, and what became of the
+    // work. Kept on this Mac only. `analytics_task_<wire>` and
+    // `analytics_outcome_<wire>` name each closed value
+    // (`session_labels::LabelledTask`, `SessionOutcome`).
+    ("analytics_label_task", "Task"),
+    ("analytics_label_outcome", "Outcome"),
+    ("analytics_task_bug_fix", "Bug fix"),
+    ("analytics_task_refactor", "Refactor"),
+    ("analytics_task_tests", "Tests"),
+    ("analytics_task_docs", "Docs"),
+    ("analytics_task_other", "Other"),
+    // The task the rules inferred, until the person sets one.
+    ("analytics_task_inferred", "{label} · inferred"),
+    // Takes the inferred task as the person's own, in one click.
+    ("analytics_task_confirm", "Confirm"),
+    // Clears the person's task, so the inferred one shows again.
+    ("analytics_task_use_inferred", "Use inferred"),
+    ("analytics_outcome_kept", "Kept"),
+    ("analytics_outcome_partly_kept", "Partly kept"),
+    ("analytics_outcome_thrown_away", "Thrown away"),
+    ("analytics_outcome_clear", "Clear"),
+    // Each row's controls for VoiceOver, so the rows' repeated controls
+    // are told apart: `{label}` is the row's own label.
+    ("analytics_label_task_a11y", "Task, {label}"),
+    ("analytics_label_outcome_a11y", "Outcome, {label}"),
+    ("analytics_task_confirm_a11y", "Confirm task, {label}"),
+    // Under a row whose label could not be saved; the row shows its label
+    // as it was.
+    (
+        "analytics_label_save_failed",
+        "The label couldn't be saved.",
+    ),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",

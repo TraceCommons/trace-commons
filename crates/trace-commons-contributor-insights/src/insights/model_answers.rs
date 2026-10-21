@@ -93,6 +93,15 @@
 //!   fixed seed; the type weights stay the pair's, from the whole sample. A draw whose figure is
 //!   undefined (a resample with no edits) is not a lead. A row with no
 //!   clear difference still carries both figures, in the total order.
+//! - The person's own labels (`session_labels`, by `session_ref`): a task
+//!   they set replaces the inferred task wherever one is read, after the
+//!   rules are re-run on the stored shape, so it decides which rows the
+//!   session is on (a session inferred as no edits that they name is on
+//!   that task's rows). An outcome they set is counted in `kept`, on the
+//!   rejection rows only (Q1-Q3, Q5): per model, over the row's sessions
+//!   that are compared (by route) and whose majority model it is, whatever
+//!   else leaves them out of the rate. It never moves a rate, an order or a
+//!   state, and a session with no outcome is in no `kept` figure.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,6 +118,7 @@ use super::analytics_constants::{
 };
 use super::pricing_catalog::PricingCatalog;
 use super::session_facts::{EditMode, InferredTask, ModelFacts, SessionFacts};
+use super::session_labels::{SessionLabel, SessionOutcome};
 use super::session_pricing::{ModelPrice, PricingTableRef, normalize_model_label, price_session};
 use super::task_classifier::reclassify;
 use super::week_rollup::{SessionBody, SessionInput};
@@ -192,6 +202,25 @@ pub struct ModelFigure {
     /// sessions whose route is verified and whose calls all named this
     /// model as served. `None` when there are none.
     pub near_ai_charge: Option<NearAiChargeFigure>,
+    /// On a rejection figure only: what the person said became of this
+    /// model's work in the row's sessions. `None` elsewhere and when they
+    /// gave none of those sessions an outcome.
+    pub kept: Option<KeptFigure>,
+}
+
+/// The outcomes the person gave one model's sessions in a row (their own
+/// labels, `session_labels::SessionOutcome`): an acceptance signal beside
+/// the rejection rate, never folded into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct KeptFigure {
+    /// Sessions with an outcome; the three counts below sum to it.
+    pub labelled: u32,
+    pub kept: u32,
+    pub partly_kept: u32,
+    pub thrown_away: u32,
+    /// `kept / labelled` in permille, rounded half-up once. Partly kept is
+    /// not kept.
+    pub kept_permille: u32,
 }
 
 /// One session's NEAR AI charge, as its route tally kept it.
@@ -263,6 +292,10 @@ pub struct ModelAnswerRow {
     /// session sent through NEAR AI, whichever model served it. `None`
     /// elsewhere and when no such session is in the window.
     pub near_ai_charge: Option<NearAiChargeFigure>,
+    /// On the rejection rows only: each model with at least one session in
+    /// the row the person gave an outcome, by label, whatever the row's
+    /// state. Empty elsewhere and when none has an outcome.
+    pub kept_by_model: Vec<(String, KeptFigure)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -314,6 +347,8 @@ struct Candidate {
     tables: Vec<PricingTableRef>,
     /// The NEAR AI charge: `None` with no call through NEAR AI.
     near_ai_charge: Option<SessionCharge>,
+    /// The outcome the person gave the session, if any.
+    outcome: Option<SessionOutcome>,
 }
 
 struct Prepared {
@@ -420,6 +455,7 @@ fn prepare(
     sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
     charges: &BTreeMap<String, SessionCharge>,
+    labels: &BTreeMap<String, SessionLabel>,
     catalog: &PricingCatalog,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -453,6 +489,8 @@ fn prepare(
             bump(&mut prepared.unknown_facts);
             continue;
         };
+        // The person's own labels; `labels` below are the declared models.
+        let own_label = labels.get(&session.session_ref);
         let (accounting, labels, turns) = match &session.body {
             SessionBody::Claude {
                 series,
@@ -474,6 +512,10 @@ fn prepare(
         };
         let mut facts = facts.clone();
         reclassify(&mut facts);
+        // The person's task over the inferred one.
+        if let Some(task) = own_label.and_then(|label| label.task) {
+            facts.task = task.inferred();
+        }
         if facts.reviewer {
             bump(prepared.reviewer.entry(facts.task).or_default());
             continue;
@@ -511,6 +553,7 @@ fn prepare(
             cost_usd_micros: price.total_usd_micros,
             tables: price.tables,
             near_ai_charge: charges.get(&session.session_ref).cloned(),
+            outcome: own_label.and_then(|label| label.outcome),
         });
     }
     prepared
@@ -1084,7 +1127,43 @@ fn empty_row(
         sessions_by_model,
         left_out,
         near_ai_charge: None,
+        kept_by_model: Vec::new(),
     }
+}
+
+/// Each model's [`KeptFigure`] over the row's sessions of `tasks` that are
+/// compared by route and have a majority model, by majority label. A model
+/// with no session the person gave an outcome is absent.
+fn kept_by_model(prepared: &Prepared, tasks: &[InferredTask]) -> BTreeMap<String, KeptFigure> {
+    let mut counts: BTreeMap<String, [u32; 3]> = BTreeMap::new();
+    for candidate in prepared.of_tasks(tasks) {
+        let (Some(model), Some(outcome)) = (&candidate.majority, candidate.outcome) else {
+            continue;
+        };
+        if !candidate.route.compared() {
+            continue;
+        }
+        let slot = match outcome {
+            SessionOutcome::Kept => 0,
+            SessionOutcome::PartlyKept => 1,
+            SessionOutcome::ThrownAway => 2,
+        };
+        bump(&mut counts.entry(model.clone()).or_default()[slot]);
+    }
+    counts
+        .into_iter()
+        .map(|(label, [kept, partly_kept, thrown_away])| {
+            let labelled = kept.saturating_add(partly_kept).saturating_add(thrown_away);
+            let figure = KeptFigure {
+                labelled,
+                kept,
+                partly_kept,
+                thrown_away,
+                kept_permille: permille(u64::from(kept), u64::from(labelled)).unwrap_or(0),
+            };
+            (label, figure)
+        })
+        .collect()
 }
 
 /// The NEAR AI charge figure over `candidates`, or `None` when none went
@@ -1171,6 +1250,11 @@ fn rejection_row(
     }
     let compared = comparable(entrants, &mut left_out);
     let mut row = empty_row(question, session_counts(&cells), left_out);
+    let kept = kept_by_model(prepared, tasks);
+    row.kept_by_model = kept
+        .iter()
+        .map(|(label, figure)| (label.clone(), *figure))
+        .collect();
     if compared.len() < 2 {
         return row;
     }
@@ -1216,6 +1300,7 @@ fn rejection_row(
         let rate = fixed_permille(value)?;
         Some(Contender {
             figure: ModelFigure {
+                kept: kept.get(&entrant.label).copied(),
                 label: entrant.label.clone(),
                 sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
                 edits: Some(u32::try_from(edits).unwrap_or(u32::MAX)),
@@ -1324,6 +1409,7 @@ fn cost_row(
                         .copied()
                         .filter(|candidate| attributed_to(candidate, label)),
                 ),
+                kept: None,
             },
             cells,
             value,
@@ -1410,6 +1496,7 @@ fn time_figure(
             },
             interrupts_per_session_permille: None,
             near_ai_charge: None,
+            kept: None,
         },
         cells,
         value,
@@ -1458,10 +1545,26 @@ pub fn model_answers_with_charges(
     catalog: &PricingCatalog,
     now: DateTime<Utc>,
 ) -> ModelAnswers {
+    model_answers_labelled(sessions, routes, charges, &BTreeMap::new(), catalog, now)
+}
+
+/// [`model_answers_with_charges`] with the person's own labels, by
+/// `session_ref`: a task they set replaces the inferred one, and an outcome
+/// they set is counted in the rejection rows' `kept` figures. A session with
+/// no entry is read as before.
+pub fn model_answers_labelled(
+    sessions: &[SessionInput],
+    routes: &BTreeMap<String, ModelRoute>,
+    charges: &BTreeMap<String, SessionCharge>,
+    labels: &BTreeMap<String, SessionLabel>,
+    catalog: &PricingCatalog,
+    now: DateTime<Utc>,
+) -> ModelAnswers {
     model_answers_counting(
         sessions,
         routes,
         charges,
+        labels,
         catalog,
         now,
         LEDGER_MONEY_IN_INSIGHTS,
@@ -1471,17 +1574,28 @@ pub fn model_answers_with_charges(
 
 /// [`model_answers`], counting each question's bootstrap draws: the seam
 /// the draw-count test reads.
+// Private, and every input is one the public entry points pass through.
+#[allow(clippy::too_many_arguments)]
 fn model_answers_counting(
     sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
     charges: &BTreeMap<String, SessionCharge>,
+    labels: &BTreeMap<String, SessionLabel>,
     catalog: &PricingCatalog,
     now: DateTime<Utc>,
     money: bool,
     draws: &mut BTreeMap<ModelQuestion, u32>,
 ) -> ModelAnswers {
     let window_start = now - Duration::weeks(MODEL_ANSWER_WINDOW_WEEKS);
-    let prepared = prepare(sessions, routes, charges, catalog, window_start, now);
+    let prepared = prepare(
+        sessions,
+        routes,
+        charges,
+        labels,
+        catalog,
+        window_start,
+        now,
+    );
     let mut tables = BTreeSet::new();
     let rows = ModelQuestion::ALL
         .iter()

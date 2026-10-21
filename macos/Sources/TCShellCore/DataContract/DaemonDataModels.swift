@@ -2282,6 +2282,17 @@ extension DaemonData {
         /// Tokens per turn for the row; `nil` for Codex, for a trace with no
         /// known turn, and from a daemon that predates it.
         public let sparkline: InsightsSessionSparkline?
+        /// The task the daemon's rules infer: `bug_fix`, `refactor`,
+        /// `tests`, `docs`, `other` or `no_edits`; `nil` with no facts and
+        /// from a daemon that predates the labels.
+        public let inferredTask: String?
+        /// The person's own task (`insights_session_label`), one of the five
+        /// task words; `nil` while unset. Settable, so the model can show a
+        /// change before the daemon answers.
+        public var userTask: String?
+        /// The person's own outcome: `kept`, `partly_kept` or
+        /// `thrown_away`; `nil` while unset.
+        public var userOutcome: String?
 
         public var id: String { sessionRef }
 
@@ -2289,7 +2300,29 @@ extension DaemonData {
             case source, turns, folder, tokens, sparkline
             case sessionRef = "session_ref"
             case startedAt = "started_at"
+            case inferredTask = "inferred_task"
+            case userTask = "user_task"
+            case userOutcome = "user_outcome"
         }
+    }
+
+    /// One `insights_session_label` param: absent (`keep`), `null`
+    /// (`clear`) or a closed word (`set`).
+    public enum InsightsLabelChange: Equatable, Sendable {
+        case keep
+        case clear
+        case set(String)
+    }
+
+    /// `insights_session_label`: the labelled row as `insights_sessions` now
+    /// lists it (`session`). The same three shapes as the list: off,
+    /// unreadable, and the row.
+    public struct InsightsSessionLabelAnswer: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        public let readable: Bool?
+        public let reason: String?
+        public let session: InsightsWatchedSession?
     }
 
     /// `insights_session_drill`: one watched trace turn by turn, in the

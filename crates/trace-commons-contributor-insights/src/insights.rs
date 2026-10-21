@@ -35,6 +35,7 @@ pub mod service;
 pub mod session_drill;
 pub mod session_facts;
 pub mod session_identity;
+pub mod session_labels;
 pub mod session_pricing;
 pub mod session_sparkline;
 pub mod summary;

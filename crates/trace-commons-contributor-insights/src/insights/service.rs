@@ -1942,6 +1942,31 @@ mod tests {
         );
     }
 
+    /// Every value a Sessions row's own labels can take has its words, so
+    /// a shell never shows a wire label, and the inferred task says so.
+    #[test]
+    fn every_session_label_has_its_words() {
+        use super::super::session_labels::{LabelledTask, SessionOutcome};
+        let copy = ui_copy();
+        for task in LabelledTask::ALL {
+            let key = format!("analytics_task_{}", task.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        for outcome in SessionOutcome::ALL {
+            let key = format!("analytics_outcome_{}", outcome.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        assert!(!copy.contains_key("analytics_task_no_edits"));
+        assert_eq!(copy["analytics_task_inferred"], "{label} · inferred");
+        for key in [
+            "analytics_label_task_a11y",
+            "analytics_label_outcome_a11y",
+            "analytics_task_confirm_a11y",
+        ] {
+            assert!(copy[key].contains("{label}"), "{key} names its row");
+        }
+    }
+
     /// Owner decision 2026-10-20: a Patterns card whose estimate rounds to
     /// 0 leads with its count and unit, one and many, and the line beneath
     /// it does not say the count again.

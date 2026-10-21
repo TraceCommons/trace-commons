@@ -318,6 +318,22 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
+    public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
+                                     outcome: DaemonData.InsightsLabelChange) async throws
+        -> DaemonData.InsightsSessionLabelAnswer {
+        var params: [String: Any] = ["session_ref": sessionRef]
+        // Absent keeps a label, `null` clears it.
+        for (key, change) in [("task", task), ("outcome", outcome)] {
+            switch change {
+            case .keep: break
+            case .clear: params[key] = NSNull()
+            case .set(let word): params[key] = word
+            }
+        }
+        return try await call("insights_session_label", params: params,
+                              as: DaemonData.InsightsSessionLabelAnswer.self)
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }
