@@ -13,8 +13,8 @@
 //! turn's usage unknown and becomes the new baseline. An event with no
 //! running total is a turn of unknown usage and leaves the baseline as it
 //! was. Counters come from
-//! `info.last_token_usage` by the pricing mapping (`session_pricing`'s module
-//! doc): `uncached_input = input - cached - cache_write`, `cache_read =
+//! `info.last_token_usage` through `session_pricing::codex_turn_usage`, the
+//! one pricing mapping: `uncached_input = input - cached - cache_write`, `cache_read =
 //! cached`, `cache_write = TotalOnly(cache_write)`, `output = output`. The
 //! write is never also inside `uncached_input`, so a turn's `total()` is
 //! `input + output`, once.
@@ -29,8 +29,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trace_commons_protocol::insights_usage_series::{
-    CacheWrite, DigestKey, KeyedDigest, MAX_SERIES_TOOL_CALLS, MAX_SERIES_TURNS, ToolCallRecord,
-    ToolKind, TurnRecord, UsageSeries, args_key, edit_text_key, gap_between, path_ext, path_key,
+    DigestKey, KeyedDigest, KnownTurnUsage, MAX_SERIES_TOOL_CALLS, MAX_SERIES_TURNS,
+    ToolCallRecord, ToolKind, TurnRecord, UsageSeries, args_key, edit_text_key, gap_between,
+    path_ext, path_key,
 };
 
 use super::analytics_constants::{
@@ -40,6 +41,7 @@ use super::models::MAX_DECLARED_MODELS;
 use super::session_facts::{
     EditMode, ExtensionClassCounts, ModelFacts, SessionFacts, SessionShape, renamed_operands,
 };
+use super::session_pricing::codex_turn_usage;
 use super::task_classifier::{PathClass, classify, path_class};
 use super::usage_evidence::safe_model;
 
@@ -389,10 +391,10 @@ impl<'k> CodexTurnSeriesScan<'k> {
         self.turns.push(TurnRecord {
             ordinal,
             at,
-            uncached_input: counters.map(|c| c[0]),
-            cache_read: counters.map(|c| c[1]),
-            cache_write: counters.map(|c| CacheWrite::TotalOnly(c[2])),
-            output: counters.map(|c| c[3]),
+            uncached_input: counters.map(|c| c.uncached_input),
+            cache_read: counters.map(|c| c.cache_read),
+            cache_write: counters.map(|c| c.cache_write),
+            output: counters.map(|c| c.output),
             model_label_ix: self.model.and_then(|ix| u16::try_from(ix).ok()),
             gap_secs: if ordinal == 0 {
                 None
@@ -774,22 +776,17 @@ impl<'k> CodexTurnSeriesScan<'k> {
     }
 }
 
-/// `[uncached, cache_read, cache_write, output]` from a `last_token_usage`
-/// object, or `None` when any field is missing, does not fit, or the cached
-/// and written tokens exceed the input.
-fn codex_counters(usage: &Value) -> Option<[u32; 4]> {
+/// The stored counters for a `last_token_usage` object, through the one
+/// pricing mapping ([`codex_turn_usage`]), or `None` when any field is
+/// missing, does not fit, or the cached and written tokens exceed the input.
+fn codex_counters(usage: &Value) -> Option<KnownTurnUsage> {
     let field = |name: &str| usage.get(name).and_then(Value::as_u64);
-    let input = field("input_tokens")?;
-    let cached = field("cached_input_tokens")?;
-    let write = field("cache_write_input_tokens")?;
-    let output = field("output_tokens")?;
-    let uncached = input.checked_sub(cached)?.checked_sub(write)?;
-    Some([
-        u32::try_from(uncached).ok()?,
-        u32::try_from(cached).ok()?,
-        u32::try_from(write).ok()?,
-        u32::try_from(output).ok()?,
-    ])
+    codex_turn_usage(
+        field("input_tokens")?,
+        field("cached_input_tokens")?,
+        field("cache_write_input_tokens")?,
+        field("output_tokens")?,
+    )
 }
 
 /// The command line of an `exec_command` (`cmd`) or `shell` (`command`, a
