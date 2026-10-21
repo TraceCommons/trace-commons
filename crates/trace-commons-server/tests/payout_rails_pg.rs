@@ -24,8 +24,10 @@ mod pilot_runtime_grants;
 
 use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
-use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
-use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
+use trace_commons_gate_api::pipeline::{
+    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind,
+};
+use trace_commons_gate_api::{RailDescriptor, RailId, RailRate, RecipientKind};
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
@@ -2604,6 +2606,23 @@ async fn link_principal(owner: &PgBackend, tenant: &str, account: Uuid, principa
     tx.commit().await.unwrap();
 }
 
+/// A test rail's descriptor: the rail and its instrument, with fixed
+/// synthetic values for the rest.
+fn rail_descriptor(rail_id: &RailId, instrument: &str) -> RailDescriptor {
+    RailDescriptor {
+        rail_id: rail_id.clone(),
+        instrument_id: InstrumentId::new(instrument).unwrap(),
+        instrument: InstrumentDescriptor {
+            kind: InstrumentKind::Erc20,
+            network: "1".to_owned(),
+            contract: "0x00000000000000000000000000000000000000a1".to_owned(),
+            decimals: 18,
+        },
+        recipient_kind: RecipientKind::new("test_address").unwrap(),
+        wire_max: None,
+    }
+}
+
 async fn accrue(
     fixture: &Fixture,
     tenant: &str,
@@ -2614,8 +2633,7 @@ async fn accrue(
         &fixture.runtime,
         &fixture.runtime,
         tenant,
-        rail_id,
-        &InstrumentId::new(instrument).unwrap(),
+        &rail_descriptor(rail_id, instrument),
         ACTOR,
     )
     .await

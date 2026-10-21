@@ -22,8 +22,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId, Microcredits};
-use trace_commons_gate_api::{RailId, RailRate};
+use trace_commons_gate_api::pipeline::{AtomicUnits, Microcredits};
+use trace_commons_gate_api::{RailDescriptor, RailId, RailRate};
 use uuid::Uuid;
 
 use crate::db::{
@@ -186,11 +186,14 @@ fn magnitude_micros(points_delta: &str) -> Option<u128> {
 }
 
 /// Plans one rail's accrual from stored rows. Pure: no clock, no store.
+/// The rail and the instrument its rows are written in both come from the
+/// rail's own descriptor, so they cannot be paired wrongly.
 pub fn plan_rail_accruals(
-    rail: &RailId,
-    instrument: &InstrumentId,
+    descriptor: &RailDescriptor,
     inputs: &AccrualInputs<'_>,
 ) -> Result<AccrualPlan, AccrualError> {
+    let rail = &descriptor.rail_id;
+    let instrument = &descriptor.instrument_id;
     let mut plan = AccrualPlan::default();
     if inputs.epochs.is_empty() {
         return Ok(plan);
@@ -488,16 +491,17 @@ fn hold_reversal(
     hold_line_owner(plan, owner, reversal_event_id);
 }
 
-/// Runs accrual for one tenant on one rail and records the result.
-/// `actor_ref_hash` is the system actor's hash on claim and hold audit rows.
+/// Runs accrual for one tenant on the rail `descriptor` describes and
+/// records the result. `actor_ref_hash` is the system actor's hash on claim
+/// and hold audit rows.
 pub async fn accrue_rail(
     payouts: &dyn PayoutStore,
     corpus: &dyn Database,
     tenant: &str,
-    rail: &RailId,
-    instrument: &InstrumentId,
+    descriptor: &RailDescriptor,
     actor_ref_hash: &str,
 ) -> Result<AccrualReport, AccrualError> {
+    let rail = &descriptor.rail_id;
     let epochs = payouts
         .payout_rate_epochs(rail)
         .await
@@ -534,8 +538,7 @@ pub async fn accrue_rail(
         .await
         .map_err(|_| AccrualError::Store)?;
     let plan = plan_rail_accruals(
-        rail,
-        instrument,
+        descriptor,
         &AccrualInputs {
             batches: &batches,
             events: &events,
@@ -601,6 +604,8 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+    use trace_commons_gate_api::RecipientKind;
+    use trace_commons_gate_api::pipeline::{InstrumentDescriptor, InstrumentId, InstrumentKind};
 
     use crate::trace_corpus_storage::{
         TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditSettlementNearStatus,
@@ -610,8 +615,19 @@ mod tests {
         RailId::new("test_keyed").unwrap()
     }
 
-    fn instrument() -> InstrumentId {
-        InstrumentId::new("test_token").unwrap()
+    fn descriptor() -> RailDescriptor {
+        RailDescriptor {
+            rail_id: rail(),
+            instrument_id: InstrumentId::new("test_token").unwrap(),
+            instrument: InstrumentDescriptor {
+                kind: InstrumentKind::Erc20,
+                network: "1".to_owned(),
+                contract: "0x00000000000000000000000000000000000000a1".to_owned(),
+                decimals: 18,
+            },
+            recipient_kind: RecipientKind::new("test_address").unwrap(),
+            wire_max: None,
+        }
     }
 
     fn line(reference: &str, micros: i64, events: &[Uuid]) -> TraceCreditAccountSettlementLineItem {
@@ -706,8 +722,7 @@ mod tests {
         existing: &[PayoutAccrual],
     ) -> AccrualPlan {
         plan_rail_accruals(
-            &rail(),
-            &instrument(),
+            &descriptor(),
             &AccrualInputs {
                 batches,
                 events,
@@ -808,6 +823,20 @@ mod tests {
             Some(account)
         );
         assert_eq!(accrual_owner_for_line("principal-a"), None);
+    }
+
+    #[test]
+    fn writes_carry_the_descriptors_rail_and_instrument() {
+        let account = Uuid::new_v4();
+        let batches = [batch(
+            TraceCreditSettlementBatchStatus::Finalized,
+            vec![line(&format!("account:{account}"), 10, &[])],
+        )];
+        let planned = plan(&batches, &[], &HashMap::new());
+        let expected = descriptor();
+        assert_eq!(planned.writes.len(), 1);
+        assert_eq!(planned.writes[0].rail_id, expected.rail_id);
+        assert_eq!(planned.writes[0].instrument_id, expected.instrument_id);
     }
 
     #[test]
