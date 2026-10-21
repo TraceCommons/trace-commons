@@ -75,6 +75,12 @@ public struct GlassRefreshButton: View {
 
     /// The refresh glyph.
     public static let systemImage = "arrow.clockwise"
+    /// Where the glyph's weight sits: its arrowhead runs up and right past
+    /// the ring, so centring its box leaves the ring about half a point
+    /// left of and low in the circle (measured at 13pt medium). This moves
+    /// the ring back to the centre (owner, 2026-10-20: "not visually
+    /// centered").
+    public static let opticalOffset = CGSize(width: 0.5, height: -0.6)
 
     public init(_ label: String, small: Bool = false, action: @escaping () -> Void) {
         self.label = label
@@ -83,7 +89,8 @@ public struct GlassRefreshButton: View {
     }
 
     public var body: some View {
-        GlassRoundButton(label, systemImage: Self.systemImage, small: small, action: action)
+        GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
+                         action: action)
     }
 }
 

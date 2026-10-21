@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCDesign
 @testable import TCShellCore
 import XCTest
@@ -62,8 +63,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
         XCTAssertEqual(words.sectionTraces, "Traces")
         XCTAssertEqual(words.sectionAccount, "Account")
-        XCTAssertEqual(words.privateAINotConnected, "Not connected")
-        XCTAssertEqual(words.privateAIConnect, "Connect")
+        XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n            HomeSection(words?.sectionTraces) {"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
@@ -75,18 +75,27 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(HomeSection<EmptyView>.titleType, GlassTabHeading<EmptyView>.titleType)
     }
 
-    /// Not connected: one card with Connect, which opens the Private AI
-    /// tab rather than turning anything on. Working: Calls and Verified.
-    func test_thePrivateAISectionConnectsOrCounts() throws {
+    /// Signed out of NEAR AI: one card with no icon, "Sign in to NEAR AI to
+    /// get started." and Sign in, which begins the NEAR AI sign-in (owner,
+    /// 2026-10-20). Signed in: Calls and Verified.
+    func test_thePrivateAISectionSignsInOrCounts() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains(
-            "HomePrivateAIConnectCard( title: words.privateAINotConnected, connect: words.privateAIConnect, action: openPrivateAI)"
-                .replacingOccurrences(of: "( ", with: "(\n                        ")))
-        // Centred on the card's height (owner, 2026-10-20), not the icon
-        // card's top-aligned head.
-        let card = try XCTUnwrap(home.range(of: "private struct HomePrivateAIConnectCard: View {"))
-        XCTAssertTrue(home[card.upperBound...].prefix(900).contains("HStack(alignment: .center, spacing: GlassTokens.Space.s3) {"))
-        XCTAssertTrue(home.contains("Button(connect, action: action)"))
+        XCTAssertTrue(home.contains("let snapshot = model.managedSnapshot {"))
+        XCTAssertTrue(home.contains("if snapshot.nearAiSignedIn {"))
+        XCTAssertTrue(home.contains("line: words.privateAISignIn, button: model.managedText(\"sign_in_near_ai\"),"))
+        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
+        // The core's managed words, which reach the model with its snapshot.
+        let managed = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(XCTUnwrap(TCDiscovery.managedCopyJSON()).utf8)) as? [String: String])
+        XCTAssertEqual(managed["sign_in_near_ai"], "Sign in")
+        XCTAssertEqual(managed["sign_in_near_ai_accessibility"], "Sign in to NEAR AI")
+        // Centred on the card's height, with no icon.
+        let card = try XCTUnwrap(home.range(of: "private struct HomePrivateAISignInCard: View {"))
+        let body = home[card.upperBound...].prefix(1400)
+        XCTAssertTrue(body.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s3) {"))
+        XCTAssertFalse(body.contains("glassCardWatermark"), "the sign-in card has an icon again")
+        XCTAssertFalse(body.contains("Image(systemName:"), "the sign-in card has an icon again")
+        XCTAssertFalse(home.contains("HomePrivateAIConnectCard"))
         XCTAssertTrue(home.contains("HomeStatTile(label: MonitorWords.calls, value: HomeFormat.count(totals.calls),"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: InferenceWords.proof(.verified), value: HomeFormat.count(totals.verified),"))
@@ -96,10 +105,29 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertNil(none.calls)
         XCTAssertNil(none.verified)
         XCTAssertNil(HomePrivateAI.totals(InferenceStore(client: nil)).calls)
-        // Connected follows the core's tone, never the switch: no state
-        // reported is not connected.
-        let calls = AppModel().privateInferenceCalls
-        XCTAssertFalse(HomePrivateAI.connected(nil, calls: calls))
+    }
+
+    /// The Not contributed card has no chevron (owner, 2026-10-20).
+    func test_theNotContributedCardHasNoChevron() throws {
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
+        let end = try XCTUnwrap(home.range(of: "\n}\n", range: card.upperBound..<home.endIndex))
+        XCTAssertFalse(home[card.upperBound..<end.lowerBound].contains("GlassChevron()"))
+    }
+
+    /// The Private AI tab's state follows its title (owner, 2026-10-20),
+    /// not at the row's far end.
+    func test_thePrivateAIStateFollowsItsTitle() throws {
+        let tab = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(tab.contains(
+            "return GlassTabHeading(copy.inspectorStatus) {\n            GlassStatusLabel(state.line,"))
+    }
+
+    /// The refresh glyph's ring sits on the circle's centre: its box is
+    /// nudged right and up by the arrowhead's pull (owner, 2026-10-20).
+    func test_theRefreshGlyphIsOpticallyCentred() {
+        XCTAssertEqual(GlassRefreshButton.opticalOffset.width, 0.5)
+        XCTAssertEqual(GlassRefreshButton.opticalOffset.height, -0.6)
     }
 
     /// The main window's divider: the window keeps its width; the main
@@ -170,9 +198,8 @@ final class DesignRulings20261020Tests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertEqual(home.components(separatedBy: "iconPlacement: .watermark").count - 1, 2)
         XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
-        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.privateAI)"))
         // Behind the words and over the fill: before the card's tier.
-        for icon in ["uncontributed", "privateAI"] {
+        for icon in ["uncontributed"] {
             let mark = try XCTUnwrap(home.range(of: ".glassCardWatermark(HomeStatIcons.\(icon))"))
             let tier = try XCTUnwrap(home.range(of: ".glassTier(.card", range: mark.upperBound..<home.endIndex))
             XCTAssertLessThan(home.distance(from: mark.upperBound, to: tier.lowerBound), 200, icon)

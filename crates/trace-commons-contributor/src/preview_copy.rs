@@ -1277,13 +1277,12 @@ pub struct MonitorHomeHistoryCopy {
     pub uncontributed_size: &'static str,
     pub uncontributed_estimate: &'static str,
     /// Home's section titles over its groups of cards, and the Private AI
-    /// section's card while Private AI is not working, with its button
-    /// (owner, 2026-10-20, in the owner's words).
+    /// section's line while NEAR AI is signed out, beside the managed
+    /// copy's "Sign in" (owner, 2026-10-20, in the owner's words).
     pub section_private_ai: &'static str,
     pub section_traces: &'static str,
     pub section_account: &'static str,
-    pub private_ai_not_connected: &'static str,
-    pub private_ai_connect: &'static str,
+    pub private_ai_sign_in: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
     /// this Mac saw, `{amount}` signed. No change says nothing (owner,
     /// 2026-10-16). DRAFT, NEEDS APPROVAL.
@@ -1603,8 +1602,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_private_ai: "Private AI",
             section_traces: "Traces",
             section_account: "Account",
-            private_ai_not_connected: "Not connected",
-            private_ai_connect: "Connect",
+            private_ai_sign_in: "Sign in to NEAR AI to get started.",
             credit_delta: "{amount} since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",

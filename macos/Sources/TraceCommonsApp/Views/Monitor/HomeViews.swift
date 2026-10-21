@@ -129,6 +129,8 @@ private struct HomeOverview: View {
     let inference: InferenceStore?
     /// The NEAR AI balance the Balance tile reads.
     @EnvironmentObject private var model: AppModel
+    /// Where the NEAR AI sign-in's browser page opens.
+    @Environment(\.openURL) private var openURL
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -329,17 +331,17 @@ private struct HomeOverview: View {
     }
 
     /// Home's Private AI section (owner, 2026-10-20), drawn once the core's
-    /// words have loaded and the daemon runs. While Private AI is working
-    /// (`HomePrivateAI.connected`), two tiles: the calls answered here and
-    /// how many are verified, over the Private AI tab's window. Otherwise
-    /// one card across the row saying it is not connected, with Connect,
-    /// which opens the Private AI tab: turning it on is there, beside what
-    /// it exposes, never one press on Home.
+    /// words have loaded, the daemon runs and the NEAR AI sign-in has been
+    /// read. Signed in, two tiles: the calls answered here and how many
+    /// are verified, over the Private AI tab's window. Signed out, one card
+    /// across the row: "Sign in to NEAR AI to get started." and Sign in,
+    /// which begins the NEAR AI sign-in as the Private AI tab's notice does.
     @ViewBuilder
     private var privateAI: some View {
-        if let words, model.privateInferenceCopy != nil, case .running = model.startup {
+        if let words, model.privateInferenceCopy != nil, case .running = model.startup,
+           let snapshot = model.managedSnapshot {
             HomeSection(words.sectionPrivateAI) {
-                if HomePrivateAI.connected(inference?.privateAI?.state, calls: model.privateInferenceCalls) {
+                if snapshot.nearAiSignedIn {
                     let totals = HomePrivateAI.totals(inference)
                     Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
@@ -351,8 +353,11 @@ private struct HomeOverview: View {
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    HomePrivateAIConnectCard(
-                        title: words.privateAINotConnected, connect: words.privateAIConnect, action: openPrivateAI)
+                    HomePrivateAISignInCard(
+                        line: words.privateAISignIn, button: model.managedText("sign_in_near_ai"),
+                        buttonName: model.managedText("sign_in_near_ai_accessibility"), busy: model.credentialBusy) {
+                        NearAiSignIn.begin(model, openURL: openURL)
+                    }
                 }
             }
         }
@@ -438,7 +443,6 @@ private struct HomeNotContributedCard: View {
                     }
                 }
                 Spacer(minLength: 0)
-                GlassChevron()
             }
             // The tiles' inset, so its words start where theirs do.
             .padding(.horizontal, 12)
@@ -467,37 +471,40 @@ enum HomeStatIcons {
     static let uncontributed = "lock.laptopcomputer"
     /// The NEAR AI balance (owner, 2026-10-19).
     static let balance = "creditcard"
-    /// Home's Private AI section (owner, 2026-10-20): the not-connected
-    /// card in the Private AI notices' mark, and the two tiles.
-    static let privateAI = "shield.lefthalf.filled"
+    /// Home's Private AI tiles (owner, 2026-10-20).
     static let calls = "arrow.left.arrow.right"
     static let verified = "checkmark.shield"
 }
 
-/// Home's Private AI card while Private AI is not working (owner,
-/// 2026-10-20): "Not connected" and Connect, centred on the card's height,
-/// which the button sets, over the card's icon as a watermark, as the
-/// tiles'.
-private struct HomePrivateAIConnectCard: View {
-    let title: String
-    let connect: String
+/// Home's Private AI card while NEAR AI is signed out (owner,
+/// 2026-10-20): the core's line and Sign in, centred on the card's height,
+/// which the button sets. No icon. Sign in waits while a sign-in is under
+/// way.
+private struct HomePrivateAISignInCard: View {
+    let line: String
+    let button: String
+    /// The button's name for VoiceOver: "Sign in" alone does not say to
+    /// what.
+    let buttonName: String
+    let busy: Bool
     let action: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
-            Text(title)
+            Text(line)
                 .glassType(GlassTokens.TypeScale.bodyStrong)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: GlassTokens.Space.s4)
-            Button(connect, action: action)
+            Button(button, action: action)
                 .buttonStyle(GlassButtonStyle(.primary, small: true))
                 .fixedSize()
+                .accessibilityLabel(buttonName)
+                .disabled(busy)
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCardWatermark(HomeStatIcons.privateAI)
         .glassTier(.card)
         .accessibilityElement(children: .contain)
     }
@@ -534,13 +541,6 @@ struct HomeSection<Content: View>: View {
 /// Home's Private AI section's reading of the Private AI tab's store.
 @MainActor
 enum HomePrivateAI {
-    /// Whether Private AI is working: the core's tone for the listener's
-    /// state reads as working, the rule every indicator follows, never the
-    /// settings switch (`PrivateInferenceTone.readsAsWorking`).
-    static func connected(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> Bool {
-        PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls).readsAsWorking
-    }
-
     /// The Private AI tab's totals (`InferenceTabView.totals`): unknown
     /// until its calls page has been read and is readable.
     static func totals(_ store: InferenceStore?) -> (calls: Int?, verified: Int?) {

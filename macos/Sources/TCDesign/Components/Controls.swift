@@ -249,6 +249,10 @@ public struct GlassRoundButton: View {
     private let label: String
     private let icon: GlassIcon
     private let small: Bool
+    /// A nudge, at the large size, that puts a lopsided glyph's weight on
+    /// the circle's centre rather than its bounding box's (scaled down for
+    /// the small size).
+    private let opticalOffset: CGSize
     private let action: () -> Void
 
     public init(_ label: String, systemImage: String, small: Bool = false, action: @escaping () -> Void) {
@@ -256,16 +260,26 @@ public struct GlassRoundButton: View {
     }
 
     public init(_ label: String, icon: GlassIcon, small: Bool = false, action: @escaping () -> Void) {
+        self.init(label, icon: icon, small: small, opticalOffset: .zero, action: action)
+    }
+
+    init(_ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, action: @escaping () -> Void) {
         self.label = label
         self.icon = icon
         self.small = small
+        self.opticalOffset = opticalOffset
         self.action = action
     }
 
+    /// The glyph's size at each button size.
+    static func symbolSize(small: Bool) -> CGFloat { small ? 11 : 13 }
+
     public var body: some View {
         let side = small ? GlassTokens.Size.control : GlassTokens.Size.controlLarge
+        let scale = Self.symbolSize(small: small) / Self.symbolSize(small: false)
         Button(action: action) {
-            GlassIconView(icon: icon, symbolSize: small ? 11 : 13, weight: .medium)
+            GlassIconView(icon: icon, symbolSize: Self.symbolSize(small: small), weight: .medium)
+                .offset(x: opticalOffset.width * scale, y: opticalOffset.height * scale)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
                 .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
