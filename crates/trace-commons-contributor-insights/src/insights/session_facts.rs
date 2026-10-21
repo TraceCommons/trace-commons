@@ -814,7 +814,8 @@ impl<'k> ClaudeFactsScan<'k> {
             task: classify(&shape),
             shape,
             classifier_version: CLASSIFIER_VERSION,
-            active_secs: (!self.active_unknown)
+            // No prompt opened a span: the time was never measured.
+            active_secs: (!self.active_unknown && self.user_turns > 0)
                 .then(|| u32::try_from(self.active_ms / 1000).unwrap_or(u32::MAX)),
             finished: Some(self.edit_calls > 0 && ended_in_text && !self.rejected_since_prompt),
             user_turns: Some(self.user_turns),
@@ -1135,6 +1136,23 @@ mod tests {
     fn a_missing_timestamp_in_a_span_makes_active_time_unknown() {
         let (f, _) = one("missing-timestamp");
         assert_eq!(f.active_secs, None);
+    }
+
+    /// With no contributor prompt there is no span: the time was never
+    /// measured, so it is unknown, never zero seconds.
+    #[test]
+    fn a_session_with_no_contributor_prompt_has_unknown_active_time() {
+        let text = fixture_text("finished");
+        let without_prompt: String = text
+            .lines()
+            .skip(1)
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let f = facts_of(&without_prompt);
+        assert_eq!(f.user_turns, Some(0));
+        assert_eq!(f.active_secs, None);
+        // The fixture with its prompt still measures its span.
+        assert!(facts("finished").active_secs.is_some());
     }
 
     #[test]
