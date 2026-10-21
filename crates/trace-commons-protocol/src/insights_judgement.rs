@@ -178,13 +178,29 @@ struct RawRefusalBody {
 }
 
 impl JudgementRefusalBody {
-    /// `reset_at` must be present exactly when the refusal carries one.
+    /// `reset_at` must be present exactly when the refusal carries one, and
+    /// must be the first instant of a UTC month, as
+    /// [`judgement_budget_reset_at`] computes it.
+    ///
+    /// Refusal bodies are not signed, and the client does not retry before
+    /// `reset_at`. Without this rule a forged or broken value such as
+    /// `i64::MAX` would block an account's judgements for good, and `-1`
+    /// would have the client retry straight away against an exhausted cap.
     pub fn new(
         refusal: JudgementRefusal,
         reset_at: Option<i64>,
     ) -> Result<Self, JudgementWireError> {
         if refusal.carries_reset_at() != reset_at.is_some() {
             return Err(JudgementWireError::Malformed("reset_at"));
+        }
+        if let Some(reset_at) = reset_at {
+            let month_start = reset_at
+                .checked_sub(1)
+                .and_then(judgement_budget_reset_at)
+                .is_some_and(|expected| expected == reset_at);
+            if !month_start {
+                return Err(JudgementWireError::Malformed("reset_at"));
+            }
         }
         Ok(Self { refusal, reset_at })
     }
@@ -1298,6 +1314,23 @@ mod tests {
         );
         assert_eq!(body.refusal(), JudgementRefusal::AccountBudgetExhausted);
         assert_eq!(body.reset_at(), Some(reset));
+        // The constructor applies the same month-start rule, so the service
+        // cannot build a body the client would refuse.
+        for bad in [i64::MAX, i64::MIN, -1, reset + 1, 1_792_497_600] {
+            assert_eq!(
+                JudgementRefusalBody::new(JudgementRefusal::OperatorBudgetExhausted, Some(bad)),
+                Err(JudgementWireError::Malformed("reset_at")),
+                "{bad}"
+            );
+        }
+        // 2027-01-01T00:00:00Z, a year boundary, is a month start.
+        assert!(
+            JudgementRefusalBody::new(
+                JudgementRefusal::AccountBudgetExhausted,
+                Some(1_798_761_600)
+            )
+            .is_ok()
+        );
         let plain = JudgementRefusalBody::new(JudgementRefusal::Timeout, None).unwrap();
         assert_eq!(plain.to_json(), r#"{"error":"judgement_timeout"}"#);
         assert_eq!(
@@ -1320,6 +1353,29 @@ mod tests {
             // unknown label
             (503, r#"{"error":"judgement_bogus"}"#),
             (503, "not json"),
+            // reset_at that is not the first instant of a UTC month
+            (
+                503,
+                r#"{"error":"judgement_account_budget_exhausted","reset_at":9223372036854775807}"#,
+            ),
+            (
+                503,
+                r#"{"error":"judgement_account_budget_exhausted","reset_at":-1}"#,
+            ),
+            (
+                503,
+                r#"{"error":"judgement_operator_budget_exhausted","reset_at":-9223372036854775808}"#,
+            ),
+            // 2026-11-01T00:00:01Z, one second past a month start
+            (
+                503,
+                r#"{"error":"judgement_operator_budget_exhausted","reset_at":1793491201}"#,
+            ),
+            // 2026-10-20T12:00:00Z, mid-month
+            (
+                503,
+                r#"{"error":"judgement_account_budget_exhausted","reset_at":1792497600}"#,
+            ),
         ] {
             assert_eq!(
                 parse_judgement_refusal(status, body.as_bytes()),
