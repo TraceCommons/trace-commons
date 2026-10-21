@@ -20,6 +20,7 @@ pub mod chunker;
 pub mod embedder;
 pub mod embedder_fastembed;
 pub mod orchestrator;
+pub mod payout_rail;
 pub mod perplexity;
 pub mod perplexity_local;
 #[cfg(feature = "near-ai-scorer")]
@@ -40,6 +41,7 @@ pub use trace_commons_gate_api::{
 
 pub use embedder::MockEmbedder;
 pub use orchestrator::EnclaveGateOrchestrator;
+pub use payout_rail::MockKeyedPayoutRail;
 pub use perplexity::{MockPerplexityScorer, MockTokenRarityScorer};
 #[cfg(feature = "near-ai-scorer")]
 pub use perplexity_near_ai::{NearAiPerplexityScorer, NearAiScorerConfig};
