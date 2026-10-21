@@ -3219,6 +3219,16 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<u64, DatabaseError>;
 
+    /// The account each of `principals` is actively linked to, for
+    /// accrual. Reads `trace_account_principals` only: unlike
+    /// [`Database::resolve_principals_to_accounts`] it never upserts the
+    /// tenant row, so accrual writes nothing outside the payout tables.
+    async fn payout_principal_accounts(
+        &self,
+        tenant: &str,
+        principals: &[String],
+    ) -> Result<std::collections::HashMap<String, Uuid>, DatabaseError>;
+
     /// Every accrual on `rail` in this tenant, oldest first.
     async fn payout_accruals(
         &self,

@@ -17,6 +17,11 @@
 #[path = "support/role_ddl_lock.rs"]
 mod role_ddl_lock;
 
+// Only the V62 grant is read here, to pin the subset below against it.
+#[allow(dead_code)]
+#[path = "support/pilot_runtime_grants.rs"]
+mod pilot_runtime_grants;
+
 use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
@@ -36,6 +41,19 @@ use uuid::Uuid;
 /// login is re-provisioned to exactly this shape on every run.
 const RUNTIME_LOGIN: &str = "tc_payout_runtime_test";
 const ACTOR: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+/// The tables accrual reads that predate V62, which the runtime group
+/// reaches on the pilot through its table-wide V62 grant. Granted alone
+/// rather than the whole V62 grant, whose `ON ALL TABLES` would also cover
+/// the payout tables and hide the narrower grants V132 gives them, which
+/// this suite asserts the runtime cannot exceed.
+const ACCRUAL_PILOT_TABLES: [&str; 3] = [
+    "trace_credit_settlement_batches",
+    "trace_credit_ledger",
+    "trace_account_principals",
+];
+const ACCRUAL_PILOT_GRANTS: &str = "GRANT SELECT ON trace_credit_settlement_batches, \
+    trace_credit_ledger, trace_account_principals TO trace_ingest_runtime;";
 
 struct Fixture {
     owner: PgBackend,
@@ -90,15 +108,13 @@ async fn fixture() -> Option<Fixture> {
              GRANT trace_ingest_runtime TO {RUNTIME_LOGIN} WITH INHERIT TRUE;
              GRANT trace_payout_enumerator TO {RUNTIME_LOGIN} WITH INHERIT FALSE, SET TRUE;
              GRANT trace_payout_config_writer TO {RUNTIME_LOGIN} WITH INHERIT FALSE, SET TRUE;
-             -- Accrual reads settled batches, the credit ledger and the
-             -- principal links, and the principal resolve upserts the tenant
-             -- row first. Those tables predate V62, so the runtime group
-             -- reaches them through the pilot's table-wide V62 grant
+             -- Accrual only reads settled batches, the credit ledger and the
+             -- principal links. Those tables predate V62, so the runtime
+             -- group reaches them through the pilot's table-wide V62 grant
              -- (support/pilot_runtime_grants.rs), which a database migrated
-             -- straight to head lacks. This is the part of it accrual uses.
-             GRANT SELECT ON trace_credit_settlement_batches, trace_credit_ledger,
-                 trace_account_principals TO trace_ingest_runtime;
-             GRANT SELECT, INSERT, UPDATE ON trace_tenants TO trace_ingest_runtime;"
+             -- straight to head lacks. This is the part of it accrual uses;
+             -- `accrual_grants_are_covered_by_the_pilot_v62_grant` pins it.
+             {ACCRUAL_PILOT_GRANTS}"
         )))
         .await
         .expect("provision the runtime login");
@@ -3608,4 +3624,48 @@ async fn rerunning_accrual_writes_nothing_new() {
             .unwrap(),
         audit
     );
+}
+
+/// The fixture's hand-picked grant is a part of the pilot's V62 grant, not
+/// something beside it: every table it names existed by V62 (so the
+/// pilot's `ON ALL TABLES` grant covers it) and is not revoked there, and
+/// it grants only SELECT. Accrual needs no write outside the payout tables.
+#[test]
+fn accrual_grants_are_covered_by_the_pilot_v62_grant() {
+    let pilot = pilot_runtime_grants::PILOT_V62_RUNTIME_GRANTS;
+    assert!(pilot.contains(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trace_ingest_runtime;"
+    ));
+    let granted = ACCRUAL_PILOT_GRANTS
+        .strip_prefix("GRANT SELECT ON ")
+        .and_then(|rest| rest.strip_suffix(" TO trace_ingest_runtime;"))
+        .expect("a SELECT-only grant to the runtime group");
+    let granted: Vec<&str> = granted.split(',').map(str::trim).collect();
+    assert_eq!(granted, ACCRUAL_PILOT_TABLES);
+
+    let migrations = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    for table in ACCRUAL_PILOT_TABLES {
+        let revoked = pilot
+            .lines()
+            .any(|line| line.trim_start().starts_with("REVOKE") && line.contains(table));
+        assert!(!revoked, "{table} is revoked in the pilot's V62 grant");
+        let created_in: Vec<u32> = std::fs::read_dir(&migrations)
+            .expect("the migrations directory")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let version: u32 = name.strip_prefix('V')?.split("__").next()?.parse().ok()?;
+                let sql = std::fs::read_to_string(&path).ok()?;
+                let creates = [
+                    format!("CREATE TABLE {table} ("),
+                    format!("CREATE TABLE IF NOT EXISTS {table} ("),
+                ]
+                .iter()
+                .any(|statement| sql.contains(statement.as_str()));
+                creates.then_some(version)
+            })
+            .collect();
+        assert_eq!(created_in.len(), 1, "{table}: {created_in:?}");
+        assert!(created_in[0] <= 62, "{table} was created after V62");
+    }
 }

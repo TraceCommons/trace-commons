@@ -525,14 +525,10 @@ pub async fn accrue_rail(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let principal_accounts = if principals.is_empty() {
-        HashMap::new()
-    } else {
-        corpus
-            .resolve_principals_to_accounts(tenant, &principals)
-            .await
-            .map_err(|_| AccrualError::Store)?
-    };
+    let principal_accounts = payouts
+        .payout_principal_accounts(tenant, &principals)
+        .await
+        .map_err(|_| AccrualError::Store)?;
     let existing = payouts
         .payout_accruals(tenant, rail)
         .await

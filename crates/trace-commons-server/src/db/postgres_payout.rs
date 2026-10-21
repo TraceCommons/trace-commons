@@ -13,7 +13,7 @@
 //! and are parsed as `u128`: no decimal crate, and a value that does not fit
 //! is refused, never truncated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -267,6 +267,32 @@ impl PayoutStore for PgBackend {
         }
         tx.commit().await?;
         Ok(rows.len() as u64)
+    }
+
+    async fn payout_principal_accounts(
+        &self,
+        tenant: &str,
+        principals: &[String],
+    ) -> Result<HashMap<String, Uuid>, DatabaseError> {
+        if principals.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT principal_ref, account_id FROM trace_account_principals
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND unlinked_at IS NULL
+                    AND principal_ref = ANY($1)",
+                &[&principals],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)))
+            .collect())
     }
 
     async fn payout_accruals(
