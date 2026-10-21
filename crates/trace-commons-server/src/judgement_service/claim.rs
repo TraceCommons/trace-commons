@@ -26,8 +26,19 @@
 //!
 //! `jsonwebtoken` checks neither "issued at most 15 minutes before expiry"
 //! nor "expires at most 15 minutes from now", and checks expiry against the
-//! system clock. So its time checks are off and this module checks all
-//! three bounds against an injected `now`.
+//! system clock. So its time checks are off and this module checks every
+//! bound against an injected `now`, each with the 60 s clock-skew allowance
+//! between the issuer and the CVM (spec section 3, "Lifetime and clock
+//! skew"):
+//!
+//! - `exp - iat <= 900`: the lifetime itself, both issuer-signed, no skew;
+//! - `now <= exp + 60`;
+//! - `exp - now <= 900 + 60`;
+//! - `iat <= now + 60`.
+//!
+//! The issuer clamps a judgement claim to `900 - 60 = 840` seconds (slice
+//! 4), so a claim verifies whichever way the two clocks differ by up to a
+//! minute. The verified `iat` is what the limiter's month follows.
 
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -41,8 +52,8 @@ pub const JUDGEMENT_CLAIM_AUDIENCE: &str = "trace-commons-insights-judgement";
 /// The longest a judgement claim may live, and the furthest ahead of `now`
 /// its expiry may be.
 pub const JUDGEMENT_CLAIM_MAX_LIFETIME_SECS: i64 = 15 * 60;
-/// How far in the future `iat` may be, for clock skew between the issuer
-/// and the CVM.
+/// The clock skew allowed between the issuer and the CVM, on each bound
+/// that compares a claim time with `now`.
 pub const JUDGEMENT_CLAIM_CLOCK_SKEW_SECS: i64 = 60;
 /// Environment variable carrying the issuer's Ed25519 public keys.
 pub const ISSUER_PUBLIC_KEYS_ENV: &str = "TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS";
@@ -93,9 +104,16 @@ pub fn parse_issuer_public_keys(spec: &str) -> Result<IssuerKeys, IssuerKeysMalf
 /// it.
 pub struct VerifiedAccount {
     account_ref: String,
+    iat: i64,
 }
 
 impl VerifiedAccount {
+    /// The claim's issuer-signed `iat`: the clock the limiter's month
+    /// follows (spec section 6), within 60 s of the service clock.
+    pub fn iat(&self) -> i64 {
+        self.iat
+    }
+
     /// The account reference the limiter keys on (through its keyed digest,
     /// never directly).
     pub fn account_ref(&self) -> &str {
@@ -135,7 +153,8 @@ pub fn is_per_account_tenant_id(account_ref: &str) -> bool {
 ///
 /// [`JudgementRefusal::CredentialRefused`] for anything wrong with the token
 /// itself: not EdDSA, no configured key verifies it, wrong audience,
-/// expired, issued in the future, a lifetime over 15 minutes, or no
+/// expired or issued in the future by more than the skew, a lifetime over
+/// 15 minutes, or no
 /// `account_ref`. [`JudgementRefusal::AccountIneligible`] for a valid claim
 /// whose `account_ref` is not a per-account tenant.
 pub fn verify_judgement_claim(
@@ -159,10 +178,11 @@ pub fn verify_judgement_claim(
         .ok_or(JudgementRefusal::CredentialRefused)?
         .claims;
 
-    let lifetime_ok = claims.exp > now
-        && claims.iat <= now.saturating_add(JUDGEMENT_CLAIM_CLOCK_SKEW_SECS)
+    let skew = JUDGEMENT_CLAIM_CLOCK_SKEW_SECS;
+    let lifetime_ok = now <= claims.exp.saturating_add(skew)
+        && claims.iat <= now.saturating_add(skew)
         && claims.exp.saturating_sub(claims.iat) <= JUDGEMENT_CLAIM_MAX_LIFETIME_SECS
-        && claims.exp.saturating_sub(now) <= JUDGEMENT_CLAIM_MAX_LIFETIME_SECS;
+        && claims.exp.saturating_sub(now) <= JUDGEMENT_CLAIM_MAX_LIFETIME_SECS + skew;
     if !lifetime_ok {
         return Err(JudgementRefusal::CredentialRefused);
     }
@@ -172,7 +192,10 @@ pub fn verify_judgement_claim(
     if !is_per_account_tenant_id(&account_ref) {
         return Err(JudgementRefusal::AccountIneligible);
     }
-    Ok(VerifiedAccount { account_ref })
+    Ok(VerifiedAccount {
+        account_ref,
+        iat: claims.iat,
+    })
 }
 
 #[cfg(test)]
@@ -270,15 +293,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_expired_claim_is_refused() {
+    fn an_expired_claim_is_refused_past_the_skew() {
         let issuer = TestIssuer::new();
-        for exp in [NOW, NOW - 1] {
+        for exp in [NOW - 61, NOW - 600] {
             let token = issuer.claim_for(ACCOUNT, exp - 60, exp);
             assert_eq!(
                 verify_judgement_claim(&issuer.keys(), &token, NOW).unwrap_err(),
                 JudgementRefusal::CredentialRefused
             );
         }
+        // Up to 60 s past expiry is clock skew, not expiry.
+        for exp in [NOW, NOW - 60] {
+            let token = issuer.claim_for(ACCOUNT, exp - 60, exp);
+            assert!(verify_judgement_claim(&issuer.keys(), &token, NOW).is_ok());
+        }
+    }
+
+    /// The issuer clamps a judgement claim to 840 s (slice 4). A service
+    /// clock 30 s either side of the issuer's accepts it, and so does one
+    /// for a claim at the old 900 s clamp.
+    #[test]
+    fn a_claim_verifies_at_issuer_time_minus_and_plus_thirty_seconds() {
+        let issuer = TestIssuer::new();
+        let issued = NOW;
+        for lifetime in [840, 900] {
+            let token = issuer.claim_for(ACCOUNT, issued, issued + lifetime);
+            for service_now in [issued - 30, issued + 30] {
+                let account = verify_judgement_claim(&issuer.keys(), &token, service_now)
+                    .unwrap_or_else(|e| panic!("lifetime {lifetime} at {service_now}: {e:?}"));
+                assert_eq!(account.iat(), issued);
+            }
+        }
+        // The edges: iat 60 s ahead with expiry 960 s ahead is accepted, one
+        // more second of iat is not.
+        let token = issuer.claim_for(ACCOUNT, NOW + 60, NOW + 960);
+        assert!(verify_judgement_claim(&issuer.keys(), &token, NOW).is_ok());
+        let token = issuer.claim_for(ACCOUNT, NOW + 61, NOW + 961);
+        assert_eq!(
+            verify_judgement_claim(&issuer.keys(), &token, NOW).unwrap_err(),
+            JudgementRefusal::CredentialRefused
+        );
     }
 
     #[test]
@@ -290,9 +344,8 @@ pub(crate) mod tests {
             verify_judgement_claim(&issuer.keys(), &token, NOW).unwrap_err(),
             JudgementRefusal::CredentialRefused
         );
-        // Lifetime fine but expiry too far ahead of now (iat in the future
-        // within skew still bounded).
-        let token = issuer.claim_for(ACCOUNT, NOW + 30, NOW + 30 + 900);
+        // One second over fifteen minutes, wherever now falls.
+        let token = issuer.claim_for(ACCOUNT, NOW, NOW + 901);
         assert_eq!(
             verify_judgement_claim(&issuer.keys(), &token, NOW).unwrap_err(),
             JudgementRefusal::CredentialRefused
