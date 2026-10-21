@@ -4506,9 +4506,10 @@ its file is unchanged.
 sessions written in the last 13 weeks, so it keeps the newest sessions. The
 turn and tool-call caps count Claude Code's per-turn series only. Codex
 per-turn series have their own allowance (owner decision, 2026-10-20):
-196608 turns and 196608 tool calls across every Codex row. Past either, the
-oldest Codex rows (last write, then the order they were counted) lose their
-per-turn series and nothing else: the row, its observed change, its dates
+196608 turns and 196608 tool calls across every Codex row. Past either,
+Codex rows lose their per-turn series and nothing else, automated sessions'
+first (nothing draws them), then the person's, each oldest first (last
+write, then the order they were counted): the row, its observed change, its dates
 and its facts stay, so the session still counts in every weekly figure. A
 trimmed row is not evicted and gets no mark, and it is not read again while
 its file is unchanged. `insights_sessions` and `insights_session_drill`
