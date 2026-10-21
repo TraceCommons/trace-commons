@@ -227,6 +227,64 @@ fixture's sensitive substrings appears anywhere. The fixtures:
   asserts that the builder's module constructs a redactor only through
   `deterministic_only`.
 
+#### Size (#1501 review point 9)
+
+An earlier draft capped excerpts by characters and dropped any digest over
+8 KiB whole. A dropped digest leaves its session unjudged, and the basis switch
+needs every session in a comparison judged. So one long or non-Latin session
+sent its whole comparison back to the local basis, every time. The fix is to
+budget each field in serialized bytes, so the digest **cannot** pass the cap.
+
+**Measured** on 2026-10-21 against #1525's digest shape, serialized compactly
+(Python `json.dumps(..., ensure_ascii=False)`, which escapes `"`, `\` and
+control characters as serde_json does), with every count at `u32::MAX`, 12
+excerpts, 64 turn outcomes, 64 event markers and a 160-character final line:
+
+| Case | One 240-char excerpt | Whole digest | Over 8,192? |
+|---|---|---|---|
+| ASCII | 240 B | 10,979 B | yes |
+| CJK (3-byte) | 720 B | 17,059 B | yes |
+| Emoji (4-byte) | 960 B | 20,099 B | yes |
+| `"` and `\` | 480 B | 14,019 B | yes |
+| Control characters (`\u0001`) | 1,440 B | 26,179 B | yes |
+
+The fixed part alone (counts, no excerpts, outcomes or events) is 1,142 B. 64
+turn outcomes add 3,647 B and 64 event markers 2,815 B. So even an ASCII
+session goes over, through the per-turn outcomes alone.
+
+**The budgets**, each measured on the serialized form after escaping:
+
+| Field | Budget |
+|---|---|
+| Each prompt excerpt | At most 240 characters **and** at most 320 bytes serialized, cut at a character boundary. |
+| Final line | At most 160 characters and at most 240 bytes serialized. |
+| Turn outcomes | At most 64 rows. The ordinal saturates at 65,535 and every other count at 255 (255 means "255 or more"). Over 64 turns: the first 16, the last 16, and the 32 nearest the marked events, with `turn_outcomes_truncated`. |
+| Event markers | At most 16, the earliest first, with `events_truncated`. The service judges 4. `prompt_ix` saturates at 65,535. |
+
+Under these budgets, the same worst cases (a 500-turn session, 16 events, every
+count at `u32::MAX`) measure:
+
+| Case | Characters kept per excerpt | Whole digest | Headroom under 8,192 |
+|---|---|---|---|
+| ASCII | 240 | 6,613 B | 1,579 B |
+| CJK | 106 | 7,629 B | 563 B |
+| Emoji | 80 | 7,653 B | 539 B |
+| `"` | 160 | 7,653 B | 539 B |
+| Control characters | 53 | 7,629 B | 563 B |
+| CJK mixed with control characters | 71 | 7,626 B | 566 B |
+
+- The cap stays `JUDGEMENT_DIGEST_MAX_BYTES = 8192`. The budgets keep every
+  digest under it **by construction**.
+- If a future field ever pushed a digest over, the builder shortens the middle
+  excerpts first, then drops middle excerpts, and records how many. It never
+  drops the whole digest. A test asserts that the whole-digest refusal is
+  unreachable from every fixture below.
+- The tests, in `judgement_digest_tests.rs`: 12 maximal CJK prompts, 12
+  maximal emoji prompts, 12 escape-heavy prompts (`"`, `\`, control
+  characters), a 500-turn session with every count saturated, and 64 event
+  markers. Each must build, be at most 8,192 bytes, and keep every excerpt
+  slot it was given.
+
 ### Folder rules (O2: the design's default, for PM sign-off)
 
 The counter pass skips only Never folders (`daemon/insights_week.rs`, module
