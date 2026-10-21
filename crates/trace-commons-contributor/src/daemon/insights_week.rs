@@ -38,7 +38,9 @@
 //! budget; a row whose task rules are older is re-classified from its
 //! stored shape when answered, not read again. Sessions in a folder that is Never, by its
 //! own rule or a global Never override, are not read, and rows already
-//! stored for one are dropped (owner decision D4). A Claude session's delegated transcripts are not read; a
+//! stored for one are dropped (owner decision D4). Nor do they keep a route
+//! tally: the pass names them from their file names, and both the pass and
+//! the ledger fold drop their tallies (`NeverSessions`). A Claude session's delegated transcripts are not read; a
 //! session that has any is marked truncated, so it counts as partial
 //! coverage and never as complete.
 //!
@@ -629,8 +631,10 @@ impl Default for WeekOptions {
 
 /// How a job's sessions are placed in folders: a candidate's project key
 /// and whether its folder is Never, the contribution override included.
-/// Owns what it needs, so it can run on the pass's own thread; asked only
-/// for a session about to be read, with no lock of the pass held.
+/// Owns what it needs, so it can run on the pass's own thread; asked, with
+/// no lock of the pass held, for a session about to be read, and for one
+/// whose file name matches a route tally no row matches or a session the
+/// last pass found Never (`NeverSessions`).
 pub(crate) type ProjectOf =
     Box<dyn FnMut(&DaemonShared, &CounterCandidate) -> (String, bool) + Send>;
 
@@ -770,6 +774,75 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     );
 }
 
+/// The sessions in Never folders, by keyed harness-session digest under
+/// the counter key, as the last pass found them.
+///
+/// A Never-folder session is never read, so it has no row and nothing
+/// joins its tally to its folder: the pass names it from its file name
+/// instead (`name_session_digest`), and the fold drops its tally before
+/// any write (owner decision D4: a Never folder leaves nothing).
+#[derive(Debug, Clone, Default)]
+struct NeverSessions {
+    /// A global Never override is in force: no tally is kept at all.
+    every: bool,
+    these: BTreeSet<KeyedDigest>,
+}
+
+impl NeverSessions {
+    /// Drop every tally a Never folder's session made.
+    fn purge(&self, routing: &mut BTreeMap<KeyedDigest, RouteTally>) {
+        if self.every {
+            routing.clear();
+        } else if !self.these.is_empty() {
+            routing.retain(|digest, _| !self.these.contains(digest));
+        }
+    }
+
+    /// Whether `purge` would drop anything from `routing`.
+    fn touches(&self, routing: &BTreeMap<KeyedDigest, RouteTally>) -> bool {
+        if self.every {
+            !routing.is_empty()
+        } else {
+            routing.keys().any(|digest| self.these.contains(digest))
+        }
+    }
+}
+
+/// The session ID a transcript's file name carries, read without opening
+/// the file, as the keyed harness-session digest a tally is made under.
+///
+/// - Claude Code: the session file's stem, the `sessionId` its records carry
+///   (the address `claude_code` verifies a group's members against).
+/// - Codex: the UUID a `rollout-<timestamp>-<uuid>` stem ends with, the
+///   `session_meta` id.
+///
+/// `None` for any other name, so an unknown shape names no session.
+fn name_session_digest(key: &DigestKey, candidate: &CounterCandidate) -> Option<KeyedDigest> {
+    let stem = candidate.path.file_stem()?.to_str()?;
+    let id = match candidate.source {
+        SOURCE_CLAUDE_CODE => Some(stem).filter(|stem| !stem.is_empty())?,
+        SOURCE_CODEX => {
+            let rest = stem.strip_prefix("rollout-")?;
+            let id = rest.get(rest.len().checked_sub(36)?..)?;
+            is_uuid(id).then_some(id)?
+        }
+        _ => return None,
+    };
+    Some(harness_session_digest(key, candidate.source, id))
+}
+
+/// `8-4-4-4-12` hex digits.
+fn is_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.char_indices().all(|(at, c)| {
+            if matches!(at, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
 /// The daemon's counter pass and its store.
 pub struct CounterPass {
     rows_path: PathBuf,
@@ -788,6 +861,10 @@ pub struct CounterPass {
     /// The background pass: whether one is running, and the one job kept
     /// for after it. See [`submit_counter_pass`].
     worker: Mutex<WorkerSlot>,
+    /// The sessions the last pass found in Never folders. In memory only,
+    /// never written: a fold drops their tallies before it writes. A leaf
+    /// lock.
+    never_sessions: Mutex<NeverSessions>,
     /// Signalled when the worker goes idle.
     #[cfg(test)]
     idle: std::sync::Condvar,
@@ -829,6 +906,7 @@ impl CounterPass {
             last_fold_failure: Mutex::new(None),
             cleared: AtomicU64::new(0),
             worker: Mutex::new(WorkerSlot::default()),
+            never_sessions: Mutex::new(NeverSessions::default()),
             #[cfg(test)]
             idle: std::sync::Condvar::new(),
             #[cfg(test)]
@@ -917,7 +995,8 @@ impl CounterPass {
 
     /// Run one pass. `project_of` resolves a candidate's project key and
     /// whether its folder is Never, the contribution override included; it
-    /// is asked only for a session about to be read. `never_folders` are
+    /// is asked for a session about to be read, and for one that may hold a
+    /// Never folder's tally (`NeverSessions`). `never_folders` are
     /// every folder that is Never, so rows for sessions no longer on disk
     /// drop too.
     ///
@@ -1065,6 +1144,51 @@ impl CounterPass {
             .then(|| kept_person().map(|(_, row)| row.modified_at).min())
             .flatten();
 
+        // Sessions in Never folders, named from their file names. A tally
+        // no row matches may be a Never-folder session's, which is never
+        // read and so never has a row; its folder is resolved here, before
+        // the quiet-period and unchanged tests below skip the candidate.
+        // So is every session the last pass found Never, so one whose
+        // tally a fold already dropped stays known. Any other session's
+        // folder is resolved only when it is about to be read.
+        let every_never = matches!(never_project_keys, NeverFolders::Every);
+        let mut never_sessions = NeverSessions {
+            every: every_never,
+            these: BTreeSet::new(),
+        };
+        let mut folders: BTreeMap<PathBuf, (String, bool)> = BTreeMap::new();
+        if !every_never && COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
+            let known_never = self
+                .never_sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .these
+                .clone();
+            let matched: BTreeSet<KeyedDigest> = current
+                .rows
+                .values()
+                .filter_map(|row| row.harness_session)
+                .collect();
+            for candidate in candidates {
+                if analytics_source(candidate.source).is_none() {
+                    continue;
+                }
+                let Some(digest) = name_session_digest(&key, candidate) else {
+                    continue;
+                };
+                let unmatched_tally =
+                    current.routing.contains_key(&digest) && !matched.contains(&digest);
+                if !unmatched_tally && !known_never.contains(&digest) {
+                    continue;
+                }
+                let folder = project_of(candidate);
+                if folder.1 {
+                    never_sessions.these.insert(digest);
+                }
+                folders.insert(candidate.path.clone(), folder);
+            }
+        }
+
         let mut order: Vec<&CounterCandidate> = candidates.iter().collect();
         order.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified_at));
         let mut reads: Vec<(KeyedDigest, CounterRow)> = Vec::new();
@@ -1118,11 +1242,17 @@ impl CounterPass {
             {
                 continue;
             }
-            let (project_key, never_folder) = project_of(candidate);
+            let (project_key, never_folder) = match folders.remove(&candidate.path) {
+                Some(folder) => folder,
+                None => project_of(candidate),
+            };
             if never_folder && COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
                 if current.rows.contains_key(&session) {
                     removals.insert(session);
                 }
+                never_sessions
+                    .these
+                    .extend(name_session_digest(&key, candidate));
                 continue;
             }
             // Charged by the one file read, not the group: delegated
@@ -1176,7 +1306,8 @@ impl CounterPass {
 
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
-        let unchanged = reads.is_empty() && removals.is_empty() && !restart && !upgrade;
+        let purge = never_sessions.touches(&current.routing);
+        let unchanged = reads.is_empty() && removals.is_empty() && !restart && !upgrade && !purge;
         // Asked with no lock of this pass held: it reads the settings.
         if should_stop() {
             return Ok(None);
@@ -1187,6 +1318,11 @@ impl CounterPass {
         if self.cleared.load(Ordering::SeqCst) != cleared {
             return Ok(None);
         }
+        // Under the cache lock, so a fold that writes after this sees it.
+        *self
+            .never_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = never_sessions.clone();
         if unchanged {
             self.mark_pass(now);
             return Ok(Some(summary));
@@ -1230,6 +1366,7 @@ impl CounterPass {
             COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
             COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
         );
+        never_sessions.purge(&mut store.routing);
         prune_routing(&mut store, &gone, cutoff);
         self.save_into(&mut cached, store)?;
         self.mark_pass(now);
@@ -1940,6 +2077,12 @@ impl CounterPass {
             return Ok(FoldSummary::default());
         }
         let summary = fold_into(&mut store.routing, &key, &plan, &speakers);
+        // A Never folder leaves nothing: a session the last pass found in
+        // one keeps no tally, charge or model label.
+        self.never_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .purge(&mut store.routing);
         store.ledger_folded_through = plan.next.through;
         store.ledger_folded_started = plan.next.started;
         prune_routing(
@@ -5454,6 +5597,111 @@ mod tests {
         );
         assert!(stored_rows(&f.pass).is_empty());
         assert!(tallies(&f.pass).is_empty());
+    }
+
+    /// The session ID a Codex rollout's file name ends with, in the shape
+    /// Codex writes.
+    const NEVER_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+
+    fn never_rollout(f: &Fixture) -> PathBuf {
+        f.write(
+            &format!("rollout-2026-09-14T09-00-00-{NEVER_ID}.jsonl"),
+            &codex_bytes_for(NEVER_ID),
+        )
+    }
+
+    fn charged_call(id: i64, minutes: i64, session: &str) -> crate::routing::RoutedExchange {
+        let mut call = ledger_call(id, minutes, session);
+        call.cost_usd = Some(0.25);
+        call.served_model = Some("PRIVATE-SERVED-MODEL".to_string());
+        call
+    }
+
+    /// A session in a Never folder has no row (it is never read), so the
+    /// row-driven drop above never reaches its tally. It leaves no tally,
+    /// charge or served-model label: calls folded before the pass learns its
+    /// folder go at that pass, a session still being written included, and
+    /// calls folded after are not kept.
+    #[test]
+    fn a_never_folder_session_leaves_no_tally_charge_or_model() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let rollout = never_rollout(&f);
+        fold_with(&f.pass, true, vec![charged_call(1, 30, NEVER_ID)]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 1);
+
+        // Still being written: not read, but its folder is known Never.
+        let mut live = candidate(SOURCE_CODEX, &rollout);
+        live.modified_at = now();
+        let summary = run_with(&f.pass, &[live], &[PROJECT.to_string()], true);
+        assert_eq!(summary.read, 0);
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+        let text = f.rows_text().to_lowercase();
+        for leak in ["usd_micros", "private-served-model", "charge"] {
+            assert!(!text.contains(leak), "{leak} in the store");
+        }
+
+        // Calls folded after are not kept, before or after it goes quiet.
+        fold_with(&f.pass, true, vec![charged_call(2, 20, NEVER_ID)]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+        run_with(
+            &f.pass,
+            &[candidate(SOURCE_CODEX, &rollout)],
+            &[PROJECT.to_string()],
+            true,
+        );
+        fold_with(&f.pass, true, vec![charged_call(3, 10, NEVER_ID)]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+        assert!(!f.rows_text().to_lowercase().contains("usd_micros"));
+    }
+
+    /// A quiet Never session the pass has already passed over leaves no
+    /// tally when its calls are folded only afterwards.
+    #[test]
+    fn calls_folded_after_a_pass_skipped_a_never_session_leave_no_tally() {
+        let f = Fixture::new();
+        let rollout = never_rollout(&f);
+        run_with(
+            &f.pass,
+            &[candidate(SOURCE_CODEX, &rollout)],
+            &[PROJECT.to_string()],
+            true,
+        );
+        fold_with(&f.pass, true, vec![charged_call(1, 30, NEVER_ID)]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+    }
+
+    /// A session still being written in a folder that is not Never keeps
+    /// the tally its calls made before its row: the purge reads the folder,
+    /// it does not drop every tally without a row.
+    #[test]
+    fn a_live_session_outside_never_folders_keeps_its_tally() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let rollout = never_rollout(&f);
+        fold_with(&f.pass, true, vec![charged_call(1, 30, NEVER_ID)]).unwrap();
+        let mut live = candidate(SOURCE_CODEX, &rollout);
+        live.modified_at = now();
+        run_with(&f.pass, &[live], &[], false);
+        assert_eq!(f.pass.tallied_sessions_for_test(), 1);
+    }
+
+    /// Under a global Never override no tally is kept, matched by a row or
+    /// not, and none is made.
+    #[test]
+    fn every_folder_never_leaves_no_tally() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        fold_with(&f.pass, true, vec![charged_call(1, 30, "PRIVATE-UNLISTED")]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 1);
+        f.pass
+            .run_pass(&[], &NeverFolders::Every, now(), QUIET, &mut |_| {
+                (PROJECT.to_string(), true)
+            })
+            .unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+        fold_with(&f.pass, true, vec![charged_call(2, 20, "PRIVATE-UNLISTED")]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
     }
 
     #[test]
