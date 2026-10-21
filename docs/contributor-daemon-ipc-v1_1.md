@@ -609,9 +609,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
-| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
-| `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
+| `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's counter store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
+| `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -4941,7 +4942,9 @@ whole range: a re-made row shows once, under its new reference and at its
 place, and a client that keeps the row on screen in view sees no jump.
 
 Each row is exactly
-`{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:
+`{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder",
+"inferred_task", "user_task", "user_outcome"}` (the last three are additive;
+a client that predates them ignores them):
 
 - `session_ref` is opaque: `t` and the order the pass made the row in. It is
   never a digest or a path, and it changes when the session's file grows and
@@ -4977,6 +4980,17 @@ Each row is exactly
   key; the label is matched at answer time and never stored, and no key or
   path crosses. A shell draws `null` with the core's
   `analytics_folder_unknown`.
+- `inferred_task` is the task the local rules infer from the row's stored
+  facts (`insights::task_classifier`, re-run when the facts were read under
+  older rules, as `insights_model_answers` reads them): `bug_fix`,
+  `refactor`, `tests`, `docs`, `other` or `no_edits`; `null` for a row with
+  no facts.
+- `user_task` is the task the person set with `insights_session_label`
+  (`bug_fix`, `refactor`, `tests`, `docs` or `other`), or `null` while they
+  have set none. A shell pre-fills its task control from `inferred_task`
+  and says which of the two it shows.
+- `user_outcome` is what the person said became of the work (`kept`,
+  `partly_kept` or `thrown_away`), or `null` while unset. Never inferred.
 
 `insights_session_drill` takes `session_ref` (**required**, from the list)
 and `tz` (optional, seconds east; the daemon's local offset when absent). It
@@ -5002,6 +5016,49 @@ Each stored row keeps the earliest and latest recorded event for this. A row
 stored before they were kept is read once more, within the per-poll limits,
 even when its file is unchanged; until then its drill's date and span are
 `null`, never guessed.
+
+### `insights_session_label`
+
+Additive (Insights PM request, 2026-10-21). Sets or clears the person's own
+labels on one listed row, so a terminal user labels a session in one click
+from the Sessions feed instead of choosing its file. Params:
+
+- `session_ref` (**required**): a reference `insights_sessions` listed. A
+  missing or non-string one is `bad_params` / `insights-session-ref-invalid`.
+- `task` (optional): `bug_fix`, `refactor`, `tests`, `docs` or `other` sets
+  it; `null` clears it, so the inferred task shows again; absent leaves it
+  as it is. `no_edits` is not a label.
+- `outcome` (optional): `kept`, `partly_kept` or `thrown_away` sets it;
+  `null` clears it; absent leaves it.
+
+Any other value of either, or neither given, is `bad_params` /
+`insights-session-label-invalid`. Params are checked before the gate. Gated
+as `insights_sessions` is: with `insights_counter_pass` off it answers
+`{"enabled": false, "feed": "counter_pass"}` and writes nothing, makes no key
+and opens no store; on, an unreadable key, store or folder rules answer
+`readable: false` with the fixed reason. A reference that names no listed
+row (never stored, made again since, automated, or in a Never folder) is
+`bad_params` / `insights-session-unknown`, and nothing is written; a store
+that cannot be written is `unavailable` /
+`insights-session-label-write-failed`, and the label is as it was. Otherwise
+it answers `{"enabled": true, "feed": "counter_pass", "readable": true,
+"session"}`, where `session` is the row exactly as `insights_sessions` now
+lists it. Local in a dry-run daemon: it writes only the counter store.
+
+Where a label lives and when it goes:
+
+- In the counter store, keyed by the row's keyed session digest (the store's
+  row key), never by the reference. A row made again when its file grows
+  gets a new `session_ref` and keeps its label.
+- It goes with its row: when the row ages out of the 13 kept weeks, when the
+  store's caps evict it, and when its folder is Never (no label is set on a
+  row in a Never folder; one whose folder becomes Never is hidden at once
+  and dropped at the next pass, and does not come back if the folder is
+  watched again). Unenroll removes the store, and every label with it.
+- A store written before labels loads with none, and a store with no label
+  is written without the `labels` key, as before.
+- It is never sent anywhere: it crosses only on this socket, on the Sessions
+  rows and as counts in `insights_model_answers`.
 
 ### `insights_model_answers`
 
@@ -5038,7 +5095,7 @@ updated_at, window_start, window_end, pricing, rows}`:
   - `edit_mode`: `prompting` or `not_prompting` on `finish_time`, else
     `null`. `unknown` is never compared.
   - `leader`, `next`: `null`, or `{label, sessions, edits,
-    figure, interrupts_per_session_permille, near_ai_charge}`. `label` is a
+    figure, interrupts_per_session_permille, near_ai_charge, kept}`. `label` is a
     model label the session declared, not a verified serving identity.
     `figure` is `{kind: "rate_permille", value}`, `{kind: "usd_micros",
     value}` or `{kind: "finish_time", median_active_secs,
@@ -5050,7 +5107,9 @@ updated_at, window_start, window_end, pricing, rows}`:
     label may not name the model NEAR AI served, so a session declared as
     one model and served another, or not verified, or whose calls named no
     one served model, is counted on the row's `near_ai_charge` only, never
-    on a model's.
+    on a model's. `kept` is as in `kept_by_model`, for that model, on the
+    rejection rows; `null` on every other figure and when none of the
+    model's sessions has an outcome.
   - `sessions_by_model`: `[[label, sessions], ...]`.
   - `left_out`: counts of sessions left out of that question, per reason:
     `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
@@ -5082,6 +5141,22 @@ updated_at, window_start, window_end, pricing, rows}`:
     `null` on every other row, and on `docs_cost` when no session in the
     window was sent through NEAR AI. It is never added to `figure`: a
     session's charge and its list-price estimate never meet in one figure.
+  - `kept_by_model` (additive): on the rejection rows (`bug_fix_rejected`,
+    `refactor_rejected`, `tests_rejected`, `rejected_across_tasks`),
+    `[[label, {labelled, kept, partly_kept, thrown_away, kept_permille}],
+    ...]`, one entry per model with at least one session in the row the
+    person gave an outcome (`insights_session_label`), whatever the row's
+    `state`. It counts the row's sessions that are compared by route and
+    whose majority model is that label; `labelled` is their sum and
+    `kept_permille` is `kept / labelled`, rounded half-up (partly kept is not
+    kept). An acceptance signal beside the rate: it never moves a rate, an
+    order or a state. `[]` on `docs_cost` and `finish_time`, and when no
+    session has an outcome.
+
+The person's `user_task` (see `insights_session_label`) replaces the
+inferred task wherever the answers read one, so it decides which rows a
+session is on; a session inferred as `no_edits` that they label is on that
+task's rows.
 
 While `LEDGER_MONEY_IN_INSIGHTS` is held (owner decision D5), `docs_cost`
 is `not_priced` with `leader`, `next` and `near_ai_charge` `null` and

@@ -438,6 +438,7 @@ pub const METHODS: &[&str] = &[
     "insights_week",
     "insights_sessions",
     "insights_session_drill",
+    "insights_session_label",
     "insights_model_answers",
     "inference_summary",
     "inference_call_proof",
@@ -543,6 +544,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "insights_week",
     "insights_sessions",
     "insights_session_drill",
+    "insights_session_label",
     "insights_model_answers",
     "inference_call_proof",
     "private_ai",
@@ -3682,6 +3684,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "insights_week" => super::insights_week::handle_week(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
+        "insights_session_label" => super::insights_sessions::handle_session_label(shared, req),
         "insights_model_answers" => {
             super::insights_model_answers::handle_model_answers(shared, req)
         }
@@ -17772,7 +17775,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 91, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

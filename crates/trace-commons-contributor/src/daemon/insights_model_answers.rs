@@ -17,6 +17,11 @@
 //! `table_id`. No session
 //! reference, path, folder or ranking word crosses. Labels are declared
 //! labels, not verified serving identities.
+//!
+//! The person's own labels on their sessions (`insights_session_label`)
+//! are read here, by each row's reference: their task replaces the inferred
+//! one, and their outcomes cross as counts only, in `kept_by_model` and each
+//! rejection figure's `kept`.
 
 use super::insights_sessions::gate;
 use super::ipc::{DaemonShared, Request, Response};
@@ -741,6 +746,69 @@ mod tests {
         assert_eq!(routed_count(false, true), 0, "feed off");
         assert_eq!(routed_count(true, false), 0, "no ledger declared");
         assert_eq!(routed_count(false, false), 0);
+    }
+
+    /// The person's own labels (`insights_session_label`): their task
+    /// moves a session off the inferred task's rows and onto theirs, and
+    /// their outcomes cross as `kept` on the rejection rows.
+    #[test]
+    fn the_persons_labels_override_the_inferred_task_and_count_as_kept() {
+        let f = Fixture::docs_priced();
+        let before = f.answers(&[], true);
+        let docs = &before["rows"][3];
+        assert_eq!(docs["question"], "docs_cost");
+        assert_eq!(
+            docs["sessions_by_model"],
+            serde_json::json!([[LARGER, 5], [SMALLER, 5]])
+        );
+        let listed = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 200);
+        let references: Vec<String> = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                assert_eq!(row["inferred_task"], "docs");
+                row["session_ref"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(references.len(), 10);
+        for (ix, reference) in references.iter().enumerate() {
+            let outcome = if ix % 2 == 0 { "kept" } else { "thrown_away" };
+            let (reference, change) = super::super::insights_sessions::label_params(
+                &serde_json::json!({"session_ref": reference, "task": "bug_fix", "outcome": outcome}),
+            )
+            .unwrap();
+            f.pass
+                .label_value(true, &reference, change, &NeverFolders::NONE, &[])
+                .unwrap();
+        }
+        let after = f.answers(&[], true);
+        assert_eq!(
+            after["rows"][3]["sessions_by_model"],
+            serde_json::json!([]),
+            "no longer Docs"
+        );
+        let bug_fix = &after["rows"][0];
+        assert_eq!(bug_fix["question"], "bug_fix_rejected");
+        assert_eq!(
+            bug_fix["sessions_by_model"],
+            serde_json::json!([[LARGER, 5], [SMALLER, 5]])
+        );
+        let kept = bug_fix["kept_by_model"].as_array().unwrap();
+        assert_eq!(kept.len(), 2);
+        let mut labelled = 0;
+        for entry in kept {
+            let figure = &entry[1];
+            assert_eq!(
+                figure["kept"].as_u64().unwrap() + figure["thrown_away"].as_u64().unwrap(),
+                figure["labelled"].as_u64().unwrap()
+            );
+            labelled += figure["labelled"].as_u64().unwrap();
+        }
+        assert_eq!(labelled, 10);
+        // A Never folder takes its sessions' labels out with them.
+        let hidden = f.answers(&[PROJECT], true);
+        assert_eq!(hidden["rows"][0]["kept_by_model"], serde_json::json!([]));
     }
 
     #[test]
