@@ -9,9 +9,12 @@
 //!
 //! - Anthropic (version 1): `source_url` is where the docs pricing page
 //!   redirected; `content_sha256` hashes the raw bytes fetched there, which
-//!   carry every rate. The page names models by display name; each `model`
-//!   id was confirmed on the same site's models overview and model IDs
-//!   pages.
+//!   carry every rate. The table holds every model the page prices, with
+//!   both cache-write lifetimes. The page names models by display name; each
+//!   `model` id was confirmed on the same site's models overview (the
+//!   current models) and model deprecations page (the older ones, which
+//!   carry dated ids that `normalize_model_label` strips; Haiku 3.5 is
+//!   `claude-3-5-haiku`, version first).
 //! - OpenAI (version 2): `source_url` is where the API pricing page
 //!   redirected; `content_sha256` hashes its raw bytes, which carry the
 //!   standard-tier rates up to 272K input tokens. The rates above 272K are
@@ -187,7 +190,7 @@ impl PricingCatalog {
 pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     (
         1,
-        "sha256:cc9f2ae4075adad77dc148f24e3d7a4e52b1fbd1452b5be140090a2751e7eecd",
+        "sha256:64e1ab5b55133a35bf3f98aaf70963efe38e745388a0bb8fe1f9754104fab4b1",
     ),
     (
         2,
