@@ -52,7 +52,6 @@ fn entry(accounting: PricingAccounting, model: &str, usd_per_million: u64) -> Mo
 /// model-a at 1 USD, model-b at 3 USD, model-c at 5 USD per million tokens.
 /// Any other label is unpriced.
 fn catalog() -> PricingCatalog {
-    let at = |second| Utc.timestamp_opt(second, 0).unwrap();
     let mut entries = Vec::new();
     for accounting in [PricingAccounting::ClaudeCode, PricingAccounting::Codex] {
         entries.push(entry(accounting, "model-a", 1));
@@ -64,16 +63,17 @@ fn catalog() -> PricingCatalog {
         table_id: String::new(),
         version: 1,
         currency: PricingCurrency::Usd,
-        published_at: at(101),
+        published_at: day_ago() - Duration::hours(12),
         provenance: PricingTableProvenance {
             publisher: "Synthetic fixture".to_owned(),
             source_url: "https://example.invalid/prices/1".to_owned(),
-            retrieved_at: at(100),
+            retrieved_at: day_ago() - Duration::days(1),
             content_sha256:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             reviewed_by: "Synthetic reviewer".to_owned(),
-            reviewed_at: at(101),
+            reviewed_at: day_ago() - Duration::hours(12),
             effective_from_basis: None,
+            source_notes: None,
         },
         entries,
     };
