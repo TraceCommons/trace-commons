@@ -1517,6 +1517,65 @@ pub fn judgement_signing_bytes(
     out
 }
 
+// ---------------------------------------------------------------------------
+// The judgement claim, minted by the upload-claim issuer
+// ---------------------------------------------------------------------------
+
+/// Issuer route that mints a judgement claim (spec section 3, "The account
+/// credential").
+///
+/// The request is authenticated exactly as a device-key upload claim is: the
+/// device signs the exact JSON body bytes with raw Ed25519 and sends
+/// `x-trace-device-key-id` and `x-trace-device-signature` beside it. The
+/// issuer mints only for a device registered, and not revoked, under a
+/// per-account tenant; any other tenant is refused with
+/// `judgement_account_ineligible`. `issued_at` bounds replay, and the schema
+/// version keeps an upload-claim body from being replayed here or the
+/// reverse.
+pub const JUDGEMENT_CLAIM_PATH: &str = "/v1/insights-judgement/claim";
+
+pub const JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION: &str =
+    "trace_commons.insights_judgement_claim_request.v1";
+
+/// How far `issued_at` may sit from the issuer's clock, either way.
+pub const JUDGEMENT_CLAIM_MAX_SKEW_SECONDS: i64 = 300;
+
+/// Issuer refusal: `issued_at` is outside [`JUDGEMENT_CLAIM_MAX_SKEW_SECONDS`].
+/// The other issuer refusals on this route are the device-key labels the
+/// upload-claim route already uses, and `judgement_account_ineligible` for a
+/// tenant that is not per-account.
+pub const JUDGEMENT_CLAIM_REQUEST_STALE: &str = "insights_judgement_claim_request_stale";
+
+/// `POST /v1/insights-judgement/claim` body. Signed as sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgementClaimRequest {
+    pub schema_version: String,
+    /// The tenant the device is registered under. Becomes the claim's
+    /// `account_ref` when it is a per-account tenant.
+    pub tenant_id: String,
+    /// Must equal the `x-trace-device-key-id` header.
+    pub device_key_id: String,
+    /// Unix seconds.
+    pub issued_at: i64,
+}
+
+/// The minted judgement claim. The token is an EdDSA JWT with
+/// `aud = "trace-commons-insights-judgement"` and an `account_ref` claim; the
+/// daemon presents it to the judgement service as `Authorization: Bearer`
+/// and never reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgementClaimResponse {
+    pub access_token: String,
+    /// Always `Bearer`.
+    pub token_type: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+    /// Seconds from issue to `expires_at`, at most 15 minutes.
+    pub expires_in: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3000,5 +3059,52 @@ mod tests {
             sign(1, &nonce(), &"ab".repeat(32), &task_only, over, 0),
             sign(1, &nonce(), &"ab".repeat(32), &event, over, 0)
         );
+    }
+
+    #[test]
+    fn the_claim_route_and_schema_are_pinned() {
+        assert_eq!(JUDGEMENT_CLAIM_PATH, "/v1/insights-judgement/claim");
+        assert_eq!(
+            JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION,
+            "trace_commons.insights_judgement_claim_request.v1"
+        );
+        assert_eq!(JUDGEMENT_CLAIM_MAX_SKEW_SECONDS, 300);
+        assert_eq!(
+            JUDGEMENT_CLAIM_REQUEST_STALE,
+            "insights_judgement_claim_request_stale"
+        );
+    }
+
+    #[test]
+    fn claim_wire_types_round_trip_and_refuse_unknown_fields() {
+        let request = JudgementClaimRequest {
+            schema_version: JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: format!("near-{}", "a".repeat(64)),
+            device_key_id: "sha256:00".to_string(),
+            issued_at: 1,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<JudgementClaimRequest>(value.clone()).unwrap(),
+            request
+        );
+        let mut smuggled = value;
+        smuggled["consent_scopes"] = serde_json::json!(["benchmark_only"]);
+        assert!(serde_json::from_value::<JudgementClaimRequest>(smuggled).is_err());
+
+        let response = JudgementClaimResponse {
+            access_token: "a.b.c".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: 2,
+            expires_in: 1,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serde_json::from_value::<JudgementClaimResponse>(value.clone()).unwrap(),
+            response
+        );
+        let mut smuggled = value;
+        smuggled["account_ref"] = serde_json::json!("near-00");
+        assert!(serde_json::from_value::<JudgementClaimResponse>(smuggled).is_err());
     }
 }
