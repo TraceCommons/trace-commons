@@ -1118,8 +1118,9 @@ mod tests {
         assert_eq!(haiku(100_000), Some(10_500));
         assert_eq!(haiku(100_001), Some(52_501));
 
-        // "272K" is not stated in tokens: a prompt that is above 272,000 but
-        // not above 272 x 1,024 is unpriced, never put in either band.
+        // The page labels its tiers "<=272K" and ">272K" input tokens, so the
+        // bands meet at 272,000: a prompt of 272,001 is already in the higher
+        // band, and no prompt size falls between the two.
         let astra = |uncached| {
             price(
                 PricingAccounting::Codex,
@@ -1129,8 +1130,9 @@ mod tests {
             .total_usd_micros
         };
         assert_eq!(astra(272_000), Some(2_720_000));
-        assert_eq!(astra(275_000), None);
-        assert_eq!(astra(278_528), None);
+        assert_eq!(astra(272_001), Some(5_440_020));
+        assert_eq!(astra(275_000), Some(5_500_000));
+        assert_eq!(astra(278_528), Some(5_570_560));
         assert_eq!(astra(278_529), Some(5_570_580));
     }
 }

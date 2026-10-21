@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "table_id": "sha256:7c620ffda43fe2151864cbb1cfc1daea51dffca741283bf2ab46cd88989b652d",
+  "table_id": "sha256:18fb3575c45e8f10c09231aa47d134de3ab1010e7ff845dd61186dc9954df4d7",
   "version": 2,
   "currency": "usd",
   "published_at": "2026-10-20T20:17:01Z",
@@ -46,7 +46,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",
@@ -98,7 +98,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",
@@ -150,7 +150,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",
@@ -202,7 +202,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",
@@ -254,7 +254,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",
@@ -306,7 +306,7 @@
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
       "effective_until": null,
-      "prompt_tokens_above": 278528,
+      "prompt_tokens_above": 272000,
       "rates": [
         {
           "category": "uncached_input",

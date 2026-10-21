@@ -28,9 +28,12 @@
 //! as `provenance.effective_from_basis` says; an older turn is unpriced.
 //!
 //! Prompt-size bands: Anthropic states its threshold in tokens (100,000).
-//! OpenAI states "272K input tokens" without saying whether K is 1,000 or
-//! 1,024, so the lower band ends at 272,000 and the higher one starts above
-//! 278,528; a prompt between them is unpriced, never put in either band.
+//! OpenAI labels its tiers "<=272K input tokens" and ">272K input tokens"
+//! (the labels sit in the pricing page's selector script) and gives no
+//! token count, so K is read as 1,000: the lower band ends at 272,000 and
+//! the higher one starts above it. The bands meet, so every prompt size is
+//! priced. Reading K as 1,024 instead would put 272,001 to 278,528 tokens
+//! in the lower band; the page's wording (">272K") does not support that.
 
 use std::collections::BTreeSet;
 
@@ -183,7 +186,7 @@ pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     ),
     (
         2,
-        "sha256:7c620ffda43fe2151864cbb1cfc1daea51dffca741283bf2ab46cd88989b652d",
+        "sha256:18fb3575c45e8f10c09231aa47d134de3ab1010e7ff845dd61186dc9954df4d7",
     ),
 ];
 
@@ -405,7 +408,15 @@ mod tests {
     fn each_embedded_table_parses_and_validates() {
         for source in SHIPPED_PRICING_TABLE_SOURCES {
             let table: PricingTable = serde_json::from_str(source).unwrap();
-            assert_eq!(table.validate(), Ok(()));
+            // A rate or provenance edit moves the digest; the message names
+            // the new id to pin in the file and in `SHIPPED_PRICING_TABLES`.
+            assert_eq!(
+                table.validate(),
+                Ok(()),
+                "table_id for version {} must be {}",
+                table.version,
+                table.canonical_table_id().unwrap()
+            );
         }
     }
 
