@@ -123,6 +123,7 @@ use crate::insights::analytics_constants::{
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
+use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::task_classifier::reclassify;
@@ -1501,6 +1502,71 @@ impl CounterPass {
         }))
     }
 
+    /// The `insights_model_answers` answer: the six Models answers over the
+    /// stored sessions inside the 13 weeks ending `now`, priced at list
+    /// prices when the answer is built (the store holds tokens, never a
+    /// price). Each row is joined to its session's route tally by the keyed
+    /// harness-session digest, as `week_value` joins it; with the ledger feed
+    /// off or no proxy ledger declared every session is `Unobserved`, so no
+    /// stored tally is read.
+    pub(crate) fn model_answers_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        ledger_feed: bool,
+        ledger_present: bool,
+        now: DateTime<Utc>,
+    ) -> serde_json::Value {
+        if !enabled {
+            // Owner decision D4, open: nothing is read for Insights.
+            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+        }
+        let (key, store) = match self.visible_store() {
+            Ok(found) => found,
+            Err(reason) => return unreadable_value(reason),
+        };
+        let (inputs, routes) = match (&key, &store) {
+            (Some(key), Some(store)) => {
+                let never = never_digests(key, never_project_keys);
+                let mut rows: Vec<&CounterRow> = store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .collect();
+                rows.sort_by_key(|row| row.seq);
+                let routes = route_map(&rows, &store.routing, ledger_feed && ledger_present);
+                let inputs: Vec<SessionInput> =
+                    rows.iter().map(|row| row.session_input()).collect();
+                (inputs, routes)
+            }
+            _ => (Vec::new(), BTreeMap::new()),
+        };
+        let answers = crate::insights::model_answers::model_answers(
+            &inputs,
+            &routes,
+            &crate::insights::pricing_catalog::production_pricing_catalog(),
+            now,
+        );
+        let tables: Vec<serde_json::Value> = answers
+            .pricing_tables
+            .iter()
+            .map(|table| serde_json::json!({"table_id": table.table_id, "version": table.version}))
+            .collect();
+        serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "updated_at": self.updated_at(),
+            "window_start": answers.window_start.to_rfc3339(),
+            "window_end": answers.window_end.to_rfc3339(),
+            "pricing": {
+                "basis": crate::insights::session_pricing::PRICING_BASIS_API_LIST,
+                "tables": tables,
+            },
+            "rows": answers.rows,
+        })
+    }
+
     /// When a pass last finished, RFC 3339.
     fn updated_at(&self) -> Option<String> {
         self.last_pass_at
@@ -2330,6 +2396,40 @@ pub(crate) fn never_folders(policy: &super::policy::ProjectPolicy) -> NeverFolde
             .cloned()
             .collect(),
     )
+}
+
+/// Each row's route for the Models answers, by the engine's session
+/// reference: the category of its session's tally. While routing is
+/// unavailable (the ledger feed off, or no proxy ledger declared) every row
+/// is `Unobserved`, so a tally folded earlier is not read.
+fn route_map(
+    rows: &[&CounterRow],
+    routing: &BTreeMap<KeyedDigest, RouteTally>,
+    routing_available: bool,
+) -> BTreeMap<String, ModelRoute> {
+    use super::insights_route_tally::{RouteCategory, route_category};
+    rows.iter()
+        .map(|row| {
+            let route = if routing_available {
+                let tally = row
+                    .harness_session
+                    .as_ref()
+                    .and_then(|digest| routing.get(digest));
+                match route_category(tally).0 {
+                    RouteCategory::Unobserved => ModelRoute::Unobserved,
+                    RouteCategory::Unrecorded => ModelRoute::Unrecorded,
+                    RouteCategory::Outside => ModelRoute::Outside,
+                    RouteCategory::Mixed => ModelRoute::Mixed,
+                    RouteCategory::CheckFailed => ModelRoute::CheckFailed,
+                    RouteCategory::RoutedVerified => ModelRoute::RoutedVerified,
+                    RouteCategory::RoutedUnverified => ModelRoute::RoutedUnverified,
+                }
+            } else {
+                ModelRoute::Unobserved
+            };
+            (row.reference(), route)
+        })
+        .collect()
 }
 
 /// `insights_week`.
@@ -4551,6 +4651,35 @@ mod tests {
             .unwrap()
             .map(|store| store.routing.clone())
             .unwrap_or_default()
+    }
+
+    /// The Models answers read a route only while routing is available: a
+    /// tally folded while the feed was on is not read once it is off.
+    #[test]
+    fn model_routes_follow_the_tally_only_while_routing_is_available() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let mut call = ledger_call(1, 30, "PRIVATE-CODEX-ID");
+        call.proof = Some(crate::routing::ProofStatus::Pending);
+        fold_with(&f.pass, true, vec![call]).unwrap();
+        let store = f.pass.load_cached().unwrap().unwrap();
+        let rows: Vec<&CounterRow> = store.rows.values().collect();
+        assert_eq!(rows.len(), 1);
+        let on = route_map(&rows, &store.routing, true);
+        assert_eq!(
+            on.values().copied().collect::<Vec<_>>(),
+            vec![ModelRoute::RoutedUnverified]
+        );
+        let off = route_map(&rows, &store.routing, false);
+        assert_eq!(
+            off.values().copied().collect::<Vec<_>>(),
+            vec![ModelRoute::Unobserved]
+        );
+        assert_eq!(
+            off.keys().collect::<Vec<_>>(),
+            on.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
