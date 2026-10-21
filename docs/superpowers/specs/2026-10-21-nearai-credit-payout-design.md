@@ -5,6 +5,14 @@ owner decisions this spec was written around are open (section 11, a-c).
 Review raised three more questions only the owner can settle (section 11,
 d-f); they are open too.
 
+## Owner decisions
+
+- **2026-10-21: the contributor chooses the payout org in the app.** The app
+  lists the NEAR AI organizations the contributor's sign-in can see and the
+  contributor picks one. There is no automatic "personal org" guess, and no
+  NEAR AI change is needed to find the org. The server still verifies the
+  choice (section 5); a pick is never trusted on the client's word.
+
 This spec covers paying Trace Commons contributors in NEAR AI inference
 credit through the org-to-org transfer API that nearai/cloud-api PR #1271
 added. It covers the commons side (a transfer client, where it sits in the
@@ -223,8 +231,8 @@ Our tree is `origin/main` at f164d68f9. cloud-api is the #1271 merge commit
   flag** and no server-to-server lookup by user. NEAR-wallet users get a
   personal org at sign-up named `<account>-org-<4 hex>`; other providers get
   `<email-local>-org-<4 chars>`, so an org name can carry part of an email
-  address and is treated as personal data here. "First active org where the
-  user is owner" is a heuristic.
+  address and is treated as personal data here. So the contributor chooses
+  the org in the app (owner decision above) rather than the app guessing.
 
 ## 1. Goal and non-goals
 
@@ -643,11 +651,15 @@ trust. The link call therefore follows the provision and bind shape:
 
 1. The daemon exchanges its refresh token for a fresh access token
    (`session::exchange`).
-2. It calls `/v1/users/me` itself, lists the active orgs where the user is
-   owner, and proposes the first one (the heuristic above). The app shows its
-   name, from this call. The name stays on the device: the daemon keeps it
-   with the org id it chose, as it already keeps `organization_id`, and
-   re-reads it from `/users/me` for the status line later.
+2. It calls `/v1/users/me` itself and the app shows the active orgs where
+   the user is owner, by name, for the contributor to choose from (owner
+   decision, 2026-10-21). Nothing is preselected when there is more than one;
+   with exactly one, it is shown as the only choice and still needs a
+   confirm. Orgs the user does not own, or that are inactive, are not
+   offered, because step 4 would refuse them. The name stays on the device:
+   the daemon keeps it with the chosen org id, as it already keeps
+   `organization_id`, and re-reads it from `/users/me` for the status line
+   later. Choosing again later is the change flow below.
 3. On confirm, the daemon sends the chosen org id **and the fresh NEAR AI
    access token in the request body** to ingest, as provisioning does
    (`daemon/nearai_onboarding.rs:32-42`).
@@ -1077,8 +1089,8 @@ If the owner picks per settled credit (Option A), step 6 becomes: first the
 
 ### Other open questions (not owner decisions yet)
 
-1. **Personal org.** #1271 has no personal flag and no server lookup by user.
-   Ask NEAR AI for one. Until then, the user picks from owned, active orgs.
+1. **Personal org.** Settled by the owner decision above: the contributor
+   picks from owned, active orgs in the app, so no personal flag is needed.
 2. **Staging API host:** `cloud-stg-api.near.ai` or `cloud-stg.near.ai`.
 3. **Staging deployment flags** (`CREDIT_ALLOCATION_POLICY_VERSION=v2`,
    `CREDIT_USAGE_ORDER`): unknown.
