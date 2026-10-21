@@ -329,11 +329,17 @@ impl ResolvedModel {
 /// until slice 9. A development build adds its development models. The
 /// production-allowlist test (spec section 2) is over this list.
 pub fn registry_model_ids() -> Vec<&'static str> {
-    #[allow(unused_mut)]
-    let mut ids: Vec<&'static str> = Vec::new();
+    /// Production adapters. None until slice 9.
+    const PRODUCTION_ADAPTERS: &[&str] = &[];
     #[cfg(feature = "judgement-development-models")]
-    ids.push(super::mock::MOCK_MODEL_ID);
-    ids
+    const DEVELOPMENT_ADAPTERS: &[&str] = &[super::mock::MOCK_MODEL_ID];
+    #[cfg(not(feature = "judgement-development-models"))]
+    const DEVELOPMENT_ADAPTERS: &[&str] = &[];
+    PRODUCTION_ADAPTERS
+        .iter()
+        .chain(DEVELOPMENT_ADAPTERS)
+        .copied()
+        .collect()
 }
 
 /// The configured model, if this build may call it.
