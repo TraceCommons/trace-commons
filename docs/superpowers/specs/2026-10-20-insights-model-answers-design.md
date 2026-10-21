@@ -247,7 +247,11 @@ figure for that reason.
   per-session charge on the route tally, which would be the store's only
   price. Question 4 leaves out every session with a route tally, because
   its charge does not last the 13-week window and API list prices do not
-  describe it.
+  describe it. Settled 2026-10-20 (owner): the alternative was taken. The
+  route tally stores each session's NEAR AI charge per model, in integer
+  USD micros, as the ledger is folded, and Question 4 shows the median
+  charge per session of its routed sessions as its own figure
+  (`near_ai_charge`) beside the API-price one, never summed with it.
 - **Unpriced.** A model whose sessions meet the session floor but are not
   priced shows "Not priced", never "Not enough sessions" and never $0.
 - **What changes in code and tests:**
