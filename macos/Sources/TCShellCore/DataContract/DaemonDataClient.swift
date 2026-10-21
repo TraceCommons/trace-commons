@@ -254,6 +254,11 @@ public protocol DaemonDataClient: Sendable {
     /// `insights_session_drill`: one listed watched trace turn by turn, by
     /// its `sessionRef`, at the local UTC offset.
     func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
+    /// `insights_model_answers`: the Patterns "Models" card's six answers
+    /// over the counter pass. Answers `enabled: false` while counting is
+    /// off; an older daemon refuses it as `unknown_method`. Either way, and
+    /// on any failed read, the card is hidden.
+    func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older

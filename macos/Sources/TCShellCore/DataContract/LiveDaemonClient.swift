@@ -310,6 +310,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
                        as: DaemonData.InsightsSessionDrillAnswer.self)
     }
 
+    public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
+        try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }
