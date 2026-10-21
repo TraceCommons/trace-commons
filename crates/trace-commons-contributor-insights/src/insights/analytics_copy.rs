@@ -726,6 +726,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Left out, not priced: {n}",
     ),
     (
+        "analytics_models_left_out_too_few_sessions",
+        "Model had too few traces of a task type: {n}",
+    ),
+    (
         "analytics_models_left_out_too_few_edits",
         "Left out, too few edits: {n}",
     ),
