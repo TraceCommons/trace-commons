@@ -423,7 +423,10 @@ struct InsightDetail: View {
                 }
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                     InsightsGroupHeading(text("summary_metrics"))
-                    ForEach(insight.report.metrics) { metric in
+                    // Only the metrics this trace recorded (Kristi,
+                    // 2026-10-21); what a result cannot say stays in the
+                    // title's "i".
+                    ForEach(InsightsSummaryFormatting.known(insight.report.metrics)) { metric in
                         VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
                             Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
                             Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
