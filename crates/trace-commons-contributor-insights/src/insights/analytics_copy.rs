@@ -583,10 +583,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_models_not_enough", "Not enough traces yet"),
     ("analytics_models_count_one", "{label}: {n} trace"),
     ("analytics_models_count_other", "{label}: {n} traces"),
+    // Not priced: two models have enough docs traces but fewer than two
+    // have enough priced ones, so one of them may well be priced.
     ("analytics_models_not_priced", "Not priced"),
     (
         "analytics_models_not_priced_line",
-        "No published API prices are known for these models, so no cost is shown.",
+        "Fewer than two of these models have API prices for enough traces, so costs aren't compared.",
     ),
     (
         "analytics_models_no_clear_difference",

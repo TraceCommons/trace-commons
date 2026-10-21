@@ -1927,7 +1927,7 @@ mod tests {
             ("analytics_models_not_priced", "Not priced"),
             (
                 "analytics_models_not_priced_line",
-                "No published API prices are known for these models, so no cost is shown.",
+                "Fewer than two of these models have API prices for enough traces, so costs aren't compared.",
             ),
             (
                 "analytics_models_no_clear_difference",
