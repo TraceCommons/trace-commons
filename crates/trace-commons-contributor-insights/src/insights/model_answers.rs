@@ -27,9 +27,11 @@
 //!   elsewhere. A cost figure's `sessions` is its priced sessions, the
 //!   median's sample; a time figure's is its finished sessions.
 //! - Across task types (Q5, Q6), a type's weight is the sessions of that
-//!   type in the question's cells, across every model with a cell there
-//!   (not only the compared ones, which the weights decide).
-//!   `mix_too_different` counts every session in the question of a model
+//!   type in the question's cells, across every model with at least one
+//!   qualifying cell in the question (the spec's "compared models": the
+//!   mix rule only removes models from that set, so the weights do not
+//!   depend on their own outcome). A model with no qualifying cell anywhere
+//!   is never compared and does not weigh in. `mix_too_different` counts every session in the question of a model
 //!   with a qualifying cell whose qualifying types carry less than
 //!   `MODEL_ANSWER_MIN_MIX_COVERAGE` of the weight. Q1-Q4 have one type,
 //!   so every model with a qualifying cell covers it.
@@ -40,9 +42,12 @@
 //!   the same way and do not order. A session of `Unknown` edit mode, or a
 //!   finished one with unknown time or turns, is counted in
 //!   `unknown_facts`; a session of the other known mode is in the other
-//!   comparison and is not counted as left out. When neither mode compares
-//!   two models, the row shows the mode with more sessions (ties:
-//!   `NotPrompting`).
+//!   comparison and is not counted as left out.
+//! - Q6's `edit_mode` is chosen before the mix rule: `NotPrompting` when at
+//!   least two models have a qualifying cell there, `Prompting` in every
+//!   other case (including when neither mode has two). The mix rule and the
+//!   bootstrap then run within that mode only, so a qualifier that fails
+//!   the mix leaves the row on `NotPrompting` reading not enough sessions.
 //! - The bootstrap compares the leader and the next model only. Per draw it
 //!   resamples the leader's qualifying cells, then the next model's, each
 //!   in task order and each cell's sessions in `session_ref` order, with
@@ -576,8 +581,24 @@ fn session_counts<T>(cells: &Cells<T>) -> Vec<(String, u32)> {
 /// Each task type's weight: the contributor's sessions of that type in the
 /// question, across every model.
 fn mix_weights<T>(cells: &Cells<T>) -> BTreeMap<InferredTask, u64> {
+    weights_of(cells.values())
+}
+
+/// Each task type's weight across the entrants: the models with at least
+/// one qualifying cell in the question.
+fn entrant_weights<T, U>(cells: &Cells<T>, entrants: &[Entrant<U>]) -> BTreeMap<InferredTask, u64> {
+    weights_of(
+        entrants
+            .iter()
+            .filter_map(|entrant| cells.get(&entrant.label)),
+    )
+}
+
+fn weights_of<'c, T: 'c>(
+    cells: impl Iterator<Item = &'c BTreeMap<InferredTask, Vec<T>>>,
+) -> BTreeMap<InferredTask, u64> {
     let mut weights: BTreeMap<InferredTask, u64> = BTreeMap::new();
-    for by_task in cells.values() {
+    for by_task in cells {
         for (task, samples) in by_task {
             let weight = weights.entry(*task).or_default();
             *weight = weight.saturating_add(samples.len() as u64);
@@ -858,7 +879,6 @@ fn rejection_row(
     draws: &mut u32,
 ) -> ModelAnswerRow {
     let (cells, mut left_out) = rejection_cells(prepared, tasks);
-    let weights = mix_weights(&cells);
     let mut entrants = Vec::new();
     for (label, by_task) in &cells {
         let mut qualifying = Vec::new();
@@ -885,6 +905,7 @@ fn rejection_row(
             });
         }
     }
+    let weights = entrant_weights(&cells, &entrants);
     let compared = covering(entrants, &weights, &mut left_out);
     let mut row = empty_row(question, session_counts(&cells), left_out);
     if compared.len() < 2 {
@@ -1022,18 +1043,13 @@ fn cost_row(
     row
 }
 
-/// Question 6's contenders in one `edit_mode`.
-fn time_contenders(
+/// Question 6's cells in one `edit_mode`, and the entrants: the models with
+/// at least one qualifying cell there, before the mix rule.
+fn time_entrants(
     prepared: &Prepared,
     mode: EditMode,
-) -> (
-    Cells<TimeSample>,
-    LeftOut,
-    BTreeMap<InferredTask, u64>,
-    Vec<Contender<TimePoint>>,
-) {
-    let (cells, mut left_out) = time_cells(prepared, &EDIT_TASKS, mode);
-    let weights = mix_weights(&cells);
+) -> (Cells<TimeSample>, LeftOut, Vec<Entrant<TimeSample>>) {
+    let (cells, left_out) = time_cells(prepared, &EDIT_TASKS, mode);
     let mut entrants = Vec::new();
     for (label, by_task) in &cells {
         let mut qualifying = Vec::new();
@@ -1051,8 +1067,19 @@ fn time_contenders(
             });
         }
     }
+    (cells, left_out, entrants)
+}
+
+/// Question 6's contenders among the entrants of one `edit_mode`, after the
+/// mix rule.
+fn time_contenders(
+    cells: &Cells<TimeSample>,
+    entrants: Vec<Entrant<TimeSample>>,
+    left_out: &mut LeftOut,
+) -> (BTreeMap<InferredTask, u64>, Vec<Contender<TimePoint>>) {
+    let weights = entrant_weights(cells, &entrants);
     let mut contenders = Vec::new();
-    for entrant in covering(entrants, &weights, &mut left_out) {
+    for entrant in covering(entrants, &weights, left_out) {
         let sessions = entrant
             .cells
             .iter()
@@ -1103,33 +1130,23 @@ fn time_contenders(
             sessions,
         });
     }
-    (cells, left_out, weights, contenders)
+    (weights, contenders)
 }
 
-/// Question 6: sessions of one `edit_mode`, `NotPrompting` when two models
-/// are compared there, else `Prompting`; `Unknown` never.
+/// Question 6: sessions of one `edit_mode`, `NotPrompting` when at least
+/// two models have a qualifying cell there, else `Prompting`; `Unknown`
+/// never. The mode is chosen before the mix rule.
 fn time_row(prepared: &Prepared, draws: &mut u32) -> ModelAnswerRow {
-    let not_prompting = time_contenders(prepared, EditMode::NotPrompting);
-    let prompting = time_contenders(prepared, EditMode::Prompting);
-    let (mode, (cells, left_out, weights, contenders)) = if not_prompting.3.len() >= 2 {
+    let not_prompting = time_entrants(prepared, EditMode::NotPrompting);
+    let (mode, (cells, mut left_out, entrants)) = if not_prompting.2.len() >= 2 {
         (EditMode::NotPrompting, not_prompting)
-    } else if prompting.3.len() >= 2 {
-        (EditMode::Prompting, prompting)
     } else {
-        // Neither compares two models: show the counts of the mode with
-        // more sessions, so the row reports the nearer comparison.
-        let sessions = |cells: &Cells<TimeSample>| {
-            cells
-                .values()
-                .map(|by_task| u64::from(sessions_of(by_task)))
-                .sum::<u64>()
-        };
-        if sessions(&prompting.0) > sessions(&not_prompting.0) {
-            (EditMode::Prompting, prompting)
-        } else {
-            (EditMode::NotPrompting, not_prompting)
-        }
+        (
+            EditMode::Prompting,
+            time_entrants(prepared, EditMode::Prompting),
+        )
     };
+    let (weights, contenders) = time_contenders(&cells, entrants, &mut left_out);
     let mut row = empty_row(ModelQuestion::FinishTime, session_counts(&cells), left_out);
     row.edit_mode = Some(mode);
     settle(&mut row, contenders, &weights, draws);
