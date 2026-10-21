@@ -1135,4 +1135,64 @@ mod tests {
         assert_eq!(astra(278_528), Some(5_570_560));
         assert_eq!(astra(278_529), Some(5_570_580));
     }
+
+    /// OpenAI's page shows "-" (or no column) for the cache write of gpt-5.5
+    /// and the older models: no separate write charge, so a written token
+    /// costs the uncached-input rate. Rates are the page's, per million
+    /// tokens; micros are tokens x rate / 1M x 1M.
+    #[test]
+    fn a_model_with_no_separate_write_charge_prices_the_write_as_input() {
+        use crate::insights::pricing_catalog::production_pricing_catalog;
+
+        let catalog = production_pricing_catalog();
+        let from = catalog.tables()[0].entries[0].effective_from;
+        let price = |model: &str, counts: [u32; 3], write: u32| {
+            let mut record = turn(
+                0,
+                Some(0),
+                Some(0),
+                counts.map(Some),
+                Some(CacheWrite::TotalOnly(write)),
+            );
+            record.at = Some(from);
+            price_session(
+                &catalog,
+                PricingAccounting::Codex,
+                &labels(&[model]),
+                &[record],
+            )
+            .total_usd_micros
+        };
+        // gpt-5.5 up to 272K: 1,000 x 5 + 10,000 x 0.50 + 2,000 x 5 (write at
+        // the input rate) + 500 x 30 = 35,000.
+        assert_eq!(price("gpt-5.5", [1_000, 10_000, 500], 2_000), Some(35_000));
+        // Above 272K the page's long-context rates apply: 272,001 x 10.
+        assert_eq!(price("gpt-5.5", [272_001, 0, 0], 0), Some(2_720_010));
+        // gpt-5.4: 1,000 x 2.50 + 10,000 x 0.25 + 2,000 x 2.50 + 500 x 15.
+        assert_eq!(price("gpt-5.4", [1_000, 10_000, 500], 2_000), Some(17_500));
+        assert_eq!(price("gpt-5.4", [272_001, 0, 0], 0), Some(1_360_005));
+        // gpt-5.4-mini has one rate at every prompt size: 0.75 in, 0.075
+        // cached, 4.50 out.
+        assert_eq!(
+            price("gpt-5.4-mini", [1_000, 10_000, 500], 2_000),
+            Some(750 + 750 + 1_500 + 2_250)
+        );
+        assert_eq!(price("gpt-5.4-mini", [300_000, 0, 0], 0), Some(225_000));
+        // gpt-5.3-codex: 1.75 in, 0.175 cached, 14 out.
+        assert_eq!(
+            price("gpt-5.3-codex", [1_000, 10_000, 500], 2_000),
+            Some(1_750 + 1_750 + 3_500 + 7_000)
+        );
+        // gpt-5.6-terra has its own write rate (2.50): 1,000 x 2 + 10,000 x
+        // 0.20 + 2,000 x 2.50 + 500 x 12 = 15,000; above 272K: 4 / 0.40 /
+        // 5 / 18.
+        assert_eq!(
+            price("gpt-5.6-terra", [1_000, 10_000, 500], 2_000),
+            Some(15_000)
+        );
+        assert_eq!(price("gpt-5.6-terra", [272_001, 0, 0], 0), Some(1_088_004));
+        // A pro model has no cached-input rate on the page, so it stays
+        // unpriced rather than getting a rate nobody published.
+        assert_eq!(price("gpt-5.5-pro", [1_000, 0, 500], 0), None);
+    }
 }
