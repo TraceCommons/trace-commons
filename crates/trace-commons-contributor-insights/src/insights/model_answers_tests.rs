@@ -919,8 +919,9 @@ fn a_docs_heavy_model_does_not_win_across_types_on_mix_alone() {
 
 #[test]
 fn a_model_covering_under_eighty_percent_of_the_mix_is_not_compared() {
-    // Weights: BugFix 15, Docs 13. model-a qualifies in BugFix only (15/28,
-    // 54%); model-b and model-c qualify in both.
+    // model-a qualifies in BugFix only: with model-b or model-c, their
+    // shared BugFix carries 10 of 18 sessions (55%). model-b and model-c
+    // qualify in both. model-a's 3 Docs sessions are under the floor.
     let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 10, &[0; 5]);
     sessions.extend(spread("ad", "model-a", InferredTask::Docs, 10, &[0; 3]));
     sessions.extend(spread("bb", "model-b", InferredTask::BugFix, 10, &[1; 5]));
@@ -929,7 +930,8 @@ fn a_model_covering_under_eighty_percent_of_the_mix_is_not_compared() {
     sessions.extend(spread("cd", "model-c", InferredTask::Docs, 10, &[3; 5]));
     let answers = answer(&sessions);
     let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
-    assert_eq!(q5.left_out.mix_too_different, 8);
+    assert_eq!(q5.left_out.mix_too_different, 5);
+    assert_eq!(q5.left_out.too_few_sessions, 3);
     assert_eq!(q5.state, AnswerState::Answered);
     assert_eq!(ranked(q5), ("model-b".to_owned(), "model-c".to_owned()));
     assert_eq!(
@@ -1258,9 +1260,10 @@ fn timed_in(
 fn finish_time_keeps_not_prompting_when_a_qualifier_there_fails_the_mix() {
     // Not prompting: model-a qualifies in BugFix (5) but not Docs (4);
     // model-b qualifies in both. Their shared BugFix carries 10 of their 19
-    // sessions, so neither can be compared with the other. Two models
-    // qualify there, so the row stays on not_prompting with none compared,
-    // even though prompting would compare two.
+    // sessions, so neither can be compared with the other: their 15
+    // sessions in qualifying cells are mix too different, model-a's 4 Docs
+    // too few. Two models qualify there, so the row stays on not_prompting
+    // with none compared, even though prompting would compare two.
     let mut sessions = Vec::new();
     for ix in 0..5 {
         for (prefix, label, task, mode, secs) in [
@@ -1317,7 +1320,8 @@ fn finish_time_keeps_not_prompting_when_a_qualifier_there_fails_the_mix() {
     assert_eq!(q6.edit_mode, Some(EditMode::NotPrompting));
     assert_eq!(q6.state, AnswerState::NotEnoughSessions);
     assert!(q6.leader.is_none());
-    assert_eq!(q6.left_out.mix_too_different, 19);
+    assert_eq!(q6.left_out.mix_too_different, 15);
+    assert_eq!(q6.left_out.too_few_sessions, 4);
     assert_eq!(counts(q6), vec![("model-a", 9), ("model-b", 10)]);
 }
 
@@ -1438,6 +1442,92 @@ fn a_model_worse_in_every_shared_type_never_leads_across_types() {
     assert_eq!(finish(figure_of(q6, "model-a")), (100, 2));
     assert_eq!(figure_of(q6, "model-a").sessions, 20);
     assert_eq!(finish(figure_of(q6, "model-b")), (110, 2));
+}
+
+/// Every session of the two models shown is in a figure or in a
+/// `left_out` reason: a cell under the session floor is too few sessions,
+/// and a qualifying cell outside the pair's shared types is mix too
+/// different.
+#[test]
+fn left_out_explains_every_session_of_the_models_shown() {
+    // model-a: 10 BugFix, 10 Docs, 5 Refactor; model-b: 10 BugFix, 10
+    // Docs, 2 Refactor. Compared over BugFix and Docs.
+    let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 100, &[10; 10]);
+    sessions.extend(spread("ad", "model-a", InferredTask::Docs, 100, &[10; 10]));
+    sessions.extend(spread(
+        "ar",
+        "model-a",
+        InferredTask::Refactor,
+        100,
+        &[30; 5],
+    ));
+    sessions.extend(spread(
+        "bb",
+        "model-b",
+        InferredTask::BugFix,
+        100,
+        &[11; 10],
+    ));
+    sessions.extend(spread("bd", "model-b", InferredTask::Docs, 100, &[11; 10]));
+    sessions.extend(spread(
+        "br",
+        "model-b",
+        InferredTask::Refactor,
+        100,
+        &[0; 2],
+    ));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.left_out.too_few_sessions, 2);
+    assert_eq!(q5.left_out.mix_too_different, 5);
+    let shown = q5.leader.as_ref().unwrap().sessions + q5.next.as_ref().unwrap().sessions;
+    let in_question: u32 = counts(q5).iter().map(|(_, count)| count).sum();
+    assert_eq!(
+        shown + q5.left_out.too_few_sessions + q5.left_out.mix_too_different,
+        in_question
+    );
+    // In Refactor alone model-b's two sessions are too few.
+    let q2 = row(&answers, ModelQuestion::RefactorRejected);
+    assert_eq!(q2.state, AnswerState::NotEnoughSessions);
+    assert_eq!(q2.left_out.too_few_sessions, 2);
+
+    // The same in one type, in finish time and in cost: a cell under the
+    // floor.
+    let mut sessions = bugfix_pair();
+    sessions.pop();
+    let answers = answer(&sessions);
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(q1.left_out.too_few_sessions, 4);
+    let mut sessions = Vec::new();
+    for (prefix, label, n) in [
+        ("a", "model-a", 5),
+        ("b", "model-b", 5),
+        ("c", "model-c", 3),
+    ] {
+        for ix in 0..n {
+            sessions.push(timed(
+                &format!("{prefix}-{ix}"),
+                label,
+                EditMode::NotPrompting,
+                100,
+                2,
+            ));
+        }
+    }
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.edit_mode, Some(EditMode::NotPrompting));
+    assert_eq!(q6.left_out.too_few_sessions, 3);
+    let mut sessions = many("a", 5, |id| {
+        solo(&id, "model-a", InferredTask::Docs, 1, Some(0), 0)
+    });
+    sessions.extend(many("b", 3, |id| {
+        solo(&id, "model-b", InferredTask::Docs, 1, Some(0), 0)
+    }));
+    let answers = answer(&sessions);
+    let q4 = row(&answers, ModelQuestion::DocsCost);
+    assert_eq!(q4.state, AnswerState::NotEnoughSessions);
+    assert_eq!(q4.left_out.too_few_sessions, 3);
 }
 
 #[test]

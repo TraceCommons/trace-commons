@@ -25,8 +25,13 @@
 //!   rows whose task types the session's task belongs to. A session whose
 //!   majority model's `edits` or `undone` is unknown is counted in
 //!   `unknown_facts` on its rejection rows only.
-//! - `too_few_edits` counts the sessions of cells that reach the session
-//!   floor but not the edit floor.
+//! - `too_few_sessions` counts the sessions of cells under the session
+//!   floor (for time, every session of a cell with too few finished; for
+//!   cost, the priced sessions of a cell with too few priced), whatever
+//!   the model. `too_few_edits` counts the sessions of cells that reach the
+//!   session floor but not the edit floor. Every session of the two models
+//!   shown is then in a figure or one reason: a qualifying cell outside
+//!   their shared types is counted in `mix_too_different`.
 //! - A median of an even count is the mean of the two middle values,
 //!   rounded half-up. A cell's figure is held in fixed point at
 //!   `1 / FIXED_SCALE` (10^-18) of a unit, rounded half-up once there; a
@@ -52,9 +57,9 @@
 //!   leads on the types only it qualifies in. A pair whose shared types
 //!   carry less than `MODEL_ANSWER_MIN_MIX_COVERAGE` of the two models'
 //!   sessions in the question is not compared. A model with no qualifying
-//!   cell anywhere is never compared. `mix_too_different` counts every
-//!   session in the question of a model with a qualifying cell that no
-//!   other such model can be compared with. Q1-Q4 have one type, so every
+//!   cell anywhere is never compared. `mix_too_different` counts the
+//!   sessions in the qualifying cells of a model that no other model with
+//!   a qualifying cell can be compared with. Q1-Q4 have one type, so every
 //!   pair shares all of it.
 //! - The leader is the model lower in the most of its comparisons, then
 //!   higher in the fewest, then with more sessions in the question, then
@@ -216,6 +221,9 @@ pub struct LeftOut {
     pub reviewer: u32,
     pub no_majority: u32,
     pub unpriced: u32,
+    /// Sessions of cells under the session floor (`MODEL_ANSWER_MIN_SESSIONS`
+    /// sessions, finished ones for time, priced ones for cost).
+    pub too_few_sessions: u32,
     pub too_few_edits: u32,
     pub mix_too_different: u32,
 }
@@ -760,6 +768,18 @@ struct Entrant<T> {
 }
 
 impl<T> Entrant<T> {
+    /// Sessions in the qualifying cells outside the types `weights` names
+    /// (all of them with no weights).
+    fn unshared(&self, weights: Option<&BTreeMap<InferredTask, u64>>) -> u32 {
+        let sessions = self
+            .cells
+            .iter()
+            .filter(|(task, _)| weights.is_none_or(|weights| !weights.contains_key(task)))
+            .map(|(_, samples)| samples.len())
+            .sum();
+        saturating_len(sessions)
+    }
+
     /// The qualifying cells in the types a pair's weights name.
     fn shared<'e>(
         &'e self,
@@ -796,9 +816,10 @@ fn pair_weights<T>(a: &Entrant<T>, b: &Entrant<T>) -> Option<BTreeMap<InferredTa
 }
 
 /// The entrants that can be compared with at least one other entrant.
-/// With two or more entrants, the sessions of the others are counted in
-/// `mix_too_different`; a lone entrant is kept, and reads not enough
-/// sessions.
+/// With two or more entrants, the sessions in the qualifying cells of the
+/// others are counted in `mix_too_different` (their other cells are
+/// counted under the floor they missed); a lone entrant is kept, and reads
+/// not enough sessions.
 fn comparable<T>(entrants: Vec<Entrant<T>>, left_out: &mut LeftOut) -> Vec<Entrant<T>> {
     if entrants.len() < 2 {
         return entrants;
@@ -820,7 +841,7 @@ fn comparable<T>(entrants: Vec<Entrant<T>>, left_out: &mut LeftOut) -> Vec<Entra
         } else {
             left_out.mix_too_different = left_out
                 .mix_too_different
-                .saturating_add(entrant.in_question);
+                .saturating_add(entrant.unshared(None));
         }
     }
     kept
@@ -1001,6 +1022,14 @@ fn settle<T, P: Point>(
         row.state = AnswerState::NotEnoughSessions;
         return;
     };
+    // The two models' qualifying cells outside their shared types are in
+    // neither figure.
+    for ix in [pairing.lower.0, pairing.higher.0] {
+        row.left_out.mix_too_different = row
+            .left_out
+            .mix_too_different
+            .saturating_add(entrants[ix].unshared(Some(&pairing.weights)));
+    }
     let (leader, next) = (&pairing.lower.1, &pairing.higher.1);
     row.state = if clear_lead(leader, next, &pairing.weights, draws) {
         AnswerState::Answered
@@ -1074,6 +1103,9 @@ fn rejection_row(
         let mut qualifying = Vec::new();
         for (task, samples) in by_task {
             if saturating_len(samples.len()) < MODEL_ANSWER_MIN_SESSIONS {
+                left_out.too_few_sessions = left_out
+                    .too_few_sessions
+                    .saturating_add(saturating_len(samples.len()));
                 continue;
             }
             let edits = samples.iter().fold(0u64, |sum, sample| {
@@ -1192,8 +1224,13 @@ fn cost_row(
             {
                 tables.extend(candidate.tables.iter().cloned());
             }
-            if saturating_len(priced(samples).len()) >= MODEL_ANSWER_MIN_SESSIONS {
+            let priced = saturating_len(priced(samples).len());
+            if priced >= MODEL_ANSWER_MIN_SESSIONS {
                 qualifying.push((*task, samples.clone()));
+            } else {
+                // Unpriced sessions are counted as unpriced already.
+                row.left_out.too_few_sessions =
+                    row.left_out.too_few_sessions.saturating_add(priced);
             }
         }
         if !qualifying.is_empty() {
@@ -1251,7 +1288,7 @@ fn time_entrants(
     prepared: &Prepared,
     mode: EditMode,
 ) -> (Cells<TimeSample>, LeftOut, Vec<Entrant<TimeSample>>) {
-    let (cells, left_out) = time_cells(prepared, &EDIT_TASKS, mode);
+    let (cells, mut left_out) = time_cells(prepared, &EDIT_TASKS, mode);
     let mut entrants = Vec::new();
     for (label, by_task) in &cells {
         let mut qualifying = Vec::new();
@@ -1259,6 +1296,10 @@ fn time_entrants(
             let finished = samples.iter().filter(|sample| sample.is_some()).count();
             if saturating_len(finished) >= MODEL_ANSWER_MIN_SESSIONS {
                 qualifying.push((*task, samples.clone()));
+            } else {
+                left_out.too_few_sessions = left_out
+                    .too_few_sessions
+                    .saturating_add(saturating_len(samples.len()));
             }
         }
         if !qualifying.is_empty() {
