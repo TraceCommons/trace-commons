@@ -337,17 +337,20 @@ CREATE TABLE trace_payout_rate_epochs (
     PRIMARY KEY (rail_id, version)
 );
 
--- Control: the kill switch, as an append-only log per rail.
+-- Control: the kill switch, as an append-only log per rail. seq orders the
+-- log: the latest row by seq is the rail's state, so a halt and a resume
+-- written at the same microsecond still resolve in the order written.
 CREATE TABLE trace_payout_control (
     rail_id TEXT NOT NULL CHECK (rail_id ~ '^[a-z0-9_.-]{1,64}$'),
     change_id UUID NOT NULL,
+    seq BIGINT GENERATED ALWAYS AS IDENTITY,
     halted BOOLEAN NOT NULL,
     label TEXT CHECK (label ~ '^[a-z0-9_.-]{1,64}$'),
     actor_ref_hash TEXT NOT NULL CHECK (actor_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
     changed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (rail_id, change_id)
 );
-CREATE INDEX trace_payout_control_latest ON trace_payout_control (rail_id, changed_at DESC);
+CREATE INDEX trace_payout_control_latest ON trace_payout_control (rail_id, seq DESC);
 
 -- Settled values are final. The column grants below let the runtime role
 -- write these columns at all; these triggers keep it from writing a settled

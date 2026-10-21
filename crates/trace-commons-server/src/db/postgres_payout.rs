@@ -1165,7 +1165,7 @@ impl PayoutStore for PgBackend {
             .query_opt(
                 "SELECT halted, label, changed_at FROM trace_payout_control
                   WHERE rail_id = $1
-                  ORDER BY changed_at DESC, change_id DESC
+                  ORDER BY seq DESC
                   LIMIT 1",
                 &[&rail.as_str()],
             )

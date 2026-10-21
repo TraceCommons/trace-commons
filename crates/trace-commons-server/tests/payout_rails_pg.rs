@@ -2141,3 +2141,36 @@ async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn the_later_control_row_wins_at_an_equal_timestamp() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    // A rail of this run's own, so other runs' rows cannot interleave.
+    let rail_id = format!("ord_{}", &Uuid::new_v4().simple().to_string()[..12]);
+    // As the owner, which may set changed_at: a halt, then a resume at the
+    // same microsecond. Their random change ids order the other way round.
+    let client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    for (change_id, halted) in [
+        ("ffffffff-ffff-4fff-bfff-ffffffffffff", true),
+        ("00000000-0000-4000-8000-000000000001", false),
+    ] {
+        client
+            .execute(
+                "INSERT INTO trace_payout_control
+                     (rail_id, change_id, halted, actor_ref_hash, changed_at)
+                 VALUES ($1, $2::TEXT::UUID, $3, $4, '2026-01-01T00:00:00Z')",
+                &[&rail_id, &change_id, &halted, &ACTOR],
+            )
+            .await
+            .unwrap();
+    }
+    drop(client);
+    let control = fixture
+        .runtime
+        .payout_control(&rail(&rail_id))
+        .await
+        .unwrap();
+    assert!(!control.halted, "the earlier halt beat the later resume");
+}
