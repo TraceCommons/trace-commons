@@ -97,6 +97,31 @@ enum InsightsModelsWords {
             .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 2))
     }
 
+    /// A known rate as a percent. Whole percent, except that a rate that is
+    /// not zero never rounds to 0 and one that is not all never rounds to
+    /// 100: those show a tenth of a percent.
+    static func rate(_ permille: UInt64) -> String {
+        if (1 ... 4).contains(permille) || (995 ... 999).contains(permille) {
+            return (Double(permille) / 10).formatted(.number.precision(.fractionLength(1)))
+        }
+        return InsightsOverviewWords.percent(permille)
+    }
+
+    /// Interrupts per trace, to a tenth, and the template that agrees with
+    /// it: the singular only when it reads as exactly 1. A rate below a
+    /// twentieth is shown to the thousandth, so it never prints as 0.
+    static func interrupts(_ permille: Int, copy: [String: String]) -> String {
+        let tenths = (Double(permille) / 100).rounded() / 10
+        let shown: String
+        if permille > 0, tenths == 0 {
+            shown = (Double(permille) / 1000).formatted(.number.precision(.fractionLength(0 ... 3)))
+        } else {
+            shown = tenths.formatted(.number.precision(.fractionLength(0 ... 1)))
+        }
+        let key = tenths == 1 ? "analytics_models_interrupts_one" : "analytics_models_interrupts"
+        return fill(text(key, copy), ["x": shown])
+    }
+
     /// A model's figure in the row's words; the dash for a kind this build
     /// does not know, never a zero.
     static func figure(_ value: DaemonData.InsightsModelFigureValue, basis: String?,
@@ -105,7 +130,7 @@ enum InsightsModelsWords {
         case "rate_permille":
             guard let permille = value.value else { break }
             let key = basis == "undone" ? "analytics_models_rate_undone" : "analytics_models_rate_rejected"
-            return fill(text(key, copy), ["p": InsightsOverviewWords.percent(permille)])
+            return fill(text(key, copy), ["p": rate(permille)])
         case "usd_micros":
             guard let micros = value.value else { break }
             return fill(text("analytics_models_cost", copy), ["x": money(micros)])
@@ -129,8 +154,7 @@ enum InsightsModelsWords {
             "n": String(model.sessions),
         ])
         guard let permille = model.interruptsPerSessionPermille else { return line }
-        let perTrace = (Double(permille) / 1000).formatted(.number.precision(.fractionLength(0 ... 1)))
-        return line + " \u{b7} " + fill(text("analytics_models_interrupts", copy), ["x": perTrace])
+        return line + " \u{b7} " + interrupts(permille, copy: copy)
     }
 
     /// Each model's traces, for a row that does not compare.

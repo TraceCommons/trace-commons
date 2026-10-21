@@ -1921,6 +1921,7 @@ mod tests {
                 "median {span} active, {q} prompts",
             ),
             ("analytics_models_interrupts", "{x} interrupts per trace"),
+            ("analytics_models_interrupts_one", "{x} interrupt per trace"),
             ("analytics_models_not_enough", "Not enough traces yet"),
             ("analytics_models_count_one", "{label}: {n} trace"),
             ("analytics_models_count_other", "{label}: {n} traces"),

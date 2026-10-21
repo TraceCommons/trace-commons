@@ -37,6 +37,7 @@ final class InsightsModelsCardTests: XCTestCase {
         "analytics_models_cost": "{x} AT API PRICES",
         "analytics_models_finish": "{span} ACTIVE {q} PROMPTS",
         "analytics_models_interrupts": "{x} INTERRUPTS",
+        "analytics_models_interrupts_one": "{x} INTERRUPT",
         "analytics_models_not_enough": "NOT ENOUGH",
         "analytics_models_count_one": "{label}: {n} TRACE",
         "analytics_models_count_other": "{label}: {n} TRACES",
@@ -155,6 +156,38 @@ final class InsightsModelsCardTests: XCTestCase {
                                                                    with: #""kind":"later_kind","value":0"#))
         XCTAssertEqual(InsightsModelsWords.lines(row, copy: words).first,
                        "claude-opus-4-7 <DASH> 31 TRACES \u{b7} 1.5 INTERRUPTS")
+    }
+
+    /// A known figure that is not zero never prints as zero, and a share
+    /// that is not all never prints as all.
+    func testANonZeroRateNeverPrintsAsZero() throws {
+        func leader(_ permille: Int) throws -> String {
+            let row = try Self.row(Self.undoneRow.replacingOccurrences(of: #""value":42"#,
+                                                                       with: "\"value\":\(permille)"))
+            return try XCTUnwrap(InsightsModelsWords.lines(row, copy: words).first)
+        }
+        let tenth = { (permille: Int) in
+            (Double(permille) / 10).formatted(.number.precision(.fractionLength(1)))
+        }
+        for (permille, shown) in [(4, tenth(4)), (1, tenth(1)), (0, "0"), (5, "1"), (997, tenth(997)), (1000, "100")] {
+            let line = try leader(permille)
+            XCTAssertTrue(line.contains("<\(shown) PCT UNDONE>"), "\(permille): \(line)")
+        }
+    }
+
+    func testInterruptsNeverPrintAsZeroAndSayOneInTheSingular() throws {
+        func leader(_ permille: Int) throws -> String {
+            let row = try Self.row(Self.undoneRow.replacingOccurrences(
+                of: #""interrupts_per_session_permille":1500"#,
+                with: "\"interrupts_per_session_permille\":\(permille)"))
+            return try XCTUnwrap(InsightsModelsWords.lines(row, copy: words).first)
+        }
+        let small = (0.04).formatted(.number.precision(.fractionLength(0 ... 3)))
+        for (permille, shown) in [(40, "\(small) INTERRUPTS"), (1000, "1 INTERRUPT"),
+                                  (1500, "\((1.5).formatted()) INTERRUPTS"), (0, "0 INTERRUPTS")] {
+            let line = try leader(permille)
+            XCTAssertTrue(line.hasSuffix(" \u{b7} " + shown), "\(permille): \(line)")
+        }
     }
 
     // MARK: The (i)
