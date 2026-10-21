@@ -2796,8 +2796,10 @@ fn enforce_caps(
 }
 
 /// The Codex series budget (owner decision, 2026-10-20): past either
-/// bound, the oldest Codex rows, by last write and then by the order they
-/// were counted, lose their per-turn series until both hold. Only the
+/// bound, Codex rows lose their per-turn series until both hold: automated
+/// rows first (nothing draws their series, so a burst of them never trims
+/// the person's), then the person's; each group oldest first, by last
+/// write and then by the order they were counted. Only the
 /// series goes: the row, its observed change, dates and facts stay, so the
 /// session still counts in every weekly figure. A trimmed row is not
 /// evicted and gets no eviction mark; it is not read again while its file
@@ -2818,7 +2820,8 @@ fn trim_codex_series(store: &mut CounterStore, max_turns: usize, max_tools: usiz
     if turns <= max_turns && tools <= max_tools {
         return;
     }
-    let mut oldest: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
+    // Automated rows first: nothing draws their series.
+    let mut oldest: Vec<(bool, DateTime<Utc>, u64, KeyedDigest)> = store
         .rows
         .iter()
         .filter(|(_, row)| {
@@ -2830,10 +2833,10 @@ fn trim_codex_series(store: &mut CounterStore, max_turns: usize, max_tools: usiz
                 }
             )
         })
-        .map(|(session, row)| (row.modified_at, row.seq, *session))
+        .map(|(session, row)| (!row.is_automated(), row.modified_at, row.seq, *session))
         .collect();
     oldest.sort();
-    for (_, _, session) in oldest {
+    for (_, _, _, session) in oldest {
         if turns <= max_turns && tools <= max_tools {
             break;
         }
@@ -6385,6 +6388,46 @@ mod tests {
                 .sum();
             assert_eq!(total, 6);
         }
+    }
+
+    /// Automated sessions' series go before the person's, whatever their
+    /// age: nothing draws an automated session's series (the Sessions feed
+    /// and the Models answers leave it out), so a burst of reviewer threads
+    /// never trims the person's own rows.
+    #[test]
+    fn automated_series_are_trimmed_before_the_persons() {
+        let mut store = CounterStore::empty(KeyedDigest([0; 32]));
+        for i in 0..4u8 {
+            let mut row = codex_series_row(
+                written() + Duration::minutes(i64::from(i)),
+                u64::from(i),
+                3,
+                2,
+            );
+            // The two newest are automated.
+            if i >= 2 {
+                row.automation = Automation::Automated;
+                row.automation_read = true;
+            }
+            store.rows.insert(KeyedDigest([i; 32]), row);
+        }
+        trim_codex_series(&mut store, 6, usize::MAX);
+        let trimmed: Vec<u8> = store
+            .rows
+            .iter()
+            .filter(|(_, row)| is_trimmed(row))
+            .map(|(digest, _)| digest.0[0])
+            .collect();
+        assert_eq!(trimmed, vec![2, 3]);
+        // Past what the automated rows hold, the person's oldest go next.
+        trim_codex_series(&mut store, 3, usize::MAX);
+        let trimmed: Vec<u8> = store
+            .rows
+            .iter()
+            .filter(|(_, row)| is_trimmed(row))
+            .map(|(digest, _)| digest.0[0])
+            .collect();
+        assert_eq!(trimmed, vec![0, 2, 3]);
     }
 
     /// A trimmed row is not read again on the next poll, and stays trimmed.
