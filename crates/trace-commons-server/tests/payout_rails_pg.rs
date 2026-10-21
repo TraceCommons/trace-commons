@@ -1068,7 +1068,37 @@ async fn the_enumerator_role_sees_only_tenant_rail_and_state() {
     let (tenant_a, accounts_a) = tenant_with_accounts(&fixture.owner, 2).await;
     let (tenant_b, accounts_b) = tenant_with_accounts(&fixture.owner, 1).await;
     let (tenant_c, accounts_c) = tenant_with_accounts(&fixture.owner, 1).await;
+    let (tenant_d, accounts_d) = tenant_with_accounts(&fixture.owner, 1).await;
     let store = &fixture.runtime;
+    // Tenant d's only link is closed: nothing left for a pass to do.
+    let done = link(accounts_d[0], "near_ai", PayoutLinkState::Active, "ed");
+    store.insert_payout_link(&tenant_d, &done).await.unwrap();
+    store
+        .transition_payout_link(
+            &tenant_d,
+            done.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant_d,
+                done.link_id,
+                AtomicUnits::from_raw(0),
+                None,
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::Closed
+    );
     store
         .insert_payout_link(
             &tenant_a,
@@ -1111,6 +1141,10 @@ async fn the_enumerator_role_sees_only_tenant_rail_and_state() {
         "a tenant whose only link is waiting must be enumerated"
     );
     assert!(!tenants.contains(&tenant_c), "another rail's link");
+    assert!(
+        !tenants.contains(&tenant_d),
+        "a tenant whose only link is closed"
+    );
     assert_eq!(
         tenants.iter().filter(|tenant| **tenant == tenant_a).count(),
         1
@@ -2122,7 +2156,7 @@ async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
     };
     let soon = request(
         Uuid::new_v4(),
-        chrono::Utc::now() + chrono::Duration::milliseconds(800),
+        chrono::Utc::now() + chrono::Duration::minutes(5),
     );
     let later = request(
         Uuid::new_v4(),
@@ -2131,7 +2165,23 @@ async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
     for r in [&soon, &later] {
         store.insert_payout_link_request(&tenant, r).await.unwrap();
     }
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // Expire `soon` by the database clock, as the owner, rather than wait
+    // on the wall clock.
+    let owner = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    assert_eq!(
+        owner
+            .execute(
+                "UPDATE trace_payout_link_requests
+                    SET created_at = clock_timestamp() - interval '2 hours',
+                        expires_at = clock_timestamp() - interval '1 hour'
+                  WHERE tenant_id = $1 AND handle_hash = $2",
+                &[&tenant, &soon.handle_hash],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    drop(owner);
     assert_eq!(
         store
             .purge_expired_payout_link_requests(&tenant)

@@ -384,7 +384,9 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
     -- A plpgsql statement takes a fresh snapshot, so a pending line that
-    -- committed while this UPDATE waited on the link row is seen here.
+    -- committed while this UPDATE waited on the link row is seen here (the
+    -- store's line insert holds the link row FOR SHARE until it commits).
+    -- The rail pass's lock serialises these already; this is the backstop.
     IF NEW.state = 'closed' AND EXISTS (
         SELECT 1 FROM trace_payout_lines
          WHERE tenant_id = OLD.tenant_id AND link_id = OLD.link_id AND state = 'pending'

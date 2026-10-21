@@ -669,7 +669,10 @@ impl PayoutStore for PgBackend {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         // Only onto the account's active link on the line's rail: never a
-        // waiting, closing or closed one.
+        // waiting, closing or closed one. FOR SHARE holds the link row until
+        // commit, so a concurrent close either waits for this line (and the
+        // V132 link trigger then sees it pending and refuses) or commits
+        // first (and this re-check finds the link no longer active).
         let inserted = tx
             .execute(
                 "INSERT INTO trace_payout_lines (
@@ -681,7 +684,8 @@ impl PayoutStore for PgBackend {
                    FROM trace_payout_links l
                   WHERE l.tenant_id = $1::TEXT AND l.link_id = $5::UUID
                     AND l.account_id = $3::UUID AND l.rail_id = $4::TEXT
-                    AND l.state = 'active'",
+                    AND l.state = 'active'
+                    FOR SHARE OF l",
                 &[
                     &tenant,
                     &line.line_id,
