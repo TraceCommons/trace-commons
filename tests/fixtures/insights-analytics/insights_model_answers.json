@@ -9,7 +9,7 @@
     "basis": "api_list",
     "tables": [
       {
-        "table_id": "sha256:cc9f2ae4075adad77dc148f24e3d7a4e52b1fbd1452b5be140090a2751e7eecd",
+        "table_id": "sha256:97aeb32f2fa47f4b9f20c3653e71a2855ecf546753bb4559dcefeb5390336107",
         "version": 1
       }
     ]
@@ -32,10 +32,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "refactor_rejected",
@@ -54,10 +56,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "tests_rejected",
@@ -76,10 +80,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "docs_cost",
@@ -99,11 +105,12 @@
           "basis": "near_ai_ledger",
           "median": {
             "kind": "usd_micros",
-            "value": 25000
+            "value": 30000
           },
-          "routed_sessions": 3,
+          "routed_sessions": 6,
           "charge_unknown": 1
-        }
+        },
+        "kept": null
       },
       "next": {
         "label": "claude-opus-5-5",
@@ -114,7 +121,8 @@
           "value": 85400
         },
         "interrupts_per_session_permille": null,
-        "near_ai_charge": null
+        "near_ai_charge": null,
+        "kept": null
       },
       "sessions_by_model": [
         [
@@ -131,10 +139,11 @@
         "automated": 0,
         "delegated": 0,
         "capped": 0,
-        "routed": 3,
+        "routed": 7,
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
@@ -142,11 +151,12 @@
         "basis": "near_ai_ledger",
         "median": {
           "kind": "usd_micros",
-          "value": 25000
+          "value": 33750
         },
-        "routed_sessions": 3,
+        "routed_sessions": 7,
         "charge_unknown": 1
-      }
+      },
+      "kept_by_model": []
     },
     {
       "question": "rejected_across_tasks",
@@ -166,7 +176,7 @@
         ],
         [
           "claude-sonnet-5-5",
-          8
+          12
         ]
       ],
       "left_out": {
@@ -178,10 +188,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
-        "too_few_edits": 13,
+        "too_few_sessions": 1,
+        "too_few_edits": 17,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     },
     {
       "question": "finish_time",
@@ -192,7 +204,7 @@
       "next": null,
       "sessions_by_model": [],
       "left_out": {
-        "unknown_facts": 14,
+        "unknown_facts": 18,
         "automated": 0,
         "delegated": 0,
         "capped": 0,
@@ -200,10 +212,12 @@
         "reviewer": 0,
         "no_majority": 0,
         "unpriced": 0,
+        "too_few_sessions": 0,
         "too_few_edits": 0,
         "mix_too_different": 0
       },
-      "near_ai_charge": null
+      "near_ai_charge": null,
+      "kept_by_model": []
     }
   ]
 }
