@@ -307,11 +307,15 @@ mod pinned_signer_tests {
 
     #[test]
     fn a_signature_over_other_bytes_does_not_match_the_pin() {
+        // A valid signature over other bytes recovers to some other address,
+        // so this is a mismatch. `sign` is deterministic, so if this fixture
+        // ever recovered nothing the test would say so rather than pass on
+        // the other variant.
         let signature = sign(b"one message", 27);
-        assert!(matches!(
+        assert_eq!(
             recover_pinned_signer(b"another message", &signature, &pinned()),
-            Err(PinnedSignerError::Mismatch | PinnedSignerError::Unrecoverable)
-        ));
+            Err(PinnedSignerError::Mismatch)
+        );
     }
 
     #[test]
