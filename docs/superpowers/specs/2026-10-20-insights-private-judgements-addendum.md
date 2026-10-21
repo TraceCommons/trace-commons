@@ -7,11 +7,25 @@ design first.
 
 ## Owner decisions (2026-10-20)
 
-1. **Build now, with a stand-in model:** the NEAR AI-routed Jev decision
-   model sits behind the same adapter until the NEAR AI decision model ships.
-   The earlier Jev hold (2026-09-22) was about *hosted* Jev leaving the
-   privacy boundary. Jev routed through NEAR AI private inference, and called
-   only from the attested service, is inside it.
+1. **Build now. Jev is a development placeholder only; production waits for
+   the TEE-hosted decision model,** which the owner expects on NEAR AI the
+   week of 2026-10-20. The correction recorded below was checked on
+   2026-10-20 against NEAR AI's public `/v1/model/list`. `typesafe/jev-1.13`
+   reports `verifiable: false`, `attestationSupported: false`, and
+   `providerType: external` with `base_url` `https://openrouter.ai/api/v1`.
+   So "NEAR AI-routed Jev" is a pass-through to OpenRouter and TypeSafe,
+   outside NEAR AI's TEE guarantees. The service enforces the rule rather
+   than relying on convention:
+   - A **production allowlist of models.** The service refuses to start, and
+     refuses any call, with a model whose catalog entry is not both
+     `verifiable` and `attestationSupported`, and whose per-request receipt
+     does not verify.
+   - Jev (or any unverifiable model) runs only in a **development mode**.
+     That mode is a separate build flag plus measurement, never the pinned
+     production measurement, and is fed synthetic or developer-owned data
+     only. A daemon in a release build accepts only the production
+     measurement, so it can never send contributor data to a development
+     service.
 2. **Digest contents: delegated to the implementer.** The values are below,
    under "What is sent".
 3. **Budget: $5 to start.** Recorded as a cap of $5 of NEAR AI spend per
