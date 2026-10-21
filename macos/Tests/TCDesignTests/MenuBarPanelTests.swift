@@ -24,7 +24,12 @@ final class MenuBarPanelTests: XCTestCase {
             GlassMenuBarStrip.reach * 2 + GlassMenuBarStrip.centreLine, GlassMenuBarStrip.graphHeight)
         XCTAssertEqual(
             GlassMenuBarStrip.graphTop + GlassMenuBarStrip.graphHeight / 2, GlassMenuBarStrip.height / 2,
-            "the graph is centred in the item")
+            accuracy: 0.5, "the graph is centred in the item, to the half point a whole-point line allows")
+        // Whole points, so a 1x display draws the centre line and the bars'
+        // ends crisp: a 1pt line cannot be centred exactly in 22pt.
+        for edge in [GlassMenuBarStrip.graphTop, GlassMenuBarStrip.graphTop + GlassMenuBarStrip.reach] {
+            XCTAssertEqual(edge, edge.rounded(), "\(edge) is not on a whole point")
+        }
         XCTAssertEqual(
             (GlassMenuBarStrip.height - GlassMenuBarStrip.markSize) / 2 + GlassMenuBarStrip.markSize / 2,
             GlassMenuBarStrip.height / 2, "and so is the mark")
@@ -50,6 +55,17 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertEqual(
             GlassMenuBarStrip.steps(traces: traces, privateAI: idle, condition: .live),
             GlassMenuBarStrip.steps(traces: traces, privateAI: nil, condition: .live))
+    }
+
+    /// Every segment's length is whole points, whatever the count, so its
+    /// end is crisp on a 1x display.
+    func test_everySegmentEndsOnAWholePoint() {
+        for max in 1 ... 12 {
+            for count in 0 ... max {
+                let length = GlassMenuBarStrip.offset(count, max: max)
+                XCTAssertEqual(length, length.rounded(), "\(count) of \(max) reaches \(length)")
+            }
+        }
     }
 
     /// Private AI and traces are separate bars, each on its own scale:

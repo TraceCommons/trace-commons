@@ -404,10 +404,11 @@ public struct GlassMenuBarStrip: View {
     }
 
     /// A segment's reach for a count: nothing at zero, then at least
-    /// `least`, up to `reach` for the busiest step.
+    /// `least`, up to `reach` for the busiest step. Whole points, so the
+    /// segment's end is crisp on a 1x display.
     static func offset(_ count: Int, max: Int) -> CGFloat {
         guard count > 0, max > 0 else { return 0 }
-        return Swift.max(least, reach * CGFloat(count) / CGFloat(max))
+        return Swift.max(least, (reach * CGFloat(count) / CGFloat(max)).rounded())
     }
 
     /// The Private AI steps drawn: none while unknown or unavailable.
@@ -459,10 +460,12 @@ public struct GlassMenuBarStrip: View {
     static let barWidth: CGFloat = 1
     static let stepGap: CGFloat = 1
     /// The graph's height and its centre line's, and its top edge: centred
-    /// in the item's height, as the mark is.
+    /// in the item's height, as the mark is, but half a point high: a 1pt
+    /// line cannot be centred exactly in 22pt, and on a half point it and
+    /// the bars' ends draw blurred on a 1x display.
     static let graphHeight: CGFloat = 17
     static let centreLine: CGFloat = 1
-    static let graphTop: CGFloat = (height - graphHeight) / 2
+    static let graphTop: CGFloat = ((height - graphHeight) / 2).rounded(.down)
     /// The furthest a bar reaches from the centre line.
     static let reach: CGFloat = (graphHeight - centreLine) / 2
     /// The least a segment with any count reaches, so one trace beside a
