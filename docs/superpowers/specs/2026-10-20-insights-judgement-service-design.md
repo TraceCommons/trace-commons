@@ -12,6 +12,28 @@ consent principles. It follows the shape of
 and [`2026-09-02-witness-client-design.md`](2026-09-02-witness-client-design.md),
 and reuses their code wherever it can.
 
+## Owner decisions (2026-10-20, answering section 12)
+
+1. **Interim production model: none.** Production waits for the TEE-hosted
+   decision model on NEAR AI. Until that model is in the catalog, returns a
+   valid per-request `provider_tee` receipt and passes section 5, the
+   production allowlist is empty and the production service refuses to
+   start. Slices 1-6 (protocol through the development deploy, with the mock
+   and Jev development adapters) proceed now. Slice 9, the production deploy,
+   waits for the model.
+2. **Production pins are compiled into the app.** A service upgrade pauses
+   judgements until a daemon release, which is accepted. There is no signed
+   measurement list.
+3. **Gateway attestation is verified at each service boot,** pinning the
+   quote-bound receipt keys. Every request's receipt is still verified.
+4. **The operator-wide monthly budget is $100,** in the measured compose. It
+   sits above the $5 per account per month cap.
+5. **Pooled-tenant accounts stay excluded in v1** (the section 3 default).
+6. **Phala named-volume survival across an in-place upgrade:** this is a
+   fact to verify before slice 6, not a choice. If the volume does not
+   survive, section 6's ledger placement changes, and the owner is told
+   before deploying.
+
 ## What already exists, verified against the tree on 2026-10-20
 
 - **The witness is the template.** `crates/trace-commons-server/src/bin/trace-commons-witness.rs`
