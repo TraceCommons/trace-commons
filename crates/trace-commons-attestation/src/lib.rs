@@ -11,6 +11,10 @@ pub mod address;
 /// signed this way and is not a NEAR AI receipt, so a client that verifies
 /// one must not have to enable a receipt feature to do it.
 pub mod eip191;
+/// The Insights judgement seal: a request sealed to the service's per-boot
+/// key, and a response sealed back to the one request that asked. Ungated,
+/// like [`report_data`]: the contributor seals with it, the service opens.
+pub mod judgement_seal;
 pub mod measurements;
 pub mod quote;
 /// NEAR AI inference-receipt parsing and verification.
