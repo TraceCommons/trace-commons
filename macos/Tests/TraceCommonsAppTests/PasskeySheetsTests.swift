@@ -613,14 +613,15 @@ final class PasskeySheetsTests: XCTestCase {
 
     /// #1030's popup size (`ftux.css`): about 380 wide, its buttons full
     /// width and 40 tall, stacked one under the other, and the round icon in
-    /// the purple at 35% on the card edge.
+    /// the accent at 35% on the card edge (the NEAR AI accent, owner,
+    /// 2026-10-20).
     func test_thePopupsTakeRonsSizeAndBlockButtons() throws {
         XCTAssertEqual(PasskeyPopupLayout.width, 380)
         XCTAssertEqual(PasskeyPopupLayout.blockButtonHeight, 40)
         XCTAssertEqual(PasskeyPopupLayout.padding, 22)
         XCTAssertEqual(PasskeyPopupLayout.bottomPadding, 20)
         XCTAssertEqual(PasskeyPopupLayout.cornerInset, 14)
-        XCTAssertEqual(PasskeyPopupLayout.iconTint.dark, GlassTokens.Color.purple.opacity(0.35).dark)
+        XCTAssertEqual(PasskeyPopupLayout.iconTint.dark, GlassTokens.Color.purpleSoft.opacity(0.35).dark)
 
         let source = try Self.source()
         XCTAssertTrue(source.contains(".frame(width: PasskeyPopupLayout.width)"))

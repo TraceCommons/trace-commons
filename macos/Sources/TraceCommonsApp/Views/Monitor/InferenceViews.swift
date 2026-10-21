@@ -358,10 +358,11 @@ struct PrivateAIInspectorView: View {
         // takes (owner, 2026-10-19, `GlassTabHeading`), with the state on
         // the right. #1146: the Status dot is on while working, outside
         // otherwise, always beside the core's sentence.
+        // The state right after the title (owner, 2026-10-20), not at the
+        // row's far end.
         return GlassTabHeading(copy.inspectorStatus) {
-            Spacer(minLength: GlassTokens.Space.s4)
             GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-                .multilineTextAlignment(.trailing)
+                .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)

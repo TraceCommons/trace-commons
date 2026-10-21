@@ -244,9 +244,15 @@ struct InsightsView: View {
     /// closing discards late results, are behind the title's "i".
     private var analyzeSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-            InsightsSectionTitle(model.text("analytics_tab_analyze"), info: [
+            // Refresh at the title's trailing end, as every refresh is
+            // (owner, 2026-10-20).
+            InsightsSectionTitle(title: model.text("analytics_tab_analyze"), info: [
                 model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
-            ])
+            ]) {
+                if model.busy { GlassSpinner() }
+                GlassRefreshButton(model.text("refresh_accessibility")) { model.refresh() }
+                    .disabled(model.busy)
+            }
             VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
                     Text(location)
@@ -264,11 +270,6 @@ struct InsightsView: View {
                             model.analyze(file: file, source: source)
                         }
                     }
-                    // Short labels repeat on this screen; each is named in full
-                    // for VoiceOver, in the core's words.
-                    Button(model.text("refresh")) { model.refresh() }
-                        .accessibilityLabel(model.text("refresh_accessibility"))
-                    if model.busy { GlassSpinner() }
                 }.disabled(model.busy)
                 if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
                 if !model.invalidatedEpisodeIDs.isEmpty {

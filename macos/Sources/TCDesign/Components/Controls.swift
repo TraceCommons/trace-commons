@@ -249,6 +249,10 @@ public struct GlassRoundButton: View {
     private let label: String
     private let icon: GlassIcon
     private let small: Bool
+    /// A nudge, at the large size, that puts a lopsided glyph's weight on
+    /// the circle's centre rather than its bounding box's (scaled down for
+    /// the small size).
+    private let opticalOffset: CGSize
     private let action: () -> Void
 
     public init(_ label: String, systemImage: String, small: Bool = false, action: @escaping () -> Void) {
@@ -256,16 +260,26 @@ public struct GlassRoundButton: View {
     }
 
     public init(_ label: String, icon: GlassIcon, small: Bool = false, action: @escaping () -> Void) {
+        self.init(label, icon: icon, small: small, opticalOffset: .zero, action: action)
+    }
+
+    init(_ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, action: @escaping () -> Void) {
         self.label = label
         self.icon = icon
         self.small = small
+        self.opticalOffset = opticalOffset
         self.action = action
     }
 
+    /// The glyph's size at each button size.
+    static func symbolSize(small: Bool) -> CGFloat { small ? 11 : 13 }
+
     public var body: some View {
         let side = small ? GlassTokens.Size.control : GlassTokens.Size.controlLarge
+        let scale = Self.symbolSize(small: small) / Self.symbolSize(small: false)
         Button(action: action) {
-            GlassIconView(icon: icon, symbolSize: small ? 11 : 13, weight: .medium)
+            GlassIconView(icon: icon, symbolSize: Self.symbolSize(small: small), weight: .medium)
+                .offset(x: opticalOffset.width * scale, y: opticalOffset.height * scale)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
                 .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
@@ -375,7 +389,7 @@ public struct GlassToolbarButton: View {
     public var body: some View {
         Button(action: action) {
             GlassIconView(icon: icon, symbolSize: 13)
-                .foregroundStyle(Self.glyph(pressed: pressed).color)
+                .foregroundStyle(Self.glyph(pressed: pressed, expanded: expanded).color)
                 .frame(width: 28, height: 24)
                 // A glyph has no fill: the press darkens a wash behind it,
                 // never the glyph, which keeps its contrast.
@@ -396,8 +410,11 @@ public struct GlassToolbarButton: View {
     /// `toolbarGlyphHidden` while its pane is hidden (owner ruling,
     /// 2026-10-07: #1146 wins for theming). Dimmed, it still clears the
     /// 3:1 glyph floor on the control fill (ToolbarGlyphContrastTests).
-    static func glyph(pressed: Bool?) -> GlassRGBA {
-        pressed == false ? GlassTokens.Color.toolbarGlyphHidden : GlassTokens.Color.toolbarGlyph
+    /// While its menu is open the glyph sits on `toolbarExpanded`, the
+    /// accent in the flat theme, and takes the ink drawn on a selection.
+    static func glyph(pressed: Bool?, expanded: Bool? = nil) -> GlassRGBA {
+        if expanded == true { return GlassTokens.Color.textOnSelected }
+        return pressed == false ? GlassTokens.Color.toolbarGlyphHidden : GlassTokens.Color.toolbarGlyph
     }
 
     /// The fill behind the glyph: `toolbarExpanded` while its menu is open
@@ -629,15 +646,9 @@ public struct GlassIconMenu<Value: Hashable, More: View>: View {
     public var body: some View {
         let side = GlassTokens.Size.controlLarge
         Menu {
-            // An inline picker: the menu draws its items with the system's
-            // checkmark beside the chosen one, in the leading gutter.
-            Picker(label, selection: $selection) {
-                ForEach(options) { option in
-                    Text(option.title).tag(Optional(option.value))
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
+            // The system's check mark beside the chosen one, in the
+            // leading gutter, once (`GlassMenuChoices`).
+            GlassMenuChoices(options, chosen: selection) { selection = $0 }
             if More.self != EmptyView.self {
                 Divider()
                 more
@@ -858,7 +869,7 @@ public struct GlassToggleStyle: ToggleStyle {
     }
 
     /// The track colour when on. The watch switch takes the Settings
-    /// purple, as every switch matches (owner, 2026-10-08): its knob lost
+    /// accent, as every switch matches (owner, 2026-10-08): its knob lost
     /// the dark ring that let a white knob read on the bright watch green,
     /// and white on that green is about 1.8:1, under the 3:1 floor.
     static func onColor(_ kind: GlassSwitchKind) -> GlassRGBA {
@@ -868,10 +879,14 @@ public struct GlassToggleStyle: ToggleStyle {
         }
     }
 
-    /// The knob: plain white on every track, with no ring (owner,
-    /// 2026-10-08), as #1146 draws it.
+    /// The knob, with no ring (owner, 2026-10-08). Off, it is white on
+    /// every track; on, it takes the accent's own ink, `textOnAccent`, as
+    /// the NEAR AI design system's switch draws it (owner, 2026-10-20: its
+    /// accent replaces the purple). That ink is white on the light
+    /// appearance's accent and navy on the dark one's light blue, where
+    /// white would be about 2:1.
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
-        GlassTokens.Color.textOnAccent
+        isOn ? GlassTokens.Color.textOnAccent : GlassTokens.Color.toggleKnobOff
     }
 
     /// How long the knob takes to slide: #1146's `--tc-dur` (220ms) for a
@@ -987,9 +1002,9 @@ public struct GlassCheckMark: View {
                 shape.fill(GlassTokens.Color.wellFill.color)
             }
             if mixed {
-                Image(systemName: "minus").glassGlyph(8, weight: .heavy).foregroundStyle(.white)
+                Image(systemName: "minus").glassGlyph(8, weight: .heavy).foregroundStyle(GlassTokens.Color.textOnAccent.color)
             } else if checked {
-                Image(systemName: "checkmark").glassGlyph(8, weight: .heavy).foregroundStyle(.white)
+                Image(systemName: "checkmark").glassGlyph(8, weight: .heavy).foregroundStyle(GlassTokens.Color.textOnAccent.color)
             }
         }
         .frame(width: GlassTokens.Size.checkbox, height: GlassTokens.Size.checkbox)

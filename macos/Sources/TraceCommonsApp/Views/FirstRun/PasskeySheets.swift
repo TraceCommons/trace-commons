@@ -703,10 +703,12 @@ enum PasskeyPopupLayout {
     /// `.ftux-clear`: an 18pt circle holding a 9pt cross.
     static let clearSize: CGFloat = 18
     static let clearGlyph: CGFloat = 9
-    /// `.ftux-popup-icon`: the purple at 35%, on the card edge. #1030 has
-    /// no light mode; light keeps main's accent tint (owner ruling).
+    /// `.ftux-popup-icon`: the accent at 35%, on the card edge. #1030 has
+    /// no light mode; light keeps main's accent tint (owner ruling). The
+    /// accent, not the brand purple, since the NEAR AI accent replaced it
+    /// (owner, 2026-10-20).
     static let iconTint = GlassRGBA(
-        GlassTokens.Color.purple.rgb, alpha: 0.35, light: GlassTokens.Color.tintAccent.light)
+        GlassTokens.Color.purpleSoft.rgb, alpha: 0.35, light: GlassTokens.Color.tintAccent.light)
 
     /// The round tinted icon at a popup's head.
     enum Icon: Equatable {

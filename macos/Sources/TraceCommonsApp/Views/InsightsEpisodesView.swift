@@ -11,9 +11,8 @@ struct InsightsEpisodesView: View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // What a group is and is not, behind the title's "i".
             InsightsSectionTitle(title: model.text("episode_title"), info: [model.text("episode_scope")]) {
-                Button(model.text("refresh")) { model.refreshEpisodes() }
-                    .accessibilityLabel(model.text("episode_refresh_accessibility"))
                 if model.episodeBusy { GlassSpinner() }
+                GlassRefreshButton(model.text("episode_refresh_accessibility")) { model.refreshEpisodes() }
             }
             VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassStatus.on.textColor) }

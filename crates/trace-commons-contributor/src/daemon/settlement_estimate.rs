@@ -323,6 +323,7 @@ pub(crate) fn status_value(shared: &DaemonShared, now: DateTime<Utc>) -> Option<
         "pricing_version": shown.pricing_version,
         "estimated_at": shown.estimated_at,
         "text": crate::nudge_render::settlement_total_line(&shown.total),
+        "share_text": crate::nudge_render::settlement_share_line(&shown.total),
     }))
 }
 
@@ -979,6 +980,12 @@ mod tests {
         assert_eq!(estimate["pricing_version"], "p2");
         let text = estimate["text"].as_str().unwrap();
         assert!(text.starts_with("About "), "{text}");
+        // Home's call to share, over the same band.
+        let share = estimate["share_text"].as_str().unwrap();
+        assert_eq!(
+            share,
+            "You could make about $1.50 to $4.50 of inference if you share these"
+        );
 
         // Stale by the clock alone: gone, with no scan.
         let later = now() + Duration::days(8);

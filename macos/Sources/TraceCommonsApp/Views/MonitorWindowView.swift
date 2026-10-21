@@ -80,6 +80,9 @@ struct MonitorWindowView: View {
     @AppStorage("monitor.showsMap") private var showsMap = true
     @AppStorage("monitor.showsInspector") private var showsInspector = true
     @AppStorage("monitor.mapWidth") private var mapWidth = Double(GlassTokens.Size.mapWidth)
+    /// The main pane's width beside the map, as the divider was last left
+    /// (owner, 2026-10-20).
+    @AppStorage("monitor.mainWidth") private var mainWidth = Double(GlassPaneLayout.mainWidth)
     /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
     @SceneStorage("monitor.showsGraph") private var showsGraph = true
     /// The View menu's "Show ignored folders"; shown by default, as #1146
@@ -185,6 +188,7 @@ struct MonitorWindowView: View {
     var body: some View {
         GlassThreePane(
             showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, mapWidth: $mapWidth,
+            mainWidth: $mainWidth,
             onFirstLayout: seedPanes
         ) {
             MonitorMainPane(
@@ -263,7 +267,7 @@ struct MonitorWindowView: View {
                         },
                         openInsights: { tab = .insights },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
-                        missionsEnabled: model.missionsShown)
+                        missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)
                 }

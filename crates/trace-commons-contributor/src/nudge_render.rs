@@ -188,6 +188,19 @@ pub fn settlement_total_line(total: &SettlementTotal) -> String {
     fill_owned(template, &values)
 }
 
+/// Home's Not contributed line for the same estimate: what sharing the
+/// traces on this Mac could make, as a band.
+#[must_use]
+pub fn settlement_share_line(total: &SettlementTotal) -> String {
+    let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
+    let template = if up_to {
+        copy::ESTIMATE_SHARE_LINE_UP_TO
+    } else {
+        copy::ESTIMATE_SHARE_LINE
+    };
+    fill_owned(template, &values)
+}
+
 /// The settlement notification. `pricing_changed` picks the pricing body.
 #[must_use]
 pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -> NotificationText {
@@ -714,6 +727,18 @@ mod tests {
             "About $3.50 to $9 of inference in traces on this Mac"
         );
         assert!(settlement_total_line(&total(0, 500_000)).starts_with("Up to $0.50"));
+    }
+
+    #[test]
+    fn the_share_line_is_a_band_or_up_to() {
+        assert_eq!(
+            settlement_share_line(&total(3_500_000, 9_000_000)),
+            "You could make about $3.50 to $9 of inference if you share these"
+        );
+        assert_eq!(
+            settlement_share_line(&total(0, 500_000)),
+            "You could make up to $0.50 of inference if you share these, as an estimate"
+        );
     }
 
     #[test]

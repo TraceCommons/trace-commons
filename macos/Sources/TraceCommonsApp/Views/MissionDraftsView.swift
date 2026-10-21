@@ -96,8 +96,10 @@ struct MissionDraftsView: View {
                     self.selectedFile = nil
                 }
             }
-            Button(model.text("refresh")) { model.refresh() }
             Spacer(minLength: 0)
+            // At the row's trailing end, as every refresh is (owner,
+            // 2026-10-20).
+            GlassRefreshButton(model.text("refresh")) { model.refresh() }
         }
         .disabled(model.mutationBusy)
     }

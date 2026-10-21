@@ -170,10 +170,11 @@ final class SettingsSectionsTests: XCTestCase {
             XCTAssertFalse(word.isEmpty)
         }
         XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
-        // Every card with a re-read link uses the core's word for it.
+        // Every card that re-reads has the refresh icon button, named in
+        // the core's word (owner, 2026-10-20: it was a "Refresh" link).
         for file in ["WatchingSection", "ConsentSection", "StartupSection"] {
             let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
-            XCTAssertTrue(text.contains("Button(SettingsLegacyWords.refresh"), "\(file) has no Refresh")
+            XCTAssertTrue(text.contains("GlassRefreshButton(SettingsLegacyWords.refresh"), "\(file) has no refresh")
         }
     }
 
