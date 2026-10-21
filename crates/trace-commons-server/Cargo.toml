@@ -124,6 +124,13 @@ near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
 # is not the alternative: FMSPC extraction and CRL handling are exactly what
 # `dcap-qvl` gets right.
 near-attestation-collateral = ["trace-commons-attestation/collateral-client"]
+# Compile the Insights judgement service's development-only model adapters
+# (`MockJudgementModel` now; the Jev adapter in a later slice). The production
+# judgement image is built without it, so a development adapter cannot be
+# switched on by configuration: it is not in the binary. See
+# `docs/superpowers/specs/2026-10-20-insights-judgement-service-design.md`,
+# section 2.
+judgement-development-models = []
 
 [[bin]]
 name = "trace-commons-gate-calibrate"
