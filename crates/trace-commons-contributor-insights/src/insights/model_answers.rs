@@ -12,7 +12,10 @@
 //!   its `placed_at`) is in `[now - MODEL_ANSWER_WINDOW_WEEKS, now]`. A
 //!   session with no date at all is in no window and is not counted.
 //! - `left_out` counts sessions. `unknown_facts` sessions have no known task,
-//!   so they are counted on every row; every other reason is counted on the
+//!   so they are counted on every row; a session read as no edits while a
+//!   model's `edits` is unknown (Codex shell-only work) is one of them,
+//!   while a known no-edit session is in no question and no count. Every
+//!   other reason is counted on the
 //!   rows whose task types the session's task belongs to. A session whose
 //!   majority model's `edits` or `undone` is unknown is counted in
 //!   `unknown_facts` on its rejection rows only.
@@ -378,6 +381,11 @@ fn prepare(
             continue;
         }
         if facts.task == InferredTask::NoEdits {
+            // No edit seen is not no edit made when a model's edits could
+            // not be seen (Codex shell-only work): its task is unknown.
+            if facts.models.iter().any(|model| model.edits.is_none()) {
+                bump(&mut prepared.unknown_facts);
+            }
             continue;
         }
         let price = price_session(catalog, accounting, labels, turns);
