@@ -33,7 +33,8 @@ design first.
 3. **Budget: $5 to start.** Recorded as a cap of $5 of NEAR AI spend per
    contributor per calendar month, enforced by the service's limiter. If the
    owner meant $5 in total for the first experiment, the limiter's per-user
-   cap becomes the total.
+   cap becomes the total. The operator-wide budget above it is $100 a month
+   (service spec, owner decision 4).
 4. **Account-bound calls**, not anonymous tokens. The service learns which
    account made a call; mitigations are below.
 5. **Comparisons across users inside the TEE are in scope** as a later

@@ -1,6 +1,7 @@
 # The Insights judgement service -- design
 
-Date: 2026-10-20. Owner: Zaki. Status: draft, nothing built.
+Date: 2026-10-20, revised 2026-10-21 for the #1501 review (poldsam) and the
+slice reviews on #1529, #1530 and #1531. Owner: Zaki. Status: draft.
 
 This is the service spec that delivery step 3 of
 [`2026-10-20-insights-private-judgements-addendum.md`](2026-10-20-insights-private-judgements-addendum.md)
@@ -41,8 +42,9 @@ and reuses their code wherever it can.
    - **Secrets:** an upgrade replaces them all, so every upgrade passes the
      full set.
    - **Image tags:** an unchanged tag may not be re-pulled, so every release
-     uses a new tag. A memory note records that `phala deploy` ignores
-     app-compose.json. Check both against the witness's deploy procedure.
+     uses a new tag. `phala deploy` ignores `app-compose.json`; section 9
+     carries the witness's deploy procedure for that, including the
+     `compose_file` read-back.
    - Sources:
      https://docs.phala.network/phala-cloud/production-checklist
      https://docs.phala.com/phala-cloud/update/upgrade-application
@@ -337,7 +339,7 @@ k256 can, and `trace-commons-attestation` already depends on both `k256` and
 HPKE's base-mode shape: an ephemeral-static DH, a key schedule bound to both
 public keys, and one AEAD message per key. It is **not** RFC 9180
 interoperable, and RFC 9180 defines no secp256k1 KEM. Frozen test vectors pin
-it. Moving to the `hpke` crate is open item O4 (section 12).
+it. Moving to the `hpke` crate is open decision S3 (section 12).
 
 **Request plaintext** (JSON, closed, unknown fields refused):
 
@@ -589,7 +591,7 @@ it:
 - Consequence: a new production measurement reaches contributors only in a
   daemon release. An in-place image upgrade therefore pauses judgements for
   release daemons until a release adds the new measurement. That is
-  fail-closed and acceptable for an optional feature (open question 2).
+  fail-closed and acceptable for an optional feature (owner decision 2).
 
 ## 5. The NEAR AI call
 
@@ -625,7 +627,10 @@ reported, and asserts the result follows the body.
 
 Implementations:
 
-- `ChatStructuredAdapter` -- the interim production path. `POST
+- `ChatStructuredAdapter` -- the Chat Completions adapter. It is **not** a
+  production path: owner decision 1 leaves the production allowlist empty
+  until the decision model passes this section. It serves the development
+  build, and any later allowlisted model that speaks Chat Completions. `POST
   /v1/chat/completions` on `https://cloud-api.near.ai/v1`, `stream: false`,
   `temperature: 0`, `response_format` a JSON schema whose `label` is an enum of
   the choices and whose `confidence` is `{high, medium, low}`, `max_tokens: 64`,
@@ -645,9 +650,12 @@ Implementations:
 **The production check, fail-closed at boot and on every call.** A model is
 callable in a production build only if all of these hold:
 
-1. Its id is in the compiled-in production allowlist. The initial list is one
-   model (open question 1). Widening it is a code change and therefore a new
-   measurement.
+1. Its id is in the compiled-in production allowlist. **The list is empty**
+   (owner decision 1): `PRODUCTION_MODEL_ALLOWLIST: &[&str] = &[]`, and a unit
+   test asserts it is empty. Slice 9 changes the test when it adds the
+   decision model. With an empty list a production build refuses to boot,
+   which is decision 1's "the production service refuses to start". Widening
+   the list is a code change and therefore a new measurement.
 2. Its live catalog entry (`GET /v1/model/list`, refreshed hourly) has
    `verifiable: true` **and** `attestationSupported: true`. The flags are
    necessary, not sufficient: `moonshotai/kimi-k2.6` passes both while listing
@@ -718,7 +726,7 @@ callable in a production build only if all of these hold:
      `trace-commons-ingest` already declares
      `rustls = { version = "0.23", default-features = false, features = ["ring"] }`,
      so no package is added to the lockfile, but it is a new direct edge and
-     needs owner approval (open item O3). The slice confirms the reqwest
+     needs owner approval (open decision S2). The slice confirms the reqwest
      method that installs a preconfigured rustls config in the vendored
      source before naming it
      (`grep -rn use_preconfigured_tls ~/.cargo/registry/src/*/reqwest-0.12*/src/async_impl/client.rs`).
@@ -833,16 +841,19 @@ new key, an unreadable old ledger, and a deliberate fresh start (section 9,
   fail the expiry check first, and the month guard is a second check. The
   ledger month is exposed, so a capacity refusal's `reset_at` is the first
   instant of the month after it.
-- Rough cost on the interim model: a 6-call session at about 3,000 input and
-  64 output tokens per call costs about $0.0012, so the $5 cap is about 4,000
-  sessions a month. `max_tokens` is the guard against a reasoning model
-  spending far past that.
+- Rough scale, priced as if on `Qwen/Qwen3.8-27B`, the cheapest `vllm` catalog
+  model with structured outputs. That is for sizing only; it is **not**
+  allowlisted. A 6-call session at about 3,000 input and 64 output tokens per
+  call costs about $0.0012, so the $5 cap is about 4,000 sessions a month.
+  `max_tokens` is the guard against a reasoning model spending far past
+  that.
 
 **Caps** live in the measured compose environment, so a contributor can read
 them from the published manifest:
 
 - `TRACE_COMMONS_JUDGEMENT_ACCOUNT_MONTHLY_CAP_USD=5`;
-- `TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD=<open question 4>`.
+- `TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD=100` (owner decision 4).
+  Unset or unparseable refuses boot (section 8).
 
 The month is the UTC calendar month. A cap change is a new measurement.
 
@@ -979,6 +990,8 @@ prompts, the digest, the claim, or NEAR AI response text.
 | Quote call exceeds 10 s or the attestation bound is full | `judgement_quote_unavailable`. |
 | No model configured, model not on the production allowlist, catalog check or signer pin fails at boot | Boot refuses. |
 | Issuer public key absent or malformed | Boot refuses. |
+| Account cap or operator budget unset or unparseable | Boot refuses. |
+| Production build with an empty model allowlist (the state until slice 9) | Boot refuses. |
 | Limiter volume absent, or ledger unreadable or missing with the marker present | Boot refuses. Recovery is a recorded, deliberate reset (section 6). |
 | Ledger and marker both absent (a lost or replaced volume) | Boots fresh with zero spend and logs `limiter_initialized`. Residual risk, stated in section 6. |
 | Catalog flag flips, or refresh stale over 24 h | That model's calls refused, `judgement_model_unattested`. |
@@ -1188,20 +1201,45 @@ leaves the machine) is open. Until it is decided, nothing that sends a digest
 merges: not the digest builder (#1525) and not slice 7 (the daemon client).
 Slices 1 to 6 and 8 carry no contributor data and may proceed.
 
-## 12. Open questions for the owner
+## 12. Decisions and open questions
 
-1. **Interim production model.** Use `Qwen/Qwen3.8-27B` (cheapest `vllm` model
-   with `structured_outputs`; already calibrated in
-   `docs/superpowers/reports/2026-09-19-perplexity-floor-calibration-qwen3-8.md`) until
-   the decision model is on NEAR AI and passes section 5, or wait for the
-   decision model?
-2. **Production pin delivery.** Compiled-in pins mean every service upgrade
-   pauses judgements until a daemon release. Is that acceptable, or should
-   production measurements come from a list signed by an offline commons key?
-3. (Answered by owner decision 3; the check is section 5, check 5.)
-4. **Operator-wide monthly budget.** What figure? Unset refuses boot.
-5. **Pooled-tenant accounts.** Excluded in v1 (section 3). Keep that, or key
-   them on a per-account identifier the issuer would have to add?
-6. **Data volume on Phala.** Confirm that a named volume survives an in-place
-   `phala deploy` upgrade on the chosen instance type. If it does not, the
-   ledger needs to live elsewhere, and this spec changes.
+**Answered** (the owner decisions at the top of this spec): 1, the interim
+production model is none, and production waits for the decision model; 2,
+production pins are compiled into the daemon; 3, the NEAR AI gateway is
+verified at each boot (section 5, check 5); 4, the operator budget is $100 a
+month; 5, pooled tenants stay excluded in v1; 6, the Phala volume behaviour is
+checked, and the runbook upgrades in place. The addendum's decisions 1, 3, 4
+and 5 stand as recorded there.
+
+**Open, for the owner:**
+
+- **The addendum's O1 to O4:** what leaves the machine, the folder rule, the
+  consent wording, and how existing Insights users are told. O1 blocks the
+  digest builder (#1525) and slice 7.
+- **S1. Updating NEAR AI pins without a daemon release.** Today a NEAR AI
+  key rotation latches the model (section 5) and needs a redeploy plus a
+  daemon release, because the pins sit in the measured compose. Options:
+  - (a) keep that. Rotations are free, because of the latch, but judgements
+    pause until the release reaches contributors;
+  - (b) a pin document signed by an offline Trace Commons key whose public
+    half is in the measured compose. It holds the model signer keys and the
+    gateway measurement pins, and arrives through a new route whose only
+    authentication is that signature. Its version number is kept in the sealed
+    ledger and only ever increases. Every key it names must still be
+    quote-bound in a live, DCAP-verified NEAR AI report before use, so the
+    offline key can choose only among keys NEAR AI's TEEs attest.
+
+  Recommendation: (b), because NEAR AI rotates without notice. If taken, it
+  reverses owner decision 2's "no signed list" for the service's NEAR AI pins
+  only. The daemon's pins of this service stay compiled in.
+- **S2. A direct `rustls` dependency in `trace-commons-server`,** for the
+  gateway TLS pin (section 5, check 5). No package is added to the lockfile,
+  because `trace-commons-ingest` already declares the same requirement. It is
+  still a new direct edge, so it needs approval under the dependency policy.
+  Without it, check 5 cannot be built, and a NEAR AI-hosted model cannot boot.
+- **S3. RFC 9180 HPKE instead of the judgement seal.** The `hpke` crate would
+  be a new dependency, and RFC 9180 has no secp256k1 KEM, so the per-boot key
+  would become X25519 through a crate that supports static keys. The
+  recommendation is to keep the seal of section 3, which uses only `k256` and
+  `ring`, unless a reviewer wants the standard construction enough to take a
+  new crate.
