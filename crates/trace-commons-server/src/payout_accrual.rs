@@ -209,9 +209,15 @@ pub fn plan_rail_accruals(
         .filter(|batch| batch.status == TraceCreditSettlementBatchStatus::Finalized);
     // Source event -> (batch, line) for locating reversals.
     let mut line_of_event = HashMap::new();
+    // Every event a finalized batch settled, by the batch-level list:
+    // settlement's own rule (`finalized_settlement_credit_event_ids` in
+    // ingest). Ledger state is not it: ingest writes ordinary rows `final`
+    // whether or not a batch ever carries them.
+    let mut settled_events: BTreeSet<Uuid> = BTreeSet::new();
     // credit_account_hash -> credit_account_ref, for claims.
     let mut ref_of_hash: HashMap<&str, &str> = HashMap::new();
     for batch in finalized {
+        settled_events.extend(batch.source_credit_event_ids.iter().copied());
         for line in &batch.line_items {
             // Every finalized line locates its events, so a reversal of an
             // event in a line that accrued nothing is found, and then
@@ -283,12 +289,9 @@ pub fn plan_rail_accruals(
         let source = events_by_id.get(&source_id).copied();
         let Some((batch, line)) = line_of_event.get(&source_id).copied() else {
             // Never in a finalized batch: nothing was accrued, so nothing
-            // is taken back. A settled event whose line cannot be found
-            // holds the account on this rail.
-            let settled = source.is_none_or(|source| {
-                source.settlement_state != TraceCreditSettlementState::Pending
-            });
-            if !settled {
+            // is taken back. A settled event (one a finalized batch lists)
+            // whose line cannot be found holds the account on this rail.
+            if !settled_events.contains(&source_id) {
                 plan.skip("payout_reversal_unsettled");
                 continue;
             }
@@ -722,6 +725,67 @@ mod tests {
             planned.skipped.get("payout_reversal_credit_missing"),
             Some(&1)
         );
+    }
+
+    /// Settlement decides what settled by membership in a finalized batch
+    /// (`finalized_settlement_credit_event_ids`), not by ledger state:
+    /// ingest writes every ordinary ledger row `final`.
+    #[test]
+    fn a_reversal_of_a_final_event_in_no_finalized_batch_is_skipped_not_held() {
+        let credited = Uuid::new_v4();
+        let account = Uuid::new_v4();
+        let principals = HashMap::from([("principal-a".to_owned(), account)]);
+        let events = [
+            event(
+                credited,
+                "principal-a",
+                "2.0000",
+                TraceCreditSettlementState::Final,
+                None,
+            ),
+            event(
+                Uuid::new_v4(),
+                "principal-a",
+                "-2.0000",
+                TraceCreditSettlementState::Reversed,
+                Some(credited),
+            ),
+        ];
+        // A batch that is not finalized does not settle its events either.
+        let mut dry = batch(TraceCreditSettlementBatchStatus::DryRun, Vec::new());
+        dry.source_credit_event_ids = vec![credited];
+        let planned = plan(&[dry], &events, &principals);
+        assert!(planned.holds.is_empty(), "{planned:?}");
+        assert!(planned.writes.is_empty());
+        assert_eq!(planned.skipped.get("payout_reversal_unsettled"), Some(&1));
+    }
+
+    #[test]
+    fn a_reversal_of_a_batched_event_in_no_line_holds_the_account() {
+        let credited = Uuid::new_v4();
+        let account = Uuid::new_v4();
+        let principals = HashMap::from([("principal-a".to_owned(), account)]);
+        let events = [
+            event(
+                credited,
+                "principal-a",
+                "2.0000",
+                TraceCreditSettlementState::Final,
+                None,
+            ),
+            event(
+                Uuid::new_v4(),
+                "principal-a",
+                "-2.0000",
+                TraceCreditSettlementState::Reversed,
+                Some(credited),
+            ),
+        ];
+        let mut settled = batch(TraceCreditSettlementBatchStatus::Finalized, Vec::new());
+        settled.source_credit_event_ids = vec![credited];
+        let planned = plan(&[settled], &events, &principals);
+        assert_eq!(planned.holds, vec![(account, PAYOUT_REVERSAL_UNPRICED)]);
+        assert!(planned.writes.is_empty());
     }
 
     #[test]

@@ -2454,10 +2454,25 @@ async fn batch_with_lines(
     created_at: DateTime<Utc>,
     lines: &[TraceCreditAccountSettlementLineItem],
 ) -> Uuid {
+    batch_with_sources(owner, tenant, status, created_at, lines, &[]).await
+}
+
+/// As [`batch_with_lines`], with `extra_sources` added to the batch-level
+/// `source_credit_event_ids` but to no line: an event the batch settled
+/// that no line carries.
+async fn batch_with_sources(
+    owner: &PgBackend,
+    tenant: &str,
+    status: &str,
+    created_at: DateTime<Utc>,
+    lines: &[TraceCreditAccountSettlementLineItem],
+    extra_sources: &[Uuid],
+) -> Uuid {
     let batch = Uuid::new_v4();
     let events: Vec<Uuid> = lines
         .iter()
         .flat_map(|line| line.source_credit_event_ids.iter().copied())
+        .chain(extra_sources.iter().copied())
         .collect();
     let mut client = owner.trace_pool_for_test().get().await.unwrap();
     let tx = client.transaction().await.unwrap();
@@ -3106,25 +3121,28 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
     let Some(fixture) = fixture().await else {
         return;
     };
-    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 3).await;
     let settled_principal = format!("principal-{}", Uuid::new_v4());
+    let unbatched_principal = format!("principal-{}", Uuid::new_v4());
     let pending_principal = format!("principal-{}", Uuid::new_v4());
     link_principal(&fixture.owner, &tenant, accounts[0], &settled_principal).await;
-    link_principal(&fixture.owner, &tenant, accounts[1], &pending_principal).await;
+    link_principal(&fixture.owner, &tenant, accounts[1], &unbatched_principal).await;
+    link_principal(&fixture.owner, &tenant, accounts[2], &pending_principal).await;
     let rail_a = fresh_rail("hold-a");
     let rail_b = fresh_rail("hold-b");
     record_epoch(&fixture, &rail_a, "v1", 1, 1).await;
     record_epoch(&fixture, &rail_b, "v1", 1, 1).await;
 
-    // A settled event that is in no finalized batch: its reversal cannot be
-    // priced, so the account is held on the rail that tried.
+    // A settled event: a finalized batch lists it, but no line carries it.
+    // Its reversal cannot be priced, so the account is held on the rail
+    // that tried.
     let settled = Uuid::new_v4();
     ledger_event(
         &fixture.owner,
         &tenant,
         settled,
         &settled_principal,
-        "2",
+        "2.0000",
         "final",
         None,
     )
@@ -3134,19 +3152,52 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
         &tenant,
         Uuid::new_v4(),
         &settled_principal,
-        "-2",
+        "-2.0000",
         "reversed",
         reversal_ref(settled),
     )
     .await;
-    // An event that never settled: nothing was accrued, nothing is written.
+    batch_with_sources(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now() - Duration::hours(1),
+        &[],
+        &[settled],
+    )
+    .await;
+    // An event ingest wrote `final` (as it writes every ordinary event)
+    // that no finalized batch carries: it never settled, so nothing was
+    // accrued and nothing is written or held.
+    let unbatched = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        unbatched,
+        &unbatched_principal,
+        "3.0000",
+        "final",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &unbatched_principal,
+        "-3.0000",
+        "reversed",
+        reversal_ref(unbatched),
+    )
+    .await;
+    // A pending event: likewise.
     let pending = Uuid::new_v4();
     ledger_event(
         &fixture.owner,
         &tenant,
         pending,
         &pending_principal,
-        "3",
+        "4.0000",
         "pending",
         None,
     )
@@ -3156,7 +3207,7 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
         &tenant,
         Uuid::new_v4(),
         &pending_principal,
-        "-3",
+        "-4.0000",
         "reversed",
         reversal_ref(pending),
     )
@@ -3176,6 +3227,7 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
     let report = accrue(&fixture, &tenant, &rail_a, "test_units").await;
     assert_eq!(report.holds_opened, 1);
     assert_eq!(report.reversals_inserted, 0);
+    assert_eq!(report.skipped.get("payout_reversal_unsettled"), Some(&2));
     assert_eq!(
         labels(accounts[0], rail_a.clone()).await,
         vec!["payout_reversal_unpriced".to_owned()]
@@ -3184,7 +3236,11 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
         labels(accounts[0], rail_b.clone()).await.is_empty(),
         "rail b is not held by rail a's pass"
     );
-    assert!(labels(accounts[1], rail_a.clone()).await.is_empty());
+    assert!(
+        labels(accounts[1], rail_a.clone()).await.is_empty(),
+        "a final event in no finalized batch never settled"
+    );
+    assert!(labels(accounts[2], rail_a.clone()).await.is_empty());
 
     accrue(&fixture, &tenant, &rail_b, "test_units").await;
     assert_eq!(
@@ -3192,6 +3248,7 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
         vec!["payout_reversal_unpriced".to_owned()]
     );
     assert_eq!(labels(accounts[0], rail_a.clone()).await.len(), 1);
+    assert!(labels(accounts[1], rail_b.clone()).await.is_empty());
     assert!(accruals(&fixture, &tenant, &rail_a).await.is_empty());
 }
 
@@ -3286,7 +3343,9 @@ async fn rerunning_accrual_writes_nothing_new() {
         reversal_ref(lost),
     )
     .await;
-    batch_with_lines(
+    // `lost` is settled by the batch's own list but carried by no line, so
+    // its reversal cannot be priced and holds the account.
+    batch_with_sources(
         &fixture.owner,
         &tenant,
         "finalized",
@@ -3295,6 +3354,7 @@ async fn rerunning_accrual_writes_nothing_new() {
             item(&account_ref(accounts[0]), 7, &[], None),
             item(&principal, 1_000_000, &[credited], None),
         ],
+        &[lost],
     )
     .await;
 
