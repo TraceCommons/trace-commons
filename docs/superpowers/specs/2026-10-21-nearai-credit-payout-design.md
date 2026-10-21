@@ -772,9 +772,12 @@ the accruals above, and
   `subject_index` (keyed blind index of whatever proved the recipient; for
   `near_ai` the NEAR AI subject, section 5), `program`, `final_paid
   NUMERIC(39,0)` (rail atomic units, set on close), `unlink_requested_at`,
-  `version`, timestamps. Three partial unique indexes allow at most one
-  `active`, one `waiting` and one `closing` row per `(tenant_id,
-  account_id, rail_id)`. There is no uniqueness on `recipient_index`: many
+  `version`, timestamps. Two partial unique indexes allow at most one
+  `waiting` row, and at most one row that is `active` or `closing`, per
+  `(tenant_id, account_id, rail_id)`. Active and closing share a slot
+  because a new link's target leaves out what a still-closing link was
+  paid: a link goes active only once its predecessor is closed, in the
+  same transaction. There is no uniqueness on `recipient_index`: many
   accounts may name one org (D7), so no recipient can be locked away from
   its real owner by an earlier link.
 - `trace_payout_lines`: `tenant_id`, `account_id`, `rail_id`, `line_id`
@@ -799,9 +802,12 @@ the accruals above, and
   are not tenant data. They get forced RLS with a read-all policy, and
   writes only through a narrow role used by the boot path and the admin
   routes.
-- **Enumeration.** Each rail's pass and the drill need the tenants with an
-  `active` or `closing` link on that rail, which no tenant context can see
-  under forced RLS. A narrow role, `trace_payout_enumerator`, with a
+- **Enumeration.** Each rail's pass and the drill need the tenants with a
+  `waiting`, `active` or `closing` link on that rail, which no tenant
+  context can see under forced RLS. `waiting` is included because every
+  confirmed link is written `waiting` (section 5, step 7) and only the pass
+  makes it `active`: a tenant whose only link is waiting (every first link,
+  or a successor left by a crash) must still get a pass. A narrow role, `trace_payout_enumerator`, with a
   permissive `SELECT` policy on `trace_payout_links (tenant_id, rail_id,
   state)` only, assumed with `SET ROLE` for that one query, as
   `docs/operator/register-stats-role.md` does. It can read nothing else.
