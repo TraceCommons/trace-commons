@@ -104,6 +104,81 @@ final class InsightsSampleAnalyzeTests: XCTestCase {
         XCTAssertFalse(partly.isEmpty, "some metrics are missing for some snapshots")
     }
 
+    /// Every sample metric keeps the rules the core's store holds a saved
+    /// snapshot to (`validate_local_metrics`): one session; every event
+    /// observed; tokens and known outcomes never reported; tool calls over
+    /// every event; tool failures over at most every event.
+    func test_everySampleMetricKeepsTheCoreRules() throws {
+        let list = try XCTUnwrap(answer(.init("list")).insights)
+        for insight in list {
+            let metrics = Dictionary(uniqueKeysWithValues: insight.report.metrics.map { ($0.id, $0) })
+            XCTAssertEqual(metrics.count, 7)
+            for metric in insight.report.metrics { XCTAssertEqual(metric.evidence_ids, [insight.id], metric.id) }
+            let sessions = try XCTUnwrap(metrics["sessions"])
+            XCTAssertEqual([sessions.value, sessions.coverage.observed, sessions.coverage.total], [1, 1, 1])
+            let events = try XCTUnwrap(metrics["events"]?.value)
+            XCTAssertGreaterThan(events, 0)
+            XCTAssertEqual(metrics["events"]?.coverage.observed, events)
+            XCTAssertEqual(metrics["events"]?.coverage.total, events)
+            for id in ["input_tokens", "output_tokens", "known_outcomes"] {
+                let metric = try XCTUnwrap(metrics[id])
+                XCTAssertNil(metric.value, id)
+                XCTAssertEqual([metric.coverage.observed, metric.coverage.total], [0, 1], id)
+            }
+            let calls = try XCTUnwrap(metrics["tool_calls"])
+            XCTAssertEqual(calls.coverage.total, events)
+            XCTAssertLessThanOrEqual(calls.value ?? 0, calls.coverage.observed)
+            let failures = try XCTUnwrap(metrics["tool_failures"])
+            XCTAssertLessThanOrEqual(failures.coverage.total, events)
+            XCTAssertLessThanOrEqual(failures.value ?? 0, failures.coverage.observed)
+        }
+        XCTAssertTrue(list.contains { $0.report.metrics.first { $0.id == "tool_failures" }?.value == nil },
+                      "tool failures are unknown for some")
+        XCTAssertTrue(list.contains { insight in
+            let metrics = insight.report.metrics
+            return metrics.first { $0.id == "tool_calls" }!.value! < metrics.first { $0.id == "events" }!.value!
+        })
+    }
+
+    /// The core holds the sample as its own: written into a store as the
+    /// core writes one, every snapshot, link and the group pass its load-time
+    /// checks (snapshot and link identities, metric rules, members digest),
+    /// and the core's list, summary, snapshots and group are the sample's.
+    func test_theCoreHoldsTheSampleAsItsOwnStore() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index: [String: Any] = [
+            "version": 13, "aliases": [String: Any](),
+            "reports": Dictionary(uniqueKeysWithValues: InsightsSampleWeek.traces.map { ($0.id, $0.insight) }),
+            "episodes": [InsightsSampleWeek.episodeID: InsightsSampleWeek.episode],
+        ]
+        let path = directory.appendingPathComponent("index.json").path
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: try JSONSerialization.data(
+            withJSONObject: index), attributes: [.posixPermissions: 0o600]))
+        func core(_ operation: Operation) throws -> InsightsResponse {
+            try TCInsights.call(.init(storeDirectory: directory.path, operation: operation))
+        }
+
+        let list = try XCTUnwrap(core(.init("list")).insights)
+        XCTAssertEqual(list.map(\.id).sorted(), ids.sorted(), "the core withholds none of the sample")
+        for id in ids {
+            let held = try XCTUnwrap(core(.init("explain", id: id)).insight)
+            let sample = try XCTUnwrap(answer(.init("explain", id: id)).insight)
+            XCTAssertEqual(String(describing: held), String(describing: sample))
+        }
+        let summary = try XCTUnwrap(core(.init("summary")).summary)
+        XCTAssertEqual(String(describing: summary), String(describing: try XCTUnwrap(answer(.init("summary")).summary)))
+
+        let episodes = try XCTUnwrap(core(.init("episode_list")).episodes)
+        XCTAssertEqual(episodes.map(\.episode.id), [InsightsSampleWeek.episodeID], "the core withholds no group")
+        let detail = try XCTUnwrap(core(.init("episode_explain", id: InsightsSampleWeek.episodeID)).detail)
+        let sampleDetail = try XCTUnwrap(answer(.init("episode_explain", id: InsightsSampleWeek.episodeID)).detail)
+        XCTAssertEqual(String(describing: detail.episode), String(describing: sampleDetail.episode))
+        XCTAssertEqual(detail.members.map(\.id), sampleDetail.members.map(\.id))
+    }
+
     /// Each answer's words are the core's: every source, category, outcome,
     /// limitation and metric the sample names has a copy entry.
     func test_everyWordTheSampleNamesIsInTheCoreCopy() throws {
