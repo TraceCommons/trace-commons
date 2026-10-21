@@ -1423,9 +1423,6 @@ pub fn parse_judgement_response(body: &[u8]) -> Result<JudgementResponse, Judgem
     }
     let raw: RawResponse =
         serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("response"))?;
-    if raw.wire_version != JUDGEMENT_WIRE_VERSION {
-        return Err(JudgementWireError::WireVersionUnsupported);
-    }
     let request_nonce = JudgementRequestNonce::from_hex(&raw.request_nonce)?;
     JudgementResponse::new(
         request_nonce,
