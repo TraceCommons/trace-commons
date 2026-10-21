@@ -90,6 +90,8 @@ enum SampleDaemonData {
         case "activity_missions_catalogue":
             guard set != .unknownCounts else { return nil }
             return activityMissionsCatalogue
+        // Insights feed T: hand-written, see `modelAnswers(_:)`.
+        case "insights_model_answers": return modelAnswers(set)
         default: return nil
         }
     }
@@ -314,6 +316,84 @@ enum SampleDaemonData {
 
     static let activityMissionsCatalogue =
         #"{"_sample":"hand-written","catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
+
+    // MARK: - Insights feed T: hand-written, marked per reply
+
+    /// `insights_model_answers` in the shape the daemon serves
+    /// (`daemon/insights_model_answers.rs`; its recorded answer is
+    /// `tests/fixtures/insights-analytics/insights_model_answers.json`). A
+    /// temp store holds too few traces to answer a row, so the answered
+    /// rows are written by hand: every state but `not_priced` on one card,
+    /// both bases, a NEAR AI charge beside the API-price figure, and traces
+    /// left out. Off for a fresh install, unreadable where counts are
+    /// unknown. SAMPLE labels and figures, never a pilot observation.
+    static func modelAnswers(_ set: Sample) -> String {
+        switch set {
+        case .normalDay, .busyQueue:
+            return modelAnswersSample
+        case .unknownCounts:
+            return #"{"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":false,"reason":"store_unreadable"}"#
+        default:
+            return #"{"_sample":"hand-written","enabled":false,"feed":"counter_pass"}"#
+        }
+    }
+
+    static let modelAnswersSample = #"""
+        {"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":true,\#
+        "updated_at":"2026-10-21T09:12:00+00:00","window_start":"2026-07-22T09:12:30+00:00",\#
+        "window_end":"2026-10-21T09:12:30+00:00",\#
+        "pricing":{"basis":"api_list","tables":[{"table_id":"sha256:sample-anthropic-table","version":1}]},\#
+        "rows":[\#
+        {"question":"bug_fix_rejected","state":"answered","basis":"undone","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":31,"edits":412,"figure":{"kind":"rate_permille","value":42},\#
+        "interrupts_per_session_permille":180,"near_ai_charge":null},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":14,"edits":160,"figure":{"kind":"rate_permille","value":91},\#
+        "interrupts_per_session_permille":360,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-opus-4-7",31],["claude-sonnet-4-6",14],["gpt-5.3-codex",3]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":1,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":1,"unpriced":0,"too_few_edits":3,"mix_too_different":0},"near_ai_charge":null},\#
+        {"question":"refactor_rejected","state":"no_clear_difference","basis":"undone","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":9,"edits":120,"figure":{"kind":"rate_permille","value":30},\#
+        "interrupts_per_session_permille":110,"near_ai_charge":null},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":7,"edits":64,"figure":{"kind":"rate_permille","value":38},\#
+        "interrupts_per_session_permille":290,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-opus-4-7",9],["claude-sonnet-4-6",7]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},\#
+        {"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,\#
+        "leader":null,"next":null,"sessions_by_model":[["claude-opus-4-7",4],["gpt-5.3-codex",1]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},\#
+        {"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,\#
+        "leader":{"label":"claude-sonnet-4-6","sessions":6,"edits":18,"figure":{"kind":"usd_micros","value":41200},\#
+        "interrupts_per_session_permille":0,"near_ai_charge":{"basis":"near_ai_ledger",\#
+        "median":{"kind":"usd_micros","value":25000},"routed_sessions":3,"charge_unknown":1}},\#
+        "next":{"label":"claude-opus-4-7","sessions":5,"edits":11,"figure":{"kind":"usd_micros","value":186500},\#
+        "interrupts_per_session_permille":200,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-sonnet-4-6",9],["claude-opus-4-7",5]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":3,"reviewer":0,\#
+        "no_majority":0,"unpriced":1,"too_few_edits":0,"mix_too_different":0},\#
+        "near_ai_charge":{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":25000},\#
+        "routed_sessions":3,"charge_unknown":1}},\#
+        {"question":"rejected_across_tasks","state":"answered","basis":"rejected","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":44,"edits":596,"figure":{"kind":"rate_permille","value":51},\#
+        "interrupts_per_session_permille":160,"near_ai_charge":null},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":23,"edits":242,"figure":{"kind":"rate_permille","value":87},\#
+        "interrupts_per_session_permille":310,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-opus-4-7",44],["claude-sonnet-4-6",23],["gpt-5.3-codex",4]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":1,"capped":1,"routed":0,"reviewer":1,\#
+        "no_majority":1,"unpriced":0,"too_few_edits":0,"mix_too_different":4},"near_ai_charge":null},\#
+        {"question":"finish_time","state":"answered","basis":null,"edit_mode":"not_prompting",\#
+        "leader":{"label":"claude-sonnet-4-6","sessions":12,"edits":96,\#
+        "figure":{"kind":"finish_time","median_active_secs":312,"median_user_turns":3},\#
+        "interrupts_per_session_permille":null,"near_ai_charge":null},\#
+        "next":{"label":"claude-opus-4-7","sessions":19,"edits":233,\#
+        "figure":{"kind":"finish_time","median_active_secs":498,"median_user_turns":4},\#
+        "interrupts_per_session_permille":null,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-sonnet-4-6",21],["claude-opus-4-7",38]],\#
+        "left_out":{"unknown_facts":5,"automated":4,"delegated":0,"capped":1,"routed":0,"reviewer":1,\#
+        "no_majority":1,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null}]}
+        """#
 
     // MARK: - PROVISIONAL shapes the screens still read (no source)
 

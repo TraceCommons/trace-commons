@@ -102,6 +102,22 @@ and Patterns cards do not drill down to sessions; the Sessions tab lists
 them through `insights_sessions`, whose opaque references are not the
 week's.
 
+With feed T on and readable, Overview also ends with a **Models** card
+(first version, 2026-10-21), from `insights_model_answers`: six answers
+over the last 13 weeks of watched traces, whatever week is on screen (bug
+fixing, refactoring and tests by rejected or undone edits, docs by cost per
+trace at API prices, rejected edits across task types, and active time to
+finish). Each row states its question as a fact about your own traces,
+then the leading model and "Next:", each with its figure and traces; or
+"Not enough traces yet" or "Not priced" with each model's traces, or "No
+clear difference" with both figures and neither first. Rejection rows say
+their basis ("Undone edits we could see") and interrupts per trace beside
+each figure; the docs row adds what Private AI charged, never added to the
+API-price figure. How each figure is measured and the traces left out, by
+reason, are behind the row's "i". Labels are as the agent recorded them.
+When the answer is off, unreadable or not served, no card is drawn. Every word
+is the core's (`analytics_models_*`); no word ranks a model.
+
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
 a Home page, and Home's Insights card now switches to the tab). It draws in
 the main pane: 440pt at the window's default width, 408pt inside the

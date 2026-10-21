@@ -443,6 +443,33 @@ mod tests {
         found
     }
 
+    /// A whole answer, printed between markers for shells' decode fixtures
+    /// (`cargo test ... -- --nocapture`): the Docs cost row answered at API
+    /// prices with a NEAR AI charge beside it, and the synthetic Claude Code
+    /// session on the other rows, which are short of sessions.
+    #[test]
+    fn a_model_answers_answer_for_shell_fixtures() {
+        let f = Fixture::docs_charged();
+        f.run();
+        let value = f.answers(&[], true);
+        assert_eq!(value["rows"][3]["state"], "answered", "{value}");
+        assert!(value["rows"][3]["near_ai_charge"].is_object(), "{value}");
+        // The shells decode this answer from the committed fixture, so the
+        // fixture is this answer: a change to the wire fails here first.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/insights-analytics/insights_model_answers.json"
+        ))
+        .unwrap();
+        println!("BEGIN insights_model_answers");
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        println!("END insights_model_answers");
+        assert_eq!(
+            value, fixture,
+            "re-record tests/fixtures/insights-analytics/insights_model_answers.json \
+             from this test's --nocapture output"
+        );
+    }
+
     #[test]
     fn the_priced_fixture_answers_docs_cost_with_money() {
         let v = Fixture::docs_priced().answers(&[], true);

@@ -36,6 +36,9 @@ struct InsightsView: View {
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
+        let modelAnswersReader: InsightsModel.ModelAnswersReader? = daemon.map { client in
+            { try await client.insightsModelAnswers() }
+        }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
@@ -49,7 +52,8 @@ struct InsightsView: View {
             { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
-                  model: InsightsModel(service: service, weekReader: weekReader),
+                  model: InsightsModel(service: service, weekReader: weekReader,
+                                       modelAnswersReader: modelAnswersReader),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
@@ -126,6 +130,7 @@ struct InsightsView: View {
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
+                    models: model.modelAnswers,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in

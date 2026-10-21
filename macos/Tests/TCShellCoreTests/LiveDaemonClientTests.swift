@@ -44,6 +44,7 @@ final class LiveDaemonClientTests: XCTestCase {
             ("inference_calls", #"{"cursor":"c2","limit":25}"#,
              { _ = try await client.inferenceCalls(limit: 25, cursor: "c2") }),
             ("inference_activity", "{}", { _ = try await client.inferenceActivity() }),
+            ("insights_model_answers", "{}", { _ = try await client.insightsModelAnswers() }),
         ]
         for (method, params, call) in expected {
             let before = transport.calls.count
@@ -331,6 +332,7 @@ final class LiveDaemonClientTests: XCTestCase {
                 _ = try await client.commonsCreditSummary()
                 _ = try await client.toolDestinations()
                 _ = try await client.inferenceCalls(limit: 10, cursor: nil)
+                _ = try await client.insightsModelAnswers()
             } catch {
                 XCTFail("\(set): \(error)")
             }

@@ -26,3 +26,15 @@ wire change fails there until the file is re-recorded. One session has no
 proxy record (`unobserved`); the other's calls went both through the route
 and outside it (`mixed`), with one call whose counters are unknown, so its
 `outside` tokens are `null`. The macOS decode and Overview tests read it.
+
+`insights_model_answers.json` is the daemon's `insights_model_answers`
+answer, as the contributor crate's
+`daemon::insights_model_answers::tests::a_model_answers_answer_for_shell_fixtures`
+prints it between its `BEGIN insights_model_answers` and
+`END insights_model_answers` lines under `--nocapture`, and that test
+compares its answer to this file in the same way. Ten generated Docs
+sessions on two priced models answer the Docs cost row at API prices, three
+more sent through NEAR AI give it a charge beside that figure, and the
+synthetic Claude Code session joins them on the other rows, which are short
+of sessions or edits. The one digest is the price table's `table_id`. The
+macOS decode and Models card tests read it.

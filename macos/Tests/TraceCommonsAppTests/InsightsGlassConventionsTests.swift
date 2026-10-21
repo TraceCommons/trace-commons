@@ -12,6 +12,7 @@ final class InsightsGlassConventionsTests: XCTestCase {
     static let files = [
         "Views/InsightsView.swift",
         "Views/InsightsOverviewTab.swift",
+        "Views/InsightsModelsCard.swift",
         "Views/InsightsPatternsTab.swift",
         "Views/InsightsSessionsTab.swift",
         "Views/Monitor/InsightsGlanceCard.swift",
