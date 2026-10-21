@@ -213,7 +213,9 @@ pauses judgements and breaks nothing else.
 **Measurement pin.** `mrtd` + `mrconfigid`, never RTMR3 or RTMR0, for the
 reasons in `witness/mod.rs` (`WitnessTrust` docs). The pinned value is read from
 the running instance (`phala cvms get --json` `compose_hash`, cross-checked
-against a signed response), never from a locally hashed manifest.
+against the `mrconfigid` in a freshly verified quote, section 9 step 5),
+never from a locally hashed manifest. Responses are sealed, so the quote, not
+a response, is what carries the measurement.
 
 **Image checks before push** (the workflow, mirroring the witness's three):
 the binary resolves its libraries (`--version`); boot refuses with no model
@@ -998,11 +1000,10 @@ prompts, the digest, the claim, or NEAR AI response text.
 | NEAR AI gateway quote fails DCAP, its measurement is not pinned, its report data does not bind the nonce and `spki_hash`, or the fingerprint field is absent, at boot | Boot refuses. |
 | A NEAR AI-hosted model is configured but the gateway check is not compiled in or not configured | Boot refuses, `missing_control:judgement_near_gateway_pin`. |
 | A connection's leaf SPKI differs from the verified `spki_hash` | Connection closed before any request byte. Calls refused, nothing metered, until a fresh verified report binds the new key. |
-| Receipt absent, unverifiable, `gateway`, two-part, wrong model, or unpinned signer | Label discarded, call metered, `judgement_model_unattested`. |
+| Receipt absent, unverifiable, `gateway`, two-part, wrong model, or unpinned signer | Label discarded; charged `max(reservation, reported)`; `judgement_model_unattested`. For an unpinned signer, a receipt that is not `provider_tee`, or a wrong model, the rotation latch is set, so no further call to that model is made until the pins change (section 5). |
 | `usage` absent | Reservation stands as the charge. |
 | Ledger write fails at reserve | No model call; `judgement_saturated`. A service that cannot record spend does not spend. |
 | Ledger write fails at settle, or the response cannot be signed | `judgement_service_fault` (not capacity, not retryable today), because the call was already charged. |
-| Receipt fails | Label discarded; charged `max(reservation, reported)`; `judgement_model_unattested`. |
 | Verified usage exceeds the reservation | The reported figure is charged; `judgement_usage_over_reservation` is logged; the model is latched. |
 | Per-account or operator cap reached | Capacity refusal with `reset_at`; no NEAR AI call. |
 | Daemon: quote fails, measurement not in the compiled-in set, quote nonce or `boot_binding` mismatch | Nothing sent. The session keeps its heuristic basis. |
