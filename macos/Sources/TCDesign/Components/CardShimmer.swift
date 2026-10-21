@@ -55,7 +55,8 @@ public struct GlassCardShimmer: View {
                 // Back before the card at once, then across it.
                 withTransaction(Transaction(animation: nil)) { progress = 0 }
                 try? await Task.sleep(for: .milliseconds(30))
-                withAnimation(.easeInOut(duration: Self.duration)) { progress = 1 }
+                // The one motion curve (`GlassMotion`), over the pass.
+                withAnimation(GlassMotion.curve(Self.duration)) { progress = 1 }
                 try? await Task.sleep(for: Self.every)
             }
         }
