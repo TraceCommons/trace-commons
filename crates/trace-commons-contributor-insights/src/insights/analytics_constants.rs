@@ -116,9 +116,15 @@ pub const EDIT_FAIL_EDIT_CARD: bool = true;
 
 /// Whether Codex `last_token_usage` is accepted as a per-turn series. Owner
 /// decision D11, settled (owner, 2026-10-20): the Codex reader keeps one turn
-/// per increase of the running token total. Two views read the series: the
-/// session drill-in and the Models answers. Weekly token figures, goals, the
-/// glance and Patterns keep reading the first-to-last observed change.
+/// per increase of the running token total. Three views read the series:
+/// the session drill-in's chart, the Sessions list (its `turns` and
+/// `sparkline`) and the Models answers. A Codex session's `tokens`, in the
+/// drill and the list, and the weekly token figures, goals, the glance and
+/// Patterns keep reading the first-to-last observed change, so trimming a
+/// series never moves a token figure. While false the counter pass stores
+/// no Codex series (`insights_week::scan_session`) and no stored one is
+/// served (`CounterRow::session_input_with`): every view reads a Codex
+/// session as one saved before the per-turn reader.
 pub const CODEX_PER_TURN_SERIES: bool = true;
 
 /// Whether Claude turns are counted once across snapshots by their keyed

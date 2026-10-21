@@ -14,7 +14,11 @@
 //!
 //! A Codex session read turn by turn draws its series like a Claude one
 //! (owner decision D11, settled: `CODEX_PER_TURN_SERIES`); one saved before
-//! the per-turn reader reads "not recorded". The what-if estimate is not computed here and
+//! the per-turn reader, or whose series the store's Codex budget trimmed,
+//! reads "not recorded". A Codex session's tokens are always its observed
+//! change (first to last running total), with the series or without, so
+//! trimming never moves the figure and a series with no known turn still
+//! shows the tokens it showed before the per-turn reader. The what-if estimate is not computed here and
 //! is not in the response (owner decision D2, open: `ADVICE_SHOWN`).
 
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
@@ -155,11 +159,23 @@ pub fn session_drill(
             draw_series(&mut drill, &mut reasons, series);
         }
         SessionBody::Codex {
+            observed,
             series: Some(evidence),
-            ..
         } => {
             drill.source = Some(AnalyticsSource::Codex);
             draw_series(&mut drill, &mut reasons, &evidence.series);
+            // The chart is the series; the tokens stay the observed change,
+            // the one basis a Codex session has with or without it.
+            if observed.is_some() {
+                if let Some(at) = reasons
+                    .iter()
+                    .position(|reason| *reason == CoverageReason::NoUsageCounters)
+                {
+                    // Every turn unknown: the chart says so, the tokens do not.
+                    reasons[at] = CoverageReason::SomeTurnsUnknown;
+                }
+            }
+            codex_tokens(&mut drill, &mut reasons, observed.as_ref());
         }
         SessionBody::Codex {
             observed,
@@ -169,15 +185,7 @@ pub fn session_drill(
             // Read before the per-turn reader, or its series trimmed by
             // the counter store's Codex budget: no chart.
             drill.series_unavailable = Some(SeriesUnavailable::NotRecorded);
-            match observed {
-                Some(observed) => {
-                    drill.tokens = Some(observed.total);
-                    if observed.baseline_excluded {
-                        reasons.push(CoverageReason::CodexBaselineExcluded);
-                    }
-                }
-                None => reasons.push(CoverageReason::NoUsageCounters),
-            }
+            codex_tokens(&mut drill, &mut reasons, observed.as_ref());
         }
         SessionBody::Unknown { source, reason } => {
             drill.source = *source;
@@ -194,6 +202,29 @@ pub fn session_drill(
         .unwrap_or(CoverageState::Known);
     drill.reasons = reasons;
     drill
+}
+
+/// A Codex session's tokens: its observed change between the first and last
+/// running total, whether or not its per-turn series is there, so a series
+/// that is trimmed or unknown in part never moves the figure. Unknown when
+/// there is no observed change.
+fn codex_tokens(
+    drill: &mut SessionDrill,
+    reasons: &mut Vec<CoverageReason>,
+    observed: Option<&super::week_rollup::CodexObserved>,
+) {
+    match observed {
+        Some(observed) => {
+            drill.tokens = Some(observed.total);
+            if observed.baseline_excluded {
+                reasons.push(CoverageReason::CodexBaselineExcluded);
+            }
+        }
+        None => {
+            drill.tokens = None;
+            reasons.push(CoverageReason::NoUsageCounters);
+        }
+    }
 }
 
 /// The per-turn chart, tokens and markers of a series. A turn with any
@@ -566,6 +597,89 @@ mod tests {
         );
         assert_eq!(drill.state, CoverageState::Unknown);
         assert_eq!(drill.reasons, vec![CoverageReason::NoUsageCounters]);
+    }
+
+    fn observed(total: u64, baseline_excluded: bool) -> CodexObserved {
+        CodexObserved {
+            first_at: at(9, 0),
+            last_at: at(9, 30),
+            input: total - 100,
+            cached_input: 400,
+            output: 100,
+            total,
+            baseline_excluded,
+        }
+    }
+
+    fn codex(turns: Vec<TurnRecord>, observed: Option<CodexObserved>) -> SessionBody {
+        SessionBody::Codex {
+            observed,
+            series: Some(crate::insights::codex_series::CodexTurnSeriesEvidence {
+                model_labels: vec![],
+                series: UsageSeries {
+                    turns,
+                    tool_calls: vec![],
+                    truncated: false,
+                },
+            }),
+        }
+    }
+
+    /// A Codex series whose every turn is unknown still has its observed
+    /// change: the drill shows it, as it did before the per-turn reader,
+    /// rather than no tokens at all.
+    #[test]
+    fn a_codex_series_with_no_known_turn_keeps_its_observed_tokens() {
+        let mut unknown = ctx(1, 100);
+        unknown.output = None;
+        let drill = session_drill(
+            "snap",
+            &codex(vec![unknown], Some(observed(1_000, false))),
+            None,
+            None,
+            utc(),
+        );
+        assert_eq!(drill.tokens, Some(1_000));
+        assert_ne!(drill.state, CoverageState::Unknown);
+        assert!(!drill.reasons.contains(&CoverageReason::NoUsageCounters));
+        assert!(drill.reasons.contains(&CoverageReason::SomeTurnsUnknown));
+    }
+
+    /// A Codex session's tokens are its observed change whether its series
+    /// is there, unknown in part, or trimmed by the store's Codex budget:
+    /// one basis, so trimming never moves the figure. The chart is the
+    /// series.
+    #[test]
+    fn codex_tokens_have_one_basis_with_or_without_the_series() {
+        let with = session_drill(
+            "snap",
+            &codex(vec![ctx(1, 100), ctx(2, 100)], Some(observed(1_000, true))),
+            None,
+            None,
+            utc(),
+        );
+        let trimmed = session_drill(
+            "snap",
+            &SessionBody::Codex {
+                observed: Some(observed(1_000, true)),
+                series: None,
+            },
+            None,
+            None,
+            utc(),
+        );
+        assert_eq!(with.tokens, Some(1_000));
+        assert_eq!(with.tokens, trimmed.tokens);
+        assert_eq!(with.series.as_ref().map(Vec::len), Some(2));
+        assert!(
+            with.reasons
+                .contains(&CoverageReason::CodexBaselineExcluded)
+        );
+        // No observed change: the tokens are unknown, the chart still drawn.
+        let none = session_drill("snap", &codex(vec![ctx(1, 100)], None), None, None, utc());
+        assert_eq!(none.tokens, None);
+        assert!(none.reasons.contains(&CoverageReason::NoUsageCounters));
+        assert_eq!(none.series.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

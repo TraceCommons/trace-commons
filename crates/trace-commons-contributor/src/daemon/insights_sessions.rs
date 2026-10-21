@@ -940,8 +940,14 @@ mod tests {
         assert_eq!(drill["series_unavailable"], serde_json::Value::Null);
         assert_eq!(drill["series"].as_array().unwrap().len(), 2);
         assert_eq!(drill["turns"], 2);
-        assert_eq!(drill["tokens"], 120 + 110);
-        assert_eq!(drill["state"], "known");
+        // The observed change, the one basis a Codex row's tokens have: the
+        // same figure once its series is trimmed (below).
+        assert_eq!(drill["tokens"], 110);
+        assert_eq!(drill["state"], "partial");
+        assert_eq!(
+            drill["reasons"],
+            serde_json::json!(["codex_baseline_excluded"])
+        );
         // The listed row counts what the drill draws.
         assert_eq!(listed[0]["tokens"], drill["tokens"]);
         assert_eq!(listed[0]["turns"], 2);
