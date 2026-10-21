@@ -90,6 +90,27 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertFalse(down.canChooseOverride)
     }
 
+    /// The menu-bar item's Private AI lines come from `inference_activity`
+    /// alone: a failed read, or an older daemon refusing it, draws none and
+    /// stales nothing else. A read that answers puts the trace lines on its
+    /// clock, step for step.
+    func test_aFailedActivityReadDrawsNoPrivateAILinesAndStalesNothing() async throws {
+        let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["inference_activity"])
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        XCTAssertFalse(store.stale)
+        XCTAssertTrue(store.columnsCurrent, "the trace lines are still current")
+        XCTAssertNil(store.stripPrivateAI)
+        XCTAssertEqual(store.stripTraces.count, 6)
+
+        transport.failing = []
+        await store.load()
+        let privateAI = try XCTUnwrap(store.stripPrivateAI)
+        XCTAssertEqual(privateAI.count, 6)
+        XCTAssertEqual(store.stripTraces.count, privateAI.count)
+        XCTAssertTrue(privateAI.allSatisfy { $0.up <= $0.down }, "verified calls are some of the calls")
+    }
+
     /// A read that recovers clears its own unknown.
     func test_aReadThatRecoversDrawsAgain() async throws {
         let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["list_history"])

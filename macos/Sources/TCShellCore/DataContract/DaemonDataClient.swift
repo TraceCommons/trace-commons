@@ -231,6 +231,10 @@ public protocol DaemonDataClient: Sendable {
     func toolDestinations() async throws -> DaemonData.ToolDestinations
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
+    /// `inference_activity`: the same calls in four-hour steps, with the
+    /// verified ones, for the menu-bar item. An older daemon refuses it as
+    /// `unknown_method`, which draws no Private AI bars, never empty ones.
+    func inferenceActivity() async throws -> DaemonData.InferenceActivity
 
     // MARK: Insights
 

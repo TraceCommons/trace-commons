@@ -28,7 +28,8 @@ struct MenuBarGlassPanel: View {
     /// glass on it is glass on glass (R14); the preview window has none.
     var ownsSurface = false
 
-    static let width: CGFloat = 380
+    /// A quarter narrower than the handoff's 380 (owner, 2026-10-21).
+    static let width: CGFloat = 285
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
@@ -59,13 +60,17 @@ struct MenuBarGlassPanel: View {
     /// The traces worth a second look, first (owner, 2026-10-19: moved to
     /// the top; the core's approved heading is kept), then Watching,
     /// Settings and Quit as icon buttons in the top right corner. Watching
-    /// is a dropdown menu of its pause choices, or Resume.
+    /// is a dropdown menu of its pause choices, or Resume. Spaced tight for
+    /// the narrower panel: the heading and its count fit beside the buttons
+    /// up to two digits, and a longer count shrinks the line a little rather
+    /// than cutting the count off.
     private var topRow: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
+        HStack(spacing: GlassTokens.Space.s2) {
             Button { open(.traces(entryId: nil)) } label: {
-                HStack {
+                HStack(spacing: GlassTokens.Space.s2) {
                     Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
                         .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -556,8 +561,9 @@ protocol HostingWindowSizing: AnyObject {
 extension NSHostingView: HostingWindowSizing {}
 
 
-/// The menu-bar item in the glass system: the last seven days as a strip,
-/// with the decisions-owed badge. Grey while paused.
+/// The menu-bar item in the glass system: the NEAR AI mark and the last 24
+/// hours as paired up-and-down bars (`GlassMenuBarStrip`), with the
+/// decisions-owed badge. Trace bars grey while paused.
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
@@ -599,25 +605,57 @@ struct MenuBarStripLabel: View {
     /// The strip as a bitmap. A `MenuBarExtra` label keeps only an `Image`
     /// and a `Text` out of whatever view it is given, so the strip drawn as
     /// a view lost its bars and kept the badge as a bare number. Drawn as a
-    /// non-template image it reaches the menu bar in its own colours.
-    /// Padded past the badge's offset so the badge is not clipped.
+    /// non-template image it reaches the menu bar in its own colours, once
+    /// for a dark bar and once for a light one (`MenuBarItemImage`).
+    /// Exactly the item's height, so the menu bar centres the mark and the
+    /// bars in it, and padded past the badge's halo so it is not clipped.
     /// The condition, badge and nudge mark are the ones `body` speaks, so
     /// the drawn mark and its words never disagree.
     @MainActor
     private func rendered(
         condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark
     ) -> NSImage {
-        let renderer = ImageRenderer(content: GlassMenuBarStrip(
-            columns: store.columns,
-            condition: condition,
-            badge: badge,
-            mark: mark)
-            .padding(.trailing, 6)
-            .padding(.bottom, 2))
-        renderer.scale = displayScale
-        let image = renderer.nsImage ?? NSImage()
+        let traces = store.stripTraces
+        let privateAI = store.stripPrivateAI
+        func render(_ scheme: ColorScheme) -> NSImage {
+            let renderer = ImageRenderer(content: GlassMenuBarStrip(
+                traces: traces,
+                privateAI: privateAI,
+                condition: condition,
+                badge: badge,
+                mark: mark)
+                .padding(.trailing, 3)
+                .environment(\.colorScheme, scheme))
+            renderer.scale = displayScale
+            return renderer.nsImage ?? NSImage()
+        }
+        return MenuBarItemImage.adaptive(dark: render(.dark), light: render(.light))
+    }
+}
+
+/// The menu-bar item's image, drawn in the menu bar's own appearance.
+enum MenuBarItemImage {
+    /// One image that draws `dark` on a dark menu bar and `light` on a light
+    /// one. Its drawing handler runs each time the item draws, in the
+    /// appearance of the bar it sits on, which is not always the app's: the
+    /// bar follows the wallpaper behind it, so a Mac in Light Mode can show
+    /// a dark bar. Not a template, so the bars keep their colours.
+    static func adaptive(dark: NSImage, light: NSImage) -> NSImage {
+        let image = NSImage(size: dark.size, flipped: false) { rect in
+            (isDark(NSAppearance.currentDrawing()) ? dark : light).draw(in: rect)
+            return true
+        }
         image.isTemplate = false
         return image
+    }
+
+    /// Whether an appearance is a dark one, its vibrant and high-contrast
+    /// forms included.
+    static func isDark(_ appearance: NSAppearance) -> Bool {
+        switch appearance.bestMatch(from: [.aqua, .darkAqua, .vibrantLight, .vibrantDark]) {
+        case .darkAqua?, .vibrantDark?: true
+        default: false
+        }
     }
 }
 

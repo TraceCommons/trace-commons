@@ -8,8 +8,10 @@ import XCTest
 /// The status item can only be checked by looking at it, so this draws it
 /// the way the screenshot hook does -- `ImageRenderer`, CPU-side, no window
 /// -- and asserts the one thing a pixel buffer can prove: that a count
-/// changes what is drawn. The item is the glass strip (`GlassMenuBarStrip`),
-/// drawn under each `Condition` with and without a badge. The PNGs it writes
+/// changes what is drawn. The item is the glass strip (`GlassMenuBarStrip`):
+/// the NEAR AI mark and stacked up-and-down bars, drawn under each
+/// `Condition` with and without a badge and the Private AI segments. The
+/// PNGs it writes
 /// are for a person to look at; set `TRACE_COMMONS_MENUBAR_RENDER_DIR` to
 /// keep them somewhere other than the temporary directory.
 final class MenuBarGlyphRenderTests: XCTestCase {
@@ -22,18 +24,22 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         let weight: Int
     }
 
-    /// Seven days with something on most of them, so the bars draw.
-    private static let columns = (0..<7).map { GlassDayColumn(id: "d\($0)", up: $0 % 3, down: ($0 + 1) % 2) }
+    /// Six steps with something on most of them, so the trace bars draw.
+    private static let columns = (0..<6).map { GlassDayColumn(id: "s\($0)", up: $0 % 3, down: ($0 + 1) % 2) }
+    /// Private AI steps: verified calls up, all calls down.
+    private static let privateAI = (0..<6).map { GlassDayColumn(id: "s\($0)", up: $0 % 4, down: $0 % 4 + 2) }
 
     @MainActor
     private func render(
         _ condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark = .none,
+        traces: [GlassDayColumn] = columns, privateAI: [GlassDayColumn]? = privateAI,
         scheme: ColorScheme, scale: CGFloat
     ) -> Rendered? {
         // Padded past the badge's offset, so the capture holds the whole
         // item at the menu bar's 22pt.
         let renderer = ImageRenderer(
-            content: GlassMenuBarStrip(columns: Self.columns, condition: condition, badge: badge, mark: mark)
+            content: GlassMenuBarStrip(
+                traces: traces, privateAI: privateAI, condition: condition, badge: badge, mark: mark)
                 .padding(.horizontal, GlassTokens.Space.s4)
                 .padding(.vertical, GlassTokens.Space.s1)
                 .background(scheme == .dark ? Color.black : Color.white)
@@ -68,6 +74,76 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         let env = ProcessInfo.processInfo.environment["TRACE_COMMONS_MENUBAR_RENDER_DIR"]
         if let env, !env.isEmpty { return URL(fileURLWithPath: env) }
         return FileManager.default.temporaryDirectory
+    }
+
+    /// The item alone, unpadded, on the bar's ground, as a bitmap.
+    @MainActor
+    private func bitmap(
+        traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, scheme: ColorScheme
+    ) throws -> NSBitmapImageRep {
+        let renderer = ImageRenderer(
+            content: GlassMenuBarStrip(traces: traces, privateAI: privateAI, condition: .live, badge: nil)
+                .background(scheme == .dark ? Color.black : Color.white)
+                .environment(\.colorScheme, scheme)
+        )
+        renderer.scale = 2
+        let tiff = try XCTUnwrap(renderer.nsImage?.tiffRepresentation)
+        return try XCTUnwrap(NSBitmapImageRep(data: tiff))
+    }
+
+    /// The Private AI segments add ink while they are known, also while
+    /// paused, and none while unknown or on an unavailable strip.
+    @MainActor
+    func testThePrivateAISegmentsDrawOnlyWhenKnown() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            func weight(_ condition: GlassMenuBarStrip.Condition, _ privateAI: [GlassDayColumn]?) throws -> Int {
+                try XCTUnwrap(render(condition, badge: nil, privateAI: privateAI, scheme: scheme, scale: 2)).weight
+            }
+            XCTAssertNotEqual(try weight(.live, Self.privateAI), try weight(.live, nil), "the Private AI segments")
+            XCTAssertNotEqual(try weight(.paused, Self.privateAI), try weight(.paused, nil), "pausing keeps them")
+            XCTAssertEqual(
+                try weight(.unavailable, Self.privateAI), try weight(.unavailable, nil),
+                "an unavailable strip drew Private AI segments")
+        }
+    }
+
+    /// A count past 99 draws as 99+, whatever the count (owner, 2026-10-21).
+    @MainActor
+    func testACountPastNinetyNineDrawsNinetyNinePlus() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let hundred = try XCTUnwrap(render(.live, badge: 100, scheme: scheme, scale: 2))
+            let thousands = try XCTUnwrap(render(.live, badge: 4_321, scheme: scheme, scale: 2))
+            let ninetyNine = try XCTUnwrap(render(.live, badge: 99, scheme: scheme, scale: 2))
+            XCTAssertEqual(hundred.weight, thousands.weight)
+            XCTAssertEqual(hundred.png, thousands.png)
+            XCTAssertNotEqual(hundred.weight, ninetyNine.weight)
+        }
+    }
+
+    /// No capsule behind the bars (owner, 2026-10-21): with nothing to
+    /// draw, the graph's upper reach is the bar's own ground, in both
+    /// appearances. The mark is the logo kit's single ink for the bar:
+    /// white on a dark one, black on a light one.
+    @MainActor
+    func testNoCapsuleAndTheMarkTakesTheBarsInk() throws {
+        let flat = (0..<6).map { GlassDayColumn(id: "s\($0)", up: 0, down: 0) }
+        for scheme in [ColorScheme.light, .dark] {
+            let rep = try bitmap(traces: flat, privateAI: flat, scheme: scheme)
+            let ground: CGFloat = scheme == .dark ? 0 : 1
+            func distance(_ x: CGFloat, _ y: CGFloat, from value: CGFloat) throws -> CGFloat {
+                let colour = try XCTUnwrap(rep.colorAt(x: Int(x * 2), y: Int(y * 2))?.usingColorSpace(.deviceRGB))
+                return abs(colour.redComponent - value) + abs(colour.greenComponent - value)
+                    + abs(colour.blueComponent - value)
+            }
+            // Halfway along the graph, 3pt below its top edge.
+            let graphMid = GlassMenuBarStrip.markSize + GlassMenuBarStrip.markGap
+                + GlassMenuBarStrip.graphWidth(steps: 6) / 2
+            let graphTop = GlassMenuBarStrip.graphTop
+            XCTAssertLessThan(try distance(graphMid, graphTop + 3, from: ground), 0.05, "\(scheme): a fill behind the lines")
+            // Halfway up the N's left upright, which spans its first 15%.
+            XCTAssertLessThan(
+                try distance(GlassMenuBarStrip.markSize * 0.077, 11, from: 1 - ground), 0.1, "\(scheme): the mark's ink")
+        }
     }
 
     /// The news ring and the halo each change what is drawn, in both

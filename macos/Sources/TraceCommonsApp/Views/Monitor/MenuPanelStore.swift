@@ -26,6 +26,9 @@ final class MenuPanelStore {
     private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
     private(set) var calls: [DaemonData.InferenceCall] = []
+    /// `inference_activity`: Private AI calls and verified calls per
+    /// four-hour step, for the menu-bar item's bars. Nil until read.
+    private(set) var activity: DaemonData.InferenceActivity?
     /// True until a load has read `status`, and again whenever that read
     /// fails, there is no client, or the client's event stream ends: the
     /// panel cannot vouch for anything it holds. Every value is gated on it.
@@ -261,6 +264,7 @@ final class MenuPanelStore {
         if let value = await read(.calls, { try await client.inferenceCalls(limit: 20, cursor: nil) }) {
             calls = value.readable ? value.calls : []
         }
+        if let value = await read(.activity, { try await client.inferenceActivity() }) { activity = value }
         unreadable = failed
         stale = failed.contains(.status)
         await loadGlance()
@@ -333,6 +337,26 @@ final class MenuPanelStore {
             kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
             ending: Date())
     }
+
+    /// The menu-bar item's Private AI segments: verified calls (up) over
+    /// all calls (down) per step. Nil while unknown -- unread, failed,
+    /// refused by an older daemon, or no ledger answered -- which draws
+    /// none, never empty ones.
+    var stripPrivateAI: [GlassDayColumn]? {
+        guard current(.activity), let activity else { return nil }
+        return MenuPanelData.privateAISteps(activity)
+    }
+
+    /// The menu-bar item's trace segments: shared (up) and kept (down) per
+    /// step, on the Private AI steps' own clock while they are drawn, so
+    /// all four share one span; else the same span ending now.
+    var stripTraces: [GlassDayColumn] {
+        let span = stripPrivateAI == nil ? nil : activity.flatMap(MenuPanelData.span)
+        return MenuPanelData.steps(
+            shared: history.compactMap(\.submittedAt),
+            kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
+            span: span ?? MenuPanelData.Span(end: Date()))
+    }
 }
 
 /// The popover's rules, as pure functions so they are tested.
@@ -379,7 +403,7 @@ enum MenuPanelData {
     /// The daemon reads the panel makes on each load, each gating only the
     /// values drawn from it (`MenuPanelStore.current(_:)`).
     enum Read: Hashable, Sendable {
-        case status, projects, pending, kept, history, calls
+        case status, projects, pending, kept, history, calls, activity
     }
 
     /// The roll-up of every listed folder's mode, for the mode pill.
@@ -489,6 +513,57 @@ enum MenuPanelData {
         for date in shared { if let i = index(date) { up[i] += 1 } }
         for date in kept { if let i = index(date) { down[i] += 1 } }
         return (0 ..< count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
+    }
+
+    /// The menu-bar item's span: `count` steps of `stepHours`, the last
+    /// ending at `end`. Six steps of four hours by default, the window
+    /// `inference_activity` counts.
+    struct Span: Equatable {
+        static let steps = 6
+        static let stepHours = 4
+        var end: Date
+        var count = Span.steps
+        var stepHours = Span.stepHours
+    }
+
+    /// The Private AI steps' own span: the last step's end, and their count
+    /// and step. Nil while no ledger answered, no steps came, or the step
+    /// is not a length of time.
+    static func span(_ activity: DaemonData.InferenceActivity) -> Span? {
+        let stepHours = activity.stepHours ?? Span.stepHours
+        guard activity.readable, let last = activity.steps.last, stepHours > 0 else { return nil }
+        return Span(
+            end: last.start.addingTimeInterval(TimeInterval(stepHours * 3600)),
+            count: activity.steps.count, stepHours: stepHours)
+    }
+
+    /// The Private AI steps as the strip's columns: verified (up) over all
+    /// calls (down). Nil while no ledger answered: unknown, never zero.
+    static func privateAISteps(_ activity: DaemonData.InferenceActivity) -> [GlassDayColumn]? {
+        guard activity.readable, !activity.steps.isEmpty else { return nil }
+        return activity.steps.enumerated().map { index, step in
+            GlassDayColumn(id: String(index), up: step.verified, down: step.calls)
+        }
+    }
+
+    /// One column per step of `span`, oldest first: how many sessions were
+    /// contributed (up) and kept (down) in it. A date after the span's end
+    /// counts in the last step, as `inference_activity` counts a call
+    /// stamped after its read; one before the first step is outside it.
+    static func steps(shared: [Date], kept: [Date], span: Span) -> [GlassDayColumn] {
+        guard span.count > 0, span.stepHours > 0 else { return [] }
+        let step = TimeInterval(span.stepHours * 3600)
+        let start = span.end.addingTimeInterval(-step * Double(span.count))
+        func index(_ date: Date) -> Int? {
+            let offset = date.timeIntervalSince(start)
+            guard offset >= 0 else { return nil }
+            return min(Int(offset / step), span.count - 1)
+        }
+        var up = Array(repeating: 0, count: span.count)
+        var down = Array(repeating: 0, count: span.count)
+        for date in shared { if let i = index(date) { up[i] += 1 } }
+        for date in kept { if let i = index(date) { down[i] += 1 } }
+        return (0 ..< span.count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
     }
 
     /// Sessions worth a second look: nothing matched in them, or they were
