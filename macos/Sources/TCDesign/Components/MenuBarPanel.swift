@@ -357,7 +357,9 @@ public struct GlassMenuBarStrip: View {
     /// `traces` is shared (up) over kept (down) per step, oldest first.
     /// `privateAI` is verified calls (up) over all calls (down) per step, or
     /// nil while unknown, which draws no Private AI segments rather than
-    /// empty ones.
+    /// empty ones. A zero draws no segment either, as a trace zero does, so
+    /// known steps with no calls and unknown ones draw the same; the
+    /// popover has the counts.
     public init(
         traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, condition: Condition, badge: Int?,
         mark: Mark = .none

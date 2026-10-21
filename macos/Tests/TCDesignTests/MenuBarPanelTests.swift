@@ -44,6 +44,12 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(steps[0].kept, GlassMenuBarStrip.least)
         XCTAssertEqual(steps[1].kept, 0)
         XCTAssertEqual(steps[1].shared, GlassMenuBarStrip.reach)
+
+        // Known steps with no calls draw as unknown ones do: no segment.
+        let idle = (0 ..< 2).map { GlassDayColumn(id: String($0), up: 0, down: 0) }
+        XCTAssertEqual(
+            GlassMenuBarStrip.steps(traces: traces, privateAI: idle, condition: .live),
+            GlassMenuBarStrip.steps(traces: traces, privateAI: nil, condition: .live))
     }
 
     /// Private AI and traces are separate bars, each on its own scale:
