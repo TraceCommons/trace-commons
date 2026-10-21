@@ -26,8 +26,10 @@ design first.
      only. A daemon in a release build accepts only the production
      measurement, so it can never send contributor data to a development
      service.
-2. **Digest contents: delegated to the implementer.** The values are below,
-   under "What is sent".
+2. **Digest contents: not decided.** What leaves the machine is the privacy
+   decision of this feature, so it is the owner's (open decision O1, under
+   "Not decided"). An earlier draft delegated it to the implementer. That was
+   withdrawn after #1501 review point 8.
 3. **Budget: $5 to start.** Recorded as a cap of $5 of NEAR AI spend per
    contributor per calendar month, enforced by the service's limiter. If the
    owner meant $5 in total for the first experiment, the limiter's per-user
@@ -67,8 +69,8 @@ on 2026-10-20: "there is also a decision model coming to near.ai soon" and
 3. **This is the first Insights data to leave the machine.** It is a consent
    moment of its own, off by default, with its own wording. Turning it off
    deletes every stored judgement.
-4. **Send the least that decides the question.** That is counts plus scrubbed
-   excerpts, never a whole transcript.
+4. **Send the least that decides the question,** never a whole transcript.
+   What that is is open decision O1 ("What is sent").
 
 ## Architecture
 
@@ -110,7 +112,34 @@ the same quote. (Service spec, section 3; #1501 review point 1.)
   NEAR AI directly, but then there is no shared prompt or model pin and no
   operator budget.
 
-### What is sent
+### What is sent (open decision O1)
+
+**Not decided.** The owner decides what leaves the machine. Until O1 is
+decided, **no code may send a digest**:
+
+- the digest builder (delivery step 1, #1525) may be reviewed but does not
+  merge;
+- the daemon client (service slice 7) does not merge, and the release
+  daemon's production pin set stays empty in any case until service slice 9.
+
+The options:
+
+| Option | What leaves the machine | Judgements it can make well | Cost to privacy |
+|---|---|---|---|
+| A. Counts only | The counts below. No contributor text. | `task` from tool and file-class mix; `finished` weakly. Cannot tell a rejection from a redirect: that difference is in what the contributor wrote. | Lowest. No excerpt can carry a name, a path or a secret. No scrub to get right. |
+| B. Counts plus scrubbed excerpts | The counts, plus up to 12 prompt excerpts and the final line, scrubbed (below), for sessions from Automatic folders only (section "Folder rules") | All three, including `event_kind`, which is the main gap the local rules leave. | An excerpt that the scrub misses leaves the machine. Bounded by the scrub, the residual-risk gate and the byte budgets below. |
+| C. Counts, plus excerpts only with per-session approval | Counts for every eligible session. Excerpts only for a session the contributor approves, one by one, after seeing the exact excerpts. | All three, for approved sessions only. The basis switch then rarely has a whole comparison judged. | Lowest for text. Each send is a consent moment. More prompts to answer. |
+
+**Recommendation: B, with its gates.** Excerpts only from Automatic folders,
+only for sessions whose residual-risk class is `low` (others send counts only,
+as A), and only after the scrub below. The `event_kind` judgement is the
+reason the service exists, and it needs the contributor's words. A cannot
+make it, and C would leave most comparisons on the local basis. If the owner
+wants no contributor text without an explicit per-session yes, choose C. A is
+the fallback if the scrub cannot pass its byte tests.
+
+The shape below is option B's. Under A, `excerpts` and `final_line` are always
+empty. Under C they are empty unless that session was approved.
 
 A **judgement digest**, built locally after the privacy filter runs:
 
@@ -180,8 +209,9 @@ pins that no path, file name or raw text beyond the scrubbed excerpts appears.
 
 ## Copy
 
-New consent wording, following `docs/ui-copy-guide.md`, needs owner review.
-It must say plainly:
+New consent wording, following `docs/ui-copy-guide.md`, is **not decided**
+(O3 under "Not decided"). It is written after O1, because it has to say what
+O1 chose. It must say plainly:
 
 - what leaves the machine (a short scrubbed summary per session);
 - where it goes (an attested service, then NEAR AI's attested inference);
@@ -191,14 +221,23 @@ It must say plainly:
 
 Answers that use judged fields say "judged privately" in their (i).
 
-## Not decided (owner)
+## Not decided (owner and PM sign-off)
 
-1. (Answered as decision 1: build now with the NEAR AI-routed Jev stand-in.)
-2. (Answered as decision 2: delegated; values are under "What is sent".)
-3. (Answered as decision 3: $5 per account per month to start. The
-   operator-wide budget is still open.)
-4. (Answered as decision 4: account-bound.)
-5. (Answered as decision 5: in scope as phase 2, outlined below.)
+These are open. Nothing that sends a digest merges until O1 to O4 are signed
+off.
+
+- **O1. What leaves the machine:** option A, B or C under "What is sent".
+  Recommendation: B with its gates.
+- **O2. The folder rule:** the rule under "Folder rules" is the design's
+  default, written so the code has one to test. It needs PM sign-off, because
+  it decides which of a contributor's folders can send anything.
+- **O3. The consent wording** (section "Copy"), after O1.
+- **O4. How existing Insights users are told.** Turning the feature on is
+  always opt-in. The open question is whether people who already use Insights
+  see a one-time notice that it exists, and where.
+
+Answered, for reference: decisions 1, 3, 4 and 5 above, and the service
+spec's owner decisions 1 to 6.
 
 ## Phase 2: comparisons across users inside the TEE (outline)
 
@@ -239,7 +278,8 @@ ships without per-request attestation, the receipt evidence is absent and the
 ## Delivery (after PR 0 and PR 1)
 
 1. The judgement digest builder and its privacy tests (contributor-insights,
-   pure). It can land before the service exists.
+   pure), #1525. It can be reviewed before the service exists. It does not
+   merge until O1 is decided, and it changes to match O1.
 2. The judged fields on the session facts, the `TaskClassifier` second
    implementation, and the basis switch in `model_answers`, all behind the
    opt-in and off by default.
@@ -247,5 +287,5 @@ ships without per-request attestation, the receipt evidence is absent and the
    rate limiter. Its own spec, following the witness service spec's structure.
 4. The account-bound limiter (keyed account digest, spend metering, $5 cap)
    inside the service.
-5. Consent copy and the opt-in UI (macOS first).
+5. Consent copy and the opt-in UI (macOS first), after O1 and O3.
 6. Phase 2: comparisons across users. Its own spec first.

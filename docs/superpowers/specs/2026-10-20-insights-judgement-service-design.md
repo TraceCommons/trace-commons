@@ -946,6 +946,11 @@ The addendum's daemon-side steps (1 digest builder, 2 judged fields and basis
 switch, 5 consent copy and opt-in) are independent of slices 1 to 8. Step 5
 must land before slice 9 ships to contributors.
 
+**What the owner decision on digest contents blocks.** The addendum's O1 (what
+leaves the machine) is open. Until it is decided, nothing that sends a digest
+merges: not the digest builder (#1525) and not slice 7 (the daemon client).
+Slices 1 to 6 and 8 carry no contributor data and may proceed.
+
 ## 12. Open questions for the owner
 
 1. **Interim production model.** Use `Qwen/Qwen3.8-27B` (cheapest `vllm` model
