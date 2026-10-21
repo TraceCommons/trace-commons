@@ -2451,6 +2451,8 @@ extension DaemonData {
         public let reviewer: Int
         public let noMajority: Int
         public let unpriced: Int
+        /// Absent from a daemon before the shared-type comparison: read as 0.
+        public let tooFewSessions: Int?
         public let tooFewEdits: Int
         public let mixTooDifferent: Int
 
@@ -2458,13 +2460,15 @@ extension DaemonData {
         public var reasons: [(reason: String, sessions: Int)] {
             [("unknown_facts", unknownFacts), ("automated", automated), ("delegated", delegated),
              ("capped", capped), ("routed", routed), ("reviewer", reviewer), ("no_majority", noMajority),
-             ("unpriced", unpriced), ("too_few_edits", tooFewEdits), ("mix_too_different", mixTooDifferent)]
+             ("unpriced", unpriced), ("too_few_sessions", tooFewSessions ?? 0), ("too_few_edits", tooFewEdits),
+             ("mix_too_different", mixTooDifferent)]
         }
 
         public enum CodingKeys: String, CodingKey {
             case automated, delegated, capped, routed, reviewer, unpriced
             case unknownFacts = "unknown_facts"
             case noMajority = "no_majority"
+            case tooFewSessions = "too_few_sessions"
             case tooFewEdits = "too_few_edits"
             case mixTooDifferent = "mix_too_different"
         }
