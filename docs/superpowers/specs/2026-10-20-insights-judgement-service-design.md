@@ -25,7 +25,9 @@ and reuses their code wherever it can.
    judgements until a daemon release, which is accepted. There is no signed
    measurement list.
 3. **Gateway attestation is verified at each service boot,** pinning the
-   quote-bound receipt keys. Every request's receipt is still verified.
+   quote-bound receipt keys. Every request's receipt is still verified. The
+   gateway's own quote is DCAP-verified at boot and its TLS key is pinned on
+   every connection (section 5, check 5).
 4. **The operator-wide monthly budget is $100,** in the measured compose. It
    sits above the $5 per account per month cap.
 5. **Pooled-tenant accounts stay excluded in v1** (the section 3 default).
@@ -606,6 +608,58 @@ callable in a production build only if all of these hold:
    `judgement_model_unattested`. The call is still metered, because NEAR AI
    still billed it.
 
+5. **The gateway that carries the call is attested, and its TLS key is
+   pinned on the connection** (owner decision 3; #1501 review point 2). The
+   cloud-api.near.ai gateway terminates the service's TLS and sees the
+   plaintext digest. A receipt cannot cover that hop: the model enclave signs
+   whatever the gateway forwarded. Without this check, a non-TEE proxy or a
+   mis-issued certificate would see every digest while every receipt still
+   verified.
+   - **At boot, before the listener binds:** fetch
+     `GET {gateway}/attestation/report?include_tls_fingerprint=true&signing_algo=ed25519&nonce=<fresh 32 bytes>`.
+     DCAP-verify `gateway_attestation.intel_quote` with the same verifier and
+     collateral path as check 3. Require the nonce at `report_data[32..64]`.
+     Require `report_data[0..32] = SHA-256(signing_address || spki_hash)`,
+     the fingerprint-mode binding in NEAR AI's verifier README
+     (`docs/operator/near-attestation-drill.md`, "The zero-padding
+     assertion"). Require the gateway's measurement to match
+     `TRACE_COMMONS_JUDGEMENT_NEAR_GATEWAY_MEASUREMENTS`, in the existing
+     `ExpectedMeasurements` syntax (`mrtd` + `mrconfigid` at least). Without
+     a measurement pin, a DCAP-valid quote proves only that some TDX guest
+     holds the TLS key, not that NEAR AI's gateway image does. The result is
+     a verified `spki_hash`.
+   - **On every connection:** the HTTP client the model adapter uses carries a
+     custom certificate verifier. It runs normal WebPKI validation **and**
+     requires SHA-256 of the leaf certificate's SubjectPublicKeyInfo to equal
+     the verified `spki_hash`. A connection that fails either check is closed
+     before any request byte is written, so nothing reaches an unverified
+     gateway. One client serves the model call, the receipt fetch and the
+     catalog fetch.
+   - **On a mismatch** (NEAR AI rotated its certificate key): stop sending,
+     re-run the boot fetch above, and adopt the new `spki_hash` only if a
+     fresh, DCAP-verified, measurement-pinned report binds it. Until then,
+     calls to every NEAR AI model are refused before any reservation with
+     `judgement_model_unattested`. Nothing is metered, because nothing was
+     sent.
+   - **Two facts are not verifiable from the tree, so they gate slice 5's
+     implementation of this check.** First, the response field that carries
+     `spki_hash` in fingerprint mode: every captured fixture is default mode,
+     and the drill asserts the zero padding. A live fingerprint-mode fixture is
+     captured before the code is written. Second, the client hook: the
+     verifier needs a direct `rustls` dependency in `trace-commons-server`.
+     `trace-commons-ingest` already declares
+     `rustls = { version = "0.23", default-features = false, features = ["ring"] }`,
+     so no package is added to the lockfile, but it is a new direct edge and
+     needs owner approval (open item O3). The slice confirms the reqwest
+     method that installs a preconfigured rustls config in the vendored
+     source before naming it
+     (`grep -rn use_preconfigured_tls ~/.cargo/registry/src/*/reqwest-0.12*/src/async_impl/client.rs`).
+   - **Until both land, a NEAR AI-hosted model cannot boot.** Slice 5 adds the
+     refusal: any model whose adapter calls NEAR AI refuses boot with
+     `missing_control:judgement_near_gateway_pin` unless the gateway check is
+     compiled in and configured. The mock and the development adapters do not
+     call NEAR AI and are unaffected.
+
 **What a verified receipt proves.** NEAR AI's enclave for `model_id`, holding a
 key that a DCAP-verified quote attests, signed the SHA-256 of these exact
 request and response bytes, and the receipt names `model_id`. So the digest
@@ -622,10 +676,11 @@ it.
   receipt for the response it received.
 - Anything about a gateway receipt's model. A gateway key is shared across
   every model; such receipts are refused.
-- What the gateway itself saw. The gateway terminates our TLS before the model
-  enclave. The TEE-to-TEE hop is an accepted boundary only while each hop is
-  attested (addendum, "The judgement service"); the gateway's own attestation
-  is not checked per request (open question 3).
+- What the gateway itself saw. Check 5 covers that hop separately: the
+  gateway's TLS key is bound in a DCAP-verified, measurement-pinned quote, and
+  every connection is pinned to it. So both hops are attested, as the
+  addendum requires ("The judgement service"). A receipt alone would not show
+  it.
 
 If the decision model ships without per-request receipts, it fails check 4 and
 cannot be used in production. The addendum's "the (i) must say so" applies
@@ -745,6 +800,9 @@ prompts, the digest, the claim, or NEAR AI response text.
 | Issuer public key absent or malformed | Boot refuses. |
 | Limiter volume absent, or ledger unreadable or missing with the marker present | Boot refuses. |
 | Catalog flag flips, or refresh stale over 24 h | That model's calls refused, `judgement_model_unattested`. |
+| NEAR AI gateway quote fails DCAP, its measurement is not pinned, its report data does not bind the nonce and `spki_hash`, or the fingerprint field is absent, at boot | Boot refuses. |
+| A NEAR AI-hosted model is configured but the gateway check is not compiled in or not configured | Boot refuses, `missing_control:judgement_near_gateway_pin`. |
+| A connection's leaf SPKI differs from the verified `spki_hash` | Connection closed before any request byte. Calls refused, nothing metered, until a fresh verified report binds the new key. |
 | Receipt absent, unverifiable, `gateway`, two-part, wrong model, or unpinned signer | Label discarded, call metered, `judgement_model_unattested`. |
 | `usage` absent | Reservation stands as the charge. |
 | Ledger write fails | The response is not sent; `judgement_saturated`. A service that cannot record spend does not spend. |
@@ -898,9 +956,7 @@ must land before slice 9 ships to contributors.
 2. **Production pin delivery.** Compiled-in pins mean every service upgrade
    pauses judgements until a daemon release. Is that acceptable, or should
    production measurements come from a list signed by an offline commons key?
-3. **Gateway attestation per request.** The gateway sees the digest in
-   transit. Should the service also verify the gateway's quote each boot
-   (cheap), or each request (one more fetch per call)?
+3. (Answered by owner decision 3; the check is section 5, check 5.)
 4. **Operator-wide monthly budget.** What figure? Unset refuses boot.
 5. **Pooled-tenant accounts.** Excluded in v1 (section 3). Keep that, or key
    them on a per-account identifier the issuer would have to add?
