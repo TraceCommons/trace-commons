@@ -46,11 +46,18 @@ The answers come from the user's own sessions, on their own machine.
 
 ## What's happening with Analyze
 
-Analyze currently asks you to **pick a session file by hand** (`~/.claude/projects/<folder>/<id>.jsonl`). Terminal users never see these files, so this flow is being removed.
+Analyze used to ask you to **pick a session file by hand** (`~/.claude/projects/<folder>/<id>.jsonl`). Terminal users never see these files, so **that flow is now removed** from this branch. The "Choose file" button and the "Source format" menu are gone.
 
-The replacement is **"Analyze & save" on any session in the Sessions feed**. The app already watches those sessions and knows their files, so nobody picks anything. Analyze becomes the list of what you've saved, with its assessment and evidence.
+It's replaced by **"Analyze & save" on a watched session in Insights > Sessions**. Open a row and press the button.
+- The daemon finds that session's file among the sessions it already watches, runs the same analysis, and saves it.
+- Analyze then opens the saved result, with its assessment and evidence.
+- It never runs on Never folders, nothing goes over the network, and no file path is sent to the app.
+- Analyze's empty state now says: "Open a trace in Sessions and choose Analyze & save."
 
-This replacement is still being built on a separate local branch and is **not in this push**.
+Known gaps:
+- With a custom `--insights-store` the button is hidden, because the daemon writes only the standard store.
+- The GTK client still has its own file picker.
+- The button hasn't been tried in the running app with real data yet. In sample data mode Sessions has no rows, so use real data to try it.
 
 ## Running it
 
