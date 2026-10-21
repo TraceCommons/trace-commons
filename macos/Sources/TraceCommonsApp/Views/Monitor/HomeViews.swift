@@ -401,20 +401,17 @@ private struct HomeOverview: View {
 
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
 /// label, the count and size, and the core's call to share (owner,
-/// 2026-10-20), over its icon as a watermark on the right, as the tiles'. Since 2026-10-20 it is on the
-/// standard card fill with a solid accent border (`borderWidth`), in place
-/// of the turning glow edge. The whole card is the button.
+/// 2026-10-20), over its icon as a watermark on the right, as the tiles'.
+/// It is on the standard card fill with no border, and a band of light
+/// crosses it from left to right now and then (`GlassCardShimmer`, owner,
+/// 2026-10-20; it had a solid accent border, and before that a turning
+/// glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
     let size: String?
     let detail: String?
     let action: () -> Void
-
-    /// The accent border's width.
-    static let borderWidth: CGFloat = 1.5
-    /// The border's colour: the accent, solid.
-    static var border: GlassRGBA { GlassTokens.Color.controlSelected }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
@@ -448,12 +445,12 @@ private struct HomeNotContributedCard: View {
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Its icon as the tiles' is: the card's watermark (owner,
-            // 2026-10-20).
+            // The shimmer over its icon, which is the card's watermark as
+            // the tiles' is, both behind the words (owner, 2026-10-20).
+            .glassCardShimmer()
             .glassCardWatermark(HomeStatIcons.uncontributed)
-            // The stat tiles' fill and hover, under a solid accent border.
+            // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
-            .overlay(shape.strokeBorder(Self.border.color, lineWidth: Self.borderWidth))
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
