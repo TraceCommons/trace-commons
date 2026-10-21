@@ -10,8 +10,10 @@ import TCShellCore
 /// core's (`MonitorEdgeRailCopy`, and the tables each tab already shows).
 struct EdgeRailView: View {
     let state: EdgeRailState
-    /// Asks the controller to resize the panel for the new state.
-    let onOpenChange: (Bool) -> Void
+    /// Asks the controller to open or close the rail, under the given
+    /// animation (`EdgeRailController.transition(to:)`, which sizes the
+    /// panel around the change).
+    let onOpenChange: (Bool, Animation?) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: AppModel
@@ -24,7 +26,7 @@ struct EdgeRailView: View {
     @State private var data: EdgeRailData
 
     @MainActor
-    init(state: EdgeRailState, data: EdgeRailData? = nil, onOpenChange: @escaping (Bool) -> Void) {
+    init(state: EdgeRailState, data: EdgeRailData? = nil, onOpenChange: @escaping (Bool, Animation?) -> Void) {
         self.state = state
         self._data = State(initialValue: data ?? EdgeRailData())
         self.onOpenChange = onOpenChange
@@ -58,8 +60,8 @@ struct EdgeRailView: View {
             if inside {
                 closing?.cancel()
                 closing = nil
-                if !state.open { setOpen(true) }
-            } else if state.open {
+                if !state.wanted { setOpen(true) }
+            } else if state.wanted {
                 closing = Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(300))
                     guard !Task.isCancelled else { return }
@@ -76,14 +78,11 @@ struct EdgeRailView: View {
         }
     }
 
+    /// Opens or closes the rail. The controller sequences it: the panel
+    /// grows before the rail draws into it, and shrinks after the rail has
+    /// gone (#1517).
     private func setOpen(_ open: Bool) {
-        // The panel grows before the rail draws into it, and shrinks after
-        // the rail has gone.
-        if open { onOpenChange(true) }
-        withAnimation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide)) {
-            state.open = open
-        }
-        if !open { onOpenChange(false) }
+        onOpenChange(open, reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide))
     }
 
     /// The closed rail: its handle on the edge (`GlassRailHandle`).

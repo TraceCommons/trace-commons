@@ -45,7 +45,10 @@ final class EdgeRailController {
     private func show() {
         guard panel == nil, let model else { return }
         let panel = EdgeRailPanel()
-        let root = EdgeRailView(state: state, onOpenChange: Self.deferred { [weak self] open in self?.place(open: open) })
+        let state = state
+        let root = EdgeRailView(state: state) { [weak self] open, animation in
+            Self.transition(to: open, state: state, animation: animation) { self?.place(open: $0) }
+        }
             .environmentObject(model)
             .tint(GlassTokens.Color.purpleSoft.color)
             // No focus ring drawn round controls (owner, 2026-10-11).
@@ -59,13 +62,14 @@ final class EdgeRailController {
         panel.contentView = Self.hostingView(root)
         self.panel = panel
         state.open = false
+        state.wanted = false
         place(open: false)
         panel.orderFrontRegardless()
         // A display arriving, leaving or changing resolution moves the edge.
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.place(open: self?.state.open ?? false) }
+            MainActor.assumeIsolated { self?.place(open: self?.placedOpen ?? false) }
         }
     }
 
@@ -75,6 +79,8 @@ final class EdgeRailController {
         panel?.orderOut(nil)
         panel = nil
         state.open = false
+        state.wanted = false
+        state.closing = 0
     }
 
     /// The rail's hosting view, which never sizes its window. The panel's
@@ -99,9 +105,67 @@ final class EdgeRailController {
         { open in DispatchQueue.main.async { MainActor.assumeIsolated { place(open) } } }
     }
 
+    /// Opens or closes the rail so that the panel's size never changes
+    /// while the rail's content is changing (#1517). The panel is the
+    /// controller's to size (`hostingView`), but a size change inside the
+    /// open or close animation still reached the window through
+    /// `NSHostingView.updateAnimatedWindowSize`, from `windowDidLayout`,
+    /// until AppKit's layout-loop guard threw and the app aborted -- with
+    /// the panel at its closed 4 x 240 pt.
+    ///
+    /// - Opening: the panel grows on the next turn (`deferred`), with the
+    ///   closed handle in it, which fills any size; the rail opens, under
+    ///   `animation`, on the turn after. The open rail never lays out in
+    ///   the hover zone.
+    /// - Closing: the rail closes now, under `animation`, at the open
+    ///   panel's size, and the panel shrinks on the turn after the close
+    ///   has finished. The closing rail never lays out in the hover zone.
+    ///
+    /// The last request wins: a step queued for a request since overtaken
+    /// (hovering back in while the rail closes) does nothing.
+    static func transition(
+        to open: Bool, state: EdgeRailState, animation: Animation?, place: @escaping @MainActor (Bool) -> Void
+    ) {
+        state.wanted = open
+        if open {
+            deferred { _ in
+                guard state.wanted else { return }
+                place(true)
+                deferred { _ in
+                    guard state.wanted else { return }
+                    withAnimation(animation) { state.open = true }
+                    // A close asked for from inside that write (the change
+                    // runs SwiftUI's update, and its hover handling, before
+                    // the write lands) was overwritten by it: close again.
+                    if !state.wanted { transition(to: false, state: state, animation: animation, place: place) }
+                }(true)
+            }(true)
+        } else {
+            // Only a close that takes the rail away has a transition to
+            // wait for; one asked for while the rail is already closed
+            // (or still opening) waits for any close still running.
+            let closes = state.open
+            if closes { state.closing += 1 }
+            withAnimation(animation, completionCriteria: .removed) {
+                state.open = false
+            } completion: {
+                if closes { state.closing = max(0, state.closing - 1) }
+                deferred { _ in
+                    guard !state.wanted, !state.open, state.closing == 0 else { return }
+                    place(false)
+                }(false)
+            }
+        }
+    }
+
+    /// The size the panel was last placed at, which a screen change keeps:
+    /// mid-close the panel is still open-sized while `state.open` is not.
+    private var placedOpen = false
+
     /// Moves the panel to the main display's right edge, at the size the
     /// rail's state needs.
     private func place(open: Bool) {
+        placedOpen = open
         guard let panel, let screen = NSScreen.screens.first else { return }
         let frame = EdgeRailGeometry.frame(open: open, visible: screen.visibleFrame)
         panel.setFrame(frame, display: true)
@@ -112,7 +176,16 @@ final class EdgeRailController {
 @Observable
 @MainActor
 final class EdgeRailState {
+    /// Whether the rail's content is open. Set only by
+    /// `EdgeRailController.transition(to:)`, after the panel has grown or
+    /// before it shrinks.
     var open = false
+    /// The open or close last asked for, which a queued step checks before
+    /// it runs.
+    @ObservationIgnored var wanted = false
+    /// Closes whose transition is still running: the panel shrinks only
+    /// once there are none.
+    @ObservationIgnored var closing = 0
     var peek: EdgeRailPeek = .home
 }
 

@@ -9,9 +9,13 @@ import XCTest
 /// from `NSHostingView.updateAnimatedWindowSize` inside `windowDidLayout`,
 /// through `-[NSNextStepFrame setFrameSize:]` -- the frame view of a
 /// borderless window. SwiftUI was resizing a borderless window to its
-/// content from inside that window's own layout. The edge rail had the
-/// same signature until #1402 took its sizing away from its hosting view;
-/// the menu-bar panel is the one borderless, SwiftUI-sized window left.
+/// content from inside that window's own layout. #1402 took the edge
+/// rail's sizing away from its hosting view and #1511 the menu-bar
+/// panel's, but the rail still crashed (#1517: the unified log names
+/// `EdgeRailPanel` at its closed 4 x 240 pt): its content opened and
+/// closed under an animation while the panel was at the other size, and
+/// `updateAnimatedWindowSize` is the animated path. The rail now sizes its
+/// panel around the change, never during it.
 ///
 /// There is no UI automation (no shell has any), so these pin the decision:
 /// pure frame logic, and the source shapes that keep every window frame
@@ -31,6 +35,7 @@ final class WindowResizeLoopTests: XCTestCase {
     static let threePaneSource = "TCDesign/Components/ThreePane.swift"
     static let monitorSource = "TraceCommonsApp/Views/MonitorWindowView.swift"
     static let railSource = "TraceCommonsApp/Views/EdgeRail/EdgeRailController.swift"
+    static let railViewSource = "TraceCommonsApp/Views/EdgeRail/EdgeRailView.swift"
 
     // MARK: The menu-bar panel's frame
 
@@ -143,6 +148,34 @@ final class WindowResizeLoopTests: XCTestCase {
         let panel = try Self.text(Self.panelSource)
         let pin = try XCTUnwrap(Self.block(after: "struct MenuBarTopEdgePin: NSViewRepresentable {", in: panel))
         XCTAssertTrue(pin.contains("GlassWindowFrame.onNextTurn"))
+    }
+
+    /// Only the rail's controller opens and closes the rail
+    /// (`EdgeRailController.transition(to:)`), which grows the panel before
+    /// the rail opens and shrinks it after the rail has closed (#1517). The
+    /// view writing `state.open` itself, under its own animation, is the
+    /// ordering that crashed.
+    func test_theRailViewLeavesOpeningToItsController() throws {
+        let view = try Self.text(Self.railViewSource)
+        XCTAssertFalse(view.contains("state.open ="), "the rail's view opens or closes the rail itself")
+        XCTAssertFalse(view.contains("withAnimation"), "the rail's view animates a change of the rail's size")
+        let controller = try Self.text(Self.railSource)
+        XCTAssertTrue(controller.contains("Self.transition(to: open, state: state, animation: animation)"))
+    }
+
+    /// The menu-bar panel's window is sized on the next turn from its
+    /// content's measured size (#1511), the same structure as the edge
+    /// rail's. What made the rail crash anyway (#1517) was a size change
+    /// inside an animation: the window's frame then went through
+    /// `NSHostingView.updateAnimatedWindowSize` in `windowDidLayout`. Nothing
+    /// in the panel animates today; an animated expand added later must
+    /// size the window around the animation, as the rail does, before this
+    /// pin is changed.
+    func test_theMenuBarPanelAnimatesNoSizeChange() throws {
+        let panel = try Self.text(Self.panelSource)
+        for animated in ["withAnimation", ".transition(", ".animation(", "matchedGeometryEffect"] {
+            XCTAssertFalse(panel.contains(animated), "MenuBarGlassPanel.swift uses \(animated) (#1517)")
+        }
     }
 
     // MARK: The breadcrumb
