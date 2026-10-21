@@ -648,8 +648,9 @@ callable in a production build only if all of these hold:
    a three-part receipt (`verdict.model == Some(model_id)`), and a signer in
    that model's pin set. A two-part or `gateway` receipt is refused: it binds
    no model. Any failure discards the label and returns
-   `judgement_model_unattested`. The call is still metered, because NEAR AI
-   still billed it.
+   `judgement_model_unattested`. That one call is still metered, because NEAR
+   AI billed it. A failure that means "the pins no longer match" also sets
+   the rotation latch (below), so it is the only such call.
 
 5. **The gateway that carries the call is attested, and its TLS key is
    pinned on the connection** (owner decision 3; #1501 review point 2). The
@@ -702,6 +703,29 @@ callable in a production build only if all of these hold:
      `missing_control:judgement_near_gateway_pin` unless the gateway check is
      compiled in and configured. The mock and the development adapters do not
      call NEAR AI and are unaffected.
+
+**The rotation latch** (#1501 review point 14; #1529 review point 1). NEAR AI
+does not announce a new provider-TEE key in advance, so its pins cannot be
+added before a rotation. Without a latch, every request after a rotation
+would reserve, make the paid call, settle, and only then fail check 4: up to
+six billed calls per request, draining every account's $5 and the operator's
+$100 until a redeploy.
+
+- The first receipt for a model that fails with an unpinned signer,
+  `NotProviderTee` or `WrongModel` sets a per-model latch on the production
+  check. So does a verified usage above the reservation (section 6).
+- The call check refuses a latched model **before reserving**, with
+  `judgement_model_unattested`. The next request makes no NEAR AI call and is
+  charged nothing.
+- The latch clears only when the pins change: at a boot whose pins the live
+  gateway report attests, or through the pin-update path, if the owner
+  chooses one (open decision S1, section 12).
+- Test: after one `SignerUnpinned`, the next `judge` makes no model call (the
+  mock's call count does not move) and charges nothing.
+  `an_unpinned_signer_is_refused_but_still_metered` keeps its first-call
+  assertion and gains this second-call one.
+- The drill reports a latched model as `judgement_model_latched`, a blocking
+  gap. That is the alert.
 
 **What a verified receipt proves.** NEAR AI's enclave for `model_id`, holding a
 key that a DCAP-verified quote attests, signed the SHA-256 of these exact
@@ -983,8 +1007,14 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
   refuse the new measurement until a release adds it. Ship that release, then
   drop the old measurement in a later release.
 - **Rotate.**
-  - NEAR AI model key: add the new key to `TRACE_COMMONS_JUDGEMENT_MODEL_KEY_PINS`
-    beside the old (a new measurement), then remove the old.
+  - NEAR AI model key. NEAR AI does not announce new keys ahead of time, so
+    they cannot be pinned in advance. **A rotation pauses judgements**: the
+    first failing receipt latches the model (section 5), the drill reports
+    `judgement_model_latched`, and nothing more is spent. Until open
+    decision S1 is answered, the recovery is to set the new key in
+    `TRACE_COMMONS_JUDGEMENT_MODEL_KEY_PINS`, redeploy (a new measurement),
+    and ship a daemon release carrying that measurement. Judgements stay
+    paused until the release reaches contributors.
   - Issuer key: list both keys in `TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS`
     during the overlap.
   - App id or KMS: a new signing address, a new limiter key, and a fresh
