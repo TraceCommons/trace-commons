@@ -9,9 +9,12 @@
 //! # What crosses the socket
 //!
 //! Counts, fixed snake_case labels and the declared model labels the engine
-//! (`insights::model_answers`) answers with. Money appears only as
-//! `figure.value` under `kind: "usd_micros"` on the `docs_cost` row; the one
-//! digest allowed is a shipped price table's `table_id`. No session
+//! (`insights::model_answers`) answers with. Money appears only on the
+//! `docs_cost` row, as `{kind: "usd_micros", value}`: in `figure` at API list
+//! prices, and in `near_ai_charge.median` as what NEAR AI charged, from the
+//! route tallies (owner decision D5, settled 2026-10-20), never added to the
+//! list-priced figure. The one digest allowed is a shipped price table's
+//! `table_id`. No session
 //! reference, path, folder or ranking word crosses. Labels are declared
 //! labels, not verified serving identities.
 
@@ -145,6 +148,54 @@ mod tests {
                 ));
             }
             f.run_generated(&sessions);
+            f
+        }
+
+        /// `docs_priced`, with three more Docs sessions on `SMALLER` sent
+        /// through NEAR AI: one charged 0.0125 USD, one 0.0375 USD over two
+        /// calls, one with a call the ledger did not charge.
+        fn docs_charged() -> Self {
+            let f = Self::docs_priced();
+            let sessions: Vec<(String, Vec<u8>)> = (0..3u64)
+                .map(|n| {
+                    (
+                        format!("PRIVATE-docs-near{n}.jsonl"),
+                        docs_session(&format!("PRIVATE-NEAR{n}"), SMALLER, 200 + n),
+                    )
+                })
+                .collect();
+            f.run_generated(&sessions);
+            let call = |id: i64, session: &str, usd: Option<f64>| crate::routing::RoutedExchange {
+                id: Some(id),
+                started_at: now() - Duration::minutes(30 - id),
+                client_session_id: Some(session.to_string()),
+                facade: "anthropic".to_string(),
+                path: Some("/v1/messages".to_string()),
+                backend: "SECRET-BACKEND".to_string(),
+                served_model: Some("PRIVATE-SERVED-glm".to_string()),
+                input_tokens: Some(100),
+                cache_read_tokens: Some(40),
+                cache_write_tokens: Some(0),
+                output_tokens: Some(10),
+                cost_usd: usd,
+                proof: Some(crate::routing::ProofStatus::Verified),
+                ..Default::default()
+            };
+            let ledger = crate::routing::FixedLedger::new(vec![
+                call(1, "PRIVATE-NEAR0", Some(0.0125)),
+                call(2, "PRIVATE-NEAR1", Some(0.025)),
+                call(3, "PRIVATE-NEAR1", Some(0.0125)),
+                call(4, "PRIVATE-NEAR2", Some(0.01)),
+                call(5, "PRIVATE-NEAR2", None),
+            ]);
+            f.pass
+                .fold_ledger(&|| true, &ledger, &mut Vec::new, now())
+                .unwrap();
+            assert_eq!(
+                f.pass.tallied_sessions_for_test(),
+                3,
+                "the calls were folded"
+            );
             f
         }
 
@@ -403,11 +454,77 @@ mod tests {
     }
 
     #[test]
+    fn the_near_ai_charge_crosses_as_its_own_figure() {
+        let f = Fixture::docs_charged();
+        let v = f.answers(&[], true);
+        let q4 = &v["rows"][3];
+        assert_eq!(q4["question"], "docs_cost");
+        let charge = serde_json::json!({
+            "basis": "near_ai_ledger",
+            "median": {"kind": "usd_micros", "value": 25_000},
+            "routed_sessions": 3,
+            "charge_unknown": 1,
+        });
+        assert_eq!(q4["near_ai_charge"], charge, "{v}");
+        // The routed sessions are out of the list-priced figures, which are
+        // those of the unrouted sessions alone.
+        assert_eq!(q4["left_out"]["routed"], 3);
+        let plain = Fixture::docs_priced().answers(&[], true);
+        for side in ["leader", "next"] {
+            assert_eq!(q4[side]["figure"], plain["rows"][3][side]["figure"]);
+            assert_eq!(q4[side]["sessions"], plain["rows"][3][side]["sessions"]);
+        }
+        assert_eq!(q4["leader"]["label"], SMALLER);
+        assert_eq!(q4["leader"]["near_ai_charge"], charge);
+        assert!(q4["next"]["near_ai_charge"].is_null());
+        assert!(plain["rows"][3]["near_ai_charge"].is_null());
+        for (ix, row) in v["rows"].as_array().unwrap().iter().enumerate() {
+            if ix != 3 {
+                assert!(row["near_ai_charge"].is_null(), "{row}");
+            }
+        }
+        // With the feed off no stored charge is read, as no route is.
+        let off = f.answers(&[], false);
+        assert!(off["rows"][3]["near_ai_charge"].is_null(), "{off}");
+    }
+
+    /// The ledger keeps calls for 24 hours. The charge is kept in the store
+    /// when it is folded, so it is still answered after the ledger has let
+    /// the calls go and the daemon has started again.
+    #[test]
+    fn the_near_ai_charge_outlives_the_ledger_and_a_restart() {
+        let f = Fixture::docs_charged();
+        let before = f.answers(&[], true)["rows"][3]["near_ai_charge"].clone();
+        assert!(before.is_object());
+        let empty = crate::routing::FixedLedger::new(Vec::new());
+        f.pass
+            .fold_ledger(&|| true, &empty, &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(f.answers(&[], true)["rows"][3]["near_ai_charge"], before);
+        let reopened = CounterPass::with_keys(
+            f.dir.path().join(COUNTER_ROWS_FILE),
+            Box::new(InMemoryDigestKeyStore::with_seed([3; 32])),
+        );
+        // The same seed loads the same key, as the keychain would.
+        reopened.keys_load_or_create_for_test();
+        let again = reopened.model_answers_value(true, &NeverFolders::NONE, true, true, now());
+        assert_eq!(again["rows"][3]["near_ai_charge"], before);
+        // The store holds the charge as integer micros, never the amount
+        // as the ledger wrote it, an id, the backend or a list price.
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(text.contains("\"usd_micros\":12500"), "charge kept");
+        for leak in ["0.0125", "PRIVATE-NEAR", "SECRET-BACKEND", "cost", "price"] {
+            assert!(!text.contains(leak), "{leak} in the store");
+        }
+    }
+
+    #[test]
     fn nothing_identifying_crosses() {
         let plain = Fixture::new();
         plain.run();
         let priced = Fixture::docs_priced();
-        for f in [&plain, &priced] {
+        let charged = Fixture::docs_charged();
+        for f in [&plain, &priced, &charged] {
             let value = f.answers(&[], true);
             let mut text = serde_json::to_string(&value).unwrap();
             // The pinned price tables' content digests are the one digest.
@@ -426,6 +543,8 @@ mod tests {
                 ".jsonl",
                 "README",
                 "SECRET-BACKEND",
+                "SERVED",
+                "glm",
                 "backend",
                 f.dir.path().to_str().unwrap(),
             ] {
@@ -479,7 +598,8 @@ mod tests {
         let plain = Fixture::new();
         plain.run();
         let priced = Fixture::docs_priced();
-        for f in [&plain, &priced] {
+        let charged = Fixture::docs_charged();
+        for f in [&plain, &priced, &charged] {
             let value = f.answers(&[], true);
             let mut hits = Vec::new();
             walk(&value, &mut Vec::new(), &mut hits);
@@ -498,6 +618,20 @@ mod tests {
                 for side in ["leader", "next"] {
                     assert_ne!(row[side]["figure"]["kind"], "usd_micros");
                 }
+            }
+        }
+        // The NEAR AI charge is money of the same kind, labelled, on the
+        // docs_cost row only.
+        let value = charged.answers(&[], true);
+        for row in value["rows"].as_array().unwrap() {
+            let charge = &row["near_ai_charge"];
+            if row["question"] == "docs_cost" {
+                assert_eq!(charge["basis"], "near_ai_ledger");
+                assert_eq!(charge["median"]["kind"], "usd_micros");
+                assert!(charge["median"]["value"].is_u64());
+                assert_eq!(charge["median"].as_object().unwrap().len(), 2);
+            } else {
+                assert!(charge.is_null(), "{row}");
             }
         }
     }
