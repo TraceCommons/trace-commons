@@ -207,6 +207,34 @@ fn a_decreasing_total_makes_that_turn_unknown_never_negative() {
     assert_eq!(turns[2].known_usage().unwrap().total(), 300);
 }
 
+/// A turn's counters must add up to what the running total grew by: when
+/// `last_token_usage` and the `total_token_usage` delta disagree, the turn's
+/// usage is unknown, never a silent partial.
+#[test]
+fn a_last_usage_that_disagrees_with_the_total_delta_is_unknown() {
+    let (e, _) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        tokens(1, 1_000, 900, 0, 0, 100),
+        // The total grew by 800; the last response claims 300.
+        tokens(2, 1_800, 250, 0, 0, 50),
+        // The total grew by 300 and the last response says 300.
+        tokens(3, 2_100, 250, 0, 0, 50),
+    ]);
+    let turns = &e.series.turns;
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[0].known_usage().unwrap().total(), 1_000);
+    assert!(turns[1].usage_unknown());
+    assert_eq!(turns[1].uncached_input, None);
+    assert_eq!(turns[2].known_usage().unwrap().total(), 300);
+
+    // The last response's own total must agree too.
+    let mut row = tokens(1, 1_000, 900, 0, 0, 100);
+    row["payload"]["info"]["last_token_usage"]["total_tokens"] = json!(700);
+    let (e, _) = scan(&[started(0), context(0, A, "never"), row]);
+    assert!(e.series.turns[0].usage_unknown());
+}
+
 #[test]
 fn each_turn_carries_the_model_of_the_turn_context_before_it() {
     let (e, f) = scan(&[
