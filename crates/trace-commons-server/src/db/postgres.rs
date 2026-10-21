@@ -298,6 +298,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_lines",
     "trace_payout_holds",
     "trace_payout_audit",
+    "trace_payout_reversal_hold_decisions",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1862,6 +1863,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         132,
         "payout_rails",
         include_str!("../../../../migrations/V132__payout_rails.sql"),
+    ),
+    // V133: one row per reversal event whose unpriced hold accrual opened,
+    // so a cleared hold is not reopened by the next run.
+    (
+        133,
+        "payout_reversal_hold_decisions",
+        include_str!("../../../../migrations/V133__payout_reversal_hold_decisions.sql"),
     ),
 ];
 
@@ -8173,6 +8181,7 @@ mod tests {
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V132__payout_rails.sql"),
+            include_str!("../../../../migrations/V133__payout_reversal_hold_decisions.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -8217,6 +8226,7 @@ mod tests {
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V132__payout_rails.sql"),
+            include_str!("../../../../migrations/V133__payout_reversal_hold_decisions.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),

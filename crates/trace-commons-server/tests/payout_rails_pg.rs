@@ -3350,6 +3350,122 @@ async fn an_unlocatable_reversal_holds_only_that_rail() {
     assert!(accruals(&fixture, &tenant, &rail_a).await.is_empty());
 }
 
+/// An operator clears a `payout_reversal_unpriced` hold; later accrual runs
+/// do not reopen it for the same reversal, but a new reversal that cannot
+/// be priced opens a fresh one.
+#[tokio::test]
+async fn a_cleared_reversal_hold_stays_cleared() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    link_principal(&fixture.owner, &tenant, accounts[0], &principal).await;
+    let rail_id = fresh_rail("hold-clear");
+    record_epoch(&fixture, &rail_id, "v1", 1, 1).await;
+    let (lost, later) = (Uuid::new_v4(), Uuid::new_v4());
+    for source in [lost, later] {
+        ledger_event(
+            &fixture.owner,
+            &tenant,
+            source,
+            &principal,
+            "2.0000",
+            "final",
+            None,
+        )
+        .await;
+    }
+    // Both settled by a batch's own list, neither carried by a line.
+    batch_with_sources(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now() - Duration::hours(1),
+        &[],
+        &[lost, later],
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-2.0000",
+        "reversed",
+        reversal_ref(lost),
+    )
+    .await;
+    let labels = || {
+        let fixture = &fixture;
+        let tenant = tenant.clone();
+        let rail_id = rail_id.clone();
+        let account = accounts[0];
+        async move {
+            fixture
+                .runtime
+                .open_payout_hold_labels(&tenant, account, &rail_id)
+                .await
+                .unwrap()
+        }
+    };
+    let hold_sets = || {
+        let fixture = &fixture;
+        let tenant = tenant.clone();
+        let rail_id = rail_id.clone();
+        async move {
+            fixture
+                .runtime
+                .payout_audit_actions(&tenant, &rail_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|action| *action == PayoutAuditAction::HoldSet)
+                .count()
+        }
+    };
+
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.holds_opened, 1);
+    assert_eq!(labels().await, vec!["payout_reversal_unpriced".to_owned()]);
+    assert!(
+        fixture
+            .runtime
+            .clear_payout_hold(
+                &tenant,
+                accounts[0],
+                &rail_id,
+                "payout_reversal_unpriced",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+
+    for _ in 0..2 {
+        let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+        assert_eq!(report.holds_opened, 0, "the cleared hold stays cleared");
+    }
+    assert!(labels().await.is_empty());
+    assert_eq!(hold_sets().await, 1, "no hold_set row per run");
+
+    // A new reversal that cannot be priced is a new decision.
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-2.0000",
+        "reversed",
+        reversal_ref(later),
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.holds_opened, 1);
+    assert_eq!(labels().await, vec!["payout_reversal_unpriced".to_owned()]);
+    assert_eq!(hold_sets().await, 2);
+}
+
 #[tokio::test]
 async fn rails_accrue_the_same_line_independently() {
     let Some(fixture) = fixture().await else {

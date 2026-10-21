@@ -919,6 +919,60 @@ impl PayoutStore for PgBackend {
         Ok(true)
     }
 
+    async fn open_payout_reversal_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        reversal_event_id: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let decided = tx
+            .execute(
+                "INSERT INTO trace_payout_reversal_hold_decisions
+                     (tenant_id, rail_id, reversal_event_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (tenant_id, rail_id, reversal_event_id) DO NOTHING",
+                &[&tenant, &rail.as_str(), &reversal_event_id],
+            )
+            .await?;
+        if decided == 0 {
+            // Decided on an earlier run: the hold is whatever it is now.
+            return Ok(false);
+        }
+        let opened = tx
+            .execute(
+                "INSERT INTO trace_payout_holds (tenant_id, hold_id, account_id, rail_id, label)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id, account_id, rail_id, label)
+                     WHERE cleared_at IS NULL DO NOTHING",
+                &[&tenant, &Uuid::new_v4(), &account, &rail.as_str(), &label],
+            )
+            .await?;
+        if opened > 0 {
+            insert_audit(
+                &tx,
+                tenant,
+                rail.as_str(),
+                PayoutAuditAction::HoldSet,
+                actor_ref_hash,
+                Some(account),
+                None,
+                None,
+                None,
+                Some(label),
+            )
+            .await?;
+        }
+        // The decision commits even when the hold was already open, so this
+        // event never reopens it after a clear.
+        tx.commit().await?;
+        Ok(opened > 0)
+    }
+
     async fn clear_payout_hold(
         &self,
         tenant: &str,

@@ -3374,6 +3374,21 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<bool, DatabaseError>;
 
+    /// Records, once per `(rail, reversal_event_id)`, accrual's decision to
+    /// hold `account` for a reversal it cannot price, and opens that hold
+    /// (with its audit row) only when the decision is new. A later run
+    /// finds the decision and leaves the hold as it is, so an operator's
+    /// clear stands. True if a hold was opened.
+    async fn open_payout_reversal_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        reversal_event_id: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
     /// Clears an open hold with an audit row; false if none was open.
     async fn clear_payout_hold(
         &self,

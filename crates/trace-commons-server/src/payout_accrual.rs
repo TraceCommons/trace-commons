@@ -116,6 +116,16 @@ pub struct AccrualInputs<'a> {
     pub epochs: &'a [PayoutRateEpoch],
 }
 
+/// A hold accrual asks for. A hold for a reversal it cannot price names
+/// that reversal, and opens at most once per reversal event: a cleared hold
+/// stays cleared on later runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlannedHold {
+    pub account: Uuid,
+    pub label: &'static str,
+    pub reversal_event_id: Option<Uuid>,
+}
+
 /// What accrual will write on one rail. `Debug` prints counts only.
 #[derive(Default, PartialEq, Eq)]
 pub struct AccrualPlan {
@@ -124,7 +134,7 @@ pub struct AccrualPlan {
     /// linked to their principal claims.
     pub claims: Vec<(String, Uuid)>,
     /// Accounts to hold on this rail, by label.
-    pub holds: Vec<(Uuid, &'static str)>,
+    pub holds: Vec<PlannedHold>,
     pub skipped: BTreeMap<&'static str, u64>,
 }
 
@@ -272,7 +282,11 @@ pub fn plan_rail_accruals(
                 // that pays a NEAR wallet holds the account and still
                 // accrues: a held account accrues as usual.
                 if let Some(account) = owner {
-                    plan.holds.push((account, "payout_near_wallet_unresolved"));
+                    plan.holds.push(PlannedHold {
+                        account,
+                        label: "payout_near_wallet_unresolved",
+                        reversal_event_id: None,
+                    });
                 }
             }
             let key = (batch.settlement_batch_id, line.credit_account_hash.clone());
@@ -345,7 +359,12 @@ pub fn plan_rail_accruals(
                 plan.skip("payout_reversal_unsettled");
                 continue;
             }
-            hold_reversal(&mut plan, inputs, &event.credit_account_ref);
+            hold_reversal(
+                &mut plan,
+                inputs,
+                &event.credit_account_ref,
+                event.credit_event_id,
+            );
             continue;
         };
         let key = (batch.settlement_batch_id, line.credit_account_hash.clone());
@@ -375,7 +394,7 @@ pub fn plan_rail_accruals(
             .map(|source| source.points_delta.as_str())
             .unwrap_or(event.points_delta.as_str());
         let Some(award) = magnitude_micros(amount) else {
-            hold_line_owner(&mut plan, owner);
+            hold_line_owner(&mut plan, owner, event.credit_event_id);
             continue;
         };
         let line_award =
@@ -446,18 +465,27 @@ pub fn plan_rail_accruals(
     Ok(plan)
 }
 
-fn hold_line_owner(plan: &mut AccrualPlan, owner: Option<Uuid>) {
+fn hold_line_owner(plan: &mut AccrualPlan, owner: Option<Uuid>, reversal_event_id: Uuid) {
     match owner {
-        Some(account) => plan.holds.push((account, PAYOUT_REVERSAL_UNPRICED)),
+        Some(account) => plan.holds.push(PlannedHold {
+            account,
+            label: PAYOUT_REVERSAL_UNPRICED,
+            reversal_event_id: Some(reversal_event_id),
+        }),
         None => plan.skip("payout_reversal_unpriced_unowned"),
     }
 }
 
 /// Holds the account a reversal row's principal (or account key) names.
-fn hold_reversal(plan: &mut AccrualPlan, inputs: &AccrualInputs<'_>, credit_account_ref: &str) {
+fn hold_reversal(
+    plan: &mut AccrualPlan,
+    inputs: &AccrualInputs<'_>,
+    credit_account_ref: &str,
+    reversal_event_id: Uuid,
+) {
     let owner = settlement_key_account_id(credit_account_ref)
         .or_else(|| inputs.principal_accounts.get(credit_account_ref).copied());
-    hold_line_owner(plan, owner);
+    hold_line_owner(plan, owner, reversal_event_id);
 }
 
 /// Runs accrual for one tenant on one rail and records the result.
@@ -543,13 +571,29 @@ pub async fn accrue_rail(
             .await
             .map_err(|_| AccrualError::Store)?;
     }
-    let holds: BTreeSet<(Uuid, &'static str)> = plan.holds.into_iter().collect();
-    for (account, label) in holds {
-        if payouts
-            .open_payout_hold(tenant, account, rail, label, actor_ref_hash)
-            .await
-            .map_err(|_| AccrualError::Store)?
-        {
+    let holds: BTreeSet<PlannedHold> = plan.holds.into_iter().collect();
+    for hold in holds {
+        let opened = match hold.reversal_event_id {
+            Some(reversal) => {
+                payouts
+                    .open_payout_reversal_hold(
+                        tenant,
+                        hold.account,
+                        rail,
+                        reversal,
+                        hold.label,
+                        actor_ref_hash,
+                    )
+                    .await
+            }
+            None => {
+                payouts
+                    .open_payout_hold(tenant, hold.account, rail, hold.label, actor_ref_hash)
+                    .await
+            }
+        }
+        .map_err(|_| AccrualError::Store)?;
+        if opened {
             report.holds_opened += 1;
         }
     }
@@ -937,7 +981,14 @@ mod tests {
             ),
         ];
         let planned = plan(&batches, &events, &HashMap::new());
-        assert_eq!(planned.holds, vec![(account, PAYOUT_REVERSAL_UNPRICED)]);
+        assert_eq!(
+            planned
+                .holds
+                .iter()
+                .map(|hold| (hold.account, hold.label))
+                .collect::<Vec<_>>(),
+            vec![(account, PAYOUT_REVERSAL_UNPRICED)]
+        );
         assert!(
             planned
                 .writes
@@ -1036,7 +1087,14 @@ mod tests {
         let mut settled = batch(TraceCreditSettlementBatchStatus::Finalized, Vec::new());
         settled.source_credit_event_ids = vec![credited];
         let planned = plan(&[settled], &events, &principals);
-        assert_eq!(planned.holds, vec![(account, PAYOUT_REVERSAL_UNPRICED)]);
+        assert_eq!(
+            planned
+                .holds
+                .iter()
+                .map(|hold| (hold.account, hold.label))
+                .collect::<Vec<_>>(),
+            vec![(account, PAYOUT_REVERSAL_UNPRICED)]
+        );
         assert!(planned.writes.is_empty());
     }
 
