@@ -351,6 +351,32 @@ fn apply_patch_hunks_count_edits_and_feed_undone() {
     assert_eq!(f.shape.lines_added, None);
 }
 
+/// Edits and undone count one unit, the patch's file section: a section of
+/// three hunks that a later patch restores hunk by hunk is one edit undone.
+#[test]
+fn a_multi_hunk_section_restored_whole_is_one_edit_undone() {
+    let forward = "*** Begin Patch\n*** Update File: src/x.rs\n@@\n-a\n+b\n@@\n-c\n+d\n@@\n-e\n+f\n*** End Patch\n";
+    let back = "*** Begin Patch\n*** Update File: src/x.rs\n@@\n-b\n+a\n@@\n-d\n+c\n@@\n-f\n+e\n*** End Patch\n";
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        patch_call(1, "p1", forward),
+        output(2, "p1", "Exit code: 0"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+        started(10),
+        context(10, A, "never"),
+        patch_call(11, "p2", back),
+        output(12, "p2", "Exit code: 0"),
+        tokens(13, 20, 5, 0, 0, 5),
+        complete(14),
+    ]);
+    let a = model(&e, &f, A);
+    assert_eq!(a.edits, Some(2));
+    assert_eq!(a.undone, Some(1));
+    assert!(a.undone <= a.edits);
+}
+
 #[test]
 fn codex_denied_is_unknown_in_every_mode() {
     for policy in ["never", "on-request", "untrusted"] {
