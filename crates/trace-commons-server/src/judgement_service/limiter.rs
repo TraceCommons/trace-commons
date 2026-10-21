@@ -229,10 +229,11 @@ impl Limiter {
         now: i64,
     ) -> Result<Reservation, JudgementRefusal> {
         // An unrepresentable month is not a month any budget covers.
-        let month = month_index(now).ok_or(JudgementRefusal::OperatorBudgetExhausted)?;
+        let now_month = month_index(now).ok_or(JudgementRefusal::OperatorBudgetExhausted)?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let before = state.clone();
-        roll_month(&mut state, month);
+        roll_month(&mut state, now_month);
+        let month = state.month;
 
         let account_spent = state.accounts.get(account.as_bytes()).copied().unwrap_or(0);
         let account_after = account_spent
@@ -338,7 +339,7 @@ impl Limiter {
     /// What the account has spent this month. For tests and the drill.
     pub fn account_spent_nanousd(&self, account: &AccountKey, now: i64) -> u64 {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if Some(state.month) != month_index(now) {
+        if is_behind(&state, now) {
             return 0;
         }
         state.accounts.get(account.as_bytes()).copied().unwrap_or(0)
@@ -347,7 +348,7 @@ impl Limiter {
     /// What the operator has spent this month.
     pub fn operator_spent_nanousd(&self, now: i64) -> u64 {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if Some(state.month) != month_index(now) {
+        if is_behind(&state, now) {
             return 0;
         }
         state.operator_spent_nanousd
@@ -355,14 +356,22 @@ impl Limiter {
 }
 
 /// Drop every figure from before `month`. The ledger never holds more than
-/// one month.
+/// one month, and it only rolls forward: a clock that steps back across the
+/// 1st keeps charging the later month rather than reopening an empty one.
 fn roll_month(state: &mut LedgerState, month: u32) {
-    if state.month != month {
+    if month > state.month {
         *state = LedgerState {
             month,
             ..LedgerState::default()
         };
     }
+}
+
+/// Whether the ledger's month is before `now`'s, so its figures are last
+/// month's and nothing is spent yet this month. An unrepresentable `now` is
+/// not behind: the figures stand.
+fn is_behind(state: &LedgerState, now: i64) -> bool {
+    month_index(now).is_some_and(|month| month > state.month)
 }
 
 #[cfg(test)]
@@ -724,6 +733,25 @@ pub(crate) mod tests {
             zero.remaining_bucket(&account, NOW),
             SpendBucket::UnderTenth
         );
+    }
+
+    #[test]
+    fn a_clock_stepping_back_a_month_never_resets_spend() {
+        let limiter = limiter(Arc::new(MemoryStore::default()));
+        let account = keys().account_key("near-a");
+        let cap = caps().account_nanousd();
+        let r = limiter
+            .reserve(&account, cap, NEXT_MONTH)
+            .expect("reserves");
+        limiter.settle(r, None).expect("settles");
+        // The clock steps back across the 1st: last month's ledger must not
+        // come back as an empty one.
+        assert_eq!(
+            limiter.reserve(&account, 1, NEXT_MONTH - 1).unwrap_err(),
+            JudgementRefusal::AccountBudgetExhausted
+        );
+        assert_eq!(limiter.account_spent_nanousd(&account, NEXT_MONTH - 1), cap);
+        assert_eq!(limiter.operator_spent_nanousd(NEXT_MONTH - 1), cap);
     }
 
     #[test]
