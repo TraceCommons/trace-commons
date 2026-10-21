@@ -1185,6 +1185,8 @@ mod tests {
     /// quote (TDX v4: a 48-byte header, then the TD report body with
     /// `report_data` at its offset 520) and reports `tcb_status`. Every other
     /// step of [`attest_model_pins`] runs as in production.
+    /// The offset is pinned by `pins_every_verified_quote_binds_are_accepted`:
+    /// read from anywhere else, the nonce would not match and it would fail.
     fn trusting_verifier(
         tcb_status: &'static str,
     ) -> impl Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync {
