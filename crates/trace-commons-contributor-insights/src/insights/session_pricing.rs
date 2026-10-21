@@ -1195,4 +1195,75 @@ mod tests {
         // unpriced rather than getting a rate nobody published.
         assert_eq!(price("gpt-5.5-pro", [1_000, 0, 500], 0), None);
     }
+
+    /// Every model the Anthropic page prices is in the table, each with both
+    /// cache-write lifetimes, under the id a Claude Code transcript names
+    /// (a dated id loses its stamp in `normalize_model_label`). Micros are
+    /// 1,000 uncached x input + 10,000 read x hit + 2,000 5-minute write +
+    /// 3,000 1-hour write + 500 output, each at the page's rate.
+    #[test]
+    fn every_model_on_the_anthropic_page_is_priced_with_both_write_lifetimes() {
+        use crate::insights::pricing_catalog::production_pricing_catalog;
+
+        let catalog = production_pricing_catalog();
+        let from = catalog.tables()[0].entries[0].effective_from;
+        let price = |label: &str| {
+            let mut record = turn(
+                0,
+                Some(0),
+                Some(0),
+                [Some(1_000), Some(10_000), Some(500)],
+                Some(CacheWrite::Split {
+                    m5: 2_000,
+                    h1: 3_000,
+                }),
+            );
+            record.at = Some(from);
+            price_session(
+                &catalog,
+                PricingAccounting::ClaudeCode,
+                &labels(&[label]),
+                &[record],
+            )
+            .total_usd_micros
+        };
+        let expected: [(&str, u64); 20] = [
+            ("claude-fable-5-1", 10_000 + 2_500 + 25_000 + 60_000 + 25_000),
+            ("claude-opus-5-5", 4_000 + 2_000 + 10_000 + 24_000 + 10_000),
+            ("claude-sonnet-5-5", 2_000 + 1_000 + 5_000 + 12_000 + 5_000),
+            ("claude-haiku-5-5", 100 + 100 + 250 + 600 + 250),
+            ("claude-mythos-5-1", 10_000 + 2_500 + 25_000 + 60_000 + 25_000),
+            ("claude-fable-5", 10_000 + 10_000 + 25_000 + 60_000 + 25_000),
+            ("claude-mythos-5", 10_000 + 10_000 + 25_000 + 60_000 + 25_000),
+            ("claude-opus-5", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
+            ("claude-opus-4-8", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
+            ("claude-opus-4-7", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
+            ("claude-opus-4-6", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
+            ("claude-opus-4-5", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
+            ("claude-opus-4-1", 15_000 + 15_000 + 37_500 + 90_000 + 37_500),
+            ("claude-opus-4", 15_000 + 15_000 + 37_500 + 90_000 + 37_500),
+            ("claude-sonnet-5", 2_000 + 2_000 + 5_000 + 12_000 + 5_000),
+            ("claude-sonnet-4-6", 3_000 + 3_000 + 7_500 + 18_000 + 7_500),
+            ("claude-sonnet-4-5", 3_000 + 3_000 + 7_500 + 18_000 + 7_500),
+            ("claude-sonnet-4", 3_000 + 3_000 + 7_500 + 18_000 + 7_500),
+            ("claude-haiku-4-5", 1_000 + 1_000 + 2_500 + 6_000 + 2_500),
+            ("claude-3-5-haiku", 800 + 800 + 2_000 + 4_800 + 2_000),
+        ];
+        for (label, micros) in expected {
+            assert_eq!(price(label), Some(micros), "{label}");
+        }
+        // Dated ids from the model IDs page normalize onto the same entries.
+        assert_eq!(price("claude-haiku-4-5-20251001"), Some(13_000));
+        assert_eq!(price("claude-opus-4-1-20250805"), Some(195_000));
+        assert_eq!(price("claude-3-5-haiku-20241022"), Some(10_400));
+        // The table covers exactly these models: Haiku 5.5 has two entries
+        // (one per prompt band), every other model one.
+        let in_table = catalog.tables()[0]
+            .entries
+            .iter()
+            .map(|entry| entry.model.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(in_table.len(), expected.len());
+        assert_eq!(catalog.tables()[0].entries.len(), expected.len() + 1);
+    }
 }
