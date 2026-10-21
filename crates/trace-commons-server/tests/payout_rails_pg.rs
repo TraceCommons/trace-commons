@@ -89,7 +89,16 @@ async fn fixture() -> Option<Fixture> {
              ALTER ROLE {RUNTIME_LOGIN} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
              GRANT trace_ingest_runtime TO {RUNTIME_LOGIN} WITH INHERIT TRUE;
              GRANT trace_payout_enumerator TO {RUNTIME_LOGIN} WITH INHERIT FALSE, SET TRUE;
-             GRANT trace_payout_config_writer TO {RUNTIME_LOGIN} WITH INHERIT FALSE, SET TRUE;"
+             GRANT trace_payout_config_writer TO {RUNTIME_LOGIN} WITH INHERIT FALSE, SET TRUE;
+             -- Accrual reads settled batches, the credit ledger and the
+             -- principal links, and the principal resolve upserts the tenant
+             -- row first. Those tables predate V62, so the runtime group
+             -- reaches them through the pilot's table-wide V62 grant
+             -- (support/pilot_runtime_grants.rs), which a database migrated
+             -- straight to head lacks. This is the part of it accrual uses.
+             GRANT SELECT ON trace_credit_settlement_batches, trace_credit_ledger,
+                 trace_account_principals TO trace_ingest_runtime;
+             GRANT SELECT, INSERT, UPDATE ON trace_tenants TO trace_ingest_runtime;"
         )))
         .await
         .expect("provision the runtime login");
@@ -878,14 +887,26 @@ async fn accrual_inserts_are_idempotent_per_rail() {
     );
     assert_eq!(
         store
-            .claim_payout_accruals(&tenant, &principal_hash, accounts[0], ACTOR)
+            .claim_payout_accruals(
+                &tenant,
+                &rail("near_ai"),
+                &principal_hash,
+                accounts[0],
+                ACTOR
+            )
             .await
             .unwrap(),
         1
     );
     assert_eq!(
         store
-            .claim_payout_accruals(&tenant, &principal_hash, Uuid::new_v4(), ACTOR)
+            .claim_payout_accruals(
+                &tenant,
+                &rail("near_ai"),
+                &principal_hash,
+                Uuid::new_v4(),
+                ACTOR
+            )
             .await
             .unwrap(),
         0,
@@ -1887,7 +1908,7 @@ async fn an_owned_accrual_keeps_its_owner() {
         .unwrap();
     assert_eq!(
         store
-            .claim_payout_accruals(&tenant, &unowned, accounts[1], ACTOR)
+            .claim_payout_accruals(&tenant, &rail("near_ai"), &unowned, accounts[1], ACTOR)
             .await
             .unwrap(),
         1
@@ -2340,5 +2361,977 @@ async fn an_accrual_names_a_recorded_rate_epoch() {
     assert!(
         format!("{error:?}").contains("trace_payout_accruals_rate_epoch"),
         "{error:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rate epochs and accrual (spec section 3 "Rate source", section 4 "Rate",
+// "Accrual", "Reversals"). Rate epochs are deployment-wide and immutable,
+// and the fixture pins v1 = 1/1 on near_ai, test_keyed and max_rail for
+// every test, so every test below that records an epoch does it on a rail
+// of its own. Rates are synthetic.
+// ---------------------------------------------------------------------------
+
+use chrono::{DateTime, Duration, Utc};
+use trace_commons_server::db::PayoutAccrual;
+use trace_commons_server::payout_accrual::{AccrualReport, accrue_rail};
+use trace_commons_server::payout_rate::{
+    PayoutMode, PayoutRateError, RailRateSource, RateEpochAtBoot, near_ai_rate_epoch_at_boot,
+    record_rate_epoch,
+};
+use trace_commons_server::trace_corpus_storage::{
+    TraceCreditAccountSettlementLineItem, TraceCreditSettlementNearStatus,
+};
+
+/// A rail id no other test uses.
+fn fresh_rail(prefix: &str) -> RailId {
+    rail(&format!(
+        "{prefix}-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    ))
+}
+
+struct FixedRate(Option<RailRate>);
+
+impl RailRateSource for FixedRate {
+    fn current(&self) -> Option<RailRate> {
+        self.0.clone()
+    }
+}
+
+async fn record_epoch(fixture: &Fixture, rail_id: &RailId, version: &str, num: u128, den: u128) {
+    let outcome = record_rate_epoch(
+        &fixture.runtime,
+        rail_id,
+        &FixedRate(Some(RailRate::new(version, num, den).unwrap())),
+    )
+    .await
+    .expect("record the epoch");
+    assert_eq!(outcome, RateEpochAtBoot::Recorded);
+}
+
+async fn observed_at(fixture: &Fixture, rail_id: &RailId, version: &str) -> DateTime<Utc> {
+    fixture
+        .runtime
+        .payout_rate_epochs(rail_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|epoch| epoch.rate.version() == version)
+        .expect("the epoch")
+        .observed_at
+}
+
+fn account_ref(account: Uuid) -> String {
+    format!("account:{account}")
+}
+
+fn item(
+    credit_account_ref: &str,
+    micros: i64,
+    events: &[Uuid],
+    hold: Option<&str>,
+) -> TraceCreditAccountSettlementLineItem {
+    TraceCreditAccountSettlementLineItem {
+        credit_account_ref: credit_account_ref.to_owned(),
+        credit_account_hash: sha(&format!("credit-account:{credit_account_ref}")),
+        settled_credit_delta_micros: micros,
+        source_credit_event_ids: events.to_vec(),
+        source_submission_ids: Vec::new(),
+        source_list_hash: sha(&format!("items:{credit_account_ref}:{events:?}")),
+        near_status: TraceCreditSettlementNearStatus::Disabled,
+        near_outbox_id: None,
+        near_payout_hold_reason: hold.map(str::to_owned),
+    }
+}
+
+/// A settlement batch with real line items, created as the owner, with an
+/// explicit status and creation time.
+async fn batch_with_lines(
+    owner: &PgBackend,
+    tenant: &str,
+    status: &str,
+    created_at: DateTime<Utc>,
+    lines: &[TraceCreditAccountSettlementLineItem],
+) -> Uuid {
+    let batch = Uuid::new_v4();
+    let events: Vec<Uuid> = lines
+        .iter()
+        .flat_map(|line| line.source_credit_event_ids.iter().copied())
+        .collect();
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_credit_settlement_batches (
+             tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+             source_credit_event_ids, source_list_hash, settled_credit_points,
+             settled_credit_micros, line_items_json, actor_principal_ref, created_at
+         ) VALUES ($1, $2, 'test', $3, $4, $5, $6, '1', 1000000, $7, 'operator', $8)",
+        &[
+            &tenant,
+            &batch,
+            &status,
+            &sha(&format!("reason:{batch}")),
+            &events,
+            &sha(&format!("list:{batch}")),
+            &serde_json::to_value(lines).unwrap(),
+            &created_at,
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    batch
+}
+
+/// A credit ledger row (with the submission it needs), created as the owner.
+async fn ledger_event(
+    owner: &PgBackend,
+    tenant: &str,
+    event_id: Uuid,
+    principal: &str,
+    points: &str,
+    settlement_state: &str,
+    external_ref: Option<String>,
+) {
+    let submission = Uuid::new_v4();
+    let trace = Uuid::new_v4();
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_submissions (
+             tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+             consent_policy_version, retention_policy_id, status, privacy_risk,
+             redaction_pipeline_version, redaction_hash
+         ) VALUES ($1, $2, $3, $4, 'v1', 'v1', 'test', 'accepted', 'low', 'test', $5)",
+        &[&tenant, &submission, &trace, &principal, &"a".repeat(64)],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_credit_ledger (
+             tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+             event_type, points_delta, reason, external_ref, actor_principal_ref,
+             actor_role, settlement_state
+         ) VALUES ($1, $2, $3, $4, $5, 'accepted', $6, 'fixture', $7, 'operator',
+                   'admin', $8)",
+        &[
+            &tenant,
+            &event_id,
+            &submission,
+            &trace,
+            &principal,
+            &points,
+            &external_ref,
+            &settlement_state,
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+fn reversal_ref(event: Uuid) -> Option<String> {
+    Some(format!("revocation_credit_reversal:{event}"))
+}
+
+/// Links `principal` to `account` in `trace_account_principals`, as the owner.
+async fn link_principal(owner: &PgBackend, tenant: &str, account: Uuid, principal: &str) {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "DELETE FROM trace_account_principals WHERE tenant_id = $1 AND principal_ref = $2",
+        &[&tenant, &principal],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant, &account, &principal],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn accrue(
+    fixture: &Fixture,
+    tenant: &str,
+    rail_id: &RailId,
+    instrument: &str,
+) -> AccrualReport {
+    accrue_rail(
+        &fixture.runtime,
+        &fixture.runtime,
+        tenant,
+        rail_id,
+        &InstrumentId::new(instrument).unwrap(),
+        ACTOR,
+    )
+    .await
+    .expect("accrue the rail")
+}
+
+async fn accruals(fixture: &Fixture, tenant: &str, rail_id: &RailId) -> Vec<PayoutAccrual> {
+    fixture
+        .runtime
+        .payout_accruals(tenant, rail_id)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_changed_rate_under_one_version_refuses_boot() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let rail_id = fresh_rail("boot");
+    let source = |num| FixedRate(Some(RailRate::new("table-1", num, 1_000_000).unwrap()));
+    assert_eq!(
+        record_rate_epoch(&fixture.runtime, &rail_id, &source(2_000_000_000)).await,
+        Ok(RateEpochAtBoot::Recorded)
+    );
+    assert_eq!(
+        record_rate_epoch(&fixture.runtime, &rail_id, &source(2_000_000_000)).await,
+        Ok(RateEpochAtBoot::AlreadyRecorded),
+        "the same rate under the same version boots"
+    );
+    assert_eq!(
+        record_rate_epoch(&fixture.runtime, &rail_id, &source(3_000_000_000)).await,
+        Err(PayoutRateError::VersionConflict),
+        "a re-priced version refuses boot"
+    );
+    assert_eq!(
+        PayoutRateError::VersionConflict.label(),
+        "payout_rate_version_conflict"
+    );
+    let epochs = fixture.runtime.payout_rate_epochs(&rail_id).await.unwrap();
+    assert_eq!(epochs.len(), 1);
+    assert_eq!(epochs[0].rate.numerator(), 2_000_000_000, "unchanged");
+
+    // Through the NEAR AI boot hook: the fixture recorded near_ai v1 = 1/1.
+    // A settlement table that reuses version v1 at another rate refuses boot
+    // and records nothing.
+    let table: trace_commons_protocol::settlement_estimate::SettlementEstimateTable =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "features_version": "lef1",
+            "version": "v1",
+            "pricing_version": "pricing-test",
+            "instrument_id": "trace_credit",
+            "atomic_units_per_credit": 1_000_000,
+            "usd_micros_per_credit": 7,
+            "published_at": "2026-10-20T00:00:00Z",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "cut_offs": [5.0],
+            "tiers": [
+                {"mean_atomic_units": 1_000_000, "withheld_share_micros": 300_000},
+                {"mean_atomic_units": 4_000_000, "withheld_share_micros": 100_000}
+            ],
+            "aggregate_band": {"low_ratio_micros": 600_000, "high_ratio_micros": 1_500_000},
+            "fit_rows": 40
+        }))
+        .unwrap();
+    let before = fixture
+        .runtime
+        .payout_rate_epochs(&RailId::near_ai())
+        .await
+        .unwrap();
+    for mode in [PayoutMode::DryRun, PayoutMode::Live] {
+        assert_eq!(
+            near_ai_rate_epoch_at_boot(mode, Some(&table), Some(&fixture.runtime)).await,
+            Err(PayoutRateError::VersionConflict)
+        );
+    }
+    assert_eq!(
+        near_ai_rate_epoch_at_boot(PayoutMode::Disabled, Some(&table), Some(&fixture.runtime))
+            .await,
+        Ok(None),
+        "a disabled rail records nothing and so cannot conflict"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .payout_rate_epochs(&RailId::near_ai())
+            .await
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn epochs_cannot_be_backdated() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let rail_id = fresh_rail("backdate");
+    let clock = || async {
+        let client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+        client
+            .query_one("SELECT clock_timestamp()", &[])
+            .await
+            .unwrap()
+            .get::<_, DateTime<Utc>>(0)
+    };
+    let before = clock().await;
+    record_epoch(&fixture, &rail_id, "v1", 1, 1).await;
+    let after = clock().await;
+    let observed = observed_at(&fixture, &rail_id, "v1").await;
+    assert!(
+        before <= observed && observed <= after,
+        "observed_at is the database clock at the insert"
+    );
+
+    // Not even the writer role can name its own observed_at.
+    let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute("SET LOCAL ROLE trace_payout_config_writer")
+        .await
+        .unwrap();
+    let error = tx
+        .execute(
+            "INSERT INTO trace_payout_rate_epochs
+                 (rail_id, version, numerator, denominator, observed_at)
+             VALUES ($1, 'v0', 1, 1, now() - interval '30 days')",
+            &[&rail_id.as_str()],
+        )
+        .await
+        .expect_err("a backdated epoch");
+    assert!(is_permission_denied(&error), "{error}");
+}
+
+#[tokio::test]
+async fn a_batch_is_priced_at_the_epoch_in_force_at_its_time() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("epoch");
+    record_epoch(&fixture, &rail_id, "v1", 2, 1).await;
+    let first = observed_at(&fixture, &rail_id, "v1").await;
+    record_epoch(&fixture, &rail_id, "v2", 3, 1).await;
+    let second = observed_at(&fixture, &rail_id, "v2").await;
+    assert!(first < second);
+
+    let at_first = batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        first,
+        &[item(&account_ref(accounts[0]), 100, &[], None)],
+    )
+    .await;
+    let after_second = batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        second + Duration::seconds(1),
+        &[item(&account_ref(accounts[0]), 1_000, &[], None)],
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.credits_inserted, 2);
+
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    let priced = |batch: Uuid| {
+        rows.iter()
+            .find(|row| row.settlement_batch_id == batch)
+            .map(|row| (row.rate_version.clone(), row.rail_units.get()))
+            .expect("an accrual for the batch")
+    };
+    assert_eq!(priced(at_first), ("v1".to_owned(), 200));
+    assert_eq!(priced(after_second), ("v2".to_owned(), 3_000));
+    assert!(rows.iter().all(|row| row.account_id == Some(accounts[0])));
+}
+
+#[tokio::test]
+async fn a_batch_older_than_the_first_epoch_uses_the_first() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("first");
+    record_epoch(&fixture, &rail_id, "v1", 5, 1).await;
+    let first = observed_at(&fixture, &rail_id, "v1").await;
+    record_epoch(&fixture, &rail_id, "v2", 7, 1).await;
+    let batch = batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        first - Duration::days(30),
+        &[item(&account_ref(accounts[0]), 10, &[], None)],
+    )
+    .await;
+    accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].settlement_batch_id, batch);
+    assert_eq!(rows[0].rate_version, "v1");
+    assert_eq!(rows[0].rail_units.get(), 50);
+}
+
+#[tokio::test]
+async fn a_rail_without_an_epoch_accrues_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("norate");
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[item(&account_ref(accounts[0]), 10, &[], None)],
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert!(report.no_rate_epoch);
+    assert_eq!(report.credits_inserted, 0);
+    assert!(accruals(&fixture, &tenant, &rail_id).await.is_empty());
+}
+
+#[tokio::test]
+async fn only_finalized_positive_lines_accrue() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("final");
+    record_epoch(&fixture, &rail_id, "v1", 1, 1).await;
+    let owner_ref = account_ref(accounts[0]);
+    let now = Utc::now();
+    for status in ["dry_run", "failed"] {
+        batch_with_lines(
+            &fixture.owner,
+            &tenant,
+            status,
+            now,
+            &[item(&owner_ref, 10, &[], None)],
+        )
+        .await;
+    }
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        now,
+        &[
+            item(&owner_ref, 0, &[], None),
+            item("principal-negative", -5, &[], None),
+        ],
+    )
+    .await;
+    let paid = batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        now,
+        &[item(&owner_ref, 9, &[], None)],
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.credits_inserted, 1);
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].settlement_batch_id, paid);
+    assert_eq!(rows[0].award_units.get(), 9);
+}
+
+#[tokio::test]
+async fn a_bare_principal_line_accrues_unowned_and_is_claimed_when_linked() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("bare");
+    let other = fresh_rail("bare-other");
+    record_epoch(&fixture, &rail_id, "v1", 4, 1).await;
+    record_epoch(&fixture, &other, "v1", 1, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[item(&principal, 25, &[], None)],
+    )
+    .await;
+
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!((report.credits_inserted, report.claimed), (1, 0));
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].account_id, None, "owed to nobody yet");
+    let owed = fixture
+        .runtime
+        .payout_owed(&tenant, accounts[0], &rail_id)
+        .await
+        .unwrap();
+    assert_eq!(owed.net(), Some(0));
+
+    accrue(&fixture, &tenant, &other, "test_units").await;
+
+    link_principal(&fixture.owner, &tenant, accounts[0], &principal).await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!((report.credits_inserted, report.claimed), (0, 1));
+    assert_eq!(
+        accruals(&fixture, &tenant, &other).await[0].account_id,
+        None,
+        "one rail's claim writes nothing on another rail"
+    );
+    assert_eq!(
+        accrue(&fixture, &tenant, &other, "test_units")
+            .await
+            .claimed,
+        1
+    );
+    assert_eq!(
+        accruals(&fixture, &tenant, &other).await[0].account_id,
+        Some(accounts[0])
+    );
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    assert_eq!(rows[0].account_id, Some(accounts[0]));
+    let owed = fixture
+        .runtime
+        .payout_owed(&tenant, accounts[0], &rail_id)
+        .await
+        .unwrap();
+    assert_eq!(owed.net(), Some(100));
+    assert_eq!(
+        fixture
+            .runtime
+            .payout_audit_actions(&tenant, &rail_id)
+            .await
+            .unwrap(),
+        vec![PayoutAuditAction::AccrualClaimed]
+    );
+}
+
+#[tokio::test]
+async fn a_claimed_accrual_never_moves_to_a_second_account() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let rail_id = fresh_rail("moved");
+    record_epoch(&fixture, &rail_id, "v1", 1, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[item(&principal, 30, &[], None)],
+    )
+    .await;
+    link_principal(&fixture.owner, &tenant, accounts[0], &principal).await;
+    assert_eq!(
+        accrue(&fixture, &tenant, &rail_id, "test_units")
+            .await
+            .claimed,
+        1
+    );
+
+    // The principal moves to a second account.
+    link_principal(&fixture.owner, &tenant, accounts[1], &principal).await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!((report.credits_inserted, report.claimed), (0, 0));
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    assert_eq!(
+        rows[0].account_id,
+        Some(accounts[0]),
+        "stays with the first"
+    );
+    for (account, expected) in [(accounts[0], 30), (accounts[1], 0)] {
+        let owed = fixture
+            .runtime
+            .payout_owed(&tenant, account, &rail_id)
+            .await
+            .unwrap();
+        assert_eq!(owed.net(), Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn a_near_wallet_hold_label_does_not_stop_near_ai_accrual() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    // The fixture recorded near_ai v1; nothing in this suite records a
+    // different near_ai epoch.
+    let near_ai = RailId::near_ai();
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[
+            item(&account_ref(accounts[0]), 40, &[], Some("none_enrolled")),
+            item(
+                &account_ref(accounts[1]),
+                60,
+                &[],
+                Some("ambiguous_no_designation"),
+            ),
+        ],
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &near_ai, "near_ai_usd").await;
+    assert_eq!(report.credits_inserted, 2);
+    assert_eq!(report.holds_opened, 0);
+    let rows = accruals(&fixture, &tenant, &near_ai).await;
+    for (account, award) in [(accounts[0], 40), (accounts[1], 60)] {
+        let row = rows
+            .iter()
+            .find(|row| row.account_id == Some(account))
+            .expect("the line accrued to its own account");
+        assert_eq!(row.award_units.get(), award);
+        assert!(
+            fixture
+                .runtime
+                .open_payout_hold_labels(&tenant, account, &near_ai)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reversal_takes_back_exactly_its_credit_on_each_rail() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    link_principal(&fixture.owner, &tenant, accounts[0], &principal).await;
+    let near_like = fresh_rail("rev-nano");
+    let keyed_like = fresh_rail("rev-wei");
+    record_epoch(&fixture, &near_like, "v1", 2_000_000_000, 1_000_000).await;
+    record_epoch(&fixture, &keyed_like, "v1", 1_000_000_000_000, 1).await;
+
+    let credited = Uuid::new_v4();
+    let reversal = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        credited,
+        &principal,
+        "1.5",
+        "final",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        reversal,
+        &principal,
+        "-1.5",
+        "reversed",
+        reversal_ref(credited),
+    )
+    .await;
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[item(
+            &account_ref(accounts[0]),
+            1_500_000,
+            &[credited],
+            None,
+        )],
+    )
+    .await;
+
+    for (rail_id, instrument, credit_units) in [
+        (&near_like, "near_ai_usd", 3_000_000_000_u128),
+        (&keyed_like, "test_token", 1_500_000_000_000_000_000),
+    ] {
+        let report = accrue(&fixture, &tenant, rail_id, instrument).await;
+        assert_eq!((report.credits_inserted, report.reversals_inserted), (1, 1));
+        let rows = accruals(&fixture, &tenant, rail_id).await;
+        let credit = rows
+            .iter()
+            .find(|row| row.kind == PayoutAccrualKind::Credit)
+            .unwrap();
+        let taken = rows
+            .iter()
+            .find(|row| row.kind == PayoutAccrualKind::Reversal)
+            .unwrap();
+        assert_eq!(credit.rail_units.get(), credit_units);
+        assert_eq!(taken.rail_units, credit.rail_units, "exactly its credit");
+        assert_eq!(taken.award_units, credit.award_units);
+        assert_eq!(taken.rate_version, credit.rate_version);
+        assert_eq!(taken.reversal_event_id, Some(reversal));
+        assert_eq!(taken.account_id, Some(accounts[0]));
+        assert_eq!(taken.settlement_batch_id, credit.settlement_batch_id);
+        let owed = fixture
+            .runtime
+            .payout_owed(&tenant, accounts[0], rail_id)
+            .await
+            .unwrap();
+        assert_eq!((owed.credited, owed.reversed), (credit_units, credit_units));
+        assert_eq!(owed.net(), Some(0));
+    }
+}
+
+#[tokio::test]
+async fn an_unlocatable_reversal_holds_only_that_rail() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let settled_principal = format!("principal-{}", Uuid::new_v4());
+    let pending_principal = format!("principal-{}", Uuid::new_v4());
+    link_principal(&fixture.owner, &tenant, accounts[0], &settled_principal).await;
+    link_principal(&fixture.owner, &tenant, accounts[1], &pending_principal).await;
+    let rail_a = fresh_rail("hold-a");
+    let rail_b = fresh_rail("hold-b");
+    record_epoch(&fixture, &rail_a, "v1", 1, 1).await;
+    record_epoch(&fixture, &rail_b, "v1", 1, 1).await;
+
+    // A settled event that is in no finalized batch: its reversal cannot be
+    // priced, so the account is held on the rail that tried.
+    let settled = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        settled,
+        &settled_principal,
+        "2",
+        "final",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &settled_principal,
+        "-2",
+        "reversed",
+        reversal_ref(settled),
+    )
+    .await;
+    // An event that never settled: nothing was accrued, nothing is written.
+    let pending = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        pending,
+        &pending_principal,
+        "3",
+        "pending",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &pending_principal,
+        "-3",
+        "reversed",
+        reversal_ref(pending),
+    )
+    .await;
+
+    let labels = |account: Uuid, rail_id: RailId| {
+        let fixture = &fixture;
+        let tenant = tenant.clone();
+        async move {
+            fixture
+                .runtime
+                .open_payout_hold_labels(&tenant, account, &rail_id)
+                .await
+                .unwrap()
+        }
+    };
+    let report = accrue(&fixture, &tenant, &rail_a, "test_units").await;
+    assert_eq!(report.holds_opened, 1);
+    assert_eq!(report.reversals_inserted, 0);
+    assert_eq!(
+        labels(accounts[0], rail_a.clone()).await,
+        vec!["payout_reversal_unpriced".to_owned()]
+    );
+    assert!(
+        labels(accounts[0], rail_b.clone()).await.is_empty(),
+        "rail b is not held by rail a's pass"
+    );
+    assert!(labels(accounts[1], rail_a.clone()).await.is_empty());
+
+    accrue(&fixture, &tenant, &rail_b, "test_units").await;
+    assert_eq!(
+        labels(accounts[0], rail_b.clone()).await,
+        vec!["payout_reversal_unpriced".to_owned()]
+    );
+    assert_eq!(labels(accounts[0], rail_a.clone()).await.len(), 1);
+    assert!(accruals(&fixture, &tenant, &rail_a).await.is_empty());
+}
+
+#[tokio::test]
+async fn rails_accrue_the_same_line_independently() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let nano = fresh_rail("ind-nano");
+    let wei = fresh_rail("ind-wei");
+    record_epoch(&fixture, &nano, "v1", 1_000, 1).await;
+    record_epoch(&fixture, &wei, "v1", 1_000_000_000_000, 1).await;
+    let batch = batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[item(&account_ref(accounts[0]), 2_000_000, &[], None)],
+    )
+    .await;
+
+    accrue(&fixture, &tenant, &nano, "near_ai_usd").await;
+    assert!(
+        accruals(&fixture, &tenant, &wei).await.is_empty(),
+        "one rail's accrual writes nothing on another"
+    );
+    accrue(&fixture, &tenant, &wei, "test_token").await;
+
+    for (rail_id, instrument, units) in [
+        (&nano, "near_ai_usd", 2_000_000_000_u128),
+        (&wei, "test_token", 2_000_000_000_000_000_000),
+    ] {
+        let rows = accruals(&fixture, &tenant, rail_id).await;
+        assert_eq!(rows.len(), 1, "{rail_id:?}");
+        assert_eq!(rows[0].settlement_batch_id, batch);
+        assert_eq!(rows[0].instrument_id.as_str(), instrument);
+        assert_eq!(rows[0].award_units.get(), 2_000_000);
+        assert_eq!(rows[0].rail_units.get(), units);
+    }
+}
+
+#[tokio::test]
+async fn rerunning_accrual_writes_nothing_new() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let rail_id = fresh_rail("rerun");
+    record_epoch(&fixture, &rail_id, "v1", 3, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    link_principal(&fixture.owner, &tenant, accounts[1], &principal).await;
+    let credited = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        credited,
+        &principal,
+        "1",
+        "final",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-1",
+        "reversed",
+        reversal_ref(credited),
+    )
+    .await;
+    let lost = Uuid::new_v4();
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        lost,
+        &principal,
+        "1",
+        "final",
+        None,
+    )
+    .await;
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-1",
+        "reversed",
+        reversal_ref(lost),
+    )
+    .await;
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now(),
+        &[
+            item(&account_ref(accounts[0]), 7, &[], None),
+            item(&principal, 1_000_000, &[credited], None),
+        ],
+    )
+    .await;
+
+    let first = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(
+        (
+            first.credits_inserted,
+            first.reversals_inserted,
+            first.claimed,
+            first.holds_opened
+        ),
+        (2, 1, 2, 1)
+    );
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    let audit = fixture
+        .runtime
+        .payout_audit_actions(&tenant, &rail_id)
+        .await
+        .unwrap();
+
+    let second = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(
+        (
+            second.credits_inserted,
+            second.reversals_inserted,
+            second.claimed,
+            second.holds_opened
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(accruals(&fixture, &tenant, &rail_id).await, rows);
+    assert_eq!(
+        fixture
+            .runtime
+            .payout_audit_actions(&tenant, &rail_id)
+            .await
+            .unwrap(),
+        audit
     );
 }

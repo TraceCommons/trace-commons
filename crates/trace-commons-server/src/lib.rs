@@ -42,6 +42,8 @@ pub mod near_ai_login;
 pub mod near_attestation;
 pub mod near_credit;
 pub mod near_legion_claim;
+pub mod payout_accrual;
+pub mod payout_rate;
 pub mod redaction_witness;
 pub mod register_stats;
 pub mod rescore_distribution;

@@ -2853,6 +2853,36 @@ pub struct PayoutAccrualWrite {
     pub instrument_id: InstrumentId,
 }
 
+/// One stored accrual on a rail, as accrual reads it back to skip what is
+/// already priced and to price a reversal at its credit's version.
+/// `award_units` and `rail_units` are magnitudes; `kind` gives the sign.
+/// `Debug` prints neither the account nor its hash.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccrual {
+    pub rail_id: RailId,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub reversal_event_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub award_units: AtomicUnits,
+    pub rail_units: AtomicUnits,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+impl std::fmt::Debug for PayoutAccrual {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccrual")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("owned", &self.account_id.is_some())
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What an account is owed on a rail, from its accruals alone: the credit
 /// and reversal sums, each a `u128` of the rail's atomic units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3177,15 +3207,24 @@ pub trait PayoutStore: Send + Sync {
         accruals: &[PayoutAccrualWrite],
     ) -> Result<u64, DatabaseError>;
 
-    /// Sets the owner of every unowned accrual keyed to
-    /// `credit_account_hash`, once, with one audit row per rail touched.
+    /// Sets the owner of every unowned accrual on `rail` keyed to
+    /// `credit_account_hash`, once, with one audit row when any was claimed.
+    /// Per rail: one rail's accrual never writes another rail's rows.
     async fn claim_payout_accruals(
         &self,
         tenant: &str,
+        rail: &RailId,
         credit_account_hash: &str,
         account: Uuid,
         actor_ref_hash: &str,
     ) -> Result<u64, DatabaseError>;
+
+    /// Every accrual on `rail` in this tenant, oldest first.
+    async fn payout_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutAccrual>, DatabaseError>;
 
     /// What `account` is owed on `rail`, from its accruals. Refuses a sum
     /// above `u128::MAX` rather than wrap.

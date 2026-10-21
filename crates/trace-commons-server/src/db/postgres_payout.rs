@@ -18,15 +18,15 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio_postgres::error::SqlState;
-use trace_commons_gate_api::pipeline::AtomicUnits;
+use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
 use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
 use uuid::Uuid;
 
 use super::postgres::PgBackend;
 use super::{
-    PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutControl, PayoutLine,
-    PayoutLineResolution, PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLink,
-    PayoutLinkAction, PayoutLinkClose, PayoutLinkInsert, PayoutLinkRequest,
+    PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutControl,
+    PayoutLine, PayoutLineResolution, PayoutLineResolve, PayoutLineState, PayoutLineWrite,
+    PayoutLink, PayoutLinkAction, PayoutLinkClose, PayoutLinkInsert, PayoutLinkRequest,
     PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition,
     PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore,
     PendingPayoutLineInsert, SealedRecipient,
@@ -232,6 +232,7 @@ impl PayoutStore for PgBackend {
     async fn claim_payout_accruals(
         &self,
         tenant: &str,
+        rail: &RailId,
         credit_account_hash: &str,
         account: Uuid,
         actor_ref_hash: &str,
@@ -243,8 +244,9 @@ impl PayoutStore for PgBackend {
                 "UPDATE trace_payout_accruals
                     SET account_id = $3, claimed_at = clock_timestamp()
                   WHERE tenant_id = $1 AND credit_account_hash = $2 AND account_id IS NULL
+                    AND rail_id = $4
                   RETURNING rail_id",
-                &[&tenant, &credit_account_hash, &account],
+                &[&tenant, &credit_account_hash, &account, &rail.as_str()],
             )
             .await?;
         let rails: BTreeSet<String> = rows.iter().map(|row| row.get(0)).collect();
@@ -265,6 +267,53 @@ impl PayoutStore for PgBackend {
         }
         tx.commit().await?;
         Ok(rows.len() as u64)
+    }
+
+    async fn payout_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutAccrual>, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT kind, settlement_batch_id, credit_account_hash, reversal_event_id,
+                        account_id, abs(award_units)::TEXT, abs(rail_units)::TEXT,
+                        rate_version, instrument_id
+                   FROM trace_payout_accruals
+                  WHERE tenant_id = $1 AND rail_id = $2
+                  ORDER BY created_at, accrual_id",
+                &[&tenant, &rail.as_str()],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter()
+            .map(|row| {
+                let kind: String = row.get(0);
+                let kind = match kind.as_str() {
+                    "credit" => PayoutAccrualKind::Credit,
+                    "reversal" => PayoutAccrualKind::Reversal,
+                    _ => return Err(DatabaseError::Query("payout_state_unknown".into())),
+                };
+                let award: String = row.get(5);
+                let units: String = row.get(6);
+                let instrument: String = row.get(8);
+                Ok(PayoutAccrual {
+                    rail_id: rail.clone(),
+                    kind,
+                    settlement_batch_id: row.get(1),
+                    credit_account_hash: row.get(2),
+                    reversal_event_id: row.get(3),
+                    account_id: row.get(4),
+                    award_units: AtomicUnits::from_raw(parse_units(&award)?),
+                    rail_units: AtomicUnits::from_raw(parse_units(&units)?),
+                    rate_version: row.get(7),
+                    instrument_id: InstrumentId::new(instrument)
+                        .map_err(|_| DatabaseError::Query("payout_instrument_unknown".into()))?,
+                })
+            })
+            .collect()
     }
 
     async fn payout_owed(
