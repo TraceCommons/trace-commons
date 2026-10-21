@@ -4737,9 +4737,10 @@ sessions on disk. Otherwise:
 ```
 
 - `updated_at` is when a pass last finished in this daemon process, `null`
-  before the first one; `sessions_stored` is the rows held, outside Never
-  folders, in any week, and `automated_stored` how many of those are
-  automated sessions (see "The store" above). The token figures (`rollup`,
+  before the first one; `sessions_stored` is the person's rows held,
+  outside Never folders, in any week, the same count `insights_sessions`
+  answers, and `automated_stored` how many automated sessions are held
+  beside them (see "The store" above); together they are every row held. The token figures (`rollup`,
   `overview`, `history[]`) count automated sessions, since they cost
   tokens; `patterns` leaves them out.
 - `rollup` is the week's figures exactly as the shared engine computes them

@@ -1581,8 +1581,9 @@ impl CounterPass {
             "feed": FEED_COUNTER_PASS,
             "readable": true,
             "updated_at": updated_at,
-            "sessions_stored": inputs.len(),
-            // Of those, the sessions started by a tool, not the person.
+            // The person's rows, as `insights_sessions` counts them.
+            "sessions_stored": persons.len(),
+            // Beside those, the sessions started by a tool, not the person.
             "automated_stored": inputs.len() - persons.len(),
             "iso_week": format!("{}-W{:02}", iso.year(), iso.week()),
             "week_start": this.week_start.to_string(),
@@ -6774,8 +6775,11 @@ mod tests {
         assert_eq!(sessions["sessions_stored"], 1);
         assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1);
 
+        // `sessions_stored` means the same in both answers: the person's
+        // rows; the week adds how many automated ones are stored beside.
         let week = f.week(&[]);
-        assert_eq!(week["sessions_stored"], 2);
+        assert_eq!(week["sessions_stored"], sessions["sessions_stored"]);
+        assert_eq!(week["sessions_stored"], 1);
         assert_eq!(week["automated_stored"], 1);
         let line = week["rollup"]["sources"]
             .as_array()
