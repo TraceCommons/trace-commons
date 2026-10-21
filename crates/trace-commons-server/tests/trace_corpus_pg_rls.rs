@@ -1433,6 +1433,7 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
     ));
+    sql.push_str(include_str!("../../../migrations/V131__payout_rails.sql"));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1551,6 +1552,7 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
     ));
+    sql.push_str(include_str!("../../../migrations/V131__payout_rails.sql"));
     for table in expected_trace_rls_tables()
         .into_iter()
         .chain(["trace_pii_backstop"])

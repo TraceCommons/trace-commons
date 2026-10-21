@@ -16,6 +16,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 pub mod postgres_inference_connection;
+mod postgres_payout;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
@@ -2648,3 +2649,594 @@ pub enum InstanceEnrollmentOutcome {
 }
 
 mod token_bundles;
+
+// ---------------------------------------------------------------------------
+// Payout rails (V131; docs/superpowers/specs/2026-10-21-nearai-credit-payout-
+// design.md, sections 4 and 5).
+//
+// One set of tables serves every rail, each row keyed by `rail_id`. Every
+// tenant-scoped call takes the auth-derived tenant and runs under
+// `trace_current_tenant_id()`; the two deployment-wide reads and writes, and
+// the cross-tenant enumeration, run under their narrow roles with
+// `SET LOCAL ROLE`, so the role ends with the transaction on every path.
+// Amounts are a rail's atomic units, `u128`, stored as NUMERIC(39,0).
+// ---------------------------------------------------------------------------
+
+use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
+use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
+use uuid::Uuid;
+
+/// A link's lifecycle on one rail. At most one `Active`, one `Waiting` and
+/// one `Closing` link per account and rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLinkState {
+    Waiting,
+    Active,
+    Closing,
+    Closed,
+}
+
+impl PayoutLinkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Active => "active",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "waiting" => Self::Waiting,
+            "active" => Self::Active,
+            "closing" => Self::Closing,
+            "closed" => Self::Closed,
+            _ => return None,
+        })
+    }
+}
+
+/// A payout line's state. `Pending` until its outcome is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLineState {
+    Pending,
+    Confirmed,
+    NoOp,
+    Held,
+    Failed,
+}
+
+impl PayoutLineState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Confirmed => "confirmed",
+            Self::NoOp => "no_op",
+            Self::Held => "held",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => Self::Pending,
+            "confirmed" => Self::Confirmed,
+            "no_op" => Self::NoOp,
+            "held" => Self::Held,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// A credit accrual adds to what an account is owed on a rail; a reversal
+/// takes back exactly what its credit added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutAccrualKind {
+    Credit,
+    Reversal,
+}
+
+impl PayoutAccrualKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Credit => "credit",
+            Self::Reversal => "reversal",
+        }
+    }
+}
+
+/// What a `trace_payout_audit` row records. Hash-only: the row carries an
+/// actor ref hash, a link id hash, states and a label, never an account,
+/// recipient, program, amount or rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutAuditAction {
+    LinkRequested,
+    UnlinkRequested,
+    LinkCreated,
+    LinkConfirmed,
+    LinkActivated,
+    LinkClosing,
+    LinkClosed,
+    LinkReleased,
+    LinkRecipientUnavailable,
+    HoldSet,
+    HoldCleared,
+    AccrualClaimed,
+}
+
+impl PayoutAuditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LinkRequested => "link_requested",
+            Self::UnlinkRequested => "unlink_requested",
+            Self::LinkCreated => "link_created",
+            Self::LinkConfirmed => "link_confirmed",
+            Self::LinkActivated => "link_activated",
+            Self::LinkClosing => "link_closing",
+            Self::LinkClosed => "link_closed",
+            Self::LinkReleased => "link_released",
+            Self::LinkRecipientUnavailable => "link_recipient_unavailable",
+            Self::HoldSet => "hold_set",
+            Self::HoldCleared => "hold_cleared",
+            Self::AccrualClaimed => "accrual_claimed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "link_requested" => Self::LinkRequested,
+            "unlink_requested" => Self::UnlinkRequested,
+            "link_created" => Self::LinkCreated,
+            "link_confirmed" => Self::LinkConfirmed,
+            "link_activated" => Self::LinkActivated,
+            "link_closing" => Self::LinkClosing,
+            "link_closed" => Self::LinkClosed,
+            "link_released" => Self::LinkReleased,
+            "link_recipient_unavailable" => Self::LinkRecipientUnavailable,
+            "hold_set" => Self::HoldSet,
+            "hold_cleared" => Self::HoldCleared,
+            "accrual_claimed" => Self::AccrualClaimed,
+            _ => return None,
+        })
+    }
+
+    /// The audit action a link transition into `state` records.
+    pub fn for_link_state(state: PayoutLinkState) -> Self {
+        match state {
+            PayoutLinkState::Waiting => Self::LinkConfirmed,
+            PayoutLinkState::Active => Self::LinkActivated,
+            PayoutLinkState::Closing => Self::LinkClosing,
+            PayoutLinkState::Closed => Self::LinkClosed,
+        }
+    }
+}
+
+/// A recipient as stored: sealed, with a keyed blind index, the key and
+/// pepper refs it was sealed and indexed under, and a keyed index of what
+/// proved it. Neither key is in the database. `Debug` prints none of it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedRecipient {
+    pub sealed: serde_json::Value,
+    pub recipient_index: String,
+    pub recipient_key_ref: String,
+    pub index_pepper_ref: String,
+    pub subject_index: String,
+}
+
+impl std::fmt::Debug for SealedRecipient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SealedRecipient([redacted])")
+    }
+}
+
+/// One accrual to insert. `award_units` and `rail_units` are magnitudes; a
+/// reversal is stored negated. `account_id` is `None` for a line keyed to a
+/// bare principal, owed to nobody until claimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutAccrualWrite {
+    pub rail_id: RailId,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub reversal_event_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub award_units: AtomicUnits,
+    pub rail_units: AtomicUnits,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+/// What an account is owed on a rail, from its accruals alone: the credit
+/// and reversal sums, each a `u128` of the rail's atomic units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutOwed {
+    pub credited: u128,
+    pub reversed: u128,
+    pub accrual_count: i64,
+}
+
+impl PayoutOwed {
+    /// Credited minus reversed; `None` if reversals exceed credits, which a
+    /// reversal that takes back exactly its own credit cannot produce.
+    pub fn net(&self) -> Option<u128> {
+        self.credited.checked_sub(self.reversed)
+    }
+}
+
+/// A new link generation. Only `Waiting` or `Active` may be inserted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkWrite {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub link_id: Uuid,
+    pub recipient_kind: RecipientKind,
+    pub recipient: SealedRecipient,
+    pub program: String,
+    pub state: PayoutLinkState,
+    pub actor_ref_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkInsert {
+    Inserted,
+    /// The account already has a link in that state on that rail.
+    StateTaken,
+}
+
+/// A stored link. `Debug` redacts the recipient and the program.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLink {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub link_id: Uuid,
+    pub recipient_kind: RecipientKind,
+    pub state: PayoutLinkState,
+    pub recipient: SealedRecipient,
+    pub program: String,
+    pub final_paid: Option<AtomicUnits>,
+    pub unlink_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub recipient_unavailable_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub version: i64,
+}
+
+impl std::fmt::Debug for PayoutLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLink")
+            .field("rail_id", &self.rail_id)
+            .field("state", &self.state)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A line to write `pending`, committed before any network call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLineWrite {
+    pub line_id: Uuid,
+    pub link_id: Uuid,
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub target_total: AtomicUnits,
+    pub delta: AtomicUnits,
+    pub owed_through_accrual_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingPayoutLineInsert {
+    Inserted,
+    /// The link already has an unresolved line, which recovery handles first.
+    LinkHasPendingLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLine {
+    pub line_id: Uuid,
+    pub link_id: Uuid,
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub target_total: AtomicUnits,
+    pub delta: AtomicUnits,
+    pub state: PayoutLineState,
+    pub receipt_hash: Option<String>,
+    pub attempts: i32,
+    pub last_error_label: Option<String>,
+}
+
+/// How a pending line is resolved. `Retry` keeps it pending and counts the
+/// attempt; every other variant ends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayoutLineResolution {
+    Confirmed {
+        receipt_hash: String,
+        delta: AtomicUnits,
+    },
+    NoOp,
+    Held {
+        label: String,
+    },
+    Failed {
+        label: String,
+    },
+    Retry {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLineResolve {
+    Resolved,
+    /// No pending line with that id in this tenant.
+    NotPending,
+    /// Another line on this rail already holds that receipt; nothing changed.
+    ReceiptAlreadyClaimed,
+}
+
+/// What a link request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLinkAction {
+    Link,
+    Unlink,
+}
+
+impl PayoutLinkAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Link => "link",
+            Self::Unlink => "unlink",
+        }
+    }
+}
+
+/// A link or unlink request awaiting a passkey confirmation. A link request
+/// carries its verified, sealed recipient; an unlink request none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkRequestWrite {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub idempotency_key: Uuid,
+    pub handle_hash: String,
+    pub request_digest: String,
+    pub action: PayoutLinkAction,
+    pub expected_current_version: Option<i64>,
+    pub recipient: Option<(RecipientKind, SealedRecipient)>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub actor_ref_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkRequestInsert {
+    Inserted,
+    /// The same idempotency key with the same request digest: nothing new.
+    Replayed,
+    /// The same idempotency key with a different request.
+    IdempotencyConflict,
+}
+
+/// A taken link request. The caller checks `expires_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkRequest {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub idempotency_key: Uuid,
+    pub action: PayoutLinkAction,
+    pub expected_current_version: Option<i64>,
+    pub recipient: Option<(RecipientKind, SealedRecipient)>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Whether a rate epoch was recorded at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutRateEpochRecord {
+    Recorded,
+    /// The same `(rail, version)` with the same rate is already there.
+    AlreadyRecorded,
+    /// The `(rail, version)` is there with a different rate: a version names
+    /// one rate forever, so the caller refuses to start.
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutRateEpoch {
+    pub rate: RailRate,
+    pub pricing_label: Option<String>,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A rail's kill switch: the latest halt or resume row, or not halted when
+/// there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PayoutControl {
+    pub halted: bool,
+    pub label: Option<String>,
+    pub changed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The payout rail store. Implemented for PostgreSQL in `postgres_payout`.
+#[async_trait]
+pub trait PayoutStore: Send + Sync {
+    // -- tenant-scoped ------------------------------------------------------
+
+    /// Inserts each accrual once (`ON CONFLICT DO NOTHING` on its credit or
+    /// reversal key); returns how many were new. Never re-prices a row.
+    async fn insert_payout_accruals(
+        &self,
+        tenant: &str,
+        accruals: &[PayoutAccrualWrite],
+    ) -> Result<u64, DatabaseError>;
+
+    /// Sets the owner of every unowned accrual keyed to
+    /// `credit_account_hash`, once, with one audit row per rail touched.
+    async fn claim_payout_accruals(
+        &self,
+        tenant: &str,
+        credit_account_hash: &str,
+        account: Uuid,
+        actor_ref_hash: &str,
+    ) -> Result<u64, DatabaseError>;
+
+    /// What `account` is owed on `rail`, from its accruals. Refuses a sum
+    /// above `u128::MAX` rather than wrap.
+    async fn payout_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutOwed, DatabaseError>;
+
+    /// The sum of `final_paid` over the account's closed links on `rail`.
+    async fn payout_closed_links_final_paid(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<u128, DatabaseError>;
+
+    /// The account's `active` link on `rail`.
+    async fn payout_live_link(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<Option<PayoutLink>, DatabaseError>;
+
+    /// Inserts a `waiting` or `active` link and its audit row together.
+    async fn insert_payout_link(
+        &self,
+        tenant: &str,
+        link: &PayoutLinkWrite,
+    ) -> Result<PayoutLinkInsert, DatabaseError>;
+
+    /// Moves a link from `from` to `to` and writes its audit row, in one
+    /// transaction. `final_paid` is required for, and only for, `Closed`.
+    /// Returns false, changing nothing, when the link is not in `from`. A
+    /// move that would give the account a second link in `to` on the rail is
+    /// an error.
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_payout_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        from: PayoutLinkState,
+        to: PayoutLinkState,
+        final_paid: Option<AtomicUnits>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError>;
+
+    async fn insert_pending_payout_line(
+        &self,
+        tenant: &str,
+        line: &PayoutLineWrite,
+    ) -> Result<PendingPayoutLineInsert, DatabaseError>;
+
+    async fn pending_payout_line_for_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<Option<PayoutLine>, DatabaseError>;
+
+    async fn resolve_payout_line(
+        &self,
+        tenant: &str,
+        line_id: Uuid,
+        resolution: &PayoutLineResolution,
+    ) -> Result<PayoutLineResolve, DatabaseError>;
+
+    /// Whether a line on `rail` already holds `receipt_hash`, so recovery can
+    /// skip a record that answers another line.
+    async fn payout_receipt_is_claimed(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        receipt_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Opens a hold with an audit row; false if that hold is already open.
+    async fn open_payout_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clears an open hold with an audit row; false if none was open.
+    async fn clear_payout_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    async fn open_payout_hold_labels(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Records a request with its audit row.
+    async fn insert_payout_link_request(
+        &self,
+        tenant: &str,
+        request: &PayoutLinkRequestWrite,
+    ) -> Result<PayoutLinkRequestInsert, DatabaseError>;
+
+    /// Takes (deletes and returns) the account's request on `rail` with that
+    /// handle hash, so it can be confirmed at most once.
+    async fn take_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+    ) -> Result<Option<PayoutLinkRequest>, DatabaseError>;
+
+    /// The audit actions on `rail` in this tenant, oldest first.
+    async fn payout_audit_actions(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutAuditAction>, DatabaseError>;
+
+    // -- deployment-wide ----------------------------------------------------
+
+    /// Records `(rail, rate.version)` once, under `trace_payout_config_writer`,
+    /// with `observed_at` from the database clock.
+    async fn record_payout_rate_epoch(
+        &self,
+        rail: &RailId,
+        rate: &RailRate,
+        pricing_label: Option<&str>,
+    ) -> Result<PayoutRateEpochRecord, DatabaseError>;
+
+    /// The rail's epochs, oldest observation first.
+    async fn payout_rate_epochs(
+        &self,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutRateEpoch>, DatabaseError>;
+
+    async fn payout_control(&self, rail: &RailId) -> Result<PayoutControl, DatabaseError>;
+
+    /// Appends a halt or resume row under `trace_payout_config_writer`.
+    async fn set_payout_control(
+        &self,
+        rail: &RailId,
+        halted: bool,
+        label: Option<&str>,
+        actor_ref_hash: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// The tenants with an `active` or `closing` link on `rail`, read under
+    /// `trace_payout_enumerator`, which sees only tenant, rail and state.
+    async fn tenants_with_live_payout_links(
+        &self,
+        rail: &RailId,
+    ) -> Result<Vec<String>, DatabaseError>;
+}
