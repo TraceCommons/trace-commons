@@ -160,11 +160,15 @@ pub struct DigestCounts {
     pub active_secs: Option<u32>,
     pub finished: Option<bool>,
     pub edit_mode: EditMode,
-    /// Summed over models; `None` when any model's count is unknown.
+    /// Summed over the declared models. Calls whose model was never read
+    /// are in no model's facts and are not counted. `None` when any model's
+    /// count is unknown, or when no model was declared.
     pub edits: Option<u32>,
     pub denied: Option<u32>,
     pub undone: Option<u32>,
     pub interrupted: Option<u32>,
+    /// Distinct edited files per class, as the counter pass stored them.
+    pub stored_edited_files: FileClassCounts,
     pub renamed_files: u32,
     pub lines_added: Option<u32>,
     pub lines_removed: Option<u32>,
@@ -267,10 +271,10 @@ pub fn select_prompts(prompt_count: usize, events: &[EventMarker]) -> Vec<usize>
     picked.into_iter().collect()
 }
 
-/// Events in session order; ties keep the caller's order.
+/// Events in session order, then by kind, whatever order the caller used.
 fn sorted_events(events: &[EventMarker]) -> Vec<EventMarker> {
     let mut sorted = events.to_vec();
-    sorted.sort_by_key(|event| event.prompt_ix);
+    sorted.sort_by_key(|event| (event.prompt_ix, event.kind));
     sorted
 }
 
@@ -287,8 +291,12 @@ fn first_line(text: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
-/// Sums one per-model count; `None` when any model's is unknown.
+/// Sums one per-model count; `None` when any model's is unknown or there
+/// is no model, never a zero nobody measured.
 fn sum_models(facts: &SessionFacts, count: impl Fn(&ModelFacts) -> Option<u32>) -> Option<u32> {
+    if facts.models.is_empty() {
+        return None;
+    }
     facts.models.iter().try_fold(0u32, |total, model| {
         Some(total.saturating_add(count(model)?))
     })
@@ -322,6 +330,12 @@ fn counts(facts: &SessionFacts, series: Option<&UsageSeries>) -> DigestCounts {
         denied: sum_models(facts, |m| m.denied),
         undone: sum_models(facts, |m| m.undone),
         interrupted: sum_models(facts, |m| m.interrupted),
+        stored_edited_files: FileClassCounts {
+            test: facts.shape.edited_files.test,
+            doc: facts.shape.edited_files.doc,
+            source: facts.shape.edited_files.source,
+            config: facts.shape.edited_files.config,
+        },
         renamed_files: facts.shape.renamed_files,
         lines_added: facts.shape.lines_added,
         lines_removed: facts.shape.lines_removed,

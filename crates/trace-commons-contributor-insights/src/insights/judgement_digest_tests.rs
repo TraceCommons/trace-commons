@@ -379,6 +379,15 @@ fn counts_sum_models_and_read_the_series() {
     assert_eq!(c.undone, Some(1));
     assert_eq!(c.interrupted, Some(1));
     assert_eq!(c.task, InferredTask::BugFix);
+    assert_eq!(
+        c.stored_edited_files,
+        FileClassCounts {
+            test: 1,
+            doc: 0,
+            source: 2,
+            config: 0,
+        }
+    );
     assert_eq!(c.tool_kinds.get(&ToolKind::Edit), Some(&2));
     assert_eq!(c.tool_kinds.get(&ToolKind::Bash), Some(&3));
     assert_eq!(c.tool_kinds.get(&ToolKind::Read), Some(&1));
@@ -593,4 +602,26 @@ fn sample_series() -> UsageSeries {
     s.push_tool_call(call(1, ToolKind::Bash, None));
     s.push_tool_call(call(2, ToolKind::Bash, Some(true)));
     s
+}
+
+#[test]
+fn per_model_sums_are_unknown_when_no_model_was_declared() {
+    let mut facts = facts();
+    facts.models.clear();
+    let built = build_judgement_digest(&input(&facts, &[], None, &[], &[])).unwrap();
+    let c = &built.digest.counts;
+    assert_eq!(
+        (c.edits, c.denied, c.undone, c.interrupted),
+        (None, None, None, None)
+    );
+}
+
+#[test]
+fn events_at_one_prompt_serialize_the_same_in_any_input_order() {
+    let facts = facts();
+    let a = [ev(2, EventKind::Undo), ev(2, EventKind::Denial)];
+    let b = [ev(2, EventKind::Denial), ev(2, EventKind::Undo)];
+    let ba = build_judgement_digest(&input(&facts, &[], None, &[], &a)).unwrap();
+    let bb = build_judgement_digest(&input(&facts, &[], None, &[], &b)).unwrap();
+    assert_eq!(ba.bytes, bb.bytes);
 }
