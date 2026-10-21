@@ -189,7 +189,9 @@ pauses judgements and breaks nothing else.
   development-only adapters (Jev, and any model whose catalog entry fails the
   production check). The production image is built without it.
 - A unit test asserts that, with the feature off, the adapter registry contains
-  no model outside the production allowlist (section 5). The image workflow
+  no model outside the production allowlist (section 5). The static guard in
+  section 4 ("A static CI guard") keeps the feature out of the production
+  image's build line. The image workflow
   takes a `profile: production | development` input, builds two differently
   named images (`ghcr.io/tracecommons/trace-commons-judgement` and
   `...-judgement-development`), and for `production` checks that the image
@@ -534,6 +536,29 @@ it:
   `judgement-development` feature, which release builds do not enable. A test
   over the release feature set asserts that the config parser has no
   judgement pin key.
+- **A static CI guard keeps both development features out of everything that
+  ships** (#1501 review point 7; #1531 review point 5). The unit test above
+  runs under whatever features CI picks and never reads the release
+  workflows. A daemon built with `judgement-development` could send real
+  sessions to the development service, whose Jev adapter goes to OpenRouter
+  outside any TEE. A new script, `scripts/ci/check-release-judgement-features.sh`,
+  is a sibling of `scripts/ci/check-release-credential-store.sh` with the same
+  `check` and `self-test` modes, wired into `ci.yml` beside it. It refuses:
+  - `judgement-development` or `judgement-development-models` on any build
+    line in the files that script already scans (`release-apps.yml`,
+    `release-contributor.yml`, every `release-*.yml`, and the packaging
+    scripts it lists), and `--all-features` on any of those lines;
+  - either feature in the `default` list of `trace-commons-contributor`,
+    `trace-commons-contributor-ffi` or `trace-commons-server`, or enabled
+    from a shipped crate's `[dependencies]`;
+  - in `deploy/**/Dockerfile` and `judgement-image.yml`: `--all-features`
+    on any build line, and a `production)` profile arm whose feature list is
+    anything other than exactly `near-attestation-collateral`.
+
+  The self-test seeds one violation of each kind and proves each fails, so
+  the check cannot rot into one that never fails. The server half lands with
+  slice 5, which adds the image. The `judgement-development` name is refused
+  from the start, before slice 7 adds the feature, so no window opens.
 - The judgement service URL is also compiled in, following the
   `cloud-api.near.ai` precedent in `daemon/nearai_onboarding.rs`.
 - Consequence: a new production measurement reaches contributors only in a
