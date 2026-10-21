@@ -448,8 +448,16 @@ public struct GlassMenuBarStrip: View {
     static let badgeSize: CGFloat = 11
     static let badgeGlyph: CGFloat = 7
     static let badgeInset: CGFloat = 2.5
-    static let badgeLift: CGFloat = 2.5
+    static let badgeLift: CGFloat = haloReach
     static let badgeOverlap: CGFloat = 0
+    /// How far the halo reaches past the badge's edge: its inset and half
+    /// its line. The badge sits this far above the item's bottom edge and
+    /// this far after the bars while the halo is drawn, and the image is
+    /// padded this far past it, so the halo is never cut off and never
+    /// covers the newest step.
+    public static let haloReach: CGFloat = haloInset + haloLine / 2
+    static let haloInset: CGFloat = 2.5
+    static let haloLine: CGFloat = 2
 
     /// The item's height, the mark's side and the gap after it.
     static let height: CGFloat = 22
@@ -493,7 +501,8 @@ public struct GlassMenuBarStrip: View {
         let verified = ink(GlassTokens.Color.menuStripVerified)
         let calls = ink(GlassTokens.Color.menuStripCalls)
         let width = Self.markSize + Self.markGap + Self.graphWidth(steps: steps.count)
-        HStack(alignment: .bottom, spacing: -Self.badgeOverlap) {
+        let halo = Self.shownMark(mark, badge: badge, condition: condition) == .ready
+        HStack(alignment: .bottom, spacing: halo ? Self.haloReach : -Self.badgeOverlap) {
             Canvas { context, size in
                 if let logo = GlassBrandMark.path(
                     at: CGPoint(x: 0, y: (size.height - Self.markSize) / 2), size: Self.markSize)
@@ -541,7 +550,8 @@ public struct GlassMenuBarStrip: View {
                 // own edge, as `GlassStatusDot`'s ring sits outside it.
                 .overlay {
                     if shownMark == .ready {
-                        Capsule().stroke(ink(GlassTokens.Color.purpleText).color, lineWidth: 2).padding(-2.5)
+                        Capsule().stroke(ink(GlassTokens.Color.purpleText).color, lineWidth: Self.haloLine)
+                            .padding(-Self.haloInset)
                     }
                 }
                 .padding(.bottom, Self.badgeLift)

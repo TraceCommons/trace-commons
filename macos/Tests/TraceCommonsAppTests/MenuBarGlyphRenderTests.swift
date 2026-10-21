@@ -161,6 +161,55 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         }
     }
 
+    /// The item with a badge and every bar at full reach, padded on the
+    /// trailing side as the app pads it, plus `outset` all round, on black.
+    @MainActor
+    private func badged(_ mark: GlassMenuBarStrip.Mark, outset: CGFloat) throws -> NSBitmapImageRep {
+        let full = (0..<6).map { GlassDayColumn(id: "s\($0)", up: 4, down: 4) }
+        let renderer = ImageRenderer(
+            content: GlassMenuBarStrip(traces: full, privateAI: full, condition: .live, badge: 3, mark: mark)
+                .padding(.trailing, GlassMenuBarStrip.haloReach)
+                .padding(outset)
+                .background(Color.black)
+                .environment(\.colorScheme, .dark)
+        )
+        renderer.scale = 2
+        let tiff = try XCTUnwrap(renderer.nsImage?.tiffRepresentation)
+        return try XCTUnwrap(NSBitmapImageRep(data: tiff))
+    }
+
+    /// Summed distance from black over the pixels with `x` below `width`.
+    private func ink(_ rep: NSBitmapImageRep, width: Int? = nil) -> CGFloat {
+        var total: CGFloat = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<min(width ?? rep.pixelsWide, rep.pixelsWide) {
+                guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                total += colour.redComponent + colour.greenComponent + colour.blueComponent
+            }
+        }
+        return total
+    }
+
+    /// The halo fits inside the item's image, with nothing cut off at its
+    /// bottom or trailing edge: it draws the same with room all round.
+    @MainActor
+    func testTheHaloIsNotClipped() throws {
+        let tight = try ink(badged(.ready, outset: 0))
+        let roomy = try ink(badged(.ready, outset: 8))
+        XCTAssertEqual(tight, roomy, accuracy: 0.5, "the halo is cut off at the item's edge")
+    }
+
+    /// The halo never hides the newest step: the graph draws the same with
+    /// and without it.
+    @MainActor
+    func testTheHaloLeavesTheBarsUncovered() throws {
+        let graph = Int(
+            (GlassMenuBarStrip.markSize + GlassMenuBarStrip.markGap + GlassMenuBarStrip.graphWidth(steps: 6)) * 2)
+        let halo = try badged(.ready, outset: 0)
+        let plain = try badged(.none, outset: 0)
+        XCTAssertEqual(ink(halo, width: graph), ink(plain, width: graph), accuracy: 0.01, "the halo covers the bars")
+    }
+
     @MainActor
     func testEveryStateRendersAndACountAddsInk() throws {
         let cases: [(String, GlassMenuBarStrip.Condition, Int?)] = [

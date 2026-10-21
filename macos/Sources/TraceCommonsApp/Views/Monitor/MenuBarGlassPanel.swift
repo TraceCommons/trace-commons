@@ -624,7 +624,7 @@ struct MenuBarStripLabel: View {
                 condition: condition,
                 badge: badge,
                 mark: mark)
-                .padding(.trailing, 3)
+                .padding(.trailing, GlassMenuBarStrip.haloReach)
                 .environment(\.colorScheme, scheme))
             renderer.scale = displayScale
             return renderer.nsImage ?? NSImage()
