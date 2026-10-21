@@ -33,7 +33,8 @@ pub struct ModelFacts {
     /// Edit tool calls the contributor declined; known only where the
     /// contributor could have been asked.
     pub denied: Option<u32>,
-    /// Edits a later edit restored.
+    /// Edit calls a later edit restored, in the unit of `edits`: a call
+    /// counts once however many of its sub-edits were restored.
     pub undone: Option<u32>,
     /// Interrupts that ended one of this model's turns.
     pub interrupted: Option<u32>,
@@ -219,6 +220,10 @@ struct HeldEdit {
     new: KeyedDigest,
     model: Option<usize>,
     barrier: u64,
+    /// The applied edit call it is a sub-edit of.
+    call: u32,
+    /// A restore of another sub-edit of the call already counted it undone.
+    counted: bool,
 }
 
 /// One contributor prompt's span while it is open.
@@ -670,22 +675,26 @@ impl<'k> ClaudeFactsScan<'k> {
                         self.capped = true;
                     }
                 }
+                let call = self.applied_edits;
                 for (old, new) in texts {
-                    self.applied_edit(path, old, new, model);
+                    self.applied_edit(path, old, new, model, call);
                 }
             }
         }
         false
     }
 
-    /// An applied edit or sub-edit: credits the earlier edit it restores, if
-    /// a prompt, denial or interrupt came between, then holds it.
+    /// An applied edit or sub-edit of edit call `call`: credits the earlier
+    /// call it restores, if a prompt, denial or interrupt came between, then
+    /// holds it. A call is undone once, as it is one edit, however many of
+    /// its sub-edits are restored; they share its path.
     fn applied_edit(
         &mut self,
         path: KeyedDigest,
         old: KeyedDigest,
         new: KeyedDigest,
         model: Option<usize>,
+        call: u32,
     ) {
         let barrier = self.barrier;
         let held = self.edits_by_path.entry(path).or_default();
@@ -695,9 +704,14 @@ impl<'k> ClaudeFactsScan<'k> {
         {
             let restored = held.remove(ix);
             self.held_edits -= 1;
-            if let Some(model) = restored.model {
-                let counts = &mut self.counts[model];
-                counts.undone = counts.undone.saturating_add(1);
+            if !restored.counted {
+                for sibling in held.iter_mut().filter(|e| e.call == restored.call) {
+                    sibling.counted = true;
+                }
+                if let Some(model) = restored.model {
+                    let counts = &mut self.counts[model];
+                    counts.undone = counts.undone.saturating_add(1);
+                }
             }
             self.rejected_since_prompt = true;
         }
@@ -707,6 +721,8 @@ impl<'k> ClaudeFactsScan<'k> {
                 new,
                 model,
                 barrier,
+                call,
+                counted: false,
             });
             self.held_edits += 1;
         } else {
@@ -1153,6 +1169,16 @@ mod tests {
         assert_eq!(f.shape.lines_added, None);
         assert_eq!(f.shape.lines_removed, None);
         assert_eq!(f.shape.edited_files.source, 2);
+    }
+
+    /// Edits and undone count one unit, the edit call: a MultiEdit whose
+    /// three sub-edits a later MultiEdit restores is one edit undone.
+    #[test]
+    fn a_multiedit_restored_whole_is_one_edit_undone() {
+        let (_, m) = one("multiedit-restore");
+        assert_eq!(m.edits, Some(2));
+        assert_eq!(m.undone, Some(1));
+        assert!(m.undone <= m.edits);
     }
 
     #[test]

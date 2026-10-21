@@ -108,7 +108,7 @@ impl CodexTurnSeriesEvidence {
 /// One model's counts while the records are read.
 #[derive(Default)]
 struct ModelCounts {
-    /// `apply_patch` file sections.
+    /// `apply_patch` file sections: the unit of `undone` too.
     edits: u32,
     patched: bool,
     shell: bool,
@@ -148,6 +148,10 @@ struct HeldEdit {
     new: KeyedDigest,
     model: Option<usize>,
     barrier: u64,
+    /// The applied file section it is a hunk of.
+    section: u64,
+    /// A restore of another hunk of the section already counted it undone.
+    counted: bool,
 }
 
 /// One contributor task's span while it is open.
@@ -201,6 +205,8 @@ pub struct CodexTurnSeriesScan<'k> {
     lines_unknown: bool,
     patch_calls: u32,
     applied_patches: u32,
+    /// File sections of applied patches: each held hunk's section.
+    applied_sections: u64,
     /// A patch call was made under a turn context that may ask.
     patch_where_asked: bool,
     /// Advanced by each task start, interrupt and undo.
@@ -245,6 +251,7 @@ impl<'k> CodexTurnSeriesScan<'k> {
             lines_unknown: false,
             patch_calls: 0,
             applied_patches: 0,
+            applied_sections: 0,
             patch_where_asked: false,
             barrier: 0,
             rejected_since_prompt: false,
@@ -573,20 +580,25 @@ impl<'k> CodexTurnSeriesScan<'k> {
                     self.capped = true;
                 }
             }
+            self.applied_sections += 1;
+            let section = self.applied_sections;
             for (old, new) in file.hunks {
-                self.applied_edit(file.path, old, new, model);
+                self.applied_edit(file.path, old, new, model, section);
             }
         }
     }
 
-    /// An applied hunk: credits the earlier hunk it restores, if a task
-    /// start or interrupt came between, then holds it (Task 4's rule).
+    /// An applied hunk of file section `section`: credits the earlier
+    /// section it restores, if a task start or interrupt came between, then
+    /// holds it (Task 4's rule). A section is undone once, as it is one
+    /// edit, however many of its hunks are restored; they share its path.
     fn applied_edit(
         &mut self,
         path: KeyedDigest,
         old: KeyedDigest,
         new: KeyedDigest,
         model: Option<usize>,
+        section: u64,
     ) {
         let barrier = self.barrier;
         let held = self.edits_by_path.entry(path).or_default();
@@ -596,9 +608,14 @@ impl<'k> CodexTurnSeriesScan<'k> {
         {
             let restored = held.remove(ix);
             self.held_edits -= 1;
-            if let Some(model) = restored.model {
-                let counts = &mut self.counts[model];
-                counts.undone = counts.undone.saturating_add(1);
+            if !restored.counted {
+                for sibling in held.iter_mut().filter(|e| e.section == restored.section) {
+                    sibling.counted = true;
+                }
+                if let Some(model) = restored.model {
+                    let counts = &mut self.counts[model];
+                    counts.undone = counts.undone.saturating_add(1);
+                }
             }
             self.rejected_since_prompt = true;
         }
@@ -608,6 +625,8 @@ impl<'k> CodexTurnSeriesScan<'k> {
                 new,
                 model,
                 barrier,
+                section,
+                counted: false,
             });
             self.held_edits += 1;
         } else {
