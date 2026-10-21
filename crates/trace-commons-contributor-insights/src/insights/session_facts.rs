@@ -850,12 +850,17 @@ impl<'k> ClaudeFactsScan<'k> {
 
 /// The wrappers Claude Code writes around a slash command and its local
 /// output. What they hold is the interface's, not the contributor's words.
-const CLAUDE_COMMAND_WRAPPERS: [&str; 5] = [
+const CLAUDE_COMMAND_WRAPPERS: [&str; 8] = [
     "command-name",
     "command-message",
     "local-command-stdout",
     "local-command-stderr",
     "local-command-caveat",
+    // Bash mode (`! command`): the contributor ran a shell command, not a
+    // prompt to the model.
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
 ];
 
 /// Whether a user text holds the contributor's own words, read as the
@@ -1246,6 +1251,15 @@ mod tests {
         let f = facts("finished-trailing-prompt");
         assert_eq!(f.user_turns, Some(2));
         assert_eq!(f.finished, Some(false));
+    }
+
+    /// A bash-mode command after the model's answer (`! git push`) is not a
+    /// prompt: the session stays finished and gains no user turn.
+    #[test]
+    fn a_bash_mode_command_after_the_answer_is_not_a_prompt() {
+        let f = facts("finished-bash-mode-after-answer");
+        assert_eq!(f.user_turns, facts("finished").user_turns);
+        assert_eq!(f.finished, Some(true));
     }
 
     /// `/exit`, its caveat and its output are not prompts, so the
