@@ -202,7 +202,7 @@ pub(crate) fn select_page<T>(
 
 /// Whether the pass is on, and the Never folders while it is; `Err` is the
 /// answer to send instead (the folder rules could not be read).
-fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
+pub(crate) fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
     // A poisoned lock reads as off: fail closed, never a guess.
     let enabled = shared
         .settings
