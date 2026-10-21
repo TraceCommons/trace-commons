@@ -85,7 +85,17 @@ answer time from the trace's stored folder digest; a folder it no longer
 knows reads "Unknown folder". Picking one reads `insights_session_drill`,
 the same drill a saved snapshot has, from the daemon's stored counters, so
 the same file gives the same figures either way; its header's "i" names the
-watched-folder feed. Saved snapshots stay under Analyze. A watched list that
+watched-folder feed. Each watched row also has two compact menus for the
+person's own labels (`insights_session_label`): Task (Bug fix, Refactor,
+Tests, Docs, Other), shown as the inferred task marked "inferred" until the
+person takes it with one click on Confirm or picks another, and Outcome
+(Kept, Partly kept, Thrown away), unset until they say. A choice shows at
+once; if the daemon cannot save it, the row goes back to what the daemon
+last said and says the label couldn't be saved. The labels stay in the
+daemon's counter store on this Mac, keyed so they survive the trace being
+read again, and go with it on unenroll; the Models answers read the task in
+place of the inferred one and count the outcomes as `kept`.
+Saved snapshots stay under Analyze. A watched list that
 cannot be read falls back to the saved snapshots with the same unavailable
 line Overview shows. Only then are
 weeks compared: "vs last week" and "Your best week" (a tick on the cache

@@ -36,6 +36,11 @@ struct InsightsView: View {
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
+        let watchedLabel: InsightsSessionsModel.WatchedLabelWriter? = daemon.map { client in
+            { reference, task, outcome in
+                try await client.insightsSessionLabel(sessionRef: reference, task: task, outcome: outcome)
+            }
+        }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
@@ -53,7 +58,7 @@ struct InsightsView: View {
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
-                                                       watchedDrill: watchedDrill),
+                                                       watchedDrill: watchedDrill, watchedLabel: watchedLabel),
                   turnOffRecapCard: turnOff)
     }
 

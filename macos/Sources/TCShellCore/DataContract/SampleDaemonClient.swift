@@ -488,6 +488,14 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
     }
 
+    public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
+                                     outcome: DaemonData.InsightsLabelChange) async throws
+        -> DaemonData.InsightsSessionLabelAnswer {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so there is no row to label.
+        throw DaemonDataError.notAvailableYet(method: "insights_session_label")
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
         // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so

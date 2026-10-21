@@ -254,6 +254,14 @@ public protocol DaemonDataClient: Sendable {
     /// `insights_session_drill`: one listed watched trace turn by turn, by
     /// its `sessionRef`, at the local UTC offset.
     func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
+    /// `insights_session_label`: set or clear the person's own task and
+    /// outcome on one listed watched trace, by its `sessionRef`. Kept in
+    /// the daemon's counter store only; never sent anywhere. Answers the
+    /// row as the list now gives it. An older daemon refuses it as
+    /// `unknown_method`.
+    func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
+                              outcome: DaemonData.InsightsLabelChange) async throws
+        -> DaemonData.InsightsSessionLabelAnswer
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
