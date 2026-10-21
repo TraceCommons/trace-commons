@@ -44,6 +44,16 @@ final class MenuPanelStore {
     /// no answer here ever stales the popover, since the glance is off by
     /// default and an older daemon does not serve it.
     private(set) var glance: MenuPanelData.GlanceState = .notRead
+    /// How often `run` re-reads `inference_activity` with no event: its steps
+    /// end at the moment of the read, so an idle daemon's would otherwise
+    /// stay where the last event left them.
+    var activityRefresh: Duration = .seconds(60)
+    /// The clock the menu-bar item's span is read from; a test sets its own.
+    var clock: () -> Date = { Date() }
+    /// When the item's span was last read from `clock`: on each load and
+    /// each `activityRefresh`, so the label is redrawn as time passes even
+    /// when no read changes anything.
+    private(set) var stripNow = Date()
     /// How often an open popover re-reads the glance: the ledger can stop
     /// refreshing with no event, and only a re-read sees it go stale.
     static let glanceRefresh: Duration = .seconds(60)
@@ -211,12 +221,45 @@ final class MenuPanelStore {
         while !Task.isCancelled {
             await load()
             guard let client else { return }
-            await follow(client)
+            await followWhileRefreshingActivity(client)
             if Task.isCancelled { return }
             // The stream ended: the daemon went away, or the stream could
             // not be opened. Stale until a read says otherwise.
             stale = true
             do { try await Task.sleep(for: resubscribeDelay) } catch { return }
+        }
+    }
+
+    /// Follows the events and, beside them, re-reads `inference_activity`
+    /// every `activityRefresh`, until the stream ends; the timer stops with
+    /// it.
+    private func followWhileRefreshingActivity(_ client: any DaemonDataClient) async {
+        let refreshing = Task { await self.followActivity() }
+        await follow(client)
+        refreshing.cancel()
+    }
+
+    /// Re-reads the activity every `activityRefresh` until cancelled.
+    private func followActivity() async {
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: activityRefresh) } catch { return }
+            await loadActivity()
+        }
+    }
+
+    /// Reads `inference_activity` alone, as `load` reads it: a failure marks
+    /// it unknown, a method the daemon does not have yet is not a failure.
+    /// Moves `stripNow` on whatever the read answers.
+    func loadActivity() async {
+        defer { stripNow = clock() }
+        guard let client else { return }
+        do {
+            activity = try await client.inferenceActivity()
+            unreadable.remove(.activity)
+        } catch DaemonDataError.notAvailableYet {
+            return
+        } catch {
+            unreadable.insert(.activity)
         }
     }
 
@@ -267,6 +310,7 @@ final class MenuPanelStore {
         if let value = await read(.activity, { try await client.inferenceActivity() }) { activity = value }
         unreadable = failed
         stale = failed.contains(.status)
+        stripNow = clock()
         await loadGlance()
     }
 
@@ -351,11 +395,17 @@ final class MenuPanelStore {
     /// step, on the Private AI steps' own clock while they are drawn, so
     /// all four share one span; else the same span ending now.
     var stripTraces: [GlassDayColumn] {
-        let span = stripPrivateAI == nil ? nil : activity.flatMap(MenuPanelData.span)
-        return MenuPanelData.steps(
+        MenuPanelData.steps(
             shared: history.compactMap(\.submittedAt),
             kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
-            span: span ?? MenuPanelData.Span(end: Date()))
+            span: stripSpan)
+    }
+
+    /// The item's span: the Private AI steps' own while they are drawn,
+    /// else the same span ending at `stripNow`.
+    var stripSpan: MenuPanelData.Span {
+        let span = stripPrivateAI == nil ? nil : activity.flatMap(MenuPanelData.span)
+        return span ?? MenuPanelData.Span(end: stripNow)
     }
 }
 
