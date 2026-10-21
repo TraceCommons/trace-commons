@@ -27,10 +27,13 @@ pub const JUDGEMENT_WIRE_VERSION: u32 = 1;
 /// The judgement digest's byte cap. A larger digest is dropped whole by the
 /// daemon and refused by the service; it is never truncated.
 pub const JUDGEMENT_DIGEST_MAX_BYTES: usize = 8192;
-/// The total request body cap, checked before the body is parsed.
+/// The request plaintext cap: the JSON inside the seal, checked before it
+/// is parsed. The daemon never builds a request over it.
 pub const JUDGEMENT_REQUEST_MAX_BYTES: usize = 16 * 1024;
-/// Request header carrying the nonce the daemon verified the quote with.
-pub const JUDGEMENT_NONCE_HEADER: &str = "x-trace-judgement-nonce";
+/// The sealed request body cap on the wire: the plaintext cap plus the
+/// seal's 50 bytes (version byte, 33-byte compressed ephemeral key, 16-byte
+/// AEAD tag). The service reads no more than this before opening the seal.
+pub const JUDGEMENT_SEALED_REQUEST_MAX_BYTES: usize = JUDGEMENT_REQUEST_MAX_BYTES + 1 + 33 + 16;
 /// `Retry-After` on `judgement_saturated`, as `witness_pacing`.
 pub const JUDGEMENT_SATURATED_RETRY_AFTER_SECS: u32 = 30;
 /// `event_kind` is judged for at most this many marked events per digest, in
@@ -283,11 +286,12 @@ pub enum JudgementWireError {
 }
 
 // ---------------------------------------------------------------------------
-// Nonce
+// Nonces
 // ---------------------------------------------------------------------------
 
-/// The 32-byte nonce the daemon verified the service's quote with, sent as
-/// 64 lowercase hex in [`JUDGEMENT_NONCE_HEADER`] and signed into the response.
+/// The quote nonce: 32 bytes the daemon sends to `GET /v1/attestation` so
+/// the quote it verifies is fresh. Used for nothing else; a response is
+/// bound to its send by [`JudgementRequestNonce`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct JudgementNonce([u8; NONCE_LEN]);
 
@@ -306,13 +310,7 @@ impl JudgementNonce {
 
     /// Exactly 64 lowercase hex characters.
     pub fn from_hex(value: &str) -> Result<Self, JudgementWireError> {
-        if !is_lower_hex(value, NONCE_LEN * 2) {
-            return Err(JudgementWireError::Malformed("nonce"));
-        }
-        let mut bytes = [0u8; NONCE_LEN];
-        hex::decode_to_slice(value, &mut bytes)
-            .map_err(|_| JudgementWireError::Malformed("nonce"))?;
-        Ok(Self(bytes))
+        nonce_from_hex(value, "nonce").map(Self)
     }
 
     pub fn as_bytes(&self) -> &[u8; NONCE_LEN] {
@@ -322,6 +320,48 @@ impl JudgementNonce {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
+}
+
+/// The request nonce: 32 bytes the daemon generates for one send, carries
+/// inside the sealed request, and requires back in the signed response. A
+/// distinct type from [`JudgementNonce`] so the two cannot be swapped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct JudgementRequestNonce([u8; NONCE_LEN]);
+
+impl std::fmt::Debug for JudgementRequestNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("JudgementRequestNonce")
+            .field(&self.to_hex())
+            .finish()
+    }
+}
+
+impl JudgementRequestNonce {
+    pub fn from_bytes(bytes: [u8; NONCE_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Exactly 64 lowercase hex characters.
+    pub fn from_hex(value: &str) -> Result<Self, JudgementWireError> {
+        nonce_from_hex(value, "request_nonce").map(Self)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; NONCE_LEN] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+fn nonce_from_hex(value: &str, field: &'static str) -> Result<[u8; NONCE_LEN], JudgementWireError> {
+    if !is_lower_hex(value, NONCE_LEN * 2) {
+        return Err(JudgementWireError::Malformed(field));
+    }
+    let mut bytes = [0u8; NONCE_LEN];
+    hex::decode_to_slice(value, &mut bytes).map_err(|_| JudgementWireError::Malformed(field))?;
+    Ok(bytes)
 }
 
 fn is_lower_hex(value: &str, width: usize) -> bool {
@@ -829,11 +869,16 @@ pub struct JudgementSpend {
 // Request
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/judgement` body. `Debug` shows the digest's hash, never its
-/// text: the digest is scrubbed contributor prompts and excerpts.
+/// The plaintext of a `POST /v1/judgement` request, which the daemon seals
+/// to the service's per-boot key. `Debug` shows the digest's hash only: the
+/// digest is scrubbed contributor text, the claim is a bearer credential
+/// naming the account, and the request nonce binds the response to this one
+/// send.
 #[derive(Clone, PartialEq, Eq)]
 pub struct JudgementRequest {
-    digest: String,
+    request_nonce: JudgementRequestNonce,
+    claim: String,
+    digest: Vec<u8>,
     judgements: Vec<JudgementKind>,
 }
 
@@ -846,7 +891,9 @@ struct VersionOnly {
 #[serde(deny_unknown_fields)]
 struct RawRequest {
     wire_version: u32,
-    digest: String,
+    request_nonce: String,
+    claim: String,
+    digest_b64: String,
     judgements: Vec<JudgementKind>,
 }
 
@@ -855,29 +902,55 @@ impl std::fmt::Debug for JudgementRequest {
         f.debug_struct("JudgementRequest")
             .field("digest_sha256", &self.digest_sha256())
             .field("judgements", &self.judgements)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl JudgementRequest {
     /// The digest must be non-empty and at most
-    /// [`JUDGEMENT_DIGEST_MAX_BYTES`] bytes; the judgements non-empty and
-    /// distinct.
-    pub fn new(digest: String, judgements: Vec<JudgementKind>) -> Result<Self, JudgementRefusal> {
+    /// [`JUDGEMENT_DIGEST_MAX_BYTES`] bytes; the claim non-empty; the
+    /// judgements non-empty and distinct; and the encoded plaintext at most
+    /// [`JUDGEMENT_REQUEST_MAX_BYTES`], so a request is never built that the
+    /// service would refuse for size. The claim is opaque here; the service
+    /// verifies it.
+    pub fn new(
+        request_nonce: JudgementRequestNonce,
+        claim: String,
+        digest: Vec<u8>,
+        judgements: Vec<JudgementKind>,
+    ) -> Result<Self, JudgementRefusal> {
         if digest.len() > JUDGEMENT_DIGEST_MAX_BYTES {
             return Err(JudgementRefusal::DigestTooLarge);
         }
-        if digest.is_empty() || judgements.is_empty() {
+        if digest.is_empty() || claim.is_empty() || judgements.is_empty() {
             return Err(JudgementRefusal::RequestMalformed);
         }
         let distinct: BTreeSet<_> = judgements.iter().collect();
         if distinct.len() != judgements.len() {
             return Err(JudgementRefusal::RequestMalformed);
         }
-        Ok(Self { digest, judgements })
+        let request = Self {
+            request_nonce,
+            claim,
+            digest,
+            judgements,
+        };
+        if request.to_json().len() > JUDGEMENT_REQUEST_MAX_BYTES {
+            return Err(JudgementRefusal::DigestTooLarge);
+        }
+        Ok(request)
     }
 
-    pub fn digest(&self) -> &str {
+    pub fn request_nonce(&self) -> &JudgementRequestNonce {
+        &self.request_nonce
+    }
+
+    pub fn claim(&self) -> &str {
+        &self.claim
+    }
+
+    /// The decoded digest bytes.
+    pub fn digest(&self) -> &[u8] {
         &self.digest
     }
 
@@ -885,39 +958,121 @@ impl JudgementRequest {
         &self.judgements
     }
 
-    /// Lowercase hex SHA-256 of the digest bytes: the only thing about the
-    /// digest that may be logged.
+    /// Lowercase hex SHA-256 of the decoded digest bytes: the only thing
+    /// about the digest that may be logged.
     pub fn digest_sha256(&self) -> String {
-        hex::encode(Sha256::digest(self.digest.as_bytes()))
+        hex::encode(Sha256::digest(&self.digest))
     }
 
+    /// The plaintext JSON the seal wraps. The digest travels as standard
+    /// base64 (`digest_b64`) rather than a JSON string, so an escape-heavy
+    /// digest does not nearly double in size.
     pub fn to_json(&self) -> String {
         serde_json::to_string(&RawRequest {
             wire_version: JUDGEMENT_WIRE_VERSION,
-            digest: self.digest.clone(),
+            request_nonce: self.request_nonce.to_hex(),
+            claim: self.claim.clone(),
+            digest_b64: base64_encode(&self.digest),
             judgements: self.judgements.clone(),
         })
         .expect("a judgement request is JSON serializable")
     }
 }
 
-/// Parse a request body into the refusal the service sends for it.
+/// Parse an opened request plaintext into the refusal the service sends
+/// for it.
 ///
-/// Order: the body cap, then the wire version (read leniently, so a later
-/// version with new fields is reported as a version, not as malformed),
-/// then the closed shape, then the digest cap.
-pub fn parse_judgement_request(body: &[u8]) -> Result<JudgementRequest, JudgementRefusal> {
-    if body.len() > JUDGEMENT_REQUEST_MAX_BYTES {
+/// Order: the plaintext cap, then the wire version (read leniently, so a
+/// later version with new fields is reported as a version, not as
+/// malformed), then the closed shape, then the base64 digest and the request
+/// nonce, then the decoded digest cap and the rest of
+/// [`JudgementRequest::new`].
+pub fn parse_judgement_request(plaintext: &[u8]) -> Result<JudgementRequest, JudgementRefusal> {
+    if plaintext.len() > JUDGEMENT_REQUEST_MAX_BYTES {
         return Err(JudgementRefusal::DigestTooLarge);
     }
     let version: VersionOnly =
-        serde_json::from_slice(body).map_err(|_| JudgementRefusal::RequestMalformed)?;
+        serde_json::from_slice(plaintext).map_err(|_| JudgementRefusal::RequestMalformed)?;
     if version.wire_version != JUDGEMENT_WIRE_VERSION {
         return Err(JudgementRefusal::WireVersionUnsupported);
     }
     let raw: RawRequest =
-        serde_json::from_slice(body).map_err(|_| JudgementRefusal::RequestMalformed)?;
-    JudgementRequest::new(raw.digest, raw.judgements)
+        serde_json::from_slice(plaintext).map_err(|_| JudgementRefusal::RequestMalformed)?;
+    let digest = base64_decode(&raw.digest_b64).ok_or(JudgementRefusal::RequestMalformed)?;
+    let request_nonce = JudgementRequestNonce::from_hex(&raw.request_nonce)
+        .map_err(|_| JudgementRefusal::RequestMalformed)?;
+    JudgementRequest::new(request_nonce, raw.claim, digest, raw.judgements)
+}
+
+// ---------------------------------------------------------------------------
+// Base64
+// ---------------------------------------------------------------------------
+//
+// Standard base64 (RFC 4648 section 4) with padding, inline because this
+// permissive crate has no base64 dependency. Decoding is strict: the
+// standard alphabet only, padding required, no whitespace, and the bits
+// under the padding must be zero, so each byte string has exactly one
+// accepted encoding.
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut group = [0u8; 3];
+        group[..chunk.len()].copy_from_slice(chunk);
+        let n = u32::from(group[0]) << 16 | u32::from(group[1]) << 8 | u32::from(group[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(
+                    BASE64_ALPHABET[(n >> (18 - 6 * i)) as usize & 63],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn base64_value(c: u8) -> Option<u32> {
+    let value = match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    };
+    Some(u32::from(value))
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let quads = bytes.len() / 4;
+    let mut out = Vec::with_capacity(quads * 3);
+    for (i, quad) in bytes.chunks_exact(4).enumerate() {
+        let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && i + 1 != quads) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &quad[..4 - pad] {
+            n = n << 6 | base64_value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let group = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        let keep = 3 - pad;
+        if group[keep..].iter().any(|&b| b != 0) {
+            return None;
+        }
+        out.extend_from_slice(&group[..keep]);
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,7 +1396,7 @@ mod tests {
         assert_eq!(JUDGEMENT_WIRE_VERSION, 1);
         assert_eq!(JUDGEMENT_DIGEST_MAX_BYTES, 8192);
         assert_eq!(JUDGEMENT_REQUEST_MAX_BYTES, 16 * 1024);
-        assert_eq!(JUDGEMENT_NONCE_HEADER, "x-trace-judgement-nonce");
+        assert_eq!(JUDGEMENT_SEALED_REQUEST_MAX_BYTES, 16_434);
         assert_eq!(JUDGEMENT_SATURATED_RETRY_AFTER_SECS, 30);
         assert_eq!(JUDGEMENT_EVENT_KIND_MAX, 4);
         assert_eq!(
@@ -1454,14 +1609,19 @@ mod tests {
         );
     }
 
-    // ---- nonce ----
+    // ---- nonces ----
 
     #[test]
-    fn a_nonce_is_exactly_64_lowercase_hex() {
+    fn both_nonces_are_exactly_64_lowercase_hex() {
         let hex = "0f".repeat(32);
         assert_eq!(JudgementNonce::from_hex(&hex).unwrap().to_hex(), hex);
         assert_eq!(
             JudgementNonce::from_hex(&hex).unwrap().as_bytes(),
+            &[0x0f; 32]
+        );
+        assert_eq!(JudgementRequestNonce::from_hex(&hex).unwrap().to_hex(), hex);
+        assert_eq!(
+            JudgementRequestNonce::from_hex(&hex).unwrap().as_bytes(),
             &[0x0f; 32]
         );
         for bad in [
@@ -1471,48 +1631,128 @@ mod tests {
             "zz".repeat(32),
             String::new(),
         ] {
-            assert!(JudgementNonce::from_hex(&bad).is_err(), "{bad}");
+            assert_eq!(
+                JudgementNonce::from_hex(&bad),
+                Err(JudgementWireError::Malformed("nonce")),
+                "{bad}"
+            );
+            assert_eq!(
+                JudgementRequestNonce::from_hex(&bad),
+                Err(JudgementWireError::Malformed("request_nonce")),
+                "{bad}"
+            );
+        }
+    }
+
+    // ---- base64 ----
+
+    #[test]
+    fn base64_matches_rfc_4648_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(plain.as_bytes()), encoded, "{plain}");
+            assert_eq!(
+                base64_decode(encoded).as_deref(),
+                Some(plain.as_bytes()),
+                "{encoded}"
+            );
+        }
+        let every_byte: Vec<u8> = (0..=255u8).collect();
+        for len in 0..every_byte.len() {
+            let slice = &every_byte[..len];
+            assert_eq!(base64_decode(&base64_encode(slice)).as_deref(), Some(slice));
+        }
+        // Both high alphabet characters.
+        assert_eq!(base64_encode(&[0xfb, 0xff]), "+/8=");
+    }
+
+    #[test]
+    fn base64_decoding_is_strict() {
+        for bad in [
+            "Zg=",       // length not a multiple of four
+            "Zm9vYg",    // padding missing
+            "Zh==",      // non-zero bits under the padding
+            "Zm9=",      // non-zero bits under the padding
+            "Z===",      // three padding characters
+            "====",      // padding only
+            "Zg==Zm9v",  // padding before the end
+            "Zm=v",      // padding inside a quad
+            "Zm9v\n",    // whitespace
+            " Zm9v",     // whitespace
+            "Zm-v",      // URL-safe alphabet
+            "Zm_v",      // URL-safe alphabet
+            "Zm9\u{e9}", // non-ASCII
+        ] {
+            assert_eq!(base64_decode(bad), None, "{bad:?}");
         }
     }
 
     // ---- request ----
 
-    fn request_json(version: u32, digest: &str, judgements: &str) -> String {
+    const CLAIM: &str = "eyJhbGciOiJFZERTQSJ9.eyJhY2NvdW50X3JlZiI6InQifQ.c2ln";
+
+    fn request_nonce() -> JudgementRequestNonce {
+        JudgementRequestNonce::from_bytes(std::array::from_fn(|i| 0xa0 ^ i as u8))
+    }
+
+    fn request_json(version: u32, digest: &[u8], judgements: &str) -> String {
         format!(
-            r#"{{"wire_version":{version},"digest":{},"judgements":{judgements}}}"#,
-            serde_json::to_string(digest).unwrap()
+            r#"{{"wire_version":{version},"request_nonce":"{}","claim":"{CLAIM}","digest_b64":"{}","judgements":{judgements}}}"#,
+            request_nonce().to_hex(),
+            base64_encode(digest)
         )
     }
 
+    fn all_kinds() -> Vec<JudgementKind> {
+        vec![
+            JudgementKind::Task,
+            JudgementKind::EventKind,
+            JudgementKind::Finished,
+        ]
+    }
+
     #[test]
-    fn a_request_parses_and_hashes_its_digest() {
-        let body = request_json(1, "{\"turns\":3}", r#"["task","event_kind","finished"]"#);
+    fn a_request_parses_in_the_spec_shape_and_hashes_its_decoded_digest() {
+        let digest = b"{\"turns\":3}";
+        let body = request_json(1, digest, r#"["task","event_kind","finished"]"#);
         let request = parse_judgement_request(body.as_bytes()).unwrap();
-        assert_eq!(request.digest(), "{\"turns\":3}");
-        assert_eq!(
-            request.judgements(),
-            [
-                JudgementKind::Task,
-                JudgementKind::EventKind,
-                JudgementKind::Finished
-            ]
-        );
-        // sha256("{\"turns\":3}")
+        assert_eq!(request.digest(), digest);
+        assert_eq!(request.claim(), CLAIM);
+        assert_eq!(request.request_nonce(), &request_nonce());
+        assert_eq!(request.judgements(), all_kinds());
         use sha2::{Digest as _, Sha256};
-        assert_eq!(
-            request.digest_sha256(),
-            hex::encode(Sha256::digest(b"{\"turns\":3}"))
-        );
+        assert_eq!(request.digest_sha256(), hex::encode(Sha256::digest(digest)));
+
         let rebuilt = JudgementRequest::new(
-            "{\"turns\":3}".to_string(),
-            vec![
-                JudgementKind::Task,
-                JudgementKind::EventKind,
-                JudgementKind::Finished,
-            ],
+            request_nonce(),
+            CLAIM.to_string(),
+            digest.to_vec(),
+            all_kinds(),
         )
         .unwrap();
         assert_eq!(rebuilt, request);
+        assert_eq!(rebuilt.to_json(), body);
+        let value: serde_json::Value = serde_json::from_str(&rebuilt.to_json()).unwrap();
+        let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        let mut expected = [
+            "claim",
+            "digest_b64",
+            "judgements",
+            "request_nonce",
+            "wire_version",
+        ];
+        expected.sort();
+        let mut keys_sorted = keys.clone();
+        keys_sorted.sort();
+        assert_eq!(keys_sorted, expected);
+        assert_eq!(value["digest_b64"], "eyJ0dXJucyI6M30=");
         assert_eq!(
             parse_judgement_request(rebuilt.to_json().as_bytes()).unwrap(),
             request
@@ -1520,28 +1760,51 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_cap_is_8192_bytes_and_refused_whole() {
-        let at_cap = "a".repeat(JUDGEMENT_DIGEST_MAX_BYTES);
+    fn the_sealed_request_cap_is_the_plaintext_cap_plus_the_seal_overhead() {
+        assert_eq!(JUDGEMENT_REQUEST_MAX_BYTES, 16_384);
+        // version byte, compressed ephemeral key, AEAD tag
+        assert_eq!(JUDGEMENT_SEALED_REQUEST_MAX_BYTES, 16 * 1024 + 1 + 33 + 16);
+        assert_eq!(JUDGEMENT_SEALED_REQUEST_MAX_BYTES, 16_434);
+    }
+
+    #[test]
+    fn the_digest_cap_is_8192_decoded_bytes_and_refused_whole() {
+        let at_cap = vec![b'a'; JUDGEMENT_DIGEST_MAX_BYTES];
         assert!(
             parse_judgement_request(request_json(1, &at_cap, r#"["task"]"#).as_bytes()).is_ok()
         );
-        let over = "a".repeat(JUDGEMENT_DIGEST_MAX_BYTES + 1);
+        // The cap is on decoded bytes: an at-cap digest's base64 is longer
+        // than 8192 characters and still parses.
+        assert!(base64_encode(&at_cap).len() > JUDGEMENT_DIGEST_MAX_BYTES);
+        let over = vec![b'a'; JUDGEMENT_DIGEST_MAX_BYTES + 1];
         assert_eq!(
             parse_judgement_request(request_json(1, &over, r#"["task"]"#).as_bytes()),
             Err(JudgementRefusal::DigestTooLarge)
         );
         assert_eq!(
-            JudgementRequest::new(over, vec![JudgementKind::Task]),
+            JudgementRequest::new(
+                request_nonce(),
+                CLAIM.to_string(),
+                over,
+                vec![JudgementKind::Task]
+            ),
             Err(JudgementRefusal::DigestTooLarge)
         );
         // Multi-byte characters count as bytes, not characters.
-        let multibyte = "\u{e9}".repeat(JUDGEMENT_DIGEST_MAX_BYTES / 2 + 1);
+        let multibyte = "\u{e9}"
+            .repeat(JUDGEMENT_DIGEST_MAX_BYTES / 2 + 1)
+            .into_bytes();
         assert_eq!(
-            JudgementRequest::new(multibyte, vec![JudgementKind::Task]),
+            JudgementRequest::new(
+                request_nonce(),
+                CLAIM.to_string(),
+                multibyte,
+                vec![JudgementKind::Task]
+            ),
             Err(JudgementRefusal::DigestTooLarge)
         );
-        // A body over the total cap is refused before it is parsed.
-        let mut huge = request_json(1, "x", r#"["task"]"#).into_bytes();
+        // A plaintext over the total cap is refused before it is parsed.
+        let mut huge = request_json(1, b"x", r#"["task"]"#).into_bytes();
         huge.resize(JUDGEMENT_REQUEST_MAX_BYTES + 1, b' ');
         assert_eq!(
             parse_judgement_request(&huge),
@@ -1549,10 +1812,45 @@ mod tests {
         );
     }
 
+    /// The constructor refuses a request whose encoded plaintext is over the
+    /// cap, so the daemon never builds one the service would refuse. An
+    /// at-cap digest with a realistic claim fits; a claim whose JSON
+    /// escaping multiplies its size does not, though its raw length does.
+    #[test]
+    fn a_request_whose_plaintext_is_over_the_cap_is_never_built() {
+        let at_cap = vec![0xffu8; JUDGEMENT_DIGEST_MAX_BYTES];
+        let realistic_claim = "a".repeat(1024);
+        let fits = JudgementRequest::new(
+            request_nonce(),
+            realistic_claim,
+            at_cap.clone(),
+            all_kinds(),
+        )
+        .unwrap();
+        assert!(fits.to_json().len() <= JUDGEMENT_REQUEST_MAX_BYTES);
+
+        let escaped_claim = "\u{1}".repeat(1500);
+        let raw_len = escaped_claim.len() + base64_encode(&at_cap).len();
+        assert!(raw_len < JUDGEMENT_REQUEST_MAX_BYTES);
+        assert_eq!(
+            JudgementRequest::new(request_nonce(), escaped_claim, at_cap.clone(), all_kinds()),
+            Err(JudgementRefusal::DigestTooLarge)
+        );
+        assert_eq!(
+            JudgementRequest::new(
+                request_nonce(),
+                "a".repeat(JUDGEMENT_REQUEST_MAX_BYTES),
+                b"x".to_vec(),
+                all_kinds()
+            ),
+            Err(JudgementRefusal::DigestTooLarge)
+        );
+    }
+
     #[test]
     fn an_unknown_wire_version_is_unsupported_not_malformed() {
         assert_eq!(
-            parse_judgement_request(request_json(2, "x", r#"["task"]"#).as_bytes()),
+            parse_judgement_request(request_json(2, b"x", r#"["task"]"#).as_bytes()),
             Err(JudgementRefusal::WireVersionUnsupported)
         );
         // A later version may add fields; it is still reported as a version.
@@ -1565,14 +1863,43 @@ mod tests {
 
     #[test]
     fn a_malformed_request_is_refused() {
+        let nonce_hex = request_nonce().to_hex();
+        let with = |field: &str, value: &str| {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&request_json(1, b"x", r#"["task"]"#)).unwrap();
+            v[field] = serde_json::from_str(value).unwrap();
+            v.to_string()
+        };
+        let without = |field: &str| {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&request_json(1, b"x", r#"["task"]"#)).unwrap();
+            v.as_object_mut().unwrap().remove(field);
+            v.to_string()
+        };
         for body in [
             "not json".to_string(),
-            r#"{"digest":"x","judgements":["task"]}"#.to_string(),
-            request_json(1, "x", "[]"),
-            request_json(1, "x", r#"["task","task"]"#),
-            request_json(1, "x", r#"["mood"]"#),
-            request_json(1, "", r#"["task"]"#),
-            r#"{"wire_version":1,"digest":"x","judgements":["task"],"extra":1}"#.to_string(),
+            without("wire_version"),
+            without("request_nonce"),
+            without("claim"),
+            without("digest_b64"),
+            without("judgements"),
+            request_json(1, b"x", "[]"),
+            request_json(1, b"x", r#"["task","task"]"#),
+            request_json(1, b"x", r#"["mood"]"#),
+            request_json(1, b"", r#"["task"]"#),
+            with("extra", "1"),
+            // the old v1 draft's plaintext digest field
+            with("digest", r#""x""#),
+            with("claim", r#""""#),
+            with("digest_b64", r#""Zh==""#),
+            with("digest_b64", r#""not base64!""#),
+            with("digest_b64", r#""eA""#),
+            with(
+                "request_nonce",
+                &format!(r#""{}""#, nonce_hex.to_uppercase()),
+            ),
+            with("request_nonce", &format!(r#""{}""#, &nonce_hex[..62])),
+            with("request_nonce", r#"null"#),
         ] {
             assert_eq!(
                 parse_judgement_request(body.as_bytes()),
@@ -1580,17 +1907,34 @@ mod tests {
                 "{body}"
             );
         }
+        assert_eq!(
+            JudgementRequest::new(
+                request_nonce(),
+                String::new(),
+                b"x".to_vec(),
+                vec![JudgementKind::Task]
+            ),
+            Err(JudgementRefusal::RequestMalformed)
+        );
     }
 
+    /// The digest is scrubbed contributor text, the claim is a bearer
+    /// credential naming the account, and the request nonce ties a response
+    /// to one send: none of them is ever in `Debug`.
     #[test]
-    fn request_debug_never_shows_the_digest() {
+    fn request_debug_shows_only_the_digest_hash() {
         let request = JudgementRequest::new(
-            "secret contributor prompt".to_string(),
+            request_nonce(),
+            CLAIM.to_string(),
+            b"secret contributor prompt".to_vec(),
             vec![JudgementKind::Task],
         )
         .unwrap();
         let debug = format!("{request:?}");
         assert!(!debug.contains("secret contributor prompt"));
+        assert!(!debug.contains(&base64_encode(b"secret contributor prompt")));
+        assert!(!debug.contains(CLAIM));
+        assert!(!debug.contains(&request_nonce().to_hex()));
         assert!(debug.contains(&request.digest_sha256()));
     }
 
