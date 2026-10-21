@@ -7,12 +7,14 @@
 //! "At API prices" is a list-price estimate: what the vendor's API would
 //! charge for these tokens, not what a subscription plan costs.
 //!
-//! Codex turns. PR 1's Codex reader stores, from one `token_count` event:
-//! `uncached_input = input_tokens - cached_input_tokens -
-//! cache_write_input_tokens`, `cache_read = cached_input_tokens`,
-//! `cache_write = TotalOnly(cache_write_input_tokens)`, `output =
-//! output_tokens` (reasoning is a subset of output). So `context()` is
-//! `input_tokens`, and the write is never inside `uncached_input`. OpenAI's
+//! Codex turns. PR 1's Codex reader stores each `token_count` event through
+//! [`codex_turn_usage`], and through nothing else: `uncached_input =
+//! input_tokens - cached_input_tokens - cache_write_input_tokens`,
+//! `cache_read = cached_input_tokens`, `cache_write =
+//! TotalOnly(cache_write_input_tokens)`, `output = output_tokens` (reasoning
+//! is a subset of output). So `context()` is `input_tokens`, and the write
+//! is never inside `uncached_input`; storing `input - cached` instead would
+//! price every written token twice. OpenAI's
 //! pricing page lists a separate cache-write rate, and its prompt-caching
 //! guide says that rate replaces the uncached-input rate for those tokens
 //! rather than adding to it. The write is priced at the 30-minute rate:
@@ -106,6 +108,27 @@ pub fn normalize_model_label(label: &str) -> Option<String> {
         .or_else(|| lowered.strip_suffix(LATEST_SUFFIX))
         .unwrap_or(&lowered);
     pricing_id(stem).then(|| stem.to_owned())
+}
+
+/// One Codex `token_count` event's `last_token_usage` as stored counters,
+/// the only mapping the pricing here is correct for (see the module doc).
+/// `None` when cached and written tokens exceed the input, or a counter
+/// does not fit the store: usage unknown, never a wrapped or clamped count.
+pub fn codex_turn_usage(
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    cache_write_input_tokens: u64,
+    output_tokens: u64,
+) -> Option<KnownTurnUsage> {
+    let uncached = input_tokens
+        .checked_sub(cached_input_tokens)?
+        .checked_sub(cache_write_input_tokens)?;
+    Some(KnownTurnUsage {
+        uncached_input: u32::try_from(uncached).ok()?,
+        cache_read: u32::try_from(cached_input_tokens).ok()?,
+        cache_write: CacheWrite::TotalOnly(u32::try_from(cache_write_input_tokens).ok()?),
+        output: u32::try_from(output_tokens).ok()?,
+    })
 }
 
 /// The publisher whose list prices apply to an accounting family. Never
@@ -640,6 +663,34 @@ mod tests {
             1
         );
         assert_eq!(split.total_usd_micros, None);
+    }
+
+    /// The one mapping from a Codex `token_count` event to stored counters:
+    /// the write comes out of uncached input, so it is priced once.
+    #[test]
+    fn a_codex_event_maps_to_stored_counters_with_the_write_taken_out() {
+        assert_eq!(
+            codex_turn_usage(1_000, 600, 300, 50),
+            Some(KnownTurnUsage {
+                uncached_input: 100,
+                cache_read: 600,
+                cache_write: CacheWrite::TotalOnly(300),
+                output: 50,
+            })
+        );
+        let usage = codex_turn_usage(1_000, 600, 300, 50).unwrap();
+        assert_eq!(usage.context(), 1_000, "context is the event's input");
+        // Reads and writes above the input are a shape this client does not
+        // understand: unknown, never a wrapped or clamped count.
+        assert_eq!(codex_turn_usage(1_000, 600, 401, 50), None);
+        assert_eq!(codex_turn_usage(1_000, 1_001, 0, 50), None);
+        assert_eq!(codex_turn_usage(u64::from(u32::MAX) + 1, 0, 0, 0), None);
+        assert_eq!(codex_turn_usage(0, 0, 0, u64::from(u32::MAX) + 1), None);
+        assert_eq!(
+            codex_turn_usage(u64::from(u32::MAX), 0, 0, u64::from(u32::MAX))
+                .map(|usage| usage.total()),
+            Some(2 * u64::from(u32::MAX))
+        );
     }
 
     #[test]
