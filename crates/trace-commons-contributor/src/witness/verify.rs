@@ -15,11 +15,11 @@
 use trace_commons_attestation::address::decode_address;
 use trace_commons_attestation::measurements::{MeasurementVerdict, check_measurements_opt};
 use trace_commons_attestation::quote::{Collateral, VerifiedQuote, verify_quote};
+use trace_commons_attestation::report_data::{DOMAIN_LEN, ReportDataError, check_report_data};
 
 use super::transport::{AttestationEvidence, WitnessNonce};
 use super::{
-    WITNESS_ADDRESS_AT, WITNESS_EXPECTED_MEASUREMENT_CONTROL, WITNESS_NONCE_AT, WITNESS_NONCE_LEN,
-    WITNESS_QUOTE_DOMAIN, WITNESS_REPORT_DATA_LEN, WitnessTrust, WitnessTrustError,
+    WITNESS_EXPECTED_MEASUREMENT_CONTROL, WITNESS_QUOTE_DOMAIN, WitnessTrust, WitnessTrustError,
 };
 
 /// A witness whose measurement this client has verified, for this exchange.
@@ -86,7 +86,7 @@ pub fn verify_witness(
         .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
     let verified = verify_witness_quote(&quote, collateral, now_unix)?;
 
-    check_quote(&verified, nonce, pin)?;
+    check_quote(&verified, WITNESS_QUOTE_DOMAIN, nonce, pin)?;
 
     // The one construction site in this crate. See the module docs, and
     // `there_is_no_way_to_build_a_verified_witness_but_verification`.
@@ -109,14 +109,10 @@ pub fn verify_witness(
 /// for it would send an operator to the wrong image.
 pub fn check_quote(
     quote: &VerifiedQuote,
+    domain: &[u8; DOMAIN_LEN],
     nonce: &WitnessNonce,
     pin: &WitnessTrust,
 ) -> Result<(), WitnessTrustError> {
-    // Reconstructed whole and compared in one shot, not field by field. A
-    // field-by-field check has to decide what to do about the bytes it did
-    // not name, and the honest answer -- they must be zero -- is one a
-    // reconstruction gets for free and a sequence of slice comparisons gets
-    // only if somebody remembers.
     let Some(address) = decode_address(&pin.signing_address) else {
         // A malformed pin is not a quote failure. It is reported as an
         // unexpected signer rather than silently admitting anything, because
@@ -125,27 +121,18 @@ pub fn check_quote(
         return Err(WitnessTrustError::WitnessSignerUnexpected);
     };
 
-    let mut expected = [0u8; WITNESS_REPORT_DATA_LEN];
-    expected[..WITNESS_QUOTE_DOMAIN.len()].copy_from_slice(WITNESS_QUOTE_DOMAIN);
-    expected[WITNESS_ADDRESS_AT..WITNESS_ADDRESS_AT + address.len()].copy_from_slice(&address);
-    expected[WITNESS_NONCE_AT..WITNESS_NONCE_AT + WITNESS_NONCE_LEN]
-        .copy_from_slice(nonce.as_bytes());
-
-    if quote.report_data != expected {
-        // Which half is wrong decides the error, because the two mean
-        // different things to a contributor: a wrong nonce is a replay, and a
-        // wrong address is somebody else's machine. The nonce is read first
-        // because a replayed quote for the *right* machine is still a replay.
-        let carries_our_nonce = quote
-            .report_data
-            .get(WITNESS_NONCE_AT..WITNESS_NONCE_AT + WITNESS_NONCE_LEN)
-            == Some(nonce.as_bytes());
-        return Err(if carries_our_nonce {
-            WitnessTrustError::WitnessSignerUnexpected
-        } else {
-            WitnessTrustError::WitnessQuoteReplayed
-        });
-    }
+    // The rebuild and whole-buffer comparison live in the attestation crate,
+    // shared with every service on this layout. `domain` is a parameter, never
+    // a default: it is what keeps a witness quote from verifying as a
+    // judgement-service quote, or the reverse. Which half is wrong decides
+    // the error -- a wrong nonce is a replay, a wrong address (or domain, or
+    // padding) is somebody else's machine.
+    check_report_data(&quote.report_data, domain, &address, nonce.as_array()).map_err(|err| {
+        match err {
+            ReportDataError::Replayed => WitnessTrustError::WitnessQuoteReplayed,
+            ReportDataError::SignerUnexpected => WitnessTrustError::WitnessSignerUnexpected,
+        }
+    })?;
 
     // Any pinned set matching is a pass. Nothing configured is a refusal.
     let mut last_reported = None;
@@ -249,8 +236,12 @@ pub(crate) fn verified_witness_for_test(url: &str, signing_address: &str) -> Ver
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        WITNESS_ADDRESS_AT, WITNESS_NONCE_AT, WITNESS_NONCE_LEN, WITNESS_REPORT_DATA_LEN,
+    };
     use super::*;
     use trace_commons_attestation::measurements::ExpectedMeasurements;
+    use trace_commons_attestation::report_data::JUDGEMENT_QUOTE_DOMAIN;
 
     const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
     const OTHER_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
@@ -374,6 +365,7 @@ mod tests {
         // pass on a `check_quote` that refused unconditionally.
         check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust(),
         )
@@ -384,6 +376,7 @@ mod tests {
     fn a_quote_bound_to_someone_elses_nonce_is_a_replay() {
         let err = check_quote(
             &quote_for(ADDRESS, &other_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust(),
         )
@@ -395,6 +388,7 @@ mod tests {
     fn an_unpinned_client_refuses_and_names_the_missing_control() {
         let err = check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &no_pins(),
         )
@@ -414,6 +408,7 @@ mod tests {
         let trust = trust_with(&[(MRTD, MRCONFIGID), (MRTD, MRCONFIGID_NEXT)]);
         check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID_NEXT),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust,
         )
@@ -422,6 +417,7 @@ mod tests {
         // window survivable rather than a cutover.
         check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust,
         )
@@ -429,6 +425,7 @@ mod tests {
 
         let err = check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID_STRANGER),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust,
         )
@@ -453,19 +450,22 @@ mod tests {
         // the second replica; this test is what says we do not.
         let mut second = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
         second.rtmr[3] = measurement("ab");
-        check_quote(&second, &our_nonce(), &trust()).expect("rtmr3 is not pinned");
+        check_quote(&second, WITNESS_QUOTE_DOMAIN, &our_nonce(), &trust())
+            .expect("rtmr3 is not pinned");
 
         // Same for rtmr0, which hashes SMBIOS tables that move on a VM
         // resize.
         let mut resized = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
         resized.rtmr[0] = measurement("cd");
-        check_quote(&resized, &our_nonce(), &trust()).expect("rtmr0 is not pinned");
+        check_quote(&resized, WITNESS_QUOTE_DOMAIN, &our_nonce(), &trust())
+            .expect("rtmr0 is not pinned");
     }
 
     #[test]
     fn a_quote_naming_another_signer_is_refused_as_an_unexpected_signer() {
         let err = check_quote(
             &quote_for(OTHER_ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust(),
         )
@@ -481,9 +481,65 @@ mod tests {
         // exists to prevent.
         let mut foreign = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
         foreign.report_data[..8].copy_from_slice(b"tcwitns2");
-        let err = check_quote(&foreign, &our_nonce(), &trust())
+        let err = check_quote(&foreign, WITNESS_QUOTE_DOMAIN, &our_nonce(), &trust())
             .expect_err("a quote under another domain tag is not ours");
         assert_eq!(err, WitnessTrustError::WitnessSignerUnexpected);
+    }
+
+    /// `quote_for`, bound under the judgement service's domain tag instead.
+    fn judgement_quote_for(address: &str, nonce: &WitnessNonce) -> VerifiedQuote {
+        let mut quote = quote_for(address, nonce, MRTD, MRCONFIGID);
+        quote.report_data[..8].copy_from_slice(JUDGEMENT_QUOTE_DOMAIN);
+        quote
+    }
+
+    #[test]
+    fn a_judgement_quote_passes_under_the_judgement_domain() {
+        // The positive control for the second tag: the same checks, the same
+        // pin shape, a different domain.
+        check_quote(
+            &judgement_quote_for(ADDRESS, &our_nonce()),
+            JUDGEMENT_QUOTE_DOMAIN,
+            &our_nonce(),
+            &trust(),
+        )
+        .expect("a judgement quote bound to our nonce is accepted as one");
+    }
+
+    #[test]
+    fn a_witness_quote_is_refused_as_a_judgement_quote_and_the_reverse() {
+        // Domain separation is the reason the tag exists. A quote the witness
+        // produced must never verify as the judgement service's, even for the
+        // same address, nonce and measurement, or the reverse.
+        let err = check_quote(
+            &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            JUDGEMENT_QUOTE_DOMAIN,
+            &our_nonce(),
+            &trust(),
+        )
+        .expect_err("a witness quote is not a judgement quote");
+        assert_eq!(err, WitnessTrustError::WitnessSignerUnexpected);
+
+        let err = check_quote(
+            &judgement_quote_for(ADDRESS, &our_nonce()),
+            WITNESS_QUOTE_DOMAIN,
+            &our_nonce(),
+            &trust(),
+        )
+        .expect_err("a judgement quote is not a witness quote");
+        assert_eq!(err, WitnessTrustError::WitnessSignerUnexpected);
+    }
+
+    #[test]
+    fn a_judgement_quote_with_another_nonce_is_still_a_replay() {
+        let err = check_quote(
+            &judgement_quote_for(ADDRESS, &other_nonce()),
+            JUDGEMENT_QUOTE_DOMAIN,
+            &our_nonce(),
+            &trust(),
+        )
+        .expect_err("the nonce check does not depend on the tag");
+        assert_eq!(err, WitnessTrustError::WitnessQuoteReplayed);
     }
 
     #[test]
@@ -493,7 +549,7 @@ mod tests {
         // says so.
         let mut padded = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
         padded.report_data[60] = 0x01;
-        let err = check_quote(&padded, &our_nonce(), &trust())
+        let err = check_quote(&padded, WITNESS_QUOTE_DOMAIN, &our_nonce(), &trust())
             .expect_err("bytes outside the layout are not ignored");
         assert_eq!(err, WitnessTrustError::WitnessSignerUnexpected);
     }
@@ -502,7 +558,7 @@ mod tests {
     fn a_short_report_data_is_refused() {
         let mut truncated = quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID);
         truncated.report_data.truncate(32);
-        let err = check_quote(&truncated, &our_nonce(), &trust())
+        let err = check_quote(&truncated, WITNESS_QUOTE_DOMAIN, &our_nonce(), &trust())
             .expect_err("a report body that is not 64 bytes is not this layout");
         assert_eq!(err, WitnessTrustError::WitnessQuoteReplayed);
     }
@@ -515,6 +571,7 @@ mod tests {
         };
         let err = check_quote(
             &quote_for(ADDRESS, &our_nonce(), MRTD, MRCONFIGID),
+            WITNESS_QUOTE_DOMAIN,
             &our_nonce(),
             &trust,
         )
