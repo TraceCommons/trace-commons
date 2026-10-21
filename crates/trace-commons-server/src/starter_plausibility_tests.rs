@@ -269,6 +269,23 @@ fn no_source_session_or_another_agent_is_not_counted() {
     );
 }
 
+/// A source identity the protocol would refuse (here a Claude Code id that
+/// is not a UUID) counts as no source, so it neither names an agent nor
+/// gives a session hash.
+#[test]
+fn an_invalid_source_identity_is_not_counted() {
+    let session = &plausible_week(Session::claude)[0];
+    let mut envelope = session.envelope();
+    envelope.source_session.as_mut().unwrap().native_id = "not-a-uuid".to_string();
+    let features = extract_features(&envelope, now());
+    assert_eq!(features.agent, StarterAgent::None);
+    assert!(features.session_hash.is_none());
+
+    let valid = extract_features(&session.envelope(), now());
+    assert_ne!(valid.agent, StarterAgent::None);
+    assert!(valid.session_hash.is_some());
+}
+
 #[test]
 fn too_few_sessions_or_tool_calls_is_volume() {
     let few = plausible_week(Session::claude)[..5].to_vec();

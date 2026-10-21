@@ -14,7 +14,9 @@ use crate::error::DatabaseError;
 use crate::starter_plausibility::{MAX_EVALUATED_ENVELOPES, StarterEnvelopeFeatures};
 
 /// An account's counted features: its own submissions (through a live
-/// principal link), still `accepted` and not withdrawn, oldest first.
+/// principal link), still `accepted` and not withdrawn. Read newest first,
+/// so the cap drops the oldest rather than the ones inside the age window;
+/// the caller reverses them back to oldest first.
 const ACCOUNT_FEATURES_SQL: &str = "SELECT f.features
    FROM trace_starter_plausibility_features f
    JOIN trace_submissions s
@@ -24,7 +26,7 @@ const ACCOUNT_FEATURES_SQL: &str = "SELECT f.features
     AND p.account_id = $2 AND p.unlinked_at IS NULL
   WHERE f.tenant_id = $1 AND f.tenant_id = trace_current_tenant_id()
     AND s.status = 'accepted' AND s.withdrawn_at IS NULL
-  ORDER BY s.received_at, s.submission_id
+  ORDER BY s.received_at DESC, s.submission_id DESC
   LIMIT $3";
 
 impl PgBackend {
@@ -74,8 +76,11 @@ impl PgBackend {
             )
             .await?;
         tx.commit().await?;
+        // Read newest first so the cap drops the oldest; returned oldest
+        // first.
         Ok(rows
             .into_iter()
+            .rev()
             .filter_map(|row| {
                 let value: serde_json::Value = row.get(0);
                 serde_json::from_value(value).ok()

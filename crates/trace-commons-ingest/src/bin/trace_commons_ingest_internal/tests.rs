@@ -8661,6 +8661,94 @@ async fn issue_332_clear_injected_failures(backend: &PgBackend) {
     }
 }
 
+/// The starter advance records features for accepted submissions only. A
+/// submission quarantined at submit writes nothing, and the remediation
+/// that accepts it writes the first and only row, built from the new body.
+/// The row is write-once, so one recorded from the quarantined body would
+/// have outlived the body it describes.
+#[tokio::test]
+async fn pg_starter_features_are_recorded_only_once_a_submission_is_accepted() {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_artifact_store(temp.path());
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(store.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    {
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.accept_medium_risk_submissions = false;
+        state_mut.pii_backstop_driver = None;
+        state_mut.near_ai_starter_mode = starter_advance::StarterMode::DryRun;
+    }
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let first = issue_332_quarantined_fixture().await;
+    let submission_id = first.submission_id;
+    let rows = || async {
+        client
+            .query(
+                "SELECT features->>'content_hash'
+                   FROM trace_starter_plausibility_features
+                  WHERE tenant_id = 'tenant-a' AND submission_id = $1",
+                &[&submission_id],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+    };
+
+    let Json(receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("first submission lands");
+    assert_eq!(receipt.status, "quarantined");
+    // Long enough for a spawned write to land, had one been started.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        rows().await.is_empty(),
+        "no features for a quarantined body"
+    );
+
+    let corrected = issue_332_corrected(&first);
+    let Json(receipt) = test_submit(state.clone(), "token-a", corrected.clone())
+        .await
+        .expect("corrected re-POST succeeds");
+    assert_eq!(receipt.status, "accepted");
+    let mut recorded = Vec::new();
+    for _ in 0..100 {
+        recorded = rows().await;
+        if !recorded.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .unwrap()
+        .unwrap();
+    let stored = read_envelope_by_record(state.as_ref(), &record).expect("envelope decrypts");
+    let expected =
+        trace_commons_server::starter_plausibility::extract_features(&stored, record.received_at);
+    assert_eq!(
+        recorded,
+        vec![expected.content_hash],
+        "one row, from the accepted body"
+    );
+}
+
 /// The tables a remediation writes, in the order it writes them: the
 /// submission row (with its witness evidence, in one transaction), the
 /// envelope object ref, the duplicate-precheck derived row, and the audit

@@ -36,7 +36,7 @@ pub const STARTER_PLAUSIBILITY_RULE_VERSION: &str = "starter-plausibility-v1";
 pub const STARTER_FEATURES_VERSION: &str = "starter-features-v1";
 
 /// Envelopes one evaluation reads at most. An account past this has more
-/// than enough uploads; the newest beyond it are ignored.
+/// than enough uploads; the oldest beyond it are ignored.
 pub const MAX_EVALUATED_ENVELOPES: usize = 2_000;
 
 /// A turn gap at least this long counts as human think time.
@@ -51,7 +51,7 @@ pub enum StarterAgent {
     /// A supported adapter outside the starter scope (OpenCode, Cline,
     /// Gemini CLI, ...). Not counted.
     Other,
-    /// No `source_session`. Not counted.
+    /// No `source_session`, or one the protocol refuses. Not counted.
     None,
 }
 
@@ -217,13 +217,13 @@ pub fn extract_features(
     envelope: &TraceContributionEnvelope,
     received_at: DateTime<Utc>,
 ) -> StarterEnvelopeFeatures {
-    let agent = StarterAgent::from_adapter(
-        envelope
-            .source_session
-            .as_ref()
-            .map(|source| source.adapter.as_str()),
-    );
-    let session_hash = envelope.source_session.as_ref().map(|source| {
+    // Only a source identity the protocol accepts counts; anything else is
+    // treated as no source at all.
+    let source = envelope.source_session.as_ref().filter(|source| {
+        trace_commons_protocol::trace_contribution::validate_source_session_identity(source).is_ok()
+    });
+    let agent = StarterAgent::from_adapter(source.map(|source| source.adapter.as_str()));
+    let session_hash = source.map(|source| {
         sha256_prefixed(&[
             b"trace-starter-session.v1\n",
             source.adapter.as_bytes(),

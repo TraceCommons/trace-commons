@@ -16247,14 +16247,19 @@ async fn submit_trace_handler(
         }
 
         // The starter advance's plausibility features, hash-only, when its
-        // mode is on. Never blocks or fails the upload.
-        starter_advance::observe_submission(
-            state.as_ref(),
-            tenant.tenant_id(),
-            record.submission_id,
-            &envelope,
-            record.received_at,
-        );
+        // mode is on. Never blocks or fails the upload. Accepted submissions
+        // only: the row is write-once, so one recorded from a quarantined
+        // body would outlive the remediation that replaces that body. The
+        // remediation that accepts it writes the first and only row.
+        if record.status == TraceCorpusStatus::Accepted {
+            starter_advance::observe_submission(
+                state.as_ref(),
+                tenant.tenant_id(),
+                record.submission_id,
+                &envelope,
+                record.received_at,
+            );
+        }
 
         // The record has only just landed (or been re-scrubbed from
         // quarantine): the gate has not seen it, so there is no decision to

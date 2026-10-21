@@ -6,7 +6,8 @@ features are recorded and a dry-run report reads them; nothing is sent.
 Builds on the NEAR AI payout rail in
 [`2026-10-21-nearai-credit-payout-design.md`](2026-10-21-nearai-credit-payout-design.md)
 (draft PR #1532, "the payout design" below). Section and decision numbers
-(D1-D8) refer to that document.
+(D1-D8) refer to that document. Until #1532 merges, that link resolves only
+on its branch.
 
 ## Owner decisions
 
@@ -111,13 +112,13 @@ session id. The evaluator folds an account's records at report time.
 
 | Rule | Proposed threshold | Why it suggests real use | Cost to fake |
 |---|---|---|---|
-| Accepted by ingest | Every counted envelope passed admission, redaction and residual scan | The bar every upload already meets | None extra |
-| Source agent | `source_session.adapter` is `claude-code` or `codex`, with UUID native ids | Scope of A1 | Trivial |
+| Accepted by ingest (precondition, not one of the eight rules) | Only `accepted`, unwithdrawn submissions are recorded and read; the account read enforces it | The bar every upload already meets | None extra |
+| Source agent | `source_session.adapter` is `claude-code` or `codex`, with an identity the protocol accepts (UUID native ids for both) | Scope of A1 | Trivial |
 | Volume | At least 8 distinct sessions and 150 tool calls | A few days of real work produces dozens of sessions | Low with an LLM |
-| Span | Sessions on at least 3 distinct UTC days, first to last at least 48 h, none in the future (envelopes older than 180 days are not counted) | "A few days" | Trivial |
+| Span | First or last events fall on at least 3 distinct UTC days, first to last at least 48 h, none in the future (envelopes older than 180 days are not counted) | "A few days" | Trivial |
 | Rhythm | Gaps between turns are irregular, with human think-time pauses; tool latencies are not constant | Scripted generators tend to be regular | Moderate |
-| Agent signature | Model names match the adapter where one is named (Claude models for Claude Code, OpenAI models for Codex); at least 60% of tool names fit the agent's tool set (MCP tools count for both) | Mixed or unknown shapes point at a synthetic source | Low once known |
-| Tool pairing | Over 95% of tool calls have a matching result; some calls fail and are retried | Real agent runs pair calls and include failures | Moderate |
+| Agent signature | At least 90% of envelopes that name a model use the adapter's family (Claude models for Claude Code, OpenAI models for Codex); at least 60% of tool names fit the agent's tool set (MCP tools count for both) | Mixed or unknown shapes point at a synthetic source | Low once known |
+| Tool pairing | Over 95% of tool calls have a matching result; at least one tool result failed (retries are not detected in v1) | Real agent runs pair calls and include failures | Moderate |
 | Usage | Token counts on at least half the assistant messages, input tokens growing step to step at least half the time (context grows); some list-price cost present | Real CLIs report usage this way | Moderate |
 | Not copied | No two of the account's envelopes share a content hash. Cross-account duplicates (exact hash, simhash) are checked at send time, with the identity rules (section 4) | Catches replayed or shared corpora | High for replay, low for fresh fakes |
 
@@ -171,11 +172,23 @@ else.
 | Lifetime | The advance credential's `max_total_amount`, enforced by cloud-api under its own lock | $2,500 (500 advances), raised by updating the credential |
 
 The lifetime cap is the strongest control: even a bug in the pass cannot
-send more than the credential allows. A line whose target includes an
-unpaid advance is sent with the advance credential; every other line uses
-the rail's normal credential. Both send on the link's program, and #1271
-sums a cumulative total across credentials, so absorption still works.
-Advances therefore never draw down the earned-credit budget.
+send more than the credential allows. Routing, decided at send time under
+the rail's single-flight lock:
+
+- If `owed` already covers the advance (`owed >= advance`), for example
+  credit that settled before the account linked, the advance is closed as
+  `absorbed` without being sent, and the line goes out on the rail's normal
+  credential as usual.
+- Otherwise the line is split. The normal credential sends the earned part
+  (`owed` less closed links' `final_paid`), and the advance credential sends
+  only the top-up, `advance - owed`, which is never more than the $5
+  per-transfer cap.
+
+Both send on the link's program, and #1271 sums a cumulative total across
+credentials, so the program total still reaches `max(owed, advance)` and
+absorption works. The advance credential only ever carries top-ups, so
+advances never draw down the earned-credit budget and earned credit never
+draws down the advance budget.
 
 ### Value to an attacker is low
 
@@ -316,6 +329,10 @@ start now; the rest stack after payout plan Task 5 (the pass).
 - **Agents:** Claude Code and Codex only at first, or also OpenCode, Cline
   and Gemini CLI.
 - **App wording** for the advance.
+- **One advance per recipient org.** Proposed (section 4): one sent advance
+  per `recipient_index`, stricter than D7, so in a shared org only the first
+  contributor gets an advance. Alternatives: a per-org count cap, or rely on
+  the subject and account rules plus the money caps.
 - **Fact to check with NEAR AI:** that one sender org can hold two `oc_`
   credentials with separate `max_total_amount` caps sending on the same
   program. #1271's cumulative sum across credentials implies it, but it has
