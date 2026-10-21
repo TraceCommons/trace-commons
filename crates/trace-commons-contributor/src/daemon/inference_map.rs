@@ -1838,6 +1838,7 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         let (_dir, s) = shared();
+        let s = std::sync::Arc::new(s);
         s.install_routing_ledger_for_test(crate::routing::ironwire::IronWireLedger::new(
             port,
             "t".to_string(),
