@@ -28,7 +28,12 @@
 //! carries the session's facts (`insights::session_facts`): per-model
 //! counts of edits, declined, undone and interrupted calls, the task shape
 //! and inferred task, active time, and fixed labels, never a path, a
-//! command, a text or a price. A row made before facts were kept, or under
+//! command or a text. The store holds no list price: the Models answers
+//! price stored tokens when they are built. Its one money figure is the
+//! actual NEAR AI charge per session, folded from the proxy ledger's
+//! `cost_usd` into the session's route tally (owner decision D5, settled
+//! 2026-10-20; `insights_route_tally`), in integer USD micros, because the
+//! ledger keeps a call for 24 hours only. A row made before facts were kept, or under
 //! an older `SESSION_FACTS_VERSION`, is read once more, within the per-poll
 //! budget; a row whose task rules are older is re-classified from its
 //! stored shape when answered, not read again. Sessions in a folder that is Never, by its
@@ -147,7 +152,7 @@ use trace_commons_protocol::insights_usage_series::{
 
 use super::inference_map::Speakers;
 use super::insights_route_tally::{
-    FoldCursor, FoldSummary, RouteTally, fold_into, fold_plan, prune, routing_value,
+    FoldCursor, FoldSummary, RouteTally, fold_into, fold_plan, prune, routing_value, session_charge,
 };
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
@@ -497,9 +502,10 @@ struct CounterStore {
     rows: BTreeMap<KeyedDigest, CounterRow>,
     /// Each session's route tally, keyed by its harness-session digest
     /// under this store's key (owner question Q3 and decision D15 extended,
-    /// defaults taken). Apart from `rows` because the ledger's calls arrive
-    /// before the quiet-period pass reads the transcript. Absent in a store
-    /// written before tallies, which loads with none.
+    /// defaults taken), with its NEAR AI charge per model. Apart from `rows`
+    /// because the ledger's calls arrive before the quiet-period pass reads
+    /// the transcript. Absent in a store written before tallies, which loads
+    /// with none; a tally written before charges loads with no charge.
     #[serde(default)]
     routing: BTreeMap<KeyedDigest, RouteTally>,
     /// The highest ledger row id folded into `routing`; `None` before any.
@@ -1696,10 +1702,12 @@ impl CounterPass {
 
     /// The `insights_model_answers` answer: the six Models answers over the
     /// stored sessions inside the 13 weeks ending `now`, priced at list
-    /// prices when the answer is built (the store holds tokens, never a
+    /// prices when the answer is built (the store holds tokens, never a list
     /// price). Each row is joined to its session's route tally by the keyed
-    /// harness-session digest, as `week_value` joins it; with the ledger feed
-    /// off or no proxy ledger declared every session is `Unobserved`, so no
+    /// harness-session digest, as `week_value` joins it, and so to the NEAR
+    /// AI charge the tally kept, which is answered as its own figure and
+    /// never added to a list-priced one. With the ledger feed off or no proxy
+    /// ledger declared every session is `Unobserved` with no charge, so no
     /// stored tally is read.
     pub(crate) fn model_answers_value(
         &self,
@@ -1717,7 +1725,7 @@ impl CounterPass {
             Ok(found) => found,
             Err(reason) => return unreadable_value(reason),
         };
-        let (inputs, routes) = match (&key, &store) {
+        let (inputs, routes, charges) = match (&key, &store) {
             (Some(key), Some(store)) => {
                 let never = never_digests(key, never_project_keys);
                 let mut rows: Vec<&CounterRow> = store
@@ -1726,16 +1734,19 @@ impl CounterPass {
                     .filter(|row| !never.contains(&row.project))
                     .collect();
                 rows.sort_by_key(|row| row.seq);
-                let routes = route_map(&rows, &store.routing, ledger_feed && ledger_present);
+                let available = ledger_feed && ledger_present;
+                let routes = route_map(&rows, &store.routing, available);
+                let charges = charge_map(&rows, &store.routing, available);
                 let inputs: Vec<SessionInput> =
                     rows.iter().map(|row| row.session_input()).collect();
-                (inputs, routes)
+                (inputs, routes, charges)
             }
-            _ => (Vec::new(), BTreeMap::new()),
+            _ => (Vec::new(), BTreeMap::new(), BTreeMap::new()),
         };
-        let answers = crate::insights::model_answers::model_answers(
+        let answers = crate::insights::model_answers::model_answers_with_charges(
             &inputs,
             &routes,
+            &charges,
             &crate::insights::pricing_catalog::production_pricing_catalog(),
             now,
         );
@@ -2826,6 +2837,26 @@ fn route_map(
                 ModelRoute::Unobserved
             };
             (row.reference(), route)
+        })
+        .collect()
+}
+
+/// Each row's NEAR AI charge for the Models answers, by the engine's
+/// session reference: absent when its session sent no call through NEAR AI
+/// (or routing is unavailable, as in `route_map`), `None` when the charge is
+/// unknown.
+fn charge_map(
+    rows: &[&CounterRow],
+    routing: &BTreeMap<KeyedDigest, RouteTally>,
+    routing_available: bool,
+) -> BTreeMap<String, Option<u64>> {
+    if !routing_available {
+        return BTreeMap::new();
+    }
+    rows.iter()
+        .filter_map(|row| {
+            let tally = routing.get(row.harness_session.as_ref()?)?;
+            Some((row.reference(), session_charge(tally)?))
         })
         .collect()
 }
