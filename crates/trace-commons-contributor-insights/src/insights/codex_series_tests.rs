@@ -632,7 +632,22 @@ fn a_codex_drill_with_a_series_draws_it() {
     assert!(drill.series.is_some());
     assert_eq!(drill.series_unavailable, None);
     assert_eq!(drill.turns, Some(3));
-    assert_eq!(drill.tokens, Some(4_800));
+    // The chart is the series; the tokens are the observed change, the one
+    // basis a Codex session has, and unknown with none observed.
+    let charted: u64 = drill
+        .series
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|turn| {
+            u64::from(turn.uncached.unwrap())
+                + u64::from(turn.cache_read.unwrap())
+                + turn.cache_write.unwrap()
+                + u64::from(turn.output.unwrap())
+        })
+        .sum();
+    assert_eq!(charted, 4_800);
+    assert_eq!(drill.tokens, None);
 }
 
 #[test]

@@ -5021,10 +5021,13 @@ Each row is exactly
 - `turns` is the turn count of the session's per-turn series; `null` for a
   Codex row made before the per-turn reader (owner decision D11, settled
   2026-10-20) and for an unreadable session.
-- `tokens` is the session's tokens as its drill's header counts them: the
-  known turns' tokens together (uncached input, cache read, cache write and
-  output), or, for a Codex row with no per-turn series, the change between
-  its first and last token count. `null` when no counter is known, never 0.
+- `tokens` is the session's tokens as its drill's header counts them: for
+  Claude Code the known turns' tokens together (uncached input, cache read,
+  cache write and output); for Codex always the change between its first
+  and last running token total, with or without a per-turn series, so a row
+  whose series the Codex allowance trims keeps the same figure and a series
+  with no known turn still shows it. `null` when no counter is known, never
+  0.
 - `sparkline` is the session's tokens per turn, folded for a row, or `null`
   for a Codex row with no per-turn series and for a session with no known turn:
   `{"points", "peak_tokens", "peak_turn"}`. `points` is at most 32 whole
@@ -5054,8 +5057,11 @@ computed by the same engine from the stored counters, with `feed:
 transcript's earliest and latest recorded events, by the rule a saved
 snapshot's time evidence uses, so the same bytes give the same drill. A
 Codex session read turn by turn draws its series as a Claude Code one does;
-one with no per-turn series (a saved snapshot, or a row made before the
-per-turn reader) has `series: null` and `series_unavailable: "not_recorded"`.
+one with no per-turn series (a saved snapshot, a row made before the
+per-turn reader, or one the Codex allowance trimmed) has `series: null` and
+`series_unavailable: "not_recorded"`. A Codex drill's `tokens` is the
+observed change either way (see `tokens` above); a series with unknown turns
+adds `some_turns_unknown` for the chart only.
 A missing or non-string `session_ref` is `bad_params` /
 `insights-session-ref-invalid`; one that names no listed row (never stored,
 made again since, or in a Never folder) is `bad_params` /

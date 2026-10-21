@@ -161,7 +161,7 @@ use crate::config::ConfigStore;
 use crate::insights::SourceFormat;
 use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
-    COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
+    CODEX_PER_TURN_SERIES, COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_AUTOMATED_SESSIONS, COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
     COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS,
@@ -437,6 +437,27 @@ impl CounterRow {
     }
 
     fn session_input(&self) -> SessionInput {
+        self.session_input_with(CODEX_PER_TURN_SERIES)
+    }
+
+    /// The per-turn series the Sessions list draws: Claude Code's, or
+    /// Codex's while `codex_per_turn` (`CODEX_PER_TURN_SERIES`, owner
+    /// decision D11) holds.
+    fn listed_series(&self, codex_per_turn: bool) -> Option<&UsageSeries> {
+        match &self.body {
+            RowBody::Claude { series, .. } => Some(series),
+            RowBody::Codex {
+                series: Some(evidence),
+                ..
+            } if codex_per_turn => Some(&evidence.series),
+            _ => None,
+        }
+    }
+
+    /// `session_input`, with `codex_per_turn` for `CODEX_PER_TURN_SERIES`
+    /// (owner decision D11): held, a stored Codex series is not served, and
+    /// the session reads as one saved before the per-turn reader.
+    fn session_input_with(&self, codex_per_turn: bool) -> SessionInput {
         SessionInput {
             // The order the row was made in, so the engine can tell the
             // sessions apart. Never a digest; every wire form drops it.
@@ -459,7 +480,7 @@ impl CounterRow {
                     observed, series, ..
                 } => SessionBody::Codex {
                     observed: *observed,
-                    series: series.clone(),
+                    series: series.clone().filter(|_| codex_per_turn),
                 },
                 RowBody::Unknown { source, reason } => SessionBody::Unknown {
                     source: Some(*source),
@@ -1739,28 +1760,29 @@ impl CounterPass {
                     RowBody::Unknown { source, .. } => *source,
                 };
                 // The per-turn series, Claude Code's or Codex's (owner
-                // decision D11, settled); a Codex row made before the
-                // per-turn reader, or trimmed by the Codex budget, has none.
-                let series = match &row.body {
-                    RowBody::Claude { series, .. } => Some(series),
-                    RowBody::Codex {
-                        series: Some(evidence),
-                        ..
-                    } => Some(&evidence.series),
-                    _ => None,
-                };
+                // decision D11, settled: served only while
+                // `CODEX_PER_TURN_SERIES` holds); a Codex row made before
+                // the per-turn reader, or trimmed by the Codex budget, has
+                // none.
+                let series = row.listed_series(CODEX_PER_TURN_SERIES);
                 let turns = series.map(|series| series.turns.len());
-                // The row's tokens as the drill's header counts them, and
-                // the sparkline over its per-turn series.
-                let (tokens, sparkline) = match (&row.body, series) {
-                    (_, Some(series)) => (
-                        session_sparkline::known_tokens(&series.turns),
-                        session_sparkline::session_sparkline(&series.turns),
+                // The row's tokens as the drill's header counts them: for
+                // Codex always the observed change, series or not, so a
+                // trimmed series never moves the figure. The sparkline is
+                // over the per-turn series.
+                let (tokens, sparkline) = match &row.body {
+                    RowBody::Codex { observed, .. } => (
+                        observed.as_ref().map(|observed| observed.total),
+                        series
+                            .and_then(|series| session_sparkline::session_sparkline(&series.turns)),
                     ),
-                    (RowBody::Codex { observed, .. }, None) => {
-                        (observed.as_ref().map(|observed| observed.total), None)
-                    }
-                    _ => (None, None),
+                    _ => match series {
+                        Some(series) => (
+                            session_sparkline::known_tokens(&series.turns),
+                            session_sparkline::session_sparkline(&series.turns),
+                        ),
+                        None => (None, None),
+                    },
                 };
                 serde_json::json!({
                     "session_ref": row.reference(),
@@ -2187,6 +2209,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             std::io::BufReader::new(file),
             key,
             COUNTER_PASS_MAX_LINE_BYTES,
+            CODEX_PER_TURN_SERIES,
         )
     });
     let Some(scanned) = scanned else {
@@ -2362,11 +2385,15 @@ enum ScannedBody {
 ///
 /// `None` when the file cannot be read or a line is longer than `max_line`
 /// bytes: the caller stores unknown, never zero.
+///
+/// `codex_per_turn` is `CODEX_PER_TURN_SERIES` (owner decision D11): held,
+/// no Codex per-turn series is kept, and the facts read beside it still are.
 fn scan_session(
     source: AnalyticsSource,
     mut reader: impl BufRead,
     key: &DigestKey,
     max_line: u64,
+    codex_per_turn: bool,
 ) -> Option<ScannedSession> {
     use sha2::Digest as _;
     let format = source_format(source);
@@ -2485,7 +2512,9 @@ fn scan_session(
         AnalyticsSource::Codex => {
             let (series, facts) = codex_series
                 .and_then(|scan| scan.finish().ok())
-                .map_or((None, None), |(series, facts)| (Some(series), Some(facts)));
+                .map_or((None, None), |(series, facts)| {
+                    (codex_per_turn.then_some(series), Some(facts))
+                });
             (
                 ScannedBody::Codex(
                     codex.and_then(|scan| scan.finish(digest.clone()).ok().map(Box::new)),
@@ -3538,11 +3567,56 @@ mod tests {
         );
     }
 
+    /// `CODEX_PER_TURN_SERIES` (owner decision D11) held: the pass stores
+    /// no Codex series, and a series stored while it held is not served, so
+    /// every view reads the session as one saved before the per-turn
+    /// reader. Its observed change and facts are kept.
+    #[test]
+    fn a_held_codex_per_turn_series_is_neither_read_nor_served() {
+        let key = key_for(3);
+        let bytes = codex_bytes();
+        let scan = |per_turn: bool| {
+            scan_session(
+                AnalyticsSource::Codex,
+                &bytes[..],
+                &key,
+                COUNTER_PASS_MAX_LINE_BYTES,
+                per_turn,
+            )
+            .unwrap()
+        };
+        let ScannedBody::Codex(observed, Some(_)) = scan(true).body else {
+            panic!("a series is read while D11 holds");
+        };
+        assert!(observed.is_some());
+        let ScannedBody::Codex(held_observed, None) = scan(false).body else {
+            panic!("no series is read while D11 is held");
+        };
+        assert_eq!(held_observed, observed);
+
+        let f = Fixture::new();
+        let path = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let row = &stored_rows(&f.pass)[0];
+        let series = |input: SessionInput| match input.body {
+            SessionBody::Codex { series, observed } => {
+                assert!(observed.is_some());
+                series.is_some()
+            }
+            _ => panic!("a Codex row"),
+        };
+        assert!(series(row.session_input_with(true)));
+        assert!(!series(row.session_input_with(false)));
+        assert!(row.listed_series(true).is_some());
+        assert!(row.listed_series(false).is_none());
+    }
+
     #[test]
     fn one_line_is_never_read_past_the_line_bound() {
         let key = key_for(3);
-        let scan =
-            |bytes: &[u8], max: u64| scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max);
+        let scan = |bytes: &[u8], max: u64| {
+            scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max, true)
+        };
         let line =
             br#"{"type":"user","sessionId":"PRIVATE-ID","timestamp":"2026-09-14T09:00:00Z"}"#;
         let len = line.len() as u64;
