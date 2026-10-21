@@ -3,31 +3,42 @@
 
 //! One judgement request end to end, without a socket.
 //!
-//! [`JudgementService::judge`] takes the bearer claim and a parsed request
-//! and returns the unsigned results and the spend bucket. The HTTP surface,
-//! the nonce header and the response signature belong to the binary (slice
-//! 5), which wraps this.
+//! [`JudgementService::judge`] takes the opened request plaintext (the
+//! claim and the request nonce travel inside it) and returns the unsigned
+//! results, the echoed request nonce and the spend bucket. Reading the body,
+//! opening the seal, signing and sealing the response, and the judgement
+//! permits belong to the binary (slice 5), which wraps this.
 //!
-//! Order:
+//! Order (spec section 3, "The service's check order", steps 3 to 7):
 //!
-//! 1. verify the claim offline; derive the keyed account digest;
-//! 2. count the digest's marked events (a digest that is not a version-1
-//!    digest is refused before any model call);
-//! 3. run each requested judgement in request order: `task` and `finished`
+//! 1. parse the plaintext: the wire version, the closed shape, the digest
+//!    cap;
+//! 2. verify the claim offline; derive the keyed account digest;
+//! 3. count the digest's marked events (a digest that is not a version-1
+//!    digest, or a request that would judge nothing, is refused here);
+//! 4. record the request nonce in the replay set, refusing a repeat with
+//!    `judgement_request_replayed`, or `judgement_saturated` when the set is
+//!    full. Only a request whose claim verified gets this far, so an
+//!    unauthenticated caller cannot fill the set;
+//! 5. take a judgement permit from the caller's `acquire_permit`, held until
+//!    the last model call returns. A caller cannot hold one before step 4;
+//! 6. run each requested judgement in request order: `task` and `finished`
 //!    once, `event_kind` once per marked event for the first
 //!    [`JUDGEMENT_EVENT_KIND_MAX`], and `unjudged` for the rest, so one
 //!    session costs at most six model calls;
-//! 4. any refusal discards every label of the request.
+//! 7. any refusal discards every label of the request.
 //!
 //! One log line per request, hash-only: a random request id,
-//! `digest_sha256`, the model id, `ok` or the refusal label, and a latency
-//! bucket. Nothing else.
+//! `digest_sha256` (`none` when the plaintext did not parse), the model id,
+//! `ok` or the refusal label, and a latency bucket. Nothing else.
 
+use std::collections::{HashSet, VecDeque};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use trace_commons_protocol::insights_judgement::{
-    JUDGEMENT_EVENT_KIND_MAX, JudgementKind, JudgementRefusal, JudgementRequest, JudgementResult,
-    JudgementSpend,
+    JUDGEMENT_EVENT_KIND_MAX, JudgementKind, JudgementRefusal, JudgementRequestNonce,
+    JudgementResult, JudgementSpend, parse_judgement_request,
 };
 
 use super::claim::{IssuerKeys, verify_judgement_claim};
@@ -37,19 +48,107 @@ use super::receipt_check::JudgementCaller;
 
 /// The tracing target of the request log line.
 pub const LOG_TARGET: &str = "trace_commons_judgement";
+/// How long an accepted request nonce is remembered: the claim's 15-minute
+/// lifetime plus skew. A replay after this carries an expired claim, which
+/// the claim check refuses.
+pub const REPLAY_WINDOW_SECS: i64 = 20 * 60;
+/// The most request nonces remembered at once. A full set refuses with
+/// `judgement_saturated` rather than forgetting a nonce early.
+pub const REPLAY_SET_MAX: usize = 65_536;
 
 /// The unsigned outcome of one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgedDigest {
+    /// Echoed from the request, for the signed response.
+    pub request_nonce: JudgementRequestNonce,
     pub digest_sha256: String,
     pub results: Vec<JudgementResult>,
     pub spend: JudgementSpend,
 }
 
-/// The service: the claim verifier, the limiter keys, and the caller.
+/// The request nonces accepted in the last [`REPLAY_WINDOW_SECS`], in
+/// memory only. A restart empties it, and also changes the per-boot sealing
+/// key, so a request sealed before the restart no longer opens.
+pub struct ReplaySet {
+    capacity: usize,
+    inner: Mutex<ReplayInner>,
+}
+
+#[derive(Default)]
+struct ReplayInner {
+    seen: HashSet<[u8; 32]>,
+    /// Insertion order with the time of each insertion, oldest first.
+    order: VecDeque<(i64, [u8; 32])>,
+}
+
+impl std::fmt::Debug for ReplaySet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaySet")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ReplaySet {
+    fn default() -> Self {
+        Self::with_capacity(REPLAY_SET_MAX)
+    }
+}
+
+impl ReplaySet {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            inner: Mutex::new(ReplayInner::default()),
+        }
+    }
+
+    /// Record `nonce` as accepted at `now`.
+    ///
+    /// [`JudgementRefusal::RequestReplayed`] if it was accepted within the
+    /// window; [`JudgementRefusal::Saturated`] if the set is full of
+    /// unexpired nonces. A clock that steps back only keeps entries longer.
+    pub fn record(&self, nonce: &JudgementRequestNonce, now: i64) -> Result<(), JudgementRefusal> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        while let Some(&(at, oldest)) = inner.order.front() {
+            if now.saturating_sub(at) < REPLAY_WINDOW_SECS {
+                break;
+            }
+            inner.order.pop_front();
+            inner.seen.remove(&oldest);
+        }
+        let nonce = *nonce.as_bytes();
+        if inner.seen.contains(&nonce) {
+            return Err(JudgementRefusal::RequestReplayed);
+        }
+        if inner.seen.len() >= self.capacity {
+            return Err(JudgementRefusal::Saturated);
+        }
+        inner.seen.insert(nonce);
+        inner.order.push_back((now, nonce));
+        Ok(())
+    }
+
+    /// How many nonces are remembered. For tests and the drill.
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .seen
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The service: the claim verifier, the limiter keys, the replay set and the
+/// caller.
 pub struct JudgementService {
     issuer: IssuerKeys,
     limiter_keys: LimiterKeys,
+    replay: ReplaySet,
     caller: JudgementCaller,
 }
 
@@ -76,25 +175,33 @@ impl JudgementService {
         Self {
             issuer,
             limiter_keys,
+            replay: ReplaySet::default(),
             caller,
         }
     }
 
-    /// Judge one request for the holder of `bearer` at `now`.
-    pub async fn judge(
+    /// Judge one opened request plaintext at `now`.
+    ///
+    /// `acquire_permit` is called once, after the claim verified and the
+    /// request nonce was recorded and before any model call; its permit is
+    /// held until the last call returns. The binary passes its judgement
+    /// semaphore's `try_acquire` mapped to `judgement_saturated`.
+    pub async fn judge<P>(
         &self,
-        bearer: &str,
-        request: &JudgementRequest,
+        plaintext: &[u8],
         now: i64,
+        acquire_permit: impl FnOnce() -> Result<P, JudgementRefusal>,
     ) -> Result<JudgedDigest, JudgementRefusal> {
         let started = Instant::now();
         let request_id = uuid::Uuid::new_v4();
-        let digest_sha256 = request.digest_sha256();
-        let outcome = self.judge_inner(bearer, request, &digest_sha256, now).await;
+        let mut digest_sha256 = None;
+        let outcome = self
+            .judge_inner(plaintext, now, acquire_permit, &mut digest_sha256)
+            .await;
         tracing::info!(
             target: LOG_TARGET,
             request_id = %request_id.simple(),
-            digest_sha256 = %digest_sha256,
+            digest_sha256 = %digest_sha256.as_deref().unwrap_or("none"),
             model_id = %self.caller.model_id(),
             outcome = match &outcome {
                 Ok(_) => "ok",
@@ -106,18 +213,35 @@ impl JudgementService {
         outcome
     }
 
-    async fn judge_inner(
+    async fn judge_inner<P>(
         &self,
-        bearer: &str,
-        request: &JudgementRequest,
-        digest_sha256: &str,
+        plaintext: &[u8],
         now: i64,
+        acquire_permit: impl FnOnce() -> Result<P, JudgementRefusal>,
+        digest_sha256: &mut Option<String>,
     ) -> Result<JudgedDigest, JudgementRefusal> {
-        let account = verify_judgement_claim(&self.issuer, bearer, now)?;
+        let request = parse_judgement_request(plaintext)?;
+        *digest_sha256 = Some(request.digest_sha256());
+        let account = verify_judgement_claim(&self.issuer, request.claim(), now)?;
         let account_key = self.limiter_keys.account_key(account.account_ref());
         // The raw account reference is not needed past this point.
         drop(account);
-        let events = marked_event_count(request.digest())?;
+        // The digest goes to the model as text, so it must be UTF-8.
+        let digest = std::str::from_utf8(request.digest())
+            .map_err(|_| JudgementRefusal::RequestMalformed)?;
+        let events = marked_event_count(digest)?;
+        if events == 0
+            && request
+                .judgements()
+                .iter()
+                .all(|kind| *kind == JudgementKind::EventKind)
+        {
+            // Only `event_kind` was asked for, over a digest with no marks:
+            // there is nothing to judge and nothing to sign.
+            return Err(JudgementRefusal::RequestMalformed);
+        }
+        self.replay.record(request.request_nonce(), now)?;
+        let _permit = acquire_permit()?;
 
         let mut results = Vec::new();
         for &kind in request.judgements() {
@@ -125,7 +249,7 @@ impl JudgementService {
                 JudgementKind::Task | JudgementKind::Finished => {
                     results.push(
                         self.caller
-                            .judge(&account_key, request.digest(), kind, None, now)
+                            .judge(&account_key, digest, kind, None, now)
                             .await?,
                     );
                 }
@@ -133,7 +257,7 @@ impl JudgementService {
                     for index in 0..events {
                         let result = if index < JUDGEMENT_EVENT_KIND_MAX {
                             self.caller
-                                .judge(&account_key, request.digest(), kind, Some(index), now)
+                                .judge(&account_key, digest, kind, Some(index), now)
                                 .await?
                         } else {
                             JudgementResult::unjudged_event(index)
@@ -144,13 +268,9 @@ impl JudgementService {
                 }
             }
         }
-        if results.is_empty() {
-            // Only `event_kind` was asked for, over a digest with no marks:
-            // there is nothing to judge and nothing to sign.
-            return Err(JudgementRefusal::RequestMalformed);
-        }
         Ok(JudgedDigest {
-            digest_sha256: digest_sha256.to_string(),
+            request_nonce: *request.request_nonce(),
+            digest_sha256: request.digest_sha256(),
             results,
             spend: JudgementSpend {
                 account_month_remaining_bucket: self
@@ -175,8 +295,11 @@ mod tests {
     };
     use crate::judgement_service::production::ProductionCheck;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::{Arc, Mutex};
-    use trace_commons_protocol::insights_judgement::{JudgementLabel, SpendBucket};
+    use trace_commons_protocol::insights_judgement::{
+        JudgementLabel, JudgementRequest, SpendBucket,
+    };
 
     const ROOT: [u8; 32] = [5u8; 32];
 
@@ -249,8 +372,24 @@ mod tests {
         }
     }
 
-    fn all_three(digest: String) -> JudgementRequest {
-        JudgementRequest::new(
+    static NEXT_NONCE: AtomicU8 = AtomicU8::new(1);
+
+    /// A fresh request nonce per call, as a daemon draws one per send.
+    fn fresh_nonce() -> JudgementRequestNonce {
+        let mut bytes = [0u8; 32];
+        bytes[0] = NEXT_NONCE.fetch_add(1, Ordering::SeqCst);
+        bytes[1..17].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        JudgementRequestNonce::from_bytes(bytes)
+    }
+
+    fn request(claim: String, digest: String, judgements: Vec<JudgementKind>) -> JudgementRequest {
+        JudgementRequest::new(fresh_nonce(), claim, digest.into_bytes(), judgements)
+            .expect("request")
+    }
+
+    fn all_three(claim: String, digest: String) -> JudgementRequest {
+        request(
+            claim,
             digest,
             vec![
                 JudgementKind::Task,
@@ -258,20 +397,28 @@ mod tests {
                 JudgementKind::Finished,
             ],
         )
-        .expect("request")
+    }
+
+    fn plaintext(request: &JudgementRequest) -> Vec<u8> {
+        request.to_json().into_bytes()
+    }
+
+    fn no_permit() -> Result<(), JudgementRefusal> {
+        Ok(())
     }
 
     #[tokio::test]
     async fn a_request_judges_each_judgement_in_order_with_receipts() {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
-        let request = all_three(digest(2));
+        let request = all_three(h.issuer.valid_claim(), digest(2));
         let judged = h
             .service
-            .judge(&h.issuer.valid_claim(), &request, NOW)
+            .judge(&plaintext(&request), NOW, no_permit)
             .await
             .expect("judged");
         assert_eq!(judged.digest_sha256, request.digest_sha256());
+        assert_eq!(&judged.request_nonce, request.request_nonce());
         let shape: Vec<_> = judged
             .results
             .iter()
@@ -300,10 +447,10 @@ mod tests {
     async fn event_kind_is_judged_for_at_most_four_marks() {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
-        let request = all_three(digest(6));
+        let request = all_three(h.issuer.valid_claim(), digest(6));
         let judged = h
             .service
-            .judge(&h.issuer.valid_claim(), &request, NOW)
+            .judge(&plaintext(&request), NOW, no_permit)
             .await
             .expect("judged");
         let events: Vec<_> = judged
@@ -325,9 +472,10 @@ mod tests {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
         let other = TestIssuer::new();
+        let refused = all_three(other.valid_claim(), digest(1));
         assert_eq!(
             h.service
-                .judge(&other.valid_claim(), &all_three(digest(1)), NOW)
+                .judge(&plaintext(&refused), NOW, no_permit)
                 .await
                 .unwrap_err(),
             JudgementRefusal::CredentialRefused
@@ -335,27 +483,46 @@ mod tests {
         let pooled = h.issuer.claim_for("devfolio-pool", NOW, NOW + 60);
         assert_eq!(
             h.service
-                .judge(&pooled, &all_three(digest(1)), NOW)
+                .judge(&plaintext(&all_three(pooled, digest(1))), NOW, no_permit)
                 .await
                 .unwrap_err(),
             JudgementRefusal::AccountIneligible
         );
         assert_eq!(h.model.calls(), 0);
+        // A refused claim records no nonce, so it cannot fill the set.
+        assert!(h.service.replay.is_empty());
     }
 
     #[tokio::test]
     async fn a_malformed_digest_makes_no_call() {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
-        let request = JudgementRequest::new("not a digest".to_string(), vec![JudgementKind::Task])
-            .expect("request");
-        assert_eq!(
-            h.service
-                .judge(&h.issuer.valid_claim(), &request, NOW)
-                .await
-                .unwrap_err(),
-            JudgementRefusal::RequestMalformed
+        let not_a_digest = request(
+            h.issuer.valid_claim(),
+            "not a digest".to_string(),
+            vec![JudgementKind::Task],
         );
+        let mut not_utf8 = request(h.issuer.valid_claim(), digest(1), vec![JudgementKind::Task]);
+        not_utf8 = JudgementRequest::new(
+            *not_utf8.request_nonce(),
+            not_utf8.claim().to_string(),
+            vec![0xff, 0xfe],
+            vec![JudgementKind::Task],
+        )
+        .expect("request");
+        for malformed in [
+            plaintext(&not_a_digest),
+            plaintext(&not_utf8),
+            b"{}".to_vec(),
+        ] {
+            assert_eq!(
+                h.service
+                    .judge(&malformed, NOW, no_permit)
+                    .await
+                    .unwrap_err(),
+                JudgementRefusal::RequestMalformed
+            );
+        }
         assert_eq!(h.model.calls(), 0);
     }
 
@@ -363,11 +530,14 @@ mod tests {
     async fn a_request_that_would_judge_nothing_is_malformed() {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
-        let request =
-            JudgementRequest::new(digest(0), vec![JudgementKind::EventKind]).expect("request");
+        let request = request(
+            h.issuer.valid_claim(),
+            digest(0),
+            vec![JudgementKind::EventKind],
+        );
         assert_eq!(
             h.service
-                .judge(&h.issuer.valid_claim(), &request, NOW)
+                .judge(&plaintext(&request), NOW, no_permit)
                 .await
                 .unwrap_err(),
             JudgementRefusal::RequestMalformed
@@ -380,15 +550,100 @@ mod tests {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
         h.model.set_fault(Some(MockFault::GatewayReceipt));
+        let request = all_three(h.issuer.valid_claim(), digest(3));
         assert_eq!(
             h.service
-                .judge(&h.issuer.valid_claim(), &all_three(digest(3)), NOW)
+                .judge(&plaintext(&request), NOW, no_permit)
                 .await
                 .unwrap_err(),
             JudgementRefusal::ModelUnattested
         );
         // It stopped at the first failure rather than spending more.
         assert_eq!(h.model.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_request_nonce_is_refused_before_any_call() {
+        let _serial = LOG_LINE.lock().await;
+        let h = harness();
+        let request = all_three(h.issuer.valid_claim(), digest(1));
+        h.service
+            .judge(&plaintext(&request), NOW, no_permit)
+            .await
+            .expect("judged");
+        let calls = h.model.calls();
+        assert_eq!(
+            h.service
+                .judge(&plaintext(&request), NOW + 60, no_permit)
+                .await
+                .unwrap_err(),
+            JudgementRefusal::RequestReplayed
+        );
+        assert_eq!(h.model.calls(), calls);
+    }
+
+    #[tokio::test]
+    async fn the_permit_is_taken_after_the_claim_and_the_nonce_and_before_any_call() {
+        let _serial = LOG_LINE.lock().await;
+        let h = harness();
+        // A refused claim never asks for a permit.
+        let other = TestIssuer::new();
+        let asked = std::cell::Cell::new(false);
+        let refused = all_three(other.valid_claim(), digest(1));
+        assert_eq!(
+            h.service
+                .judge(&plaintext(&refused), NOW, || {
+                    asked.set(true);
+                    Ok(())
+                })
+                .await
+                .unwrap_err(),
+            JudgementRefusal::CredentialRefused
+        );
+        assert!(!asked.get());
+        // No permit free: saturated, no model call, and the nonce is spent,
+        // because a daemon never resends one.
+        let request = all_three(h.issuer.valid_claim(), digest(1));
+        assert_eq!(
+            h.service
+                .judge(&plaintext(&request), NOW, || {
+                    Err::<(), _>(JudgementRefusal::Saturated)
+                })
+                .await
+                .unwrap_err(),
+            JudgementRefusal::Saturated
+        );
+        assert_eq!(h.model.calls(), 0);
+        assert_eq!(h.service.replay.len(), 1);
+    }
+
+    #[test]
+    fn the_replay_set_forgets_after_twenty_minutes_and_refuses_when_full() {
+        assert_eq!(ReplaySet::default().capacity, 65_536);
+        let set = ReplaySet::with_capacity(2);
+        let a = fresh_nonce();
+        let b = fresh_nonce();
+        let c = fresh_nonce();
+        set.record(&a, NOW).expect("first");
+        assert_eq!(
+            set.record(&a, NOW + REPLAY_WINDOW_SECS - 1).unwrap_err(),
+            JudgementRefusal::RequestReplayed
+        );
+        set.record(&b, NOW + 1).expect("second");
+        // Full of unexpired nonces: refused, not forgotten early.
+        assert_eq!(
+            set.record(&c, NOW + 2).unwrap_err(),
+            JudgementRefusal::Saturated
+        );
+        // `a` expires at the window, which frees one slot.
+        set.record(&c, NOW + REPLAY_WINDOW_SECS).expect("a expired");
+        assert_eq!(set.len(), 2);
+        set.record(&a, NOW + REPLAY_WINDOW_SECS).unwrap_err();
+        // A clock that steps back keeps every entry.
+        assert_eq!(
+            set.record(&b, NOW - 3600).unwrap_err(),
+            JudgementRefusal::RequestReplayed
+        );
     }
 
     #[test]
@@ -438,7 +693,8 @@ mod tests {
             .expect("runtime");
         let h = harness();
         let claim = h.issuer.valid_claim();
-        let request = all_three(digest(5));
+        let request = all_three(claim.clone(), digest(5));
+        let refused_request = all_three(claim.clone(), digest(5));
         let (judged, refused) = tracing::subscriber::with_default(subscriber, || {
             // Other tests hit the same callsite with no subscriber, and the
             // first hit caches its interest globally. Recompute it now that
@@ -448,11 +704,15 @@ mod tests {
             runtime.block_on(async {
                 let judged = h
                     .service
-                    .judge(&claim, &request, NOW)
+                    .judge(&plaintext(&request), NOW, no_permit)
                     .await
                     .expect("judged");
                 h.model.set_fault(Some(MockFault::WrongModelReceipt));
-                let refused = h.service.judge(&claim, &request, NOW).await.unwrap_err();
+                let refused = h
+                    .service
+                    .judge(&plaintext(&refused_request), NOW, no_permit)
+                    .await
+                    .unwrap_err();
                 (judged, refused)
             })
         });
@@ -470,6 +730,7 @@ mod tests {
             ACCOUNT["near-".len()..].to_string(),
             hex::encode(account_key.as_bytes()),
             CANARY.to_string(),
+            request.request_nonce().to_hex(),
             claim.clone(),
             claim.split('.').nth(1).expect("payload").to_string(),
             crate::judgement_service::prompts::TASK_V1.text()[..40].to_string(),
