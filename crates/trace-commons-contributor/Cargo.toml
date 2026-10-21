@@ -693,7 +693,84 @@ keyring-core = "=1.0.0"
 # short-hash lines (`flatpak-cargo/git/ironwire-9a4c231` -> `-bfb5e07`).
 # `grep -c 9a4c231` on the file is 0. The lock's package set is unchanged,
 # which is what makes editing equivalent to regenerating.
-ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
+#
+# ADVANCE TO a2ae5d97. One commit in the range, verified with the GitHub
+# compare API (`bfb5e071...a2ae5d97`, ahead_by 1, behind_by 0):
+# nearai/ironwire#64, "Support isolated subscription logins and bounded
+# large-account routing", which superseded the unmerged #59 that
+# TraceCommons#1513 vendored. WHY: the multi-subscription routing #1513
+# wanted -- a contributor with a second Claude Code or Codex login (its own
+# `CLAUDE_CONFIG_DIR` or `CODEX_HOME`) declares it as a backend and it is
+# routed as itself -- now arrives through this pin instead of 103k vendored
+# lines. What #64 changes, from its squashed commit list and the diff:
+#   * isolated subscription logins: each declared `config_dir` is a backend
+#     of its own whose credential is read only from that directory (Claude
+#     Code's per-directory Keychain item is named by a sha256 over the NFC
+#     form of the directory, which is what the new crates below are for);
+#     login directories are compared on disk, not by spelling;
+#   * account-bound facade URLs, `/anthropic/account/<id>` and
+#     `/openai/account/<id>/v1`; the plain facade belongs to the unmoved
+#     default login, and a plain URL never replaces an account-bound one;
+#   * per-login consent recorded with a binding to that login, never granted
+#     by an embedded start;
+#   * replay origins: encrypted reasoning is replayed only to the account that
+#     minted it, inferred after a restart only when one account could have,
+#     and refused on every route when that is ambiguous;
+#   * a failed forced route is dialled once, not once per backend;
+#   * config shapes main accepted warn instead of being refused;
+#   * `OpenAI-Organization` and `OpenAI-Project` are stripped with the
+#     client's credential;
+#   * cross-account fallback, off by default (`[subscriptions]
+#     cross_account_fallback`).
+#
+# COST. Measured with `cargo tree -p trace-commons-contributor -e normal
+# --prefix none | sort -u`: 439 packages before, 442 after (+3:
+# unicode-normalization 0.1.25, tinyvec 1.11.0, tinyvec_macros 0.1.1);
+# `-e normal,build` 455 -> 458. Upstream added `sha2` and
+# `unicode-normalization` to `ironwire_creds`, and `sha2` and `url` to
+# `ironwire_upstream`; `sha2` and `url` were already in this graph. Lock
+# entries: root 979 -> 979 (all three were already locked for other crates),
+# GTK 562 -> 563 and Tauri 738 -> 739 (unicode-normalization; tinyvec was
+# already in both). GTK and Tauri are held at unicode-normalization 0.1.25,
+# the root's version, not 0.1.26: 0.1.26 relicensed to `(MIT OR Apache-2.0)
+# AND Unicode-3.0`, and one version keeps one license expression across the
+# three locks. LICENSES: unicode-normalization 0.1.25 MIT OR Apache-2.0;
+# tinyvec Zlib OR Apache-2.0 OR MIT; tinyvec_macros MIT OR Apache-2.0 OR
+# Zlib. No license is new to any lock.
+#
+# `cargo update -p ironwire_proxy` also wanted to move IronClaw (6dccbfbc ->
+# b0b999d9, adding `ironclaw_host_api` and moving rig-core 0.33 -> 0.36).
+# That was declined: the locks were re-resolved through `cargo metadata`
+# instead, and all three still name IronClaw
+# 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9, which is also what upstream's own
+# lock pins at a2ae5d97.
+#
+# MSRV. Unmoved: every IronWire crate still declares rust-version = 1.96.
+#
+# SURFACE. `ironwire_agents` gains `pub mod endpoint` (`anthropic_url`,
+# `openai_url`, `parse_anthropic`, `parse_openai`, `Endpoint`),
+# `claude_settings::{path_in, default_dir, base_url, account, connect_as}` and
+# `codex_config::{path_in, base_url, account}`. Additive. The behaviour change
+# this crate sees is `tools`' Claude Code entry: it now plans and lists against
+# the default login's `~/.claude/settings.json` whatever this process's
+# `CLAUDE_CONFIG_DIR` says, where before it followed the variable. Upstream
+# made that change on purpose -- following the variable pointed another
+# login's Claude Code at the default login's token -- and `daemon::harness`
+# keeps it. The harness now locates that file itself, through
+# `claude_settings::default_dir` in a build and an override in tests, so no
+# test reaches a real profile on any platform (`dirs::home_dir` ignores
+# `USERPROFILE` on Windows). `ironwire_proxy` gains status fields (`binding`,
+# `awaiting_consent`, `cross_account_fallback`, ...) and `embed` options;
+# nothing this crate names was renamed or removed.
+#
+# FLATPAK. `cargo-sources.json` was regenerated, not edited, because the GTK
+# lock's package set changed this time: `flatpak-cargo-generator.py` from
+# flatpak/flatpak-builder-tools at 74697c75, run with `python3 -I` from a
+# temporary venv, as #1520 did. The diff is the ironwire revision, the two
+# manifests that changed upstream, and the unicode-normalization 0.1.25
+# vendor entry, whose sha256 matches the lock's checksum. `grep -c bfb5e07`
+# on the file is 0.
+ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -707,8 +784,8 @@ ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "bfb5e071871
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"

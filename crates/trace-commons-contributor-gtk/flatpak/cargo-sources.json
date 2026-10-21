@@ -8,8 +8,8 @@
     {
         "type": "git",
         "url": "https://github.com/nearai/ironwire",
-        "commit": "bfb5e0718716bd61998491ca2d83e1313bf7388d",
-        "dest": "flatpak-cargo/git/ironwire-bfb5e07"
+        "commit": "a2ae5d97aaee005c30dd51b7a873e6eba06940af",
+        "dest": "flatpak-cargo/git/ironwire-a2ae5d9"
     },
     {
         "type": "archive",
@@ -2850,7 +2850,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_agents\" \"cargo/vendor/ironwire_agents\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_agents\" \"cargo/vendor/ironwire_agents\""
         ]
     },
     {
@@ -2868,7 +2868,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_catalog\" \"cargo/vendor/ironwire_catalog\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_catalog\" \"cargo/vendor/ironwire_catalog\""
         ]
     },
     {
@@ -2886,7 +2886,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_core\" \"cargo/vendor/ironwire_core\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_core\" \"cargo/vendor/ironwire_core\""
         ]
     },
     {
@@ -2904,12 +2904,12 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_creds\" \"cargo/vendor/ironwire_creds\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_creds\" \"cargo/vendor/ironwire_creds\""
         ]
     },
     {
         "type": "inline",
-        "contents": "[package]\nname = \"ironwire_creds\"\ndescription = \"Credential discovery and refresh for IronWire backends\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.96\"\nlicense = \"MIT OR Apache-2.0\"\nauthors = [\"NEAR AI <support@near.ai>\"]\nhomepage = \"https://github.com/nearai/ironwire\"\nrepository = \"https://github.com/nearai/ironwire\"\npublish = false\n\n[dependencies]\nbase64 = \"0.22\"\ndirs = \"6\"\nthiserror = \"2\"\ntracing = \"0.1\"\n\n[dependencies.ironwire_core]\npath = \"crates/ironwire_core\"\nversion = \"0.1.0\"\n\n[dependencies.ironclaw_llm]\ngit = \"https://github.com/nearai/ironclaw\"\nbranch = \"main\"\n\n[dependencies.chrono]\nversion = \"0.4\"\nfeatures = [\"serde\"]\n\n[dependencies.secrecy]\nversion = \"0.10\"\nfeatures = [\"serde\"]\n\n[dependencies.serde]\nversion = \"1\"\nfeatures = [\"derive\"]\n\n[dependencies.serde_json]\nversion = \"1\"\nfeatures = [\"preserve_order\"]\n\n[dependencies.tokio]\nversion = \"1\"\nfeatures = [\"rt-multi-thread\", \"macros\", \"net\", \"signal\", \"sync\", \"time\", \"fs\", \"process\"]\n\n[dev-dependencies]\ntempfile = \"3\"\n\n[lints.rust]\nunsafe_code = \"forbid\"\nunreachable_pub = \"warn\"\n\n[lints.clippy]\ntodo = \"warn\"\ndbg_macro = \"warn\"\n",
+        "contents": "[package]\nname = \"ironwire_creds\"\ndescription = \"Credential discovery and refresh for IronWire backends\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.96\"\nlicense = \"MIT OR Apache-2.0\"\nauthors = [\"NEAR AI <support@near.ai>\"]\nhomepage = \"https://github.com/nearai/ironwire\"\nrepository = \"https://github.com/nearai/ironwire\"\npublish = false\n\n[dependencies]\nbase64 = \"0.22\"\ndirs = \"6\"\nsha2 = \"0.10\"\nunicode-normalization = \"0.1\"\nthiserror = \"2\"\ntracing = \"0.1\"\n\n[dependencies.ironwire_core]\npath = \"crates/ironwire_core\"\nversion = \"0.1.0\"\n\n[dependencies.ironclaw_llm]\ngit = \"https://github.com/nearai/ironclaw\"\nbranch = \"main\"\n\n[dependencies.chrono]\nversion = \"0.4\"\nfeatures = [\"serde\"]\n\n[dependencies.secrecy]\nversion = \"0.10\"\nfeatures = [\"serde\"]\n\n[dependencies.serde]\nversion = \"1\"\nfeatures = [\"derive\"]\n\n[dependencies.serde_json]\nversion = \"1\"\nfeatures = [\"preserve_order\"]\n\n[dependencies.tokio]\nversion = \"1\"\nfeatures = [\"rt-multi-thread\", \"macros\", \"net\", \"signal\", \"sync\", \"time\", \"fs\", \"process\"]\n\n[dev-dependencies]\ntempfile = \"3\"\n\n[lints.rust]\nunsafe_code = \"forbid\"\nunreachable_pub = \"warn\"\n\n[lints.clippy]\ntodo = \"warn\"\ndbg_macro = \"warn\"\n",
         "dest": "cargo/vendor/ironwire_creds",
         "dest-filename": "Cargo.toml"
     },
@@ -2922,7 +2922,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_ledger\" \"cargo/vendor/ironwire_ledger\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_ledger\" \"cargo/vendor/ironwire_ledger\""
         ]
     },
     {
@@ -2940,7 +2940,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_privacy\" \"cargo/vendor/ironwire_privacy\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_privacy\" \"cargo/vendor/ironwire_privacy\""
         ]
     },
     {
@@ -2958,7 +2958,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_proxy\" \"cargo/vendor/ironwire_proxy\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_proxy\" \"cargo/vendor/ironwire_proxy\""
         ]
     },
     {
@@ -2976,7 +2976,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_translate\" \"cargo/vendor/ironwire_translate\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_translate\" \"cargo/vendor/ironwire_translate\""
         ]
     },
     {
@@ -2994,7 +2994,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_update\" \"cargo/vendor/ironwire_update\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_update\" \"cargo/vendor/ironwire_update\""
         ]
     },
     {
@@ -3012,12 +3012,12 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_upstream\" \"cargo/vendor/ironwire_upstream\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_upstream\" \"cargo/vendor/ironwire_upstream\""
         ]
     },
     {
         "type": "inline",
-        "contents": "[package]\nname = \"ironwire_upstream\"\ndescription = \"IronWire upstream backends: native-lane passthrough and observation\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.96\"\nlicense = \"MIT OR Apache-2.0\"\nauthors = [\"NEAR AI <support@near.ai>\"]\nhomepage = \"https://github.com/nearai/ironwire\"\nrepository = \"https://github.com/nearai/ironwire\"\npublish = false\n\n[dependencies]\ndirs = \"6\"\nasync-trait = \"0.1\"\nbytes = \"1\"\nfutures-util = \"0.3\"\nhttp = \"1\"\nthiserror = \"2\"\ntracing = \"0.1\"\n\n[dependencies.ironwire_core]\npath = \"crates/ironwire_core\"\nversion = \"0.1.0\"\n\n[dependencies.ironwire_creds]\npath = \"crates/ironwire_creds\"\nversion = \"0.1.0\"\n\n[dependencies.ironclaw_llm]\ngit = \"https://github.com/nearai/ironclaw\"\nbranch = \"main\"\n\n[dependencies.ironwire_catalog]\npath = \"crates/ironwire_catalog\"\nversion = \"0.1.0\"\n\n[dependencies.chrono]\nversion = \"0.4\"\nfeatures = [\"serde\"]\n\n[dependencies.reqwest]\nversion = \"0.12\"\ndefault-features = false\nfeatures = [\"json\", \"rustls-tls-native-roots\", \"stream\"]\n\n[dependencies.secrecy]\nversion = \"0.10\"\nfeatures = [\"serde\"]\n\n[dependencies.serde]\nversion = \"1\"\nfeatures = [\"derive\"]\n\n[dependencies.serde_json]\nversion = \"1\"\nfeatures = [\"preserve_order\"]\n\n[dependencies.tokio]\nversion = \"1\"\nfeatures = [\"rt-multi-thread\", \"macros\", \"net\", \"signal\", \"sync\", \"time\", \"fs\", \"process\"]\n\n[lints.rust]\nunsafe_code = \"forbid\"\nunreachable_pub = \"warn\"\n\n[lints.clippy]\ntodo = \"warn\"\ndbg_macro = \"warn\"\n",
+        "contents": "[package]\nname = \"ironwire_upstream\"\ndescription = \"IronWire upstream backends: native-lane passthrough and observation\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.96\"\nlicense = \"MIT OR Apache-2.0\"\nauthors = [\"NEAR AI <support@near.ai>\"]\nhomepage = \"https://github.com/nearai/ironwire\"\nrepository = \"https://github.com/nearai/ironwire\"\npublish = false\n\n[dependencies]\ndirs = \"6\"\nasync-trait = \"0.1\"\nbytes = \"1\"\nfutures-util = \"0.3\"\nhttp = \"1\"\nsha2 = \"0.10\"\nthiserror = \"2\"\ntracing = \"0.1\"\nurl = \"2\"\n\n[dependencies.ironwire_core]\npath = \"crates/ironwire_core\"\nversion = \"0.1.0\"\n\n[dependencies.ironwire_creds]\npath = \"crates/ironwire_creds\"\nversion = \"0.1.0\"\n\n[dependencies.ironclaw_llm]\ngit = \"https://github.com/nearai/ironclaw\"\nbranch = \"main\"\n\n[dependencies.ironwire_catalog]\npath = \"crates/ironwire_catalog\"\nversion = \"0.1.0\"\n\n[dependencies.chrono]\nversion = \"0.4\"\nfeatures = [\"serde\"]\n\n[dependencies.reqwest]\nversion = \"0.12\"\ndefault-features = false\nfeatures = [\"json\", \"rustls-tls-native-roots\", \"stream\"]\n\n[dependencies.secrecy]\nversion = \"0.10\"\nfeatures = [\"serde\"]\n\n[dependencies.serde]\nversion = \"1\"\nfeatures = [\"derive\"]\n\n[dependencies.serde_json]\nversion = \"1\"\nfeatures = [\"preserve_order\"]\n\n[dependencies.tokio]\nversion = \"1\"\nfeatures = [\"rt-multi-thread\", \"macros\", \"net\", \"signal\", \"sync\", \"time\", \"fs\", \"process\"]\n\n[dev-dependencies]\nbase64 = \"0.22\"\ntempfile = \"3\"\n\n[lints.rust]\nunsafe_code = \"forbid\"\nunreachable_pub = \"warn\"\n\n[lints.clippy]\ntodo = \"warn\"\ndbg_macro = \"warn\"\n",
         "dest": "cargo/vendor/ironwire_upstream",
         "dest-filename": "Cargo.toml"
     },
@@ -3030,7 +3030,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-bfb5e07/crates/ironwire_usage\" \"cargo/vendor/ironwire_usage\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-a2ae5d9/crates/ironwire_usage\" \"cargo/vendor/ironwire_usage\""
         ]
     },
     {
@@ -6051,6 +6051,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/unicode-normalization/unicode-normalization-0.1.25.crate",
+        "sha256": "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8",
+        "dest": "cargo/vendor/unicode-normalization-0.1.25"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8\", \"files\": {}}",
+        "dest": "cargo/vendor/unicode-normalization-0.1.25",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/unicode-segmentation/unicode-segmentation-1.13.3.crate",
         "sha256": "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8",
         "dest": "cargo/vendor/unicode-segmentation-1.13.3"
@@ -7259,7 +7272,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"bfb5e0718716bd61998491ca2d83e1313bf7388d\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"a2ae5d97aaee005c30dd51b7a873e6eba06940af\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }
