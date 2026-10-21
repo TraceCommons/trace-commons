@@ -5012,11 +5012,20 @@ updated_at, window_start, window_end, pricing, rows}`:
   - `sessions_by_model`: `[[label, sessions], ...]`.
   - `left_out`: counts of sessions left out of that question, per reason:
     `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
-    `reviewer`, `no_majority`, `unpriced`, `too_few_edits`,
-    `mix_too_different`. `automated` counts the automated sessions in the
-    window (see "The store" above): compared on no row, and counted on
-    every row whatever their facts. A fact
+    `reviewer`, `no_majority`, `unpriced`, `too_few_sessions`,
+    `too_few_edits`, `mix_too_different`. `automated` counts the automated
+    sessions in the window (see "The store" above): compared on no row, and
+    counted on every row whatever their facts. A fact
     that could not be read is left out and counted here, never read as zero.
+    `too_few_sessions` counts the sessions of a model's task-type cells
+    under the five-session floor (for `finish_time`, every session of a
+    cell with fewer than five finished; for `docs_cost`, the priced
+    sessions of a cell with fewer than five priced). Across task types two
+    models are compared over the types both qualify in; `mix_too_different`
+    counts the sessions of the qualifying cells of a model that can be
+    compared with no other, and those of `leader` and `next` outside the
+    types they share. Every session of `leader` and `next` is in their
+    figure or in one count here.
   - `near_ai_charge`: on `docs_cost` only, what NEAR AI charged, from the
     route tallies (see "Route tallies" above): `{basis: "near_ai_ledger",
     median, routed_sessions, charge_unknown}`. `routed_sessions` counts the

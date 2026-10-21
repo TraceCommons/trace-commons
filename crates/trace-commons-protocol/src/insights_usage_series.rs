@@ -152,11 +152,12 @@ impl ToolKind {
     }
 
     /// Codex spells its tools differently. Only the patch tool and the shell
-    /// tools are named; every other Codex tool is `Other`.
+    /// tools are named (`shell_command` is the shell type a managed Codex
+    /// declares); every other Codex tool is `Other`.
     pub fn from_codex_tool_name(name: &str) -> Self {
         match name {
             "apply_patch" => Self::ApplyPatch,
-            "exec" | "exec_command" | "shell" => Self::Bash,
+            "exec" | "exec_command" | "shell" | "shell_command" => Self::Bash,
             _ => Self::Other,
         }
     }
@@ -608,8 +609,13 @@ mod tests {
             ToolKind::from_codex_tool_name("apply_patch"),
             ToolKind::ApplyPatch
         );
-        for shell in ["exec", "exec_command", "shell"] {
-            assert_eq!(ToolKind::from_codex_tool_name(shell), ToolKind::Bash);
+        // `shell_command` is the shell our managed Codex declares.
+        for shell in ["exec", "exec_command", "shell", "shell_command"] {
+            assert_eq!(
+                ToolKind::from_codex_tool_name(shell),
+                ToolKind::Bash,
+                "{shell}"
+            );
         }
         assert_eq!(ToolKind::from_codex_tool_name("Edit"), ToolKind::Other);
         // Claude names are unchanged.

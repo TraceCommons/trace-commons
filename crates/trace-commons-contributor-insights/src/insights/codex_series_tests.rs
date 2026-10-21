@@ -207,6 +207,34 @@ fn a_decreasing_total_makes_that_turn_unknown_never_negative() {
     assert_eq!(turns[2].known_usage().unwrap().total(), 300);
 }
 
+/// A turn's counters must add up to what the running total grew by: when
+/// `last_token_usage` and the `total_token_usage` delta disagree, the turn's
+/// usage is unknown, never a silent partial.
+#[test]
+fn a_last_usage_that_disagrees_with_the_total_delta_is_unknown() {
+    let (e, _) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        tokens(1, 1_000, 900, 0, 0, 100),
+        // The total grew by 800; the last response claims 300.
+        tokens(2, 1_800, 250, 0, 0, 50),
+        // The total grew by 300 and the last response says 300.
+        tokens(3, 2_100, 250, 0, 0, 50),
+    ]);
+    let turns = &e.series.turns;
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[0].known_usage().unwrap().total(), 1_000);
+    assert!(turns[1].usage_unknown());
+    assert_eq!(turns[1].uncached_input, None);
+    assert_eq!(turns[2].known_usage().unwrap().total(), 300);
+
+    // The last response's own total must agree too.
+    let mut row = tokens(1, 1_000, 900, 0, 0, 100);
+    row["payload"]["info"]["last_token_usage"]["total_tokens"] = json!(700);
+    let (e, _) = scan(&[started(0), context(0, A, "never"), row]);
+    assert!(e.series.turns[0].usage_unknown());
+}
+
 #[test]
 fn each_turn_carries_the_model_of_the_turn_context_before_it() {
     let (e, f) = scan(&[
@@ -283,6 +311,70 @@ fn shell_only_sessions_have_edits_unknown_not_zero() {
     assert_eq!(f.finished, Some(false));
 }
 
+/// A `local_shell_call` item: Codex's built-in shell, its command an
+/// argument list, paired with its `function_call_output` by `call_id`.
+fn local_shell_call(secs: u32, id: &str, command: &[&str]) -> Value {
+    json!({"timestamp": ts(secs), "type": "response_item", "payload": {
+        "type": "local_shell_call", "call_id": id, "status": "completed",
+        "action": {"type": "exec", "command": command}}})
+}
+
+#[test]
+fn shell_command_and_local_shell_sessions_have_edits_unknown_not_zero() {
+    // `shell_command`, the shell our managed Codex declares.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        function_call(
+            1,
+            "c1",
+            "shell_command",
+            json!({"command": "PRIVATE_CMD edit-in-place && mv a b"}),
+        ),
+        output(2, "c1", "Process exited with code 0"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, None);
+    assert_eq!(f.shape.renamed_files, 1);
+    assert_eq!(e.series.tool_calls[0].tool, ToolKind::Bash);
+    assert!(e.series.tool_calls[0].paired);
+
+    // `local_shell_call`, paired with its output by `call_id`.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        local_shell_call(1, "c1", &["bash", "-lc", "PRIVATE_CMD edit-in-place"]),
+        output(2, "c1", "Process exited with code 1"),
+        local_shell_call(3, "c2", &["bash", "-lc", "PRIVATE_CMD edit-in-place"]),
+        output(4, "c2", "Process exited with code 0"),
+        tokens(5, 10, 5, 0, 0, 5),
+        complete(6),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, None);
+    let calls = &e.series.tool_calls;
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| (c.tool, c.paired, c.success))
+            .collect::<Vec<_>>(),
+        vec![
+            (ToolKind::Bash, true, Some(false)),
+            (ToolKind::Bash, true, Some(true)),
+        ]
+    );
+
+    // A stopped local shell command is an interrupt, as an exec one is.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        local_shell_call(1, "c1", &["bash", "-lc", "PRIVATE_CMD long"]),
+        output(5, "c1", "aborted by user after 4.0s"),
+        aborted(6, "interrupted"),
+    ]);
+    assert_eq!(model(&e, &f, A).interrupted, Some(1));
+}
+
 #[test]
 fn apply_patch_hunks_count_edits_and_feed_undone() {
     let two_files = "*** Begin Patch\n*** Add File: docs/PRIVATE_NEW.md\n+PRIVATE_A\n+PRIVATE_B\n\
@@ -349,6 +441,32 @@ fn apply_patch_hunks_count_edits_and_feed_undone() {
     ]);
     assert_eq!(f.shape.lines_removed, None);
     assert_eq!(f.shape.lines_added, None);
+}
+
+/// Edits and undone count one unit, the patch's file section: a section of
+/// three hunks that a later patch restores hunk by hunk is one edit undone.
+#[test]
+fn a_multi_hunk_section_restored_whole_is_one_edit_undone() {
+    let forward = "*** Begin Patch\n*** Update File: src/x.rs\n@@\n-a\n+b\n@@\n-c\n+d\n@@\n-e\n+f\n*** End Patch\n";
+    let back = "*** Begin Patch\n*** Update File: src/x.rs\n@@\n-b\n+a\n@@\n-d\n+c\n@@\n-f\n+e\n*** End Patch\n";
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        patch_call(1, "p1", forward),
+        output(2, "p1", "Exit code: 0"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+        started(10),
+        context(10, A, "never"),
+        patch_call(11, "p2", back),
+        output(12, "p2", "Exit code: 0"),
+        tokens(13, 20, 5, 0, 0, 5),
+        complete(14),
+    ]);
+    let a = model(&e, &f, A);
+    assert_eq!(a.edits, Some(2));
+    assert_eq!(a.undone, Some(1));
+    assert!(a.undone <= a.edits);
 }
 
 #[test]

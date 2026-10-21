@@ -33,7 +33,8 @@ pub struct ModelFacts {
     /// Edit tool calls the contributor declined; known only where the
     /// contributor could have been asked.
     pub denied: Option<u32>,
-    /// Edits a later edit restored.
+    /// Edit calls a later edit restored, in the unit of `edits`: a call
+    /// counts once however many of its sub-edits were restored.
     pub undone: Option<u32>,
     /// Interrupts that ended one of this model's turns.
     pub interrupted: Option<u32>,
@@ -219,6 +220,10 @@ struct HeldEdit {
     new: KeyedDigest,
     model: Option<usize>,
     barrier: u64,
+    /// The applied edit call it is a sub-edit of.
+    call: u32,
+    /// A restore of another sub-edit of the call already counted it undone.
+    counted: bool,
 }
 
 /// One contributor prompt's span while it is open.
@@ -525,7 +530,10 @@ impl<'k> ClaudeFactsScan<'k> {
     }
 
     fn user(&mut self, row: &Value, at: Option<DateTime<Utc>>) {
-        let meta = row.get("isMeta").and_then(Value::as_bool) == Some(true);
+        // A compact summary is written by Claude Code, not the contributor.
+        let meta = ["isMeta", "isCompactSummary"]
+            .iter()
+            .any(|flag| row.get(flag).and_then(Value::as_bool) == Some(true));
         let (texts, results): (Vec<&str>, Vec<&Value>) = match row.pointer("/message/content") {
             Some(Value::String(text)) => (vec![text.as_str()], Vec::new()),
             Some(Value::Array(blocks)) => {
@@ -564,7 +572,7 @@ impl<'k> ClaudeFactsScan<'k> {
             } else if text.starts_with(CLAUDE_INTERRUPT_MARKERS[0]) {
                 self.interrupt();
             } else {
-                prompt_text = true;
+                prompt_text |= contributor_words(text);
             }
         }
         if prompt_text && !meta && results.is_empty() {
@@ -586,6 +594,8 @@ impl<'k> ClaudeFactsScan<'k> {
         self.user_turns = self.user_turns.saturating_add(1);
         self.barrier += 1;
         self.rejected_since_prompt = false;
+        // The answer to an earlier prompt does not answer this one.
+        self.last_assistant = None;
         self.close_span();
         self.span = Some(Span {
             start: at,
@@ -665,22 +675,26 @@ impl<'k> ClaudeFactsScan<'k> {
                         self.capped = true;
                     }
                 }
+                let call = self.applied_edits;
                 for (old, new) in texts {
-                    self.applied_edit(path, old, new, model);
+                    self.applied_edit(path, old, new, model, call);
                 }
             }
         }
         false
     }
 
-    /// An applied edit or sub-edit: credits the earlier edit it restores, if
-    /// a prompt, denial or interrupt came between, then holds it.
+    /// An applied edit or sub-edit of edit call `call`: credits the earlier
+    /// call it restores, if a prompt, denial or interrupt came between, then
+    /// holds it. A call is undone once, as it is one edit, however many of
+    /// its sub-edits are restored; they share its path.
     fn applied_edit(
         &mut self,
         path: KeyedDigest,
         old: KeyedDigest,
         new: KeyedDigest,
         model: Option<usize>,
+        call: u32,
     ) {
         let barrier = self.barrier;
         let held = self.edits_by_path.entry(path).or_default();
@@ -690,9 +704,14 @@ impl<'k> ClaudeFactsScan<'k> {
         {
             let restored = held.remove(ix);
             self.held_edits -= 1;
-            if let Some(model) = restored.model {
-                let counts = &mut self.counts[model];
-                counts.undone = counts.undone.saturating_add(1);
+            if !restored.counted {
+                for sibling in held.iter_mut().filter(|e| e.call == restored.call) {
+                    sibling.counted = true;
+                }
+                if let Some(model) = restored.model {
+                    let counts = &mut self.counts[model];
+                    counts.undone = counts.undone.saturating_add(1);
+                }
             }
             self.rejected_since_prompt = true;
         }
@@ -702,6 +721,8 @@ impl<'k> ClaudeFactsScan<'k> {
                 new,
                 model,
                 barrier,
+                call,
+                counted: false,
             });
             self.held_edits += 1;
         } else {
@@ -824,6 +845,46 @@ impl<'k> ClaudeFactsScan<'k> {
             delegated_unread: false,
             reviewer: false,
         }
+    }
+}
+
+/// The wrappers Claude Code writes around a slash command and its local
+/// output. What they hold is the interface's, not the contributor's words.
+const CLAUDE_COMMAND_WRAPPERS: [&str; 5] = [
+    "command-name",
+    "command-message",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+];
+
+/// Whether a user text holds the contributor's own words, read as the
+/// preview's task prompt reads it: the slash command wrappers are skipped,
+/// a slash command's non-empty arguments are words (`/review fix the login
+/// race`), and an unclosed wrapper or nothing left is none.
+fn contributor_words(mut text: &str) -> bool {
+    loop {
+        text = text.trim();
+        if let Some(args) = text.strip_prefix("<command-args>") {
+            let Some((args, rest)) = args.split_once("</command-args>") else {
+                return false;
+            };
+            if !args.trim().is_empty() {
+                return true;
+            }
+            text = rest;
+            continue;
+        }
+        let Some(tag) = CLAUDE_COMMAND_WRAPPERS
+            .iter()
+            .find(|tag| text.starts_with(&format!("<{tag}>")))
+        else {
+            return !text.is_empty();
+        };
+        let Some((_, rest)) = text.split_once(&format!("</{tag}>")) else {
+            return false;
+        };
+        text = rest;
     }
 }
 
@@ -1110,6 +1171,16 @@ mod tests {
         assert_eq!(f.shape.edited_files.source, 2);
     }
 
+    /// Edits and undone count one unit, the edit call: a MultiEdit whose
+    /// three sub-edits a later MultiEdit restores is one edit undone.
+    #[test]
+    fn a_multiedit_restored_whole_is_one_edit_undone() {
+        let (_, m) = one("multiedit-restore");
+        assert_eq!(m.edits, Some(2));
+        assert_eq!(m.undone, Some(1));
+        assert!(m.undone <= m.edits);
+    }
+
     #[test]
     fn undone_goes_to_the_model_that_made_the_edit() {
         let name = "undone-other-model";
@@ -1166,6 +1237,38 @@ mod tests {
         );
         // A denial after the last prompt: the denied call is followed by text.
         assert_eq!(facts("denial-twice").finished, Some(false));
+    }
+
+    /// The answer the earlier prompt got does not finish a session whose
+    /// last prompt went unanswered.
+    #[test]
+    fn a_trailing_unanswered_prompt_is_not_finished() {
+        let f = facts("finished-trailing-prompt");
+        assert_eq!(f.user_turns, Some(2));
+        assert_eq!(f.finished, Some(false));
+    }
+
+    /// `/exit`, its caveat and its output are not prompts, so the
+    /// interrupt before them is still the last word.
+    #[test]
+    fn an_exit_after_an_interrupt_is_not_a_prompt_and_not_finished() {
+        let (f, m) = one("finished-exit-after-interrupt");
+        assert_eq!(f.user_turns, Some(1));
+        assert_eq!(m.interrupted, Some(1));
+        assert_eq!(f.finished, Some(false));
+    }
+
+    /// A slash command's name and local output, and a compact summary, are
+    /// neither user turns nor undo barriers; a slash command's arguments
+    /// are the contributor's words.
+    #[test]
+    fn slash_command_lines_and_compact_summaries_are_not_prompts_or_barriers() {
+        let (f, m) = one("slash-commands");
+        assert_eq!(f.user_turns, Some(1));
+        // The restore after `/cost` has no prompt before it: the model's
+        // own retry, not an undo.
+        assert_eq!(m.undone, Some(0));
+        assert_eq!(f.finished, Some(true));
     }
 
     #[test]

@@ -12,7 +12,8 @@
 //! an equal total is a repeat and is skipped, and a smaller one makes that
 //! turn's usage unknown and becomes the new baseline. An event with no
 //! running total is a turn of unknown usage and leaves the baseline as it
-//! was. Counters come from
+//! was. A turn's usage is also unknown when `info.last_token_usage` does not
+//! add up to what the running total grew by. Counters come from
 //! `info.last_token_usage` through `session_pricing::codex_turn_usage`, the
 //! one pricing mapping: `uncached_input = input - cached - cache_write`, `cache_read =
 //! cached`, `cache_write = TotalOnly(cache_write)`, `output = output`. The
@@ -108,7 +109,7 @@ impl CodexTurnSeriesEvidence {
 /// One model's counts while the records are read.
 #[derive(Default)]
 struct ModelCounts {
-    /// `apply_patch` file sections.
+    /// `apply_patch` file sections: the unit of `undone` too.
     edits: u32,
     patched: bool,
     shell: bool,
@@ -148,6 +149,10 @@ struct HeldEdit {
     new: KeyedDigest,
     model: Option<usize>,
     barrier: u64,
+    /// The applied file section it is a hunk of.
+    section: u64,
+    /// A restore of another hunk of the section already counted it undone.
+    counted: bool,
 }
 
 /// One contributor task's span while it is open.
@@ -201,6 +206,8 @@ pub struct CodexTurnSeriesScan<'k> {
     lines_unknown: bool,
     patch_calls: u32,
     applied_patches: u32,
+    /// File sections of applied patches: each held hunk's section.
+    applied_sections: u64,
     /// A patch call was made under a turn context that may ask.
     patch_where_asked: bool,
     /// Advanced by each task start, interrupt and undo.
@@ -245,6 +252,7 @@ impl<'k> CodexTurnSeriesScan<'k> {
             lines_unknown: false,
             patch_calls: 0,
             applied_patches: 0,
+            applied_sections: 0,
             patch_where_asked: false,
             barrier: 0,
             rejected_since_prompt: false,
@@ -299,6 +307,10 @@ impl<'k> CodexTurnSeriesScan<'k> {
             ("response_item", Some(kind @ ("custom_tool_call" | "function_call"))) => {
                 self.model_event(at);
                 self.tool_call(payload, kind == "custom_tool_call", at);
+            }
+            ("response_item", Some("local_shell_call")) => {
+                self.model_event(at);
+                self.local_shell_call(payload, at);
             }
             ("response_item", Some("custom_tool_call_output" | "function_call_output")) => {
                 self.model_event(at);
@@ -366,23 +378,24 @@ impl<'k> CodexTurnSeriesScan<'k> {
         let total = info
             .pointer("/total_token_usage/total_tokens")
             .and_then(Value::as_u64);
-        let known = match total {
+        // What the running total grew by: the turn's usage when known.
+        let grew = match total {
             Some(total) if total > self.baseline => {
+                let grew = total - self.baseline;
                 self.baseline = total;
-                true
+                Some(grew)
             }
             Some(total) if total == self.baseline => return,
             Some(total) => {
                 self.baseline = total;
-                false
+                None
             }
-            None => false,
+            None => None,
         };
-        let counters = if known {
-            info.get("last_token_usage").and_then(codex_counters)
-        } else {
-            None
-        };
+        let counters = grew.and_then(|grew| {
+            info.get("last_token_usage")
+                .and_then(|usage| codex_counters(usage, grew))
+        });
         if self.turns.len() >= MAX_SERIES_TURNS {
             self.truncated = true;
             return;
@@ -424,6 +437,32 @@ impl<'k> CodexTurnSeriesScan<'k> {
             }
             _ => raw.clone(),
         };
+        let id = payload.get("call_id").and_then(Value::as_str);
+        self.call(name, tool, &input, id, at);
+    }
+
+    /// Codex's built-in shell: a `local_shell_call` item whose `action`
+    /// holds the command as an argument list. Its output is a
+    /// `function_call_output` with the same `call_id` (the item's `id` when
+    /// it has none).
+    fn local_shell_call(&mut self, payload: &Value, at: Option<DateTime<Utc>>) {
+        let input = payload.get("action").cloned().unwrap_or(Value::Null);
+        let id = payload
+            .get("call_id")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("id").and_then(Value::as_str));
+        self.call("local_shell", ToolKind::Bash, &input, id, at);
+    }
+
+    /// One tool call of `tool`, held under `id` until its output is read.
+    fn call(
+        &mut self,
+        name: &str,
+        tool: ToolKind,
+        input: &Value,
+        id: Option<&str>,
+        at: Option<DateTime<Utc>>,
+    ) {
         let model = self.model;
         let mut call = PendingCall {
             series_ix: None,
@@ -460,10 +499,10 @@ impl<'k> CodexTurnSeriesScan<'k> {
                 }
                 // `exec` takes a script, not a command line, and is not
                 // read for renames.
-                if let Some(command) = shell_command_text(&input) {
+                if let Some(command) = shell_command_text(input) {
                     self.renamed = self.renamed.saturating_add(renamed_operands(&command));
                 }
-                call.command = args_key(self.key, tool, &input)
+                call.command = args_key(self.key, tool, input)
                     .ok()
                     .map(|args| (args, self.applied_patches == 0));
             }
@@ -472,7 +511,7 @@ impl<'k> CodexTurnSeriesScan<'k> {
         if self.turns.len() >= MAX_SERIES_TURNS || self.series_calls.len() >= MAX_SERIES_TOOL_CALLS
         {
             self.truncated = true;
-        } else if let Ok(args) = args_key(self.key, tool, &input) {
+        } else if let Ok(args) = args_key(self.key, tool, input) {
             call.series_ix = Some(self.series_calls.len());
             self.series_calls.push(ToolCallRecord {
                 turn_ordinal: 0,
@@ -485,7 +524,7 @@ impl<'k> CodexTurnSeriesScan<'k> {
                 paired: false,
             });
         }
-        match payload.get("call_id").and_then(Value::as_str) {
+        match id {
             Some(id) if self.calls.contains_key(id) => {}
             Some(id) if self.calls.len() < MAX_SERIES_TOOL_CALLS => {
                 self.calls.insert(id.to_owned(), call);
@@ -573,20 +612,25 @@ impl<'k> CodexTurnSeriesScan<'k> {
                     self.capped = true;
                 }
             }
+            self.applied_sections += 1;
+            let section = self.applied_sections;
             for (old, new) in file.hunks {
-                self.applied_edit(file.path, old, new, model);
+                self.applied_edit(file.path, old, new, model, section);
             }
         }
     }
 
-    /// An applied hunk: credits the earlier hunk it restores, if a task
-    /// start or interrupt came between, then holds it (Task 4's rule).
+    /// An applied hunk of file section `section`: credits the earlier
+    /// section it restores, if a task start or interrupt came between, then
+    /// holds it (Task 4's rule). A section is undone once, as it is one
+    /// edit, however many of its hunks are restored; they share its path.
     fn applied_edit(
         &mut self,
         path: KeyedDigest,
         old: KeyedDigest,
         new: KeyedDigest,
         model: Option<usize>,
+        section: u64,
     ) {
         let barrier = self.barrier;
         let held = self.edits_by_path.entry(path).or_default();
@@ -596,9 +640,14 @@ impl<'k> CodexTurnSeriesScan<'k> {
         {
             let restored = held.remove(ix);
             self.held_edits -= 1;
-            if let Some(model) = restored.model {
-                let counts = &mut self.counts[model];
-                counts.undone = counts.undone.saturating_add(1);
+            if !restored.counted {
+                for sibling in held.iter_mut().filter(|e| e.section == restored.section) {
+                    sibling.counted = true;
+                }
+                if let Some(model) = restored.model {
+                    let counts = &mut self.counts[model];
+                    counts.undone = counts.undone.saturating_add(1);
+                }
             }
             self.rejected_since_prompt = true;
         }
@@ -608,6 +657,8 @@ impl<'k> CodexTurnSeriesScan<'k> {
                 new,
                 model,
                 barrier,
+                section,
+                counted: false,
             });
             self.held_edits += 1;
         } else {
@@ -778,19 +829,31 @@ impl<'k> CodexTurnSeriesScan<'k> {
 
 /// The stored counters for a `last_token_usage` object, through the one
 /// pricing mapping ([`codex_turn_usage`]), or `None` when any field is
-/// missing, does not fit, or the cached and written tokens exceed the input.
-fn codex_counters(usage: &Value) -> Option<KnownTurnUsage> {
+/// missing, does not fit, or the cached and written tokens exceed the input,
+/// or when the response's tokens (`input + output`, and its own
+/// `total_tokens` when stated) are not `grew`, what the running total grew
+/// by: a turn whose two readings disagree is unknown, never a partial.
+fn codex_counters(usage: &Value, grew: u64) -> Option<KnownTurnUsage> {
     let field = |name: &str| usage.get(name).and_then(Value::as_u64);
+    let (input, output) = (field("input_tokens")?, field("output_tokens")?);
+    if input.checked_add(output)? != grew
+        || usage
+            .get("total_tokens")
+            .is_some_and(|total| total.as_u64() != Some(grew))
+    {
+        return None;
+    }
     codex_turn_usage(
-        field("input_tokens")?,
+        input,
         field("cached_input_tokens")?,
         field("cache_write_input_tokens")?,
-        field("output_tokens")?,
+        output,
     )
 }
 
-/// The command line of an `exec_command` (`cmd`) or `shell` (`command`, a
-/// string or an argument list) call.
+/// The command line of an `exec_command` (`cmd`) or a `shell`,
+/// `shell_command` or local shell (`command`, a string or an argument list)
+/// call.
 fn shell_command_text(input: &Value) -> Option<String> {
     if let Some(cmd) = input.get("cmd").and_then(Value::as_str) {
         return Some(cmd.to_owned());
