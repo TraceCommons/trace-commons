@@ -4588,7 +4588,21 @@ its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks, so it keeps the newest sessions. A
+sessions written in the last 13 weeks, so it keeps the newest sessions. The
+turn and tool-call caps count Claude Code's per-turn series only. Codex
+per-turn series have their own allowance (owner decision, 2026-10-20):
+196608 turns and 196608 tool calls across every Codex row. Past either, the
+oldest Codex rows (last write, then the order they were counted) lose their
+per-turn series and nothing else: the row, its observed change, its dates
+and its facts stay, so the session still counts in every weekly figure. A
+trimmed row is not evicted and gets no mark, and it is not read again while
+its file is unchanged. `insights_sessions` and `insights_session_drill`
+answer it as a Codex row read before the per-turn reader: `turns` and
+`sparkline` are `null`, `tokens` is its observed change, and the drill's
+`series_unavailable` is `not_recorded`. `insights_model_answers` counts it
+in `left_out.unknown_facts`, never as zero turns. The allowance fits about 13
+weeks of heavy Codex use (measured: about 167000 stored turns and 161000
+tool calls), at most about 99 MB of the store file. A
 session the caps evict is marked by its keyed digest and the size and last
 write its row was made from; the marks age out with the rows and are capped
 at 2048, oldest first, so the newest mark stays while any does. A session

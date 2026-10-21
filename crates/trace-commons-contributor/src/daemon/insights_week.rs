@@ -54,7 +54,15 @@
 //!
 //! One daemon-local file, capped by sessions, turns and tool calls, oldest
 //! going first, and limited to recent weeks, so it keeps the newest
-//! sessions. A session the caps evict is marked by its keyed digest, size
+//! sessions. The turn and tool-call caps count Claude Code's per-turn series
+//! only. Codex per-turn series have their own allowance
+//! (`COUNTER_STORE_MAX_CODEX_SERIES_TURNS` and `..._TOOL_CALLS`; owner
+//! decision, 2026-10-20): past it the oldest Codex rows lose their series
+//! only, marked `series_trimmed`, and keep the row, `observed`, dates and
+//! facts, so every weekly figure still counts them. A trimmed row is not
+//! evicted and not read again while its file is unchanged; the Sessions
+//! answers draw it as a row read before the per-turn reader, and the Models
+//! answers count it as unknown facts, never as zero. A session the caps evict is marked by its keyed digest, size
 //! and last write. A session with no row whose last write is no later than
 //! the newest mark, or, with the store at its session cap, earlier than every
 //! row kept, is not read: the caps would evict it again. An evicted file is
@@ -121,6 +129,7 @@ use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
+    COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS, COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
     COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
     DIGEST_KEY_CUSTODY, DigestKeyCustody, SESSION_FACTS_VERSION,
 };
@@ -194,6 +203,12 @@ enum RowBody {
         /// or the row was made before it ran; `observed` stands either way.
         #[serde(default)]
         series: Option<CodexTurnSeriesEvidence>,
+        /// Whether `series` was dropped by the Codex series budget
+        /// (`COUNTER_STORE_MAX_CODEX_SERIES_TURNS`), oldest first: the row
+        /// and `observed` stay, and it is not read again for it. Left out of
+        /// the file while false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        series_trimmed: bool,
     },
     Unknown {
         source: AnalyticsSource,
@@ -297,9 +312,26 @@ impl CounterRow {
         self.earliest_event_at.or(self.first_event_at)
     }
 
+    /// Turns against the shared cap: Claude Code's series only. A Codex
+    /// series counts against its own budget (`codex_series_turns`).
     fn turns(&self) -> usize {
         match &self.body {
             RowBody::Claude { series, .. } => series.turns.len(),
+            _ => 0,
+        }
+    }
+
+    /// Tool calls against the shared cap: Claude Code's series only.
+    fn tool_calls(&self) -> usize {
+        match &self.body {
+            RowBody::Claude { series, .. } => series.tool_calls.len(),
+            _ => 0,
+        }
+    }
+
+    /// Turns against the Codex series budget.
+    fn codex_series_turns(&self) -> usize {
+        match &self.body {
             RowBody::Codex {
                 series: Some(evidence),
                 ..
@@ -308,9 +340,9 @@ impl CounterRow {
         }
     }
 
-    fn tool_calls(&self) -> usize {
+    /// Tool calls against the Codex series budget.
+    fn codex_series_tool_calls(&self) -> usize {
         match &self.body {
-            RowBody::Claude { series, .. } => series.tool_calls.len(),
             RowBody::Codex {
                 series: Some(evidence),
                 ..
@@ -337,7 +369,9 @@ impl CounterRow {
                     series: series.clone(),
                     model_labels: model_labels.clone(),
                 },
-                RowBody::Codex { observed, series } => SessionBody::Codex {
+                RowBody::Codex {
+                    observed, series, ..
+                } => SessionBody::Codex {
                     observed: *observed,
                     series: series.clone(),
                 },
@@ -1062,6 +1096,11 @@ impl CounterPass {
             COUNTER_STORE_MAX_TURNS,
             COUNTER_STORE_MAX_TOOL_CALLS,
         );
+        trim_codex_series(
+            &mut store,
+            COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
+            COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
+        );
         prune_routing(&mut store, &gone, cutoff);
         self.save_into(&mut cached, store)?;
         self.mark_pass(now);
@@ -1422,7 +1461,7 @@ impl CounterPass {
                 };
                 // The per-turn series, Claude Code's or Codex's (owner
                 // decision D11, settled); a Codex row made before the
-                // per-turn reader has none.
+                // per-turn reader, or trimmed by the Codex budget, has none.
                 let series = match &row.body {
                     RowBody::Claude { series, .. } => Some(series),
                     RowBody::Codex {
@@ -1890,6 +1929,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             RowBody::Codex {
                 observed: codex_observed(&evidence),
                 series,
+                series_trimmed: false,
             }
         }
         ScannedBody::Claude(None) | ScannedBody::Codex(None, _) => {
@@ -2314,6 +2354,65 @@ fn enforce_caps(store: &mut CounterStore, max_sessions: usize, max_turns: usize,
         let excess = marks.len() - max_sessions;
         for (_, session) in marks.into_iter().take(excess) {
             store.evicted.remove(&session);
+        }
+    }
+}
+
+/// The Codex series budget (owner decision, 2026-10-20): past either
+/// bound, the oldest Codex rows, by last write and then by the order they
+/// were counted, lose their per-turn series until both hold. Only the
+/// series goes: the row, its observed change, dates and facts stay, so the
+/// session still counts in every weekly figure. A trimmed row is not
+/// evicted and gets no eviction mark; it is not read again while its file
+/// is unchanged, because the pass's unchanged test does not look at the
+/// series. A file that changes is read again whole, series and all, as the
+/// newest Codex row, and the budget then trims older ones.
+fn trim_codex_series(store: &mut CounterStore, max_turns: usize, max_tools: usize) {
+    let mut turns: usize = store
+        .rows
+        .values()
+        .map(CounterRow::codex_series_turns)
+        .sum();
+    let mut tools: usize = store
+        .rows
+        .values()
+        .map(CounterRow::codex_series_tool_calls)
+        .sum();
+    if turns <= max_turns && tools <= max_tools {
+        return;
+    }
+    let mut oldest: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
+        .rows
+        .iter()
+        .filter(|(_, row)| {
+            matches!(
+                row.body,
+                RowBody::Codex {
+                    series: Some(_),
+                    ..
+                }
+            )
+        })
+        .map(|(session, row)| (row.modified_at, row.seq, *session))
+        .collect();
+    oldest.sort();
+    for (_, _, session) in oldest {
+        if turns <= max_turns && tools <= max_tools {
+            break;
+        }
+        let Some(row) = store.rows.get_mut(&session) else {
+            continue;
+        };
+        turns -= row.codex_series_turns();
+        tools -= row.codex_series_tool_calls();
+        if let RowBody::Codex {
+            series,
+            series_trimmed,
+            ..
+        } = &mut row.body
+        {
+            *series = None;
+            *series_trimmed = true;
         }
     }
 }
@@ -3068,6 +3167,7 @@ mod tests {
                 Ok(evidence) => RowBody::Codex {
                     observed: codex_observed(&evidence),
                     series: None,
+                    series_trimmed: false,
                 },
                 Err(_) => unknown,
             },
@@ -3424,6 +3524,7 @@ mod tests {
                     body: RowBody::Codex {
                         observed: None,
                         series: None,
+                        series_trimmed: false,
                     },
                     harness_session: None,
                     harness_session_read: true,
@@ -3487,6 +3588,7 @@ mod tests {
                     body: RowBody::Codex {
                         observed: None,
                         series: None,
+                        series_trimmed: false,
                     },
                     harness_session: None,
                     harness_session_read: true,
@@ -3616,6 +3718,7 @@ mod tests {
                     RowBody::Codex {
                         observed: None,
                         series: None,
+                        series_trimmed: false,
                     },
                 ),
             );
@@ -5302,21 +5405,22 @@ mod tests {
         assert!(facts.capped && !facts.delegated_unread, "{facts:?}");
     }
 
+    /// Owner decision, 2026-10-20: Codex per-turn series have their own
+    /// allowance. A store over the shared turn and tool-call caps only
+    /// because of a Codex series keeps every row.
     #[test]
-    fn codex_series_turns_count_toward_the_store_caps() {
+    fn codex_series_do_not_count_toward_the_shared_caps() {
         let f = Fixture::new();
         let path = f.write("c.jsonl", &codex_series_bytes());
         f.run(&[candidate(SOURCE_CODEX, &path)]);
         let row = only_row(&f.pass);
-        assert_eq!(row.turns(), 3);
-        assert!(row.tool_calls() > 0);
+        assert_eq!(row.codex_series_turns(), 3);
+        assert!(row.codex_series_tool_calls() > 0);
+        assert_eq!((row.turns(), row.tool_calls()), (0, 0));
         let store = (*f.pass.load_cached().unwrap().unwrap()).clone();
-        let mut by_turns = store.clone();
-        enforce_caps(&mut by_turns, usize::MAX, row.turns() - 1, usize::MAX);
-        assert!(by_turns.rows.is_empty());
-        let mut by_tools = store;
-        enforce_caps(&mut by_tools, usize::MAX, usize::MAX, row.tool_calls() - 1);
-        assert!(by_tools.rows.is_empty());
+        let mut capped = store.clone();
+        enforce_caps(&mut capped, usize::MAX, 0, 0);
+        assert_eq!(capped, store, "no row evicted, no series trimmed");
     }
 
     #[test]
@@ -5335,7 +5439,8 @@ mod tests {
                 row.body,
                 RowBody::Codex {
                     observed: Some(_),
-                    series: None
+                    series: None,
+                    series_trimmed: false,
                 }
             ),
             "{:?}",
@@ -5475,5 +5580,330 @@ mod tests {
             .map(|week| answer(&f.reopened(), *week))
             .collect();
         assert_eq!(with_facts, without);
+        // A Codex series trimmed by its budget changes no weekly figure.
+        edit_stored_rows(&f, |row| {
+            let body = row["body"].as_object_mut().unwrap();
+            if body["kind"] == "codex" {
+                body.insert("series_trimmed".into(), serde_json::Value::Bool(true));
+            }
+        });
+        assert!(f.rows_text().contains("\"series_trimmed\":true"));
+        let trimmed: Vec<_> = weeks
+            .iter()
+            .map(|week| answer(&f.reopened(), *week))
+            .collect();
+        assert_eq!(with_facts, trimmed);
+    }
+
+    // The Codex series allowance (owner decision 2026-10-20, #1510).
+
+    /// A Codex row in the week of `written()` whose observed change is
+    /// `CODEX_SYNTHETIC_TOKENS`, with a series of `turns` turns and `calls`
+    /// tool calls.
+    fn codex_series_row(
+        modified_at: DateTime<Utc>,
+        seq: u64,
+        turns: u32,
+        calls: u32,
+    ) -> CounterRow {
+        use trace_commons_protocol::insights_usage_series::{
+            CacheWrite, ToolCallRecord, ToolKind, TurnRecord,
+        };
+        let at = Utc.with_ymd_and_hms(2026, 9, 14, 9, 0, 0).unwrap();
+        let series = UsageSeries {
+            turns: (0..turns)
+                .map(|ordinal| TurnRecord {
+                    ordinal,
+                    at: Some(at + Duration::seconds(i64::from(ordinal))),
+                    uncached_input: Some(10),
+                    cache_read: Some(20),
+                    cache_write: Some(CacheWrite::TotalOnly(0)),
+                    output: Some(5),
+                    model_label_ix: Some(0),
+                    gap_secs: None,
+                    msg_key: None,
+                })
+                .collect(),
+            tool_calls: (0..calls)
+                .map(|i| ToolCallRecord {
+                    turn_ordinal: i * turns.max(1) / calls.max(1),
+                    tool: ToolKind::Bash,
+                    args_key: KeyedDigest([7; 32]),
+                    path_key: None,
+                    path_ext: None,
+                    result_bytes: Some(100),
+                    success: Some(true),
+                    paired: true,
+                })
+                .collect(),
+            truncated: false,
+        };
+        let mut row = synthetic_row(
+            modified_at,
+            seq,
+            RowBody::Codex {
+                observed: Some(CodexObserved {
+                    first_at: at,
+                    last_at: at + Duration::minutes(1),
+                    input: 80,
+                    cached_input: 40,
+                    output: 30,
+                    total: CODEX_SYNTHETIC_TOKENS,
+                    baseline_excluded: false,
+                }),
+                series: Some(CodexTurnSeriesEvidence {
+                    model_labels: vec!["gpt-6".to_string()],
+                    series,
+                }),
+                series_trimmed: false,
+            },
+        );
+        row.first_event_at = Some(at);
+        row.earliest_event_at = Some(at);
+        row.latest_event_at = Some(at + Duration::minutes(1));
+        row
+    }
+
+    const CODEX_SYNTHETIC_TOKENS: u64 = 110;
+
+    fn is_trimmed(row: &CounterRow) -> bool {
+        matches!(
+            row.body,
+            RowBody::Codex {
+                series: None,
+                series_trimmed: true,
+                ..
+            }
+        )
+    }
+
+    /// Over the Codex budget, by turns or by tool calls, the oldest Codex
+    /// rows lose their series and nothing else; the newest keep theirs, and
+    /// Claude rows and every total are untouched.
+    #[test]
+    fn past_the_codex_budget_the_oldest_series_are_trimmed_first() {
+        let build = || {
+            let mut store = CounterStore::empty(KeyedDigest([0; 32]));
+            for i in 0..4u8 {
+                store.rows.insert(
+                    KeyedDigest([i; 32]),
+                    codex_series_row(
+                        written() + Duration::minutes(i64::from(i)),
+                        u64::from(i),
+                        3,
+                        2,
+                    ),
+                );
+            }
+            store
+        };
+        for (max_turns, max_tools) in [(7, usize::MAX), (usize::MAX, 5)] {
+            let mut store = build();
+            let before = store.clone();
+            trim_codex_series(&mut store, max_turns, max_tools);
+            let trimmed: Vec<u8> = store
+                .rows
+                .iter()
+                .filter(|(_, row)| is_trimmed(row))
+                .map(|(k, _)| k.0[0])
+                .collect();
+            assert_eq!(trimmed, vec![0, 1], "budget {max_turns}/{max_tools}");
+            assert_eq!(store.rows.len(), 4, "no row evicted");
+            assert!(store.evicted.is_empty(), "a trimmed row is not evicted");
+            for (key, row) in &store.rows {
+                let old = &before.rows[key];
+                let (RowBody::Codex { observed, .. }, RowBody::Codex { observed: was, .. }) =
+                    (&row.body, &old.body)
+                else {
+                    panic!("Codex rows");
+                };
+                assert_eq!(observed, was, "totals kept");
+                assert_eq!(
+                    (
+                        row.modified_at,
+                        row.seq,
+                        row.facts.clone(),
+                        row.earliest_event_at
+                    ),
+                    (
+                        old.modified_at,
+                        old.seq,
+                        old.facts.clone(),
+                        old.earliest_event_at
+                    )
+                );
+                if !is_trimmed(row) {
+                    assert_eq!(row, old, "the newest keep their series");
+                }
+            }
+            let total: usize = store
+                .rows
+                .values()
+                .map(CounterRow::codex_series_turns)
+                .sum();
+            assert_eq!(total, 6);
+        }
+    }
+
+    /// A trimmed row is not read again on the next poll, and stays trimmed.
+    #[test]
+    fn a_trimmed_codex_row_is_not_read_again() {
+        let f = Fixture::new();
+        let older = f.write("older.jsonl", &codex_series_bytes());
+        let newer = f.write("newer.jsonl", &codex_series_bytes());
+        let mut old = candidate(SOURCE_CODEX, &older);
+        old.modified_at = written() - Duration::minutes(1);
+        let new = candidate(SOURCE_CODEX, &newer);
+        let both = [old, new];
+        assert_eq!(f.run(&both).read, 2);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        trim_codex_series(&mut store, 3, usize::MAX);
+        f.pass.save(store).unwrap();
+        let trimmed = |pass: &CounterPass| {
+            stored_rows(pass)
+                .iter()
+                .filter(|row| is_trimmed(row))
+                .map(|row| row.modified_at)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(trimmed(&f.pass), vec![written() - Duration::minutes(1)]);
+        for poll in 0..3 {
+            assert_eq!(f.run(&both).read, 0, "poll {poll}");
+        }
+        assert_eq!(
+            trimmed(&f.reopened()),
+            vec![written() - Duration::minutes(1)]
+        );
+    }
+
+    /// The Sessions row and drill for a trimmed row draw no sparkline and
+    /// no turns, as for a row read before the per-turn reader; its tokens
+    /// are its observed change.
+    #[test]
+    fn a_trimmed_codex_row_has_no_sparkline_or_turns() {
+        let f = Fixture::new();
+        let path = f.write("c.jsonl", &codex_series_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let listed = |f: &Fixture| {
+            f.pass.sessions_value(true, &NeverFolders::NONE, &[], 10)["sessions"][0].clone()
+        };
+        let drill = |f: &Fixture| {
+            f.pass
+                .drill_value(true, "t0", &NeverFolders::NONE, utc())
+                .unwrap()["session"]
+                .clone()
+        };
+        // Not vacuous: the untrimmed row draws both.
+        assert_eq!(listed(&f)["turns"], 3);
+        assert!(!listed(&f)["sparkline"].is_null());
+        assert!(drill(&f)["series_unavailable"].is_null());
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        trim_codex_series(&mut store, 0, 0);
+        f.pass.save(store).unwrap();
+        let row = listed(&f);
+        assert!(row["turns"].is_null(), "{row}");
+        assert!(row["sparkline"].is_null(), "{row}");
+        let RowBody::Codex { observed, .. } = only_row(&f.pass).body else {
+            panic!("a Codex row");
+        };
+        assert_eq!(
+            row["tokens"],
+            serde_json::json!(observed.map(|observed| observed.total)),
+            "its observed change, never the trimmed series' tokens"
+        );
+        assert_eq!(drill(&f)["series_unavailable"], "not_recorded");
+    }
+
+    /// The Models answers treat a trimmed series as unknown per-turn data,
+    /// never zero: the session is counted in `unknown_facts` on every row.
+    #[test]
+    fn a_trimmed_codex_row_is_left_out_of_the_model_answers() {
+        let f = Fixture::new();
+        let path = f.write("c.jsonl", &codex_series_bytes());
+        // Placed on the fixture's day, so the session stays in the window
+        // once it has no dated turns.
+        let at = Utc.with_ymd_and_hms(2026, 1, 6, 0, 0, 0).unwrap();
+        let mut session = candidate(SOURCE_CODEX, &path);
+        session.started_at = Some(at - Duration::hours(12));
+        f.run(&[session]);
+        let unknown = |f: &Fixture| {
+            let value = f
+                .pass
+                .model_answers_value(true, &NeverFolders::NONE, false, false, at);
+            value["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["left_out"]["unknown_facts"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            unknown(&f),
+            vec![0; 6],
+            "a candidate while its series is kept"
+        );
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        trim_codex_series(&mut store, 0, 0);
+        f.pass.save(store).unwrap();
+        assert_eq!(unknown(&f), vec![1; 6]);
+    }
+
+    /// At the owner's measured 13-week Codex volume (about 167k stored
+    /// turns and 161k tool calls, over the shared caps), a pass keeps every
+    /// session row and every series, and the week counts every session.
+    /// Counts rows, never time.
+    #[test]
+    fn a_realistic_codex_volume_keeps_every_row_and_series() {
+        let f = Fixture::new();
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        let synthetic = COUNTER_STORE_MAX_SESSIONS - 1;
+        for i in 0..synthetic {
+            store.rows.insert(
+                synthetic_digest(0x22, i),
+                codex_series_row(
+                    written() - Duration::seconds(i as i64 + 1),
+                    i as u64,
+                    82,
+                    79,
+                ),
+            );
+        }
+        store.next_seq = synthetic as u64;
+        let turns: usize = store
+            .rows
+            .values()
+            .map(CounterRow::codex_series_turns)
+            .sum();
+        let calls: usize = store
+            .rows
+            .values()
+            .map(CounterRow::codex_series_tool_calls)
+            .sum();
+        // Not vacuous: over the shared caps, under the Codex budget.
+        assert!(turns > COUNTER_STORE_MAX_TURNS && calls > COUNTER_STORE_MAX_TOOL_CALLS);
+        assert!(turns <= COUNTER_STORE_MAX_CODEX_SERIES_TURNS);
+        assert!(calls <= COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS);
+        f.pass.save(store).unwrap();
+
+        // One real session read, so the pass writes and enforces the caps.
+        let path = f.write("x.jsonl", &codex_bytes());
+        assert_eq!(f.run(&[candidate(SOURCE_CODEX, &path)]).read, 1);
+        let rows = stored_rows(&f.reopened());
+        assert_eq!(rows.len(), COUNTER_STORE_MAX_SESSIONS);
+        assert!(rows.iter().all(|row| !is_trimmed(row)));
+        let week = f.week(&[]);
+        assert_eq!(sessions_of(&week).len(), COUNTER_STORE_MAX_SESSIONS);
+        let line = week["rollup"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|line| line["source"] == "codex")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            line["tokens"],
+            synthetic as u64 * CODEX_SYNTHETIC_TOKENS + 80 + 30
+        );
     }
 }
