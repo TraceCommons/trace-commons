@@ -28,3 +28,7 @@ pub mod quote;
 /// only needs the other.
 #[cfg(feature = "receipt")]
 pub mod receipt;
+/// The 64-byte TDX report-data layout every Trace Commons enclave binds:
+/// an 8-byte domain tag, a signing address and a client nonce. Ungated, like
+/// [`eip191`]: verifying a quote before sending anything needs it.
+pub mod report_data;
