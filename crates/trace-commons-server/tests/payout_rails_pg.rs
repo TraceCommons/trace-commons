@@ -3116,6 +3116,104 @@ async fn a_reversal_takes_back_exactly_its_credit_on_each_rail() {
     }
 }
 
+/// Ingest writes each event's amount as `format!("{:.4}", f32)` and the
+/// line as the sum of each event's own rounding, so two events' text can
+/// sum to more than their line. Reversing both takes back the line, once.
+#[tokio::test]
+async fn reversals_of_every_event_in_a_line_take_back_exactly_the_line() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let principal = format!("principal-{}", Uuid::new_v4());
+    link_principal(&fixture.owner, &tenant, accounts[0], &principal).await;
+    let rail_id = fresh_rail("rev-many");
+    record_epoch(&fixture, &rail_id, "v1", 3, 7).await;
+    let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+    for source in [first, second] {
+        ledger_event(
+            &fixture.owner,
+            &tenant,
+            source,
+            &principal,
+            "0.8000",
+            "final",
+            None,
+        )
+        .await;
+    }
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now() - Duration::hours(1),
+        &[item(
+            &account_ref(accounts[0]),
+            1_000_000,
+            &[first, second],
+            None,
+        )],
+    )
+    .await;
+    let owed = || {
+        let fixture = &fixture;
+        let tenant = tenant.clone();
+        let rail_id = rail_id.clone();
+        let account = accounts[0];
+        async move {
+            fixture
+                .runtime
+                .payout_owed(&tenant, account, &rail_id)
+                .await
+                .unwrap()
+        }
+    };
+
+    // The first reversal arrives alone and takes back its own amount.
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-0.8000",
+        "reversed",
+        reversal_ref(first),
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!((report.credits_inserted, report.reversals_inserted), (1, 1));
+    // floor(1,000,000 * 3 / 7) and floor(800,000 * 3 / 7).
+    let after_first = owed().await;
+    assert_eq!(
+        (after_first.credited, after_first.reversed),
+        (428_571, 342_857)
+    );
+
+    // The second, in a later run, takes back only what is left of the line.
+    ledger_event(
+        &fixture.owner,
+        &tenant,
+        Uuid::new_v4(),
+        &principal,
+        "-0.8000",
+        "reversed",
+        reversal_ref(second),
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.reversals_inserted, 1);
+    let rows = accruals(&fixture, &tenant, &rail_id).await;
+    let taken: u128 = rows
+        .iter()
+        .filter(|row| row.kind == PayoutAccrualKind::Reversal)
+        .map(|row| row.award_units.get())
+        .sum();
+    assert_eq!(taken, 1_000_000, "never more than the line settled");
+    let after_both = owed().await;
+    assert_eq!(after_both.credited, after_both.reversed);
+    assert_eq!(after_both.net(), Some(0));
+}
+
 #[tokio::test]
 async fn an_unlocatable_reversal_holds_only_that_rail() {
     let Some(fixture) = fixture().await else {

@@ -146,6 +146,17 @@ impl AccrualPlan {
     }
 }
 
+/// A settlement line: `(settlement_batch_id, credit_account_hash)`.
+type LineKey = (Uuid, String);
+
+/// What a line's credit accrual priced it at on this rail.
+#[derive(Clone)]
+struct LineCredit {
+    version: String,
+    owner: Option<Uuid>,
+    rail_units: u128,
+}
+
 fn reversed_event_id(event: &TraceCreditEventRecord) -> Option<Uuid> {
     let raw = event
         .external_ref
@@ -183,24 +194,47 @@ pub fn plan_rail_accruals(
             .ok_or(AccrualError::EpochMissing)
     };
 
-    // Credit accruals already stored or planned in this run, by line key:
-    // (rate version, owner).
-    let mut credited: HashMap<(Uuid, String), (String, Option<Uuid>)> = inputs
+    // Credit accruals already stored or planned in this run, by line key.
+    let mut credited: HashMap<LineKey, LineCredit> = inputs
         .existing
         .iter()
         .filter(|row| row.kind == PayoutAccrualKind::Credit)
         .map(|row| {
             (
                 (row.settlement_batch_id, row.credit_account_hash.clone()),
-                (row.rate_version.clone(), row.account_id),
+                LineCredit {
+                    version: row.rate_version.clone(),
+                    owner: row.account_id,
+                    rail_units: row.rail_units.get(),
+                },
             )
         })
         .collect();
+    // Reversal accruals already stored: their ledger rows, and what each
+    // line has had taken back so far (award units, rail units).
     let reversed: BTreeSet<Uuid> = inputs
         .existing
         .iter()
         .filter_map(|row| row.reversal_event_id)
         .collect();
+    let mut taken_back: HashMap<LineKey, (u128, u128)> = HashMap::new();
+    for row in inputs
+        .existing
+        .iter()
+        .filter(|row| row.kind == PayoutAccrualKind::Reversal)
+    {
+        let taken = taken_back
+            .entry((row.settlement_batch_id, row.credit_account_hash.clone()))
+            .or_default();
+        taken.0 = taken
+            .0
+            .checked_add(row.award_units.get())
+            .ok_or(AccrualError::Overflow)?;
+        taken.1 = taken
+            .1
+            .checked_add(row.rail_units.get())
+            .ok_or(AccrualError::Overflow)?;
+    }
 
     // Credits: every positive line of every finalized batch.
     let finalized = inputs
@@ -266,23 +300,39 @@ pub fn plan_rail_accruals(
                 rate_version: epoch.rate.version().to_owned(),
                 instrument_id: instrument.clone(),
             });
-            credited.insert(key, (epoch.rate.version().to_owned(), owner));
+            credited.insert(
+                key,
+                LineCredit {
+                    version: epoch.rate.version().to_owned(),
+                    owner,
+                    rail_units,
+                },
+            );
         }
     }
 
-    // Reversals: a reversed ledger row naming the event it reverses.
+    // Reversals: a reversed ledger row naming the event it reverses, in
+    // ledger order, so a line's running total (and so each price) is the
+    // same whatever order the rows were read in.
     let events_by_id: HashMap<Uuid, &TraceCreditEventRecord> = inputs
         .events
         .iter()
         .map(|event| (event.credit_event_id, event))
         .collect();
-    for event in inputs.events {
-        if event.settlement_state != TraceCreditSettlementState::Reversed {
-            continue;
-        }
-        let Some(source_id) = reversed_event_id(event) else {
-            continue;
-        };
+    let mut reversals: Vec<(&TraceCreditEventRecord, Uuid)> = inputs
+        .events
+        .iter()
+        .filter(|event| event.settlement_state == TraceCreditSettlementState::Reversed)
+        .filter_map(|event| reversed_event_id(event).map(|source| (event, source)))
+        .collect();
+    reversals.sort_by_key(|(event, _)| (event.occurred_at, event.credit_event_id));
+    // Source events already taken back on this rail, stored or planned.
+    let mut sources_reversed: BTreeSet<Uuid> = reversals
+        .iter()
+        .filter(|(event, _)| reversed.contains(&event.credit_event_id))
+        .map(|(_, source)| *source)
+        .collect();
+    for (event, source_id) in reversals {
         if reversed.contains(&event.credit_event_id) {
             continue;
         }
@@ -299,13 +349,28 @@ pub fn plan_rail_accruals(
             continue;
         };
         let key = (batch.settlement_batch_id, line.credit_account_hash.clone());
-        let Some((version, owner)) = credited.get(&key).cloned() else {
+        let Some(LineCredit {
+            version,
+            owner,
+            rail_units: credit_rail_units,
+        }) = credited.get(&key).cloned()
+        else {
             plan.skip("payout_reversal_credit_missing");
             continue;
         };
+        if !sources_reversed.insert(source_id) {
+            // The event was already taken back by another reversal row.
+            plan.skip("payout_reversal_duplicate");
+            continue;
+        }
         // The reversed event's own amount, taken from the event it reverses
-        // (or, without it, the reversal row's magnitude), never more than
-        // its line settled.
+        // (or, without it, the reversal row's magnitude). Capped by what is
+        // left of the line after every earlier reversal in it, and the last
+        // event of the line to be reversed takes back exactly what is left,
+        // so a line's reversals together never take back more than it
+        // settled, and all of them take back exactly that. Each event's
+        // ledger text is rounded on its own and can sum to more or less
+        // than the line.
         let amount = source
             .map(|source| source.points_delta.as_str())
             .unwrap_or(event.points_delta.as_str());
@@ -315,14 +380,32 @@ pub fn plan_rail_accruals(
         };
         let line_award =
             u128::try_from(line.settled_credit_delta_micros).map_err(|_| AccrualError::Overflow)?;
-        let award = award.min(line_award);
+        let (taken_award, taken_rail) = taken_back.get(&key).copied().unwrap_or_default();
+        let left_award = line_award.saturating_sub(taken_award);
+        let left_rail = credit_rail_units.saturating_sub(taken_rail);
+        let last = line
+            .source_credit_event_ids
+            .iter()
+            .all(|event| sources_reversed.contains(event));
+        let (award, rail_units) = if last {
+            (left_award, left_rail)
+        } else {
+            let award = award.min(left_award);
+            let rail_units = rate_for_version(&version)?
+                .price(award)
+                .map_err(|_| AccrualError::Overflow)?;
+            (award, rail_units.min(left_rail))
+        };
         if award == 0 {
             plan.skip("payout_reversal_zero");
             continue;
         }
-        let rail_units = rate_for_version(&version)?
-            .price(award)
-            .map_err(|_| AccrualError::Overflow)?;
+        let taken = taken_back.entry(key).or_default();
+        taken.0 = taken.0.checked_add(award).ok_or(AccrualError::Overflow)?;
+        taken.1 = taken
+            .1
+            .checked_add(rail_units)
+            .ok_or(AccrualError::Overflow)?;
         plan.writes.push(PayoutAccrualWrite {
             rail_id: rail.clone(),
             kind: PayoutAccrualKind::Reversal,
@@ -573,6 +656,15 @@ mod tests {
         events: &[TraceCreditEventRecord],
         principals: &HashMap<String, Uuid>,
     ) -> AccrualPlan {
+        plan_with(batches, events, principals, &[])
+    }
+
+    fn plan_with(
+        batches: &[TraceCreditSettlementBatchRecord],
+        events: &[TraceCreditEventRecord],
+        principals: &HashMap<String, Uuid>,
+        existing: &[PayoutAccrual],
+    ) -> AccrualPlan {
         plan_rail_accruals(
             &rail(),
             &instrument(),
@@ -580,11 +672,77 @@ mod tests {
                 batches,
                 events,
                 principal_accounts: principals,
-                existing: &[],
+                existing,
                 epochs: &epochs(),
             },
         )
         .unwrap()
+    }
+
+    /// A stored row from a planned write, as the store reads it back.
+    fn stored(write: &PayoutAccrualWrite) -> PayoutAccrual {
+        PayoutAccrual {
+            rail_id: write.rail_id.clone(),
+            kind: write.kind,
+            settlement_batch_id: write.settlement_batch_id,
+            credit_account_hash: write.credit_account_hash.clone(),
+            reversal_event_id: write.reversal_event_id,
+            account_id: write.account_id,
+            award_units: write.award_units,
+            rail_units: write.rail_units,
+            rate_version: write.rate_version.clone(),
+            instrument_id: write.instrument_id.clone(),
+        }
+    }
+
+    /// A line of 1,000,000 micros settled from two events whose ledger text
+    /// is "0.8000" each: ingest writes `format!("{:.4}", f32)` per event,
+    /// while the line is the sum of each event's own rounding, so the text
+    /// can sum to more than the line. Returns the batch and the ledger rows
+    /// (both events, then a reversal of each).
+    fn over_texted_line(
+        account: Uuid,
+    ) -> (
+        TraceCreditSettlementBatchRecord,
+        Vec<TraceCreditEventRecord>,
+    ) {
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        let settled = batch(
+            TraceCreditSettlementBatchStatus::Finalized,
+            vec![line(
+                &format!("account:{account}"),
+                1_000_000,
+                &[first, second],
+            )],
+        );
+        let mut events = Vec::new();
+        for (offset, source) in [first, second].into_iter().enumerate() {
+            events.push(event(
+                source,
+                "principal-a",
+                "0.8000",
+                TraceCreditSettlementState::Final,
+                None,
+            ));
+            let mut reversal = event(
+                Uuid::new_v4(),
+                "principal-a",
+                "-0.8000",
+                TraceCreditSettlementState::Reversed,
+                Some(source),
+            );
+            reversal.occurred_at = Utc.timestamp_opt(2_000 + offset as i64, 0).unwrap();
+            events.push(reversal);
+        }
+        (settled, events)
+    }
+
+    fn reversal_awards(plan: &AccrualPlan) -> Vec<u128> {
+        plan.writes
+            .iter()
+            .filter(|write| write.kind == PayoutAccrualKind::Reversal)
+            .map(|write| write.award_units.get())
+            .collect()
     }
 
     #[test]
@@ -628,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reversal_never_takes_back_more_than_its_line_settled() {
+    fn a_single_reversal_never_takes_back_more_than_its_line_settled() {
         let account = Uuid::new_v4();
         let credited = Uuid::new_v4();
         let batches = [batch(
@@ -658,6 +816,100 @@ mod tests {
             .find(|write| write.kind == PayoutAccrualKind::Reversal)
             .unwrap();
         assert_eq!(reversal.award_units.get(), 1_000_000);
+    }
+
+    #[test]
+    fn several_reversals_on_one_line_never_take_back_more_than_it_settled() {
+        let account = Uuid::new_v4();
+        let (settled, events) = over_texted_line(account);
+        let planned = plan(&[settled], &events, &HashMap::new());
+        // The first takes its own amount; the last takes what is left.
+        assert_eq!(reversal_awards(&planned), vec![800_000, 200_000]);
+    }
+
+    #[test]
+    fn a_reversal_after_a_stored_one_takes_back_only_what_is_left() {
+        let account = Uuid::new_v4();
+        let (settled, events) = over_texted_line(account);
+        // First run: only the first reversal has been written to the ledger.
+        let first_run = plan(&[settled.clone()], &events[..3], &HashMap::new());
+        assert_eq!(reversal_awards(&first_run), vec![800_000]);
+        let existing: Vec<PayoutAccrual> = first_run.writes.iter().map(stored).collect();
+        // Second run: the second reversal arrives.
+        let second_run = plan_with(&[settled], &events, &HashMap::new(), &existing);
+        assert_eq!(reversal_awards(&second_run), vec![200_000]);
+    }
+
+    #[test]
+    fn reversals_are_priced_in_ledger_order_whatever_order_they_are_read_in() {
+        let account = Uuid::new_v4();
+        let (settled, mut events) = over_texted_line(account);
+        let in_order = plan(&[settled.clone()], &events, &HashMap::new());
+        events.reverse();
+        let reversed_read = plan(&[settled], &events, &HashMap::new());
+        let by_event = |plan: &AccrualPlan| -> BTreeMap<Option<Uuid>, u128> {
+            plan.writes
+                .iter()
+                .map(|write| (write.reversal_event_id, write.award_units.get()))
+                .collect()
+        };
+        assert_eq!(by_event(&in_order), by_event(&reversed_read));
+    }
+
+    #[test]
+    fn the_last_reversal_of_a_line_takes_back_exactly_what_is_left() {
+        let account = Uuid::new_v4();
+        let sources = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let settled = batch(
+            TraceCreditSettlementBatchStatus::Finalized,
+            vec![line(&format!("account:{account}"), 1_000_000, &sources)],
+        );
+        let mut events = Vec::new();
+        for (offset, source) in sources.into_iter().enumerate() {
+            events.push(event(
+                source,
+                "principal-a",
+                "0.3333",
+                TraceCreditSettlementState::Final,
+                None,
+            ));
+            let mut reversal = event(
+                Uuid::new_v4(),
+                "principal-a",
+                "-0.3333",
+                TraceCreditSettlementState::Reversed,
+                Some(source),
+            );
+            reversal.occurred_at = Utc.timestamp_opt(2_000 + offset as i64, 0).unwrap();
+            events.push(reversal);
+        }
+        let planned = plan(&[settled], &events, &HashMap::new());
+        let awards = reversal_awards(&planned);
+        assert_eq!(awards, vec![333_300, 333_300, 333_400]);
+        assert_eq!(awards.iter().sum::<u128>(), 1_000_000);
+    }
+
+    #[test]
+    fn a_second_reversal_of_one_event_takes_back_nothing() {
+        let account = Uuid::new_v4();
+        let (settled, mut events) = over_texted_line(account);
+        let source = events[0].credit_event_id;
+        let mut again = event(
+            Uuid::new_v4(),
+            "principal-a",
+            "-0.8000",
+            TraceCreditSettlementState::Reversed,
+            Some(source),
+        );
+        again.occurred_at = Utc.timestamp_opt(1_500, 0).unwrap();
+        events.push(again);
+        let planned = plan(&[settled], &events, &HashMap::new());
+        assert_eq!(reversal_awards(&planned), vec![800_000, 200_000]);
+        assert_eq!(
+            planned.skipped.get("payout_reversal_duplicate"),
+            Some(&1),
+            "{planned:?}"
+        );
     }
 
     #[test]
