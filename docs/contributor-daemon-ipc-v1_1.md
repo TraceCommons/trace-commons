@@ -4576,7 +4576,20 @@ still finds is read once more for its session digest, even when its file is
 unchanged, within the same per-poll limits; a row whose session is no longer
 found keeps its counters and carries no session digest until it ages out.
 Any other schema reads as
-`store_unreadable` and the pass starts the store again. The digest key is the
+`store_unreadable` and the pass starts the store again.
+
+Downgrade: a row's `facts`, `facts_version`, `automation` and
+`automation_read`, an eviction mark's `automated`, and a route tally's
+`charge` are left out of the file while they hold their defaults (no facts,
+version 0, automation unknown and not looked for, no allowance, no NEAR AI
+call), so a row with none of them is written as a daemon before them wrote
+it. Every row this build reads sets `facts_version` and `automation_read`,
+though, and an older daemon refuses fields it does not know: a store this
+build has written reads as `store_unreadable` there, and that daemon starts
+the store again. Its rows are re-derived from the sessions still on disk;
+eviction marks, route tallies and their NEAR AI charges are gone, and a
+charge cannot be read again once the proxy ledger's 24 hours have passed.
+The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.
