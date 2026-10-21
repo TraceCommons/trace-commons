@@ -2307,6 +2307,11 @@ extension DaemonData {
         public let next: InsightsModelFigure?
         public let sessionsByModel: [InsightsModelCount]
         public let leftOut: InsightsModelLeftOut
+        /// On `docs_cost` only: what NEAR AI charged for the documentation
+        /// traces sent through it, a figure of its own beside the API-price
+        /// figures and never added to them. `nil` on every other row, when
+        /// no trace went through NEAR AI, and from a daemon before the field.
+        public let nearAiCharge: InsightsModelNearAICharge?
 
         public var id: String { question }
 
@@ -2315,6 +2320,26 @@ extension DaemonData {
             case editMode = "edit_mode"
             case sessionsByModel = "sessions_by_model"
             case leftOut = "left_out"
+            case nearAiCharge = "near_ai_charge"
+        }
+    }
+
+    /// `{basis: "near_ai_ledger", median, routed_sessions, charge_unknown}`:
+    /// the NEAR AI charge per trace from the proxy ledger (owner decision
+    /// D5, settled 2026-10-20), never a list price. `median` is
+    /// `{kind: "usd_micros", value}` over the traces whose charge is known,
+    /// `nil` when none is; `charge_unknown` of the `routed_sessions` traces
+    /// have an unknown charge, never counted as zero.
+    public struct InsightsModelNearAICharge: Codable, Equatable, Sendable {
+        public let basis: String
+        public let median: InsightsModelFigureValue?
+        public let routedSessions: Int
+        public let chargeUnknown: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, median
+            case routedSessions = "routed_sessions"
+            case chargeUnknown = "charge_unknown"
         }
     }
 
@@ -2328,10 +2353,14 @@ extension DaemonData {
         public let figure: InsightsModelFigureValue
         /// Interrupts per trace, times 1000; `nil` when unknown.
         public let interruptsPerSessionPermille: Int?
+        /// On a cost figure only: what NEAR AI charged for this model's
+        /// traces sent through it, apart from `figure`; `nil` otherwise.
+        public let nearAiCharge: InsightsModelNearAICharge?
 
         public enum CodingKeys: String, CodingKey {
             case label, sessions, edits, figure
             case interruptsPerSessionPermille = "interrupts_per_session_permille"
+            case nearAiCharge = "near_ai_charge"
         }
     }
 
@@ -2380,6 +2409,9 @@ extension DaemonData {
     /// read is counted here, never read as zero.
     public struct InsightsModelLeftOut: Codable, Equatable, Sendable {
         public let unknownFacts: Int
+        /// Traces a coding tool started itself, not the contributor. `nil`
+        /// from a daemon before the field.
+        public let automated: Int?
         public let delegated: Int
         public let capped: Int
         public let routed: Int
@@ -2391,13 +2423,14 @@ extension DaemonData {
 
         /// Every reason with its wire name, in the wire's order.
         public var counts: [(reason: String, count: Int)] {
-            [("unknown_facts", unknownFacts), ("delegated", delegated), ("capped", capped),
+            [("unknown_facts", unknownFacts), ("automated", automated ?? 0), ("delegated", delegated),
+             ("capped", capped),
              ("routed", routed), ("reviewer", reviewer), ("no_majority", noMajority),
              ("unpriced", unpriced), ("too_few_edits", tooFewEdits), ("mix_too_different", mixTooDifferent)]
         }
 
         public enum CodingKeys: String, CodingKey {
-            case delegated, capped, routed, reviewer, unpriced
+            case automated, delegated, capped, routed, reviewer, unpriced
             case unknownFacts = "unknown_facts"
             case noMajority = "no_majority"
             case tooFewEdits = "too_few_edits"
