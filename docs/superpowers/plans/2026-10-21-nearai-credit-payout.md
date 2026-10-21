@@ -160,7 +160,7 @@ Spec: section 4 ("State and storage", "Accrual", "Modes and the kill switch"), s
 
 **Schema (exactly the spec's columns; all amounts `NUMERIC(39,0)` with `CHECK (x >= 0)` except signed accrual columns):**
 - `trace_payout_links`, `trace_payout_link_requests`, `trace_payout_accruals`, `trace_payout_lines`, `trace_payout_holds`, `trace_payout_audit` (tenant tables: `ENABLE` + `FORCE ROW LEVEL SECURITY`, policy `USING (tenant_id = trace_current_tenant_id()) WITH CHECK (...)`, copied from `V79__inference_connection.sql`).
-- Partial unique indexes: links one `active` / one `waiting` / one `closing` per `(tenant_id, account_id, rail_id)`; lines one `pending` per `link_id`; lines `(rail_id, receipt_hash) WHERE receipt_hash IS NOT NULL`; accruals `(tenant_id, rail_id, settlement_batch_id, credit_account_hash) WHERE kind = 'credit'` and `(tenant_id, rail_id, reversal_event_id) WHERE kind = 'reversal'`. No unique index on `recipient_index`.
+- Partial unique indexes: links one `active` / one `waiting` / one `closing` per `(tenant_id, account_id, rail_id)`; lines one `pending` per `link_id`; lines `(rail_id, receipt_hash) WHERE receipt_hash IS NOT NULL`; accruals `(tenant_id, rail_id, settlement_batch_id, credit_account_hash) WHERE kind = 'credit'` (accruals carry nullable `account_id`, set once; index `(tenant_id, rail_id, account_id)` for `owed`) and `(tenant_id, rail_id, reversal_event_id) WHERE kind = 'reversal'`. No unique index on `recipient_index`.
 - `CHECK` constraints on every enum-like text column (`state`, `kind`, `rail_id ~ '^[a-z0-9_.-]{1,64}$'`).
 - `trace_payout_audit`: no `UPDATE`/`DELETE` grant to the runtime role (append-only).
 - `trace_payout_rate_epochs (rail_id, version, numerator, denominator, pricing_label, observed_at DEFAULT clock_timestamp())`, PK `(rail_id, version)`; `trace_payout_control (rail_id PK, halted, label, updated_at)`. Forced RLS, read-all policy, writes only via role `trace_payout_config_writer` (assumed with `SET ROLE` by the boot path and the admin routes).
@@ -195,7 +195,7 @@ Spec: section 4 ("State and storage", "Accrual", "Modes and the kill switch"), s
 
 ### Task 3: Rate epochs and accrual (`payout-rail-accrual`, base `payout-rail-schema`)
 
-Spec: section 3 ("Rate source"), section 4 ("Rate", "Accrual", "Reversals"), section 12 defaults 1 and 2.
+Spec: section 3 ("Rate source"), section 4 ("Rate", "Accrual", "Reversals"), section 12 default 1, and the 2026-10-21 owner decision on pre-account credit.
 
 **Files:**
 - Create: `crates/trace-commons-server/src/payout_rate.rs` (`trait RailRateSource { fn current(&self) -> Option<RailRate> }`; `SettlementTableRate` built from `trace_commons_protocol::settlement_estimate::SettlementEstimateTable`: numerator `usd_micros_per_credit * 1000`, denominator `atomic_units_per_credit`, version = table `version`, pricing label = `pricing_version`; `None` when the rate is absent or zero)
@@ -207,7 +207,7 @@ Spec: section 3 ("Rate source"), section 4 ("Rate", "Accrual", "Reversals"), sec
 
 **Rules to implement (no network in this task):**
 - Epoch for a batch = latest `observed_at <= batch.created_at` on that rail, else the first epoch; no epoch, no accrual on that rail.
-- Credit lines: finalized batches only; `settlement_key_account_id(credit_account_ref)` must be `Some` (default 2, one function `line_is_payable(&line) -> bool` so an owner override is one edit); `settled_credit_delta_micros > 0`. `near_payout_hold_reason` is not read (default 1; a comment cites spec section 12).
+- Credit lines: finalized batches only; `settled_credit_delta_micros > 0`; account-keyed and bare-principal lines both accrue (owner decision 2026-10-21). `account_id` on the accrual = `settlement_key_account_id(credit_account_ref)` when `Some`, else NULL. Each pass then claims unowned accruals: for each NULL-owner accrual whose principal now has a `trace_account_principals` row, `UPDATE trace_payout_accruals SET account_id = $1 WHERE id = $2 AND account_id IS NULL` plus an audit row. Never reassign a set owner. `near_payout_hold_reason` is not read (default 1; a comment cites spec section 12).
 - Reversal rows: `trace_credit_ledger` rows with `settlement_state = 'reversed'` and `external_ref` prefix `revocation_credit_reversal:`; locate the finalized line whose `source_credit_event_ids` contains the event; price at the version that line's credit accrual used on this rail; negate. Unlocatable for a settled event: open hold `payout_reversal_unpriced` on that rail only.
 - Amounts are `u128` end to end; `i64` micros convert with a checked cast.
 
@@ -222,7 +222,9 @@ Spec: section 3 ("Rate source"), section 4 ("Rate", "Accrual", "Reversals"), sec
 #[tokio::test] async fn epochs_cannot_be_backdated()          // observed_at comes from the database clock
 #[tokio::test] async fn a_batch_is_priced_at_the_epoch_in_force_at_its_time()
 #[tokio::test] async fn a_batch_older_than_the_first_epoch_uses_the_first()
-#[tokio::test] async fn only_finalized_positive_account_lines_accrue() // dry_run, failed, bare principal, zero delta -> nothing
+#[tokio::test] async fn only_finalized_positive_lines_accrue() // dry_run, failed, zero delta -> nothing
+#[tokio::test] async fn a_bare_principal_line_accrues_unowned_and_is_claimed_when_linked()
+#[tokio::test] async fn a_claimed_accrual_never_moves_to_a_second_account()
 #[tokio::test] async fn a_near_wallet_hold_label_does_not_stop_near_ai_accrual()
 #[tokio::test] async fn a_reversal_takes_back_exactly_its_credit_on_each_rail()
 #[tokio::test] async fn an_unlocatable_reversal_holds_only_that_rail()

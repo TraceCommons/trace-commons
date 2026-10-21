@@ -95,6 +95,15 @@ It builds on, and does not repeat:
 
 It supersedes the settlement-rail draft in #1415 (closed).
 
+- **2026-10-21: pay credit earned before an account existed.** "we should
+  pay out credit that settled before had an account when they create an
+  account." A bare-principal line accrues unowned and is paid to the first
+  account its principal is linked to (section 4, "Which lines accrue").
+- **2026-10-21: no reversals on NEAR AI.** #1271 has no transfer reversal
+  ("Reversals and automatic accounting repair are outside this PR"), so a
+  sent credit cannot be recalled; reversed credit is netted against later
+  credit (section 4, "Reversals").
+
 ## What already exists, verified on 2026-10-21
 
 Our tree is `origin/main` at f164d68f9. cloud-api is the #1271 merge commit
@@ -306,8 +315,6 @@ credits in the org they chose.
 - Clawback. #1271 has no reversal. Over-payment is netted against the same
   account's later credit (section 4).
 - Attributing what a recipient spends to the commons. #1271 defers it.
-- Paying credit that settled to a bare principal with no account
-  (section 6).
 
 ## 2. Staging setup (operator steps)
 
@@ -627,9 +634,25 @@ account line, priced once:
   `near_ai` this is `floor(micros * usd_micros_per_credit * 1000 /
   atomic_units_per_credit)` nano-USD.
 - **Which lines accrue.** Every line of every `finalized` batch whose
-  `credit_account_ref` names an account (`settlement_key_account_id` is
-  `Some`) and whose `settled_credit_delta_micros` is positive. A line keyed
-  to a bare principal accrues nothing (section 6; a default, section 12).
+  `settled_credit_delta_micros` is positive, whether it is keyed to an
+  account or to a bare principal (owner decision, 2026-10-21: credit earned
+  before the person had an account is paid once they have one).
+  - **Owner of an accrual.** Each accrual row carries `account_id`. A line
+    keyed `account:{account_id}` gets it at accrual. A line keyed to a bare
+    principal accrues with `account_id` NULL; the accrual pass fills it in
+    the first time `trace_account_principals` (V30) links that principal to
+    an account, with `UPDATE ... SET account_id = $1 WHERE account_id IS
+    NULL`, and writes an audit row. The owner is set once and never
+    changes, so a principal that later moves to another account cannot be
+    paid twice: its old credit stays with the account that first claimed
+    it. `owed(account, rail)` sums accruals by `account_id`; an unowned
+    accrual is owed to nobody yet.
+  - **Ownership is not a payout redirect.** Claiming happens only through
+    the existing principal-to-account link, which has its own
+    authentication; no payout route can set `account_id`. The payout pass
+    sends nothing extra for a claim beyond what `owed` now includes, so a
+    newly claimed backlog goes out on the next pass under the same
+    per-send, per-account and credential ceilings.
   `dry_run` and `failed` batches never accrue. Each rail accrues the same
   lines independently; a rail with no epoch yet accrues them later, at the
   epoch rule above.
@@ -1100,9 +1123,10 @@ rail; the link rule is the rail's own.
   account in a pooled tenant links and is paid for its own lines only. No
   account is paid for another's credit, and nothing is paid at tenant level.
   Credit that settled to a bare principal (a member who had no account when
-  the batch was written) has no owner and is not paid. Batch lines are
-  never re-keyed, so linking that principal to an account later does not
-  make old lines payable.
+  the batch was written) is paid to the account that principal is first
+  linked to (owner decision, 2026-10-21). Batch lines themselves are never
+  re-keyed; the accrual records the owner once (section 4, "Which lines
+  accrue").
 - **Legacy `tenant-...` tenants:** the same as pooled. The rule that a
   legacy tenant must first link to a NEAR account (V81) does not apply to
   the `near_ai` rail; the NEAR AI proof replaces it.
@@ -1175,7 +1199,9 @@ against production with a closed recipient list.
 4. PostgreSQL: two accounts in one tenant, one linked and one not; the
    unlinked one's credit is accrued but sent nowhere. A credit hold on one
    account stops its sends and not the other's. A line keyed to a bare
-   principal accrues nothing. RLS on every new table.
+   principal accrues unowned, is paid to the account the principal is then
+   linked to, and is not paid again after the principal moves to a second
+   account. RLS on every new table.
 5. Staging, live: two accounts, one settlement each. Expect one send per
    account within a pass of settlement.
 6. Kill ingest after step 2 of a pass and before step 5. Re-run. Expect one
@@ -1384,9 +1410,9 @@ each can change without reshaping the design.
    (section 4, "Accrual"). `none_enrolled` and `ambiguous_no_designation`
    are about a wallet target that `near_ai` does not use. A rail that pays
    a NEAR wallet would treat them as holds.
-2. **Credit settled to a principal with no account is not paid** on any
-   external rail (section 6). Paying it once the principal joins an account
-   would need a re-keying rule for old batch lines.
+2. (Decided by the owner, 2026-10-21; moved to Owner decisions.) Credit
+   settled to a principal with no account is paid once the principal is
+   linked to an account, to the first account it is linked to.
 3. **Reversed-after-paid credit is netted against the account's later
    credit on the same rail, never clawed back, and the exposure is bounded
    by that rail's ceilings** (section 4, "Reversals", "Ceilings"; section
