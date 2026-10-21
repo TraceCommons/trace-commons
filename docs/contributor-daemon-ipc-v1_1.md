@@ -612,6 +612,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's counter store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
+| `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -5059,6 +5060,53 @@ Where a label lives and when it goes:
   is written without the `labels` key, as before.
 - It is never sent anywhere: it crosses only on this socket, on the Sessions
   rows and as counts in `insights_model_answers`.
+
+### `insights_analyze_session`
+
+Additive (Insights PM decision, 2026-10-21: terminal users never see their
+session files, so Analyze no longer asks for one). Analyzes one listed row's
+session, and with `save` stores the result as a dated snapshot, exactly as
+the app's in-process `analyze` operation does on a file it was given.
+Params:
+
+- `session_ref` (**required**): a reference `insights_sessions` listed. A
+  missing or non-string one is `bad_params` / `insights-session-ref-invalid`.
+- `save` (optional): `true` saves the snapshot; `false`, `null` or absent
+  analyzes only. Anything else is `bad_params` /
+  `insights-analyze-save-invalid`.
+
+Params are checked before the gate. Gated as `insights_sessions` is: with
+`insights_counter_pass` off it answers `{"enabled": false, "feed":
+"counter_pass"}` and lists, matches and reads nothing; on, an unreadable key,
+store or folder rules answer `readable: false` with the fixed reason.
+
+What is read: the caller names a row, never a file or a store. The daemon
+lists the Claude Code and Codex sessions its own watched sources find now
+(the discovery a watcher poll runs) and matches the row to one of them by
+the keyed session digest the counter pass stored it under. Only that file
+is read, as `claude_code` or `codex` by the source that found it. Nothing
+reaches the network.
+
+- A reference that names no listed row (never stored, made again since its
+  file grew, automated, or in a Never folder) is `bad_params` /
+  `insights-session-unknown`. So is a row whose folder's rule is Never now,
+  the contribution override included, though the pass has not yet dropped
+  it: that file is not read.
+- A row whose file is no longer where the watcher finds sessions (moved or
+  deleted since it was counted, or gone while it was read) is `unavailable`
+  / `insights-session-file-gone`.
+- An analysis that fails is `unavailable` with the core's fixed label, never
+  a path.
+
+Otherwise it answers `{"enabled": true, "feed": "counter_pass", "readable":
+true, "analysis"}`, where `analysis` is the core's `analyze` response as the
+in-process call returns it: `type: "analyze"`, `insight` (the `LocalInsight`:
+derived observations and the source's SHA-256 digest, never its path) and
+`mutation_effects` (the episodes and comparison tasks a save invalidated;
+empty without `save`). With `save` the snapshot goes to the standard Insights store,
+the one the app reads when no `--insights-store` is given; the caller cannot
+name another directory. Local in a dry-run daemon: it writes only that
+store.
 
 ### `insights_model_answers`
 

@@ -1772,12 +1772,15 @@ mod tests {
             assert!(!copy.contains_key(key), "{key} was removed");
         }
         // User-facing copy says "trace", not "session", with two exceptions:
-        // the Sessions tab (with its card title and drill-down column
-        // header) and the context tip's "current session".
+        // the Sessions tab (with its card title, drill-down column header
+        // and Analyze's lines that send the person to it) and the context
+        // tip's "current session".
         let exceptions = [
             "analytics_tab_sessions",
             "analytics_card_sessions",
             "analytics_drill_session",
+            "analytics_analyze_empty",
+            "analytics_analyze_how",
             "analytics_tip_context",
         ];
         for (key, words) in ANALYTICS_COPY {

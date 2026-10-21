@@ -463,7 +463,7 @@ fn record_sources_for_armings(
 
 /// The project a session belongs to, through the same cwd cache the pass
 /// uses.
-fn project_key_of(
+pub(super) fn project_key_of(
     shared: &DaemonShared,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
