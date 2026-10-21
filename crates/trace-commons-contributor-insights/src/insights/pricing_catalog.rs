@@ -42,6 +42,12 @@
 //! backdated `effective_from` may price some earlier turns at the promotional
 //! rate; that cannot be settled from the source.
 //!
+//! Staleness: a table prices only turns observed within
+//! [`PRICE_STALE_AFTER_DAYS`] of its `retrieved_at`; a later turn is
+//! unpriced (`StalePrices`) rather than shown at an old price as current.
+//! `SessionPrice::prices_as_of` carries the oldest fetch date of the tables
+//! behind a figure, for the "prices as of" line.
+//!
 //! Prompt-size bands: Anthropic states its threshold in tokens (100,000).
 //! OpenAI labels its tiers "<=272K input tokens" and ">272K input tokens"
 //! (the labels sit in the pricing page's selector script) and gives no
@@ -58,6 +64,14 @@ use trace_commons_protocol::insights_pricing::{
 };
 
 const MAX_CATALOG_TABLES: usize = 256;
+
+/// How long after a table's `retrieved_at` its prices still price a turn.
+/// List prices change, and the tables ship inside a release with no runtime
+/// fetch, so a build older than this reads "Not priced" for new turns rather
+/// than showing an old price as current. A turn observed after
+/// `retrieved_at + PRICE_STALE_AFTER_DAYS` is unpriced by that table; a
+/// release with a fresh fetch prices it again. An owner-set default.
+pub const PRICE_STALE_AFTER_DAYS: i64 = 90;
 const MAX_ID_BYTES: usize = 96;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -74,6 +88,10 @@ pub enum PricingCatalogError {
     MissingPrice,
     #[error("insights_pricing_window_unresolved")]
     UnresolvedWindow,
+    /// Every table that prices the model was fetched more than
+    /// [`PRICE_STALE_AFTER_DAYS`] before the observation.
+    #[error("insights_pricing_prices_stale")]
+    StalePrices,
     /// A saved estimate names a table this catalog release no longer carries,
     /// or carries under a different release version. Recomputation refuses
     /// rather than substituting another table's rates.
@@ -141,13 +159,21 @@ impl PricingCatalog {
     ) -> Result<&PricingTable, PricingCatalogError> {
         validate_query(input)?;
         let mut matching_identity = false;
+        let mut stale_identity = false;
         let mut applicable = None;
         for table in &self.tables {
-            matching_identity |= table.entries.iter().any(|entry| {
+            if !table.entries.iter().any(|entry| {
                 entry.provider == input.provider
                     && entry.model == input.model
                     && entry.accounting == input.accounting
-            });
+            }) {
+                continue;
+            }
+            if is_stale(table, input) {
+                stale_identity = true;
+                continue;
+            }
+            matching_identity = true;
             // Overflow is checked only after one entry matched, so it means
             // this table applies.
             match calculate_estimated_cost(table, input) {
@@ -161,6 +187,8 @@ impl PricingCatalog {
         }
         applicable.ok_or(if matching_identity {
             PricingCatalogError::UnresolvedWindow
+        } else if stale_identity {
+            PricingCatalogError::StalePrices
         } else {
             PricingCatalogError::MissingPrice
         })
@@ -230,6 +258,15 @@ pub fn production_pricing_catalog() -> PricingCatalog {
                 .eq(SHIPPED_PRICING_TABLES.iter().copied())
         })
         .unwrap_or(PricingCatalog { tables: Vec::new() })
+}
+
+/// The table was fetched too long before the observation to price it.
+fn is_stale(table: &PricingTable, input: &PricingUsageInput) -> bool {
+    table
+        .provenance
+        .retrieved_at
+        .checked_add_signed(chrono::Duration::days(PRICE_STALE_AFTER_DAYS))
+        .is_none_or(|limit| input.observed_until > limit)
 }
 
 fn validate_query(input: &PricingUsageInput) -> Result<(), PricingCatalogError> {
@@ -646,6 +683,42 @@ mod tests {
         assert_eq!(
             calculate_estimated_cost(selected, &usage),
             Err(PricingError::ArithmeticOverflow)
+        );
+    }
+
+    /// A table prices a turn up to `PRICE_STALE_AFTER_DAYS` after its fetch,
+    /// the last instant included, and not after.
+    #[test]
+    fn a_table_stops_pricing_turns_after_the_staleness_horizon() {
+        let catalog = PricingCatalog::from_tables(vec![table(1, 0, None, 1)]).unwrap();
+        let retrieved = 100;
+        let horizon = retrieved + PRICE_STALE_AFTER_DAYS * 86_400;
+        assert!(
+            catalog
+                .select_newest_applicable(&input(horizon, horizon, 1))
+                .is_ok()
+        );
+        assert_eq!(
+            catalog.select_newest_applicable(&input(horizon, horizon + 1, 1)),
+            Err(PricingCatalogError::StalePrices)
+        );
+        // An unknown model is still missing, not stale.
+        let mut unknown = input(horizon + 1, horizon + 1, 1);
+        unknown.model = "unknown-model".to_owned();
+        assert_eq!(
+            catalog.select_newest_applicable(&unknown),
+            Err(PricingCatalogError::MissingPrice)
+        );
+        // A newer, fresh table that prices the model wins over a stale one.
+        let mut fresh = table(2, 0, None, 2);
+        fresh.provenance.retrieved_at = at(horizon);
+        fresh.provenance.reviewed_at = at(horizon);
+        fresh.published_at = at(horizon);
+        fresh.table_id = fresh.canonical_table_id().unwrap();
+        let both = PricingCatalog::from_tables(vec![table(1, 0, None, 1), fresh.clone()]).unwrap();
+        assert_eq!(
+            both.select_newest_applicable(&input(horizon + 1, horizon + 1, 1)),
+            Ok(&fresh)
         );
     }
 }
