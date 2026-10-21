@@ -577,3 +577,18 @@ fn weekly_codex_figures_ignore_the_series() {
     );
     assert_eq!(dated_weeks(&with, &tz), dated_weeks(&without, &tz));
 }
+
+/// With no `task_started` there is no span: the time was never measured, so
+/// it is unknown, never zero seconds.
+#[test]
+fn a_session_with_no_task_start_has_unknown_active_time() {
+    let (_, f) = scan(&[
+        context(0, A, "never"),
+        patch_call(1, "p1", &update("PRIVATE_PATH/a.rs", "x", "y")),
+        output(2, "p1", "Exit code: 0"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+    ]);
+    assert_eq!(f.user_turns, Some(0));
+    assert_eq!(f.active_secs, None);
+}
