@@ -38,7 +38,7 @@
 -- transaction, never inherited:
 --   * trace_payout_enumerator: SELECT (tenant_id, rail_id, state) on links and
 --     a permissive SELECT policy for itself, as V61/V101 do, so a rail's pass
---     can list the tenants with a live link. It reads nothing else.
+--     can list the tenants with a waiting, active or closing link. It reads nothing else.
 --   * trace_payout_config_writer: appends rate epochs and control rows.
 -- Neither is granted to trace_ingest_runtime here: that group's memberships
 -- are pinned (tests/support/pilot_runtime_login.rs), and inheriting either

@@ -1002,7 +1002,7 @@ impl PayoutStore for PgBackend {
         let rows = tx
             .query(
                 "SELECT DISTINCT tenant_id FROM trace_payout_links
-                  WHERE rail_id = $1 AND state IN ('active', 'closing')
+                  WHERE rail_id = $1 AND state IN ('waiting', 'active', 'closing')
                   ORDER BY tenant_id",
                 &[&rail.as_str()],
             )

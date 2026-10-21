@@ -1057,7 +1057,13 @@ async fn the_enumerator_role_sees_only_tenant_rail_and_state() {
         .await
         .unwrap();
     assert!(tenants.contains(&tenant_a));
-    assert!(!tenants.contains(&tenant_b), "a waiting link is not live");
+    // Every confirmed link is written `waiting` (spec section 5, step 7),
+    // and only the pass makes it `active`, so a tenant whose only link is
+    // waiting must be enumerated or its first link never activates.
+    assert!(
+        tenants.contains(&tenant_b),
+        "a tenant whose only link is waiting must be enumerated"
+    );
     assert!(!tenants.contains(&tenant_c), "another rail's link");
     assert_eq!(
         tenants.iter().filter(|tenant| **tenant == tenant_a).count(),

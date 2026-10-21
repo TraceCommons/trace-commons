@@ -3233,8 +3233,12 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<(), DatabaseError>;
 
-    /// The tenants with an `active` or `closing` link on `rail`, read under
-    /// `trace_payout_enumerator`, which sees only tenant, rail and state.
+    /// The tenants with a `waiting`, `active` or `closing` link on `rail`,
+    /// read under `trace_payout_enumerator`, which sees only tenant, rail and
+    /// state. `waiting` is included because every confirmed link is written
+    /// waiting and only the pass activates it: a tenant whose only link is
+    /// waiting (every first link, or a successor left after a crash) must
+    /// still get a pass.
     async fn tenants_with_live_payout_links(
         &self,
         rail: &RailId,
