@@ -2028,6 +2028,49 @@ impl CounterPass {
         }))
     }
 
+    /// Which of the sessions the watcher finds now (`found`: each one's
+    /// adapter and path, as discovery lists it) the row `reference` names,
+    /// for `insights_analyze_session`. The row is looked up as the drill
+    /// looks it up (never in a Never folder, never automated), and matched
+    /// to a file by its keyed session digest, the key the pass stored it
+    /// under: nothing is read but the store, and no path is stored or kept.
+    /// `Ok(None)` when the row is stored but no file found matches it any
+    /// more (moved or deleted since it was read).
+    pub(crate) fn locate(
+        &self,
+        reference: &str,
+        never_project_keys: &NeverFolders,
+        found: &[(&str, &std::path::Path)],
+    ) -> Result<Option<Located>, LocateError> {
+        let (key, store) = self
+            .visible_store()
+            .map_err(|reason| LocateError::Unreadable(unreadable_value(reason)))?;
+        let (Some(key), Some(store)) = (key, store) else {
+            return Err(LocateError::Unknown);
+        };
+        let never = never_digests(&key, never_project_keys);
+        let session = store
+            .rows
+            .iter()
+            .find(|(_, row)| {
+                !never.contains(&row.project) && !row.is_automated() && row.reference() == reference
+            })
+            .map(|(session, _)| *session)
+            .ok_or(LocateError::Unknown)?;
+        Ok(found
+            .iter()
+            .enumerate()
+            .find_map(|(index, (adapter, path))| {
+                let source = analytics_source(adapter)?;
+                (session_key(&key, adapter, &path.to_string_lossy()) == session).then_some(
+                    Located {
+                        index,
+                        format: source_format(source),
+                    },
+                )
+            }))
+    }
+
     /// The `insights_model_answers` answer: the six Models answers over the
     /// stored sessions inside the 13 weeks ending `now`, priced at list
     /// prices when the answer is built (the store holds tokens, never a list
@@ -2385,6 +2428,24 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
         AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
         AnalyticsSource::Codex => SourceFormat::Codex,
     }
+}
+
+/// The watched session a stored row was made from ([`CounterPass::locate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Located {
+    /// Its place in the `found` list it was matched in.
+    pub index: usize,
+    /// The transcript format its harness is read as.
+    pub format: SourceFormat,
+}
+
+/// Why [`CounterPass::locate`] names no row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LocateError {
+    /// The store or key could not be read: the answer to send instead.
+    Unreadable(serde_json::Value),
+    /// No visible row has that reference.
+    Unknown,
 }
 
 /// The folders whose rule is Never, the contribution override included
