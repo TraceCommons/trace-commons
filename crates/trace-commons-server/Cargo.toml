@@ -173,6 +173,10 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 name = "trace-commons-witness"
 path = "src/bin/trace-commons-witness.rs"
 
+[[bin]]
+name = "trace-commons-judgement"
+path = "src/bin/trace-commons-judgement.rs"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # The contributor crate, for `tests/witness_certificate_cross_implementation.rs`
