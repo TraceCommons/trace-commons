@@ -104,6 +104,50 @@ mod tests {
                 .unwrap();
         }
 
+        /// One pass over generated sessions, all in `PROJECT`.
+        fn run_generated(&self, sessions: &[(String, Vec<u8>)]) {
+            let candidates: Vec<CounterCandidate> = sessions
+                .iter()
+                .map(|(name, bytes)| {
+                    let path = self.dir.path().join(name);
+                    std::fs::write(&path, bytes).unwrap();
+                    CounterCandidate {
+                        origin: 0,
+                        source: SOURCE_CLAUDE_CODE,
+                        path,
+                        size_bytes: bytes.len() as u64,
+                        modified_at: written(),
+                        started_at: None,
+                        group_member_count: 0,
+                    }
+                })
+                .collect();
+            self.pass
+                .run_pass(&candidates, &NeverFolders::NONE, now(), QUIET, &mut |_| {
+                    (PROJECT.to_string(), false)
+                })
+                .unwrap();
+        }
+
+        /// Ten documentation sessions on two priced models, five each, so
+        /// the docs cost row meets its floor and carries money.
+        fn docs_priced() -> Self {
+            let f = Self::new();
+            let mut sessions = Vec::new();
+            for n in 0..5u64 {
+                sessions.push((
+                    format!("PRIVATE-docs-a{n}.jsonl"),
+                    docs_session(&format!("PRIVATE-A{n}"), SMALLER, 100 + n * 10),
+                ));
+                sessions.push((
+                    format!("PRIVATE-docs-b{n}.jsonl"),
+                    docs_session(&format!("PRIVATE-B{n}"), LARGER, 4_000 + n * 100),
+                ));
+            }
+            f.run_generated(&sessions);
+            f
+        }
+
         fn answers(&self, never: &[&str], feed: bool) -> serde_json::Value {
             self.pass.model_answers_value(
                 true,
@@ -113,6 +157,72 @@ mod tests {
                 now(),
             )
         }
+    }
+
+    /// Labels a shipped Anthropic price table names.
+    const SMALLER: &str = "claude-sonnet-5-5";
+    const LARGER: &str = "claude-opus-5-5";
+
+    /// A Claude Code session whose only edit is to a Markdown file, so it
+    /// reads as documentation work, with one turn on `model`.
+    fn docs_session(id: &str, model: &str, output_tokens: u64) -> Vec<u8> {
+        let common = |uuid: &str, at: &str| {
+            serde_json::json!({
+                "sessionId": id,
+                "cwd": PROJECT,
+                "version": "2.0.0",
+                "uuid": uuid,
+                "timestamp": at,
+            })
+        };
+        let line = |kind: &str, at: &str, uuid: &str, message: serde_json::Value| {
+            let mut value = common(uuid, at);
+            value["type"] = kind.into();
+            value["message"] = message;
+            value.to_string()
+        };
+        let usage = serde_json::json!({
+            "input_tokens": 50,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 200,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 200,
+                "ephemeral_1h_input_tokens": 0
+            },
+            "service_tier": "standard"
+        });
+        [
+            line(
+                "user",
+                "2026-09-14T09:00:00.000Z",
+                "u1",
+                serde_json::json!({"role": "user", "content": "PRIVATE_PROMPT update the readme"}),
+            ),
+            line(
+                "assistant",
+                "2026-09-14T09:00:05.000Z",
+                "u2",
+                serde_json::json!({
+                    "id": "msg_PRIVATE_1",
+                    "model": model,
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_PRIVATE_A", "name": "Edit",
+                        "input": {"file_path": "/Users/PRIVATE_USER/code/PRIVATE_REPO/README.md",
+                            "old_string": "PRIVATE_OLD", "new_string": "PRIVATE_NEW"}}],
+                    "usage": usage,
+                }),
+            ),
+            line(
+                "user",
+                "2026-09-14T09:00:06.000Z",
+                "u3",
+                serde_json::json!({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_PRIVATE_A", "content": "ok"}]}),
+            ),
+        ]
+        .join("\n")
+        .into_bytes()
     }
 
     fn shared() -> (tempfile::TempDir, DaemonShared) {
@@ -217,6 +327,11 @@ mod tests {
         assert_eq!(hidden["rows"], empty["rows"]);
         let shown = f.answers(&[], true);
         assert_eq!(shown["rows"].as_array().unwrap().len(), 6);
+        // The session counts when its folder is not Never.
+        assert_ne!(shown["rows"], empty["rows"]);
+        let across = &shown["rows"][4];
+        assert_eq!(across["question"], "rejected_across_tasks");
+        assert!(!across["sessions_by_model"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -250,33 +365,82 @@ mod tests {
         );
     }
 
+    /// Every figure of `kind` in a payload, with its row's question.
+    fn figures<'v>(
+        value: &'v serde_json::Value,
+        kind: &str,
+    ) -> Vec<(&'v str, &'v serde_json::Value)> {
+        let mut found = Vec::new();
+        for row in value["rows"].as_array().unwrap() {
+            for side in ["leader", "next"] {
+                let figure = &row[side]["figure"];
+                if figure["kind"] == kind {
+                    found.push((row["question"].as_str().unwrap(), figure));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_priced_fixture_answers_docs_cost_with_money() {
+        let v = Fixture::docs_priced().answers(&[], true);
+        let money = figures(&v, "usd_micros");
+        assert_eq!(money.len(), 2, "leader and next: {v}");
+        // The wire form: exactly a kind and an integer value.
+        for (question, figure) in &money {
+            assert_eq!(*question, "docs_cost");
+            assert_eq!(figure.as_object().unwrap().len(), 2, "{figure}");
+            assert!(figure["value"].is_u64(), "{figure}");
+        }
+        assert_eq!(v["rows"][3]["leader"]["label"], SMALLER);
+        assert_eq!(v["rows"][3]["next"]["label"], LARGER);
+        let tables = v["pricing"]["tables"].as_array().unwrap();
+        assert!(!tables.is_empty(), "a priced session names its table");
+        for table in tables {
+            assert!(table["table_id"].as_str().unwrap().starts_with("sha256:"));
+        }
+    }
+
     #[test]
     fn nothing_identifying_crosses() {
-        let f = Fixture::new();
-        f.run();
-        let value = f.answers(&[], true);
-        let mut text = serde_json::to_string(&value).unwrap();
-        // The pinned price tables' content digests are the one digest.
-        for table in value["pricing"]["tables"].as_array().unwrap() {
-            text = text.replace(table["table_id"].as_str().unwrap(), "TABLE");
+        let plain = Fixture::new();
+        plain.run();
+        let priced = Fixture::docs_priced();
+        for f in [&plain, &priced] {
+            let value = f.answers(&[], true);
+            let mut text = serde_json::to_string(&value).unwrap();
+            // The pinned price tables' content digests are the one digest.
+            for table in value["pricing"]["tables"].as_array().unwrap() {
+                text = text.replace(table["table_id"].as_str().unwrap(), "TABLE");
+            }
+            for forbidden in [
+                "PRIVATE",
+                "/Users",
+                "msg_",
+                "toolu_",
+                "\"t0\"",
+                "\"t1\"",
+                "session_ref",
+                "session.jsonl",
+                ".jsonl",
+                "README",
+                "SECRET-BACKEND",
+                "backend",
+                f.dir.path().to_str().unwrap(),
+            ] {
+                assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
+            }
+            let hex_run = text
+                .split(|c: char| !c.is_ascii_hexdigit())
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            assert!(hex_run < 16, "a digest-like run crossed: {text}");
         }
-        for forbidden in [
-            "PRIVATE",
-            "/Users",
-            "msg_",
-            "\"t0\"",
-            "\"t1\"",
-            "session_ref",
-            f.dir.path().to_str().unwrap(),
-        ] {
-            assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
-        }
-        let hex_run = text
-            .split(|c: char| !c.is_ascii_hexdigit())
-            .map(str::len)
-            .max()
-            .unwrap_or(0);
-        assert!(hex_run < 16, "a digest-like run crossed: {text}");
+        // The exemption was used: the priced payload carries a table id.
+        let value = priced.answers(&[], true);
+        assert!(!value["pricing"]["tables"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -312,18 +476,27 @@ mod tests {
                 _ => {}
             }
         }
-        let f = Fixture::new();
-        f.run();
-        let value = f.answers(&[], true);
-        let mut hits = Vec::new();
-        walk(&value, &mut Vec::new(), &mut hits);
-        assert!(hits.is_empty(), "money-shaped keys crossed: {hits:?}");
-        // The value itself is allowed only under kind usd_micros.
+        let plain = Fixture::new();
+        plain.run();
+        let priced = Fixture::docs_priced();
+        for f in [&plain, &priced] {
+            let value = f.answers(&[], true);
+            let mut hits = Vec::new();
+            walk(&value, &mut Vec::new(), &mut hits);
+            assert!(hits.is_empty(), "money-shaped keys crossed: {hits:?}");
+        }
+        // The value itself is allowed only under kind usd_micros, on
+        // docs_cost; the priced payload really has some.
+        let value = priced.answers(&[], true);
+        let money = figures(&value, "usd_micros");
+        assert!(!money.is_empty(), "no money reached the walk: {value}");
+        assert!(money.iter().all(|(question, _)| *question == "docs_cost"));
+        // No other question carries a figure of money's kind or any value
+        // outside a typed figure.
         for row in value["rows"].as_array().unwrap() {
-            for side in ["leader", "next"] {
-                let figure = &row[side]["figure"];
-                if figure["kind"] == "usd_micros" {
-                    assert_eq!(row["question"], "docs_cost");
+            if row["question"] != "docs_cost" {
+                for side in ["leader", "next"] {
+                    assert_ne!(row[side]["figure"]["kind"], "usd_micros");
                 }
             }
         }
@@ -333,14 +506,61 @@ mod tests {
     fn no_label_reads_as_a_ranking_claim() {
         let f = Fixture::new();
         f.run();
+        let priced = Fixture::docs_priced();
         let mut all = Vec::new();
         words(&f.answers(&[], true), &mut all);
         words(&f.answers(&[], false), &mut all);
+        words(&priced.answers(&[], true), &mut all);
+        words(&priced.answers(&[], false), &mut all);
+        // Leader and next labels are among the words walked.
+        assert!(all.iter().any(|word| word == SMALLER));
+        assert!(all.iter().any(|word| word == LARGER));
         for word in all {
             for banned in ["best", "better", "fastest", "benchmark", "winner"] {
                 assert!(!word.contains(banned), "{banned} in {word}");
             }
         }
+    }
+
+    /// A pending ledger call keyed to the fixture session: with routing
+    /// available it reads as routed and unverified, so the session is left
+    /// out of the rejection comparison and counted in `left_out.routed`.
+    fn routed_count(feed: bool, ledger_present: bool) -> u64 {
+        let f = Fixture::new();
+        f.run();
+        let call = crate::routing::RoutedExchange {
+            id: Some(1),
+            started_at: now() - Duration::minutes(30),
+            client_session_id: Some("11111111-2222-4333-8444-PRIVATESESS1".to_string()),
+            facade: "anthropic".to_string(),
+            path: Some("/v1/messages".to_string()),
+            backend: "SECRET-BACKEND".to_string(),
+            input_tokens: Some(100),
+            cache_read_tokens: Some(40),
+            cache_write_tokens: Some(0),
+            output_tokens: Some(10),
+            proof: Some(crate::routing::ProofStatus::Pending),
+            ..Default::default()
+        };
+        let ledger = crate::routing::FixedLedger::new(vec![call]);
+        f.pass
+            .fold_ledger(&|| true, &ledger, &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 1, "the call was folded");
+        let value =
+            f.pass
+                .model_answers_value(true, &NeverFolders::NONE, feed, ledger_present, now());
+        let across = &value["rows"][4];
+        assert_eq!(across["question"], "rejected_across_tasks");
+        across["left_out"]["routed"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn with_the_feed_off_or_no_ledger_every_session_is_unobserved() {
+        assert_eq!(routed_count(true, true), 1, "routing available");
+        assert_eq!(routed_count(false, true), 0, "feed off");
+        assert_eq!(routed_count(true, false), 0, "no ledger declared");
+        assert_eq!(routed_count(false, false), 0);
     }
 
     #[test]
