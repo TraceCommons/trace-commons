@@ -887,9 +887,10 @@ because of it, and no other rail notices.
 - An unknown rail id anywhere (a mode setting, a route segment, a stored
   row) is refused, never defaulted.
 - The `near_ai` host is compiled in. A `near-ai-staging` build switches it
-  for introspection, payout and the daemon together, is refused as a
-  release build, and reports itself in readiness. No env value names a
-  host.
+  for introspection, payout and the daemon together, and reports itself in
+  readiness. A CI check (beside `scripts/ci/check-release-credential-store.sh`,
+  with its own self-test) refuses any release workflow or shipped manifest
+  that enables the feature. No env value names a host.
 - Readiness reports one entry per rail, `trace_credit` included, with
   `rail_id`, `mode`, `halted`, `rate_epoch` (the version label only) and
   `qualified`. For `near_ai`, `qualified` is true only in `live`, outside
@@ -1141,7 +1142,8 @@ The quota can be raised by policy.
 
 The daemon's cloud-api origin and the server's NEAR AI base are compiled in
 as production. Plan: a build-time feature (`near-ai-staging`) that switches
-both, refused in a release build and reported in readiness. Until it
+both, refused in any release workflow by a CI check and reported in
+readiness. Until it
 exists, test the client against a mock #1271 server, and test the link flow
 against production with a closed recipient list.
 
@@ -1210,8 +1212,8 @@ system admin only; NEAR AI can run it.
   proposed), and source restriction. For open enrollment the caps and
   expiry are the defence. Response: halt, revoke in the UI, rotate, update
   the env, restart, resume.
-- **Stolen database.** Org ids are sealed; the key and the credential are
-  not in the database.
+- **Stolen database.** Recipients (for `near_ai`, org ids) are sealed; the
+  key and every rail credential are not in the database.
 - **Double pay on one rail.** The rail contract makes a repeated send for
   one line a no-op (cumulative targets converge on `near_ai`; keys dedupe
   on a keyed rail), so retries and re-runs cannot overpay one link.
@@ -1256,7 +1258,8 @@ system admin only; NEAR AI can run it.
   recipient org owes. The consent copy says so.
 - **Sender out of funds.** 409 `insufficient_posted_capacity` stops the pass.
   Accruals stay owed. Readiness reports it.
-- **Rounding.** Floor per batch line; at most one nano-USD per line.
+- **Rounding.** Floor per batch line per rail; at most one atomic unit of
+  the rail's instrument per line (for `near_ai`, one nano-USD).
 - **Metadata leak.** Memo empty, metadata an opaque hash.
 - **Org name.** The server never deserializes, stores or logs it.
 - **Rate.** Not in the repo, not in logs; only the epoch version label.

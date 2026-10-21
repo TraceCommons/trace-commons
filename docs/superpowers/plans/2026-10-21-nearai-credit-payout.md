@@ -84,8 +84,8 @@ Spec: section 3 ("The interface", "Rail ids", "What makes the interface real").
 
 **Files:**
 - Create: `crates/trace-commons-gate-api/src/payout_rail.rs`
-- Modify: `crates/trace-commons-gate-api/src/lib.rs` (`pub mod payout_rail;` and re-exports beside `settlement`)
-- Create: `crates/trace-commons-gate-enclave/src/payout_rail.rs` (`MockKeyedPayoutRail`, a test double like `MockPerplexityScorer`)
+- Modify: `crates/trace-commons-gate-api/src/lib.rs` (`pub mod payout_rail;`, re-exports beside `settlement`, and `pub use async_trait::async_trait;` so gate-enclave can implement the trait without a new dependency: gate-enclave has `uuid` and `sha2` but not `async-trait`)
+- Create: `crates/trace-commons-gate-enclave/src/payout_rail.rs` (`MockKeyedPayoutRail`, a test double like `MockPerplexityScorer`; uses `trace_commons_gate_api::async_trait`)
 - Modify: `crates/trace-commons-gate-enclave/src/lib.rs`
 
 **Interfaces (all `pub`, in `trace_commons_gate_api::payout_rail`):**
@@ -179,8 +179,8 @@ Spec: section 4 ("State and storage", "Accrual", "Modes and the kill switch"), s
 #[tokio::test] async fn accrual_inserts_are_idempotent_per_rail()           // same batch line twice -> one row; same line on another rail -> second row
 #[tokio::test] async fn atomic_units_round_trip_numeric_39()               // 10^38 - 1 and u64::MAX + 1 read back exactly
 #[tokio::test] async fn the_enumerator_role_sees_only_tenant_rail_and_state() // SELECT recipient_index under the role -> permission denied
-#[tokio::test] async fn rate_epochs_and_control_are_not_writable_by_the_runtime_role()
-#[tokio::test] async fn audit_rows_cannot_be_updated_or_deleted()
+#[tokio::test] async fn rate_epochs_and_control_are_not_writable_by_the_runtime_role() // connect AS the runtime role, never the migration/superuser URL: an owner or superuser ignores REVOKE and the test passes vacuously
+#[tokio::test] async fn audit_rows_cannot_be_updated_or_deleted()                // same: as the runtime role
 #[tokio::test] async fn two_accounts_link_the_same_recipient_index()        // D7: no uniqueness
 ```
 
@@ -241,12 +241,12 @@ Spec: section 3 ("Rate source"), section 4 ("Rate", "Accrual", "Reversals"), sec
 Spec: section 2 step 6, section 4 ("The NEAR AI client", "`near_ai` refusal mapping", "Fail-closed rules"), section 8 ("Known staging gap").
 
 **Files:**
-- Create: `crates/trace-commons-server/src/near_ai_api.rs` (the one compiled-in base: `pub const NEAR_AI_API_BASE_URL`, `https://cloud-api.near.ai/v1` by default; under `feature = "near-ai-staging"` `https://cloud-stg-api.near.ai/v1` (the default in cloud-api's own scripts; spec section 12 item 2 says to confirm it, so the PR body flags it), written as a constant in this file only; `#[cfg(all(feature = "near-ai-staging", not(debug_assertions)))] compile_error!(...)`; `pub fn near_ai_staging() -> bool`)
+- Create: `crates/trace-commons-server/src/near_ai_api.rs` (the one compiled-in base: `pub const NEAR_AI_API_BASE_URL`, `https://cloud-api.near.ai/v1` by default; under `feature = "near-ai-staging"` `https://cloud-stg-api.near.ai/v1` (the default in cloud-api's own scripts; spec section 12 item 2 says to confirm it, so the PR body flags it), written as a constant in this file only; `pub fn near_ai_staging() -> bool`, which readiness reports. No `compile_error!`: the staging run needs an optimized build with the feature on, so the refusal is the release-workflow check below, not the `--release` profile)
 - Modify: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/near_provisioning.rs` (drop the local `NEAR_AI_API_BASE_URL`, use the server constant; keep the `cfg(test)` override exactly as it is)
 - Create: `crates/trace-commons-server/src/near_ai_transfer.rs` (`NearAiTransferClient`: `SecretString` credential, sender org, source type; `send_cumulative`, `capacity`, `history_page`; `redirect(Policy::none())`, TLS-or-loopback, fixed user agent, 15 s timeout, `bearer_auth`; error body `error.type` into a closed `NearAiTransferError` enum; a `#[cfg(test)]`/test-only constructor taking a loopback base)
 - Create: `crates/trace-commons-server/src/near_ai_rail.rs` (`NearAiRail: PayoutRail`; program `tc1-` + first 32 hex of `sha256("nearai-payout-program-v1:" || link_id)`; probe program `tcprobe-v1`; metadata `{"tc": sha256("nearai-payout-line-v1:" || line_id)}`; memo empty; `receipt_hash = sha256("nearai-transfer-v1:" || id)`; `target_total` narrowed to `i64` or `HoldLine("payout_amount_out_of_range")`; the refusal table from the spec, verbatim)
 - Create: `crates/trace-commons-server/src/near_ai_rail_config.rs` (env parsing: `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` default `disabled`, `_CREDENTIAL` (`oc_` + 64 hex, `SecretString`), `_CREDENTIAL_ID`, `_SENDER_ORG` (UUID), `_SOURCE` (`grant`|`payment`), `_ACCOUNT_CEILING_NANO`; any missing or malformed in `dry_run`/`live` -> `near_ai_payout_config_missing`; no base-URL variable exists)
-- Modify: `crates/trace-commons-server/Cargo.toml`, `crates/trace-commons-ingest/Cargo.toml` (feature `near-ai-staging`, ingest forwards to server and contributor where it links them), `crates/trace-commons-contributor/Cargo.toml` (feature `near-ai-staging` switching `CLOUD_API_ORIGIN` in `src/daemon/nearai_credential/api.rs`, same `compile_error!` guard)
+- Modify: `crates/trace-commons-server/Cargo.toml`, `crates/trace-commons-ingest/Cargo.toml` (feature `near-ai-staging`, ingest forwards to server and contributor where it links them), `crates/trace-commons-contributor/Cargo.toml` (feature `near-ai-staging` switching `CLOUD_API_ORIGIN` in `src/daemon/nearai_credential/api.rs`; the daemon's status reports it)
 - Modify: `scripts/ci/check-release-credential-store.sh` or add `scripts/ci/check-release-staging-feature.sh` beside it (same shape, with its own self-test), and call it from the `cargo fmt --check` job in `.github/workflows/ci.yml`, so no release workflow or shipped manifest enables `near-ai-staging`
 - Create: `crates/trace-commons-server/tests/near_ai_rail_mock.rs` (a loopback mock #1271 server built on axum, which the server already depends on)
 
@@ -268,10 +268,10 @@ Spec: section 2 step 6, section 4 ("The NEAR AI client", "`near_ai` refusal mapp
 ```
 
 - [ ] **Step 2: Run to verify they fail.** **Step 3: Implement.**
-- [ ] **Step 4: Verify** — targeted tests; global checks; additionally `RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --features near-ai-staging`, the same for `-p trace-commons-ingest` and `-p trace-commons-contributor`; `cargo build --release -p trace-commons-server --features near-ai-staging` must FAIL with the `compile_error!` text (paste it); the staging-feature check script and its self-test pass; the four `cargo deny` licence runs (Cargo.toml changed).
+- [ ] **Step 4: Verify** — targeted tests; global checks; additionally `RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --features near-ai-staging`, the same for `-p trace-commons-ingest` and `-p trace-commons-contributor`; the staging-feature check script passes and its self-test (which seeds a release workflow and a shipped manifest enabling the feature) shows each seeded violation refused (paste both); the four `cargo deny` licence runs (Cargo.toml changed).
 - [ ] **Step 5: Commit** — `Add the NEAR AI transfer client and its payout rail`.
 
-**Done when:** the rail meets the task 1 contract against the mock, every spec table row has a test, the host is one compiled-in constant shared with login introspection, the staging feature cannot reach a release build (shown, not asserted), and every check is green with output pasted.
+**Done when:** the rail meets the task 1 contract against the mock, every spec table row has a test, the host is one compiled-in constant shared with login introspection, no release workflow or shipped manifest can enable the staging feature (shown by the self-test, not asserted), and every check is green with output pasted.
 
 ---
 
