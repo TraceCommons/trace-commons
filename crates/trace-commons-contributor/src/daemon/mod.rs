@@ -593,6 +593,13 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
     let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
+    // A person's approval asks for an upload pass when its hold ends
+    // (`DaemonShared::request_upload_at`), so a trace they just sent goes
+    // out then rather than up to a poll interval later. The pass is the
+    // ordinary tick, brought forward: the same scan and the same gates.
+    let upload_wake = tokio::time::sleep(std::time::Duration::ZERO);
+    tokio::pin!(upload_wake);
+    let mut upload_wake_armed = false;
 
     loop {
         // Checked at the top as well as after the select, so a request that
@@ -625,6 +632,22 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = managed_lease_tick.tick() => {
                 managed::sweep(shared, Utc::now()).await;
+            }
+            _ = shared.upload_due_changed.notified() => {
+                if let Some(at) = shared.upload_due() {
+                    upload_wake.as_mut().reset(upload_wake_deadline(at, Utc::now()));
+                    upload_wake_armed = true;
+                }
+            }
+            _ = &mut upload_wake, if upload_wake_armed => {
+                upload_wake_armed = false;
+                if shared.take_upload_due(Utc::now()) {
+                    ticker.reset_immediately();
+                } else if let Some(at) = shared.upload_due() {
+                    // Woken a little early by the clock; wait out the rest.
+                    upload_wake.as_mut().reset(upload_wake_deadline(at, Utc::now()));
+                    upload_wake_armed = true;
+                }
             }
             _ = ticker.tick() => {
                 let tick_started = std::time::Instant::now();
@@ -719,6 +742,20 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
         }
     }
 }
+
+/// When to wake for an upload pass asked for at `at`: just after it, by the
+/// monotonic clock. The margin keeps the pass from landing a hair before the
+/// hold deadline, where `QueueEntry::hold_active` would still skip the entry.
+fn upload_wake_deadline(
+    at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> tokio::time::Instant {
+    let wait = (at - now).to_std().unwrap_or(std::time::Duration::ZERO);
+    tokio::time::Instant::now() + wait + UPLOAD_WAKE_MARGIN
+}
+
+/// See [`upload_wake_deadline`].
+const UPLOAD_WAKE_MARGIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Once the NEAR AI notice is acknowledged, by any route, undo what its gate
 /// did while it was closed: clear the gate's health label and re-offer every
@@ -977,6 +1014,7 @@ async fn drain_approved(
                 && !held_ids.contains(&e.entry_id)
         })
         .collect();
+    let approved = send_order(approved);
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
         // condition gets retracted if the contributor has logged back in.
@@ -1082,6 +1120,8 @@ async fn drain_approved(
     // Whether ingest or the issuer was unavailable for an entry this pass
     // (#1358). Ends the pass the same way.
     let mut outage = false;
+    // Listed on first use; see `PassSessions`.
+    let mut pass_sessions: Option<PassSessions> = None;
 
     for entry in approved {
         if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
@@ -1137,11 +1177,17 @@ async fn drain_approved(
         }
 
         // Re-resolve the session through its own adapter, so the uploader can
-        // re-read and re-hash the file before sending anything.
-        // `find_session` re-scans every source (`source.discover()`), the
-        // same blocking, non-yielding pass `watcher::tick` runs -- see
-        // `run_blocking`'s doc.
-        let Some((source, session_ref)) = run_blocking(|| find_session(&sources, &entry)) else {
+        // re-read and re-hash the file before sending anything. The listing
+        // is taken once, by the first entry that needs it, and shared by the
+        // rest of the pass (`PassSessions`). It is the same blocking,
+        // non-yielding scan `watcher::tick` runs -- see `run_blocking`'s doc.
+        if pass_sessions.is_none() {
+            pass_sessions = Some(run_blocking(|| PassSessions::list(&sources)));
+        }
+        let found = pass_sessions
+            .as_ref()
+            .and_then(|listed| listed.find(&sources, &entry));
+        let Some((source, session_ref)) = found else {
             let mut q = shared.queue.lock().expect("queue lock");
             q.set_state(
                 entry.entry_id,
@@ -1213,6 +1259,17 @@ async fn drain_approved(
         {
             cancel_account_admission_on_refusal(shared, reason_label);
         }
+        // The file moved since the pass listed it, so its listing is stale
+        // too: the superseding entry's size and last write come from a fresh
+        // one, taken before the queue lock, as they did before the listing
+        // was shared. Rare -- only a session that grew after approval.
+        let session_ref = if matches!(decision, uploader::UploadDecision::Superseded { .. }) {
+            run_blocking(|| find_session(&sources, &entry))
+                .map(|(_, fresh)| fresh)
+                .unwrap_or(session_ref)
+        } else {
+            session_ref
+        };
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
             uploader::UploadDecision::Uploaded {
@@ -1797,6 +1854,61 @@ pub fn credential_store_self_check() -> i32 {
         Err(CredentialError::Unentitled) => 1,
         Err(CredentialError::NoEntry) | Ok(_) => 0,
         Err(_) => 2,
+    }
+}
+
+/// The order one upload pass sends its approved entries in: every entry a
+/// person approved before any a folder's standing Automatic approved, each
+/// group in queue order.
+///
+/// A pass sends at most `MAX_UPLOADS_PER_PASS`. Switching a folder to
+/// Automatic approves its whole backlog (#1473), and in plain queue order a
+/// trace the contributor sent by hand waited behind all of it, at that many
+/// per poll. The contributor is waiting on theirs; the backlog is not.
+fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
+    // Stable, so queue order holds within each group.
+    approved.sort_by_key(|e| e.approved_unattended);
+    approved
+}
+
+/// Every source's sessions, listed once per upload pass and looked up by
+/// path for each entry the pass sends.
+///
+/// Each listing opens every session file to read its header, and the pass
+/// used to take one per entry, so a pass of twenty sends listed the disk
+/// twenty times. A listing can be a pass old by the time a later entry is
+/// sent; that is safe because the uploader re-reads and re-hashes the file
+/// before anything goes out and re-asks when the bytes moved.
+struct PassSessions {
+    /// For each path, the index of the first source that listed it and its
+    /// reference, matching [`find_session`]'s first-match rule.
+    by_path: std::collections::HashMap<std::path::PathBuf, (usize, crate::source::SessionRef)>,
+}
+
+impl PassSessions {
+    fn list(sources: &[Box<dyn crate::source::TraceSource>]) -> Self {
+        let mut by_path = std::collections::HashMap::new();
+        for (index, source) in sources.iter().enumerate() {
+            let Ok(refs) = source.discover() else {
+                continue;
+            };
+            for r in refs {
+                by_path.entry(r.path.clone()).or_insert((index, r));
+            }
+        }
+        Self { by_path }
+    }
+
+    fn find<'a>(
+        &self,
+        sources: &'a [Box<dyn crate::source::TraceSource>],
+        entry: &queue::QueueEntry,
+    ) -> Option<(
+        &'a dyn crate::source::TraceSource,
+        crate::source::SessionRef,
+    )> {
+        let (index, r) = self.by_path.get(&entry.path)?;
+        Some((sources[*index].as_ref(), r.clone()))
     }
 }
 
@@ -4172,6 +4284,90 @@ mod tests {
                 .iter()
                 .all(|e| e.state == queue::QueueState::Uploaded)
         );
+    }
+
+    /// A trace the contributor sent by hand goes in the first pass, ahead of
+    /// a backlog a folder's Automatic approved, though it sits last in the
+    /// queue and the backlog alone fills the pass.
+    #[tokio::test]
+    async fn a_person_approval_is_sent_before_an_unattended_backlog() {
+        let h = TransientRetryHarness::new().await;
+        for index in 0..MAX_UPLOADS_PER_PASS {
+            h.add_session(
+                &format!("{index:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                &format!("backlog session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let entries = h.entries();
+        assert_eq!(entries.len(), MAX_UPLOADS_PER_PASS + 1);
+        assert!(entries.iter().all(|e| e.approved_unattended));
+        // The last in queue order, approved by a person instead: the hold is
+        // left off (`approved_at` stays `None`) so only the order is tested.
+        let mine = entries.last().unwrap().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            q.entry_mut_for_test(mine).unwrap().approved_unattended = false;
+        }
+
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        let after = h.entries();
+        let state_of = |id| after.iter().find(|e| e.entry_id == id).unwrap().state;
+        assert_eq!(state_of(mine), queue::QueueState::Uploaded);
+        assert_eq!(
+            after
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            1,
+            "one backlog entry left for the next pass"
+        );
+    }
+
+    /// Person approvals first, each group in queue order.
+    #[test]
+    fn send_order_puts_person_approvals_first_and_keeps_queue_order() {
+        let entry = |n: u128, unattended: bool| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            approved_unattended: unattended,
+            ..Default::default()
+        };
+        let ordered = send_order(vec![
+            entry(1, true),
+            entry(2, false),
+            entry(3, true),
+            entry(4, false),
+        ]);
+        let ids: Vec<u128> = ordered.iter().map(|e| e.entry_id.as_u128()).collect();
+        assert_eq!(ids, vec![2, 4, 1, 3]);
+    }
+
+    /// One listing answers every entry of a pass the way a fresh
+    /// `find_session` would, and a path no source lists is not found.
+    #[tokio::test]
+    async fn one_listing_per_pass_finds_what_find_session_finds() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "00000001-cccc-4ccc-8ccc-cccccccccccc",
+            "second session, then mail alice.smith@example.org",
+        )
+        .await;
+        let roots = h.shared.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let listed = PassSessions::list(&sources);
+        let entries = h.entries();
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            let (shared_source, shared_ref) = listed.find(&sources, entry).expect("listed");
+            let (fresh_source, fresh_ref) = find_session(&sources, entry).expect("found");
+            assert_eq!(shared_source.name(), fresh_source.name());
+            assert_eq!(shared_ref.path, fresh_ref.path);
+            assert_eq!(shared_ref.size_bytes, fresh_ref.size_bytes);
+        }
+        let mut gone = entries[0].clone();
+        gone.path = h.session_path.with_file_name("not-a-session.jsonl");
+        assert!(listed.find(&sources, &gone).is_none());
     }
 
     /// Ingest down altogether: the in-call retries run out on transport

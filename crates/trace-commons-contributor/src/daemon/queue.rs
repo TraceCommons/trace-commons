@@ -1202,6 +1202,13 @@ impl Queue {
         &self.entries
     }
 
+    /// One entry, to edit in place: tests only, for a state no public
+    /// transition reaches in one step.
+    #[cfg(test)]
+    pub(crate) fn entry_mut_for_test(&mut self, id: Uuid) -> Option<&mut QueueEntry> {
+        self.entries.iter_mut().find(|e| e.entry_id == id)
+    }
+
     /// Has the contributor declined the session living at `path`?
     ///
     /// "Not this one" is a decision about the conversation, not about the
