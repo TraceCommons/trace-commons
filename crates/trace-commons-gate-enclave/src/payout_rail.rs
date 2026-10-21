@@ -504,6 +504,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_keyed_mock_is_held_as_a_trait_object() {
+        let rail: std::sync::Arc<dyn PayoutRail> = std::sync::Arc::new(MockKeyedPayoutRail::new());
+        let recipient = recipient();
+        let program = rail.program_for_link(uuid::Uuid::from_u128(5));
+        let pending = line(LINE_A, &recipient, &program, 3, 0);
+        assert!(matches!(
+            rail.send(&pending).await.unwrap(),
+            SendOutcome::Committed { .. }
+        ));
+        assert_eq!(
+            rail.read_total(&recipient, &program).await.unwrap(),
+            AtomicUnits::from_raw(3)
+        );
+    }
+
+    #[tokio::test]
     async fn keyed_mock_refusal_knobs_change_nothing() {
         let rail = MockKeyedPayoutRail::new();
         let recipient = recipient();
