@@ -282,6 +282,17 @@ final class InsightsModelsCardTests: XCTestCase {
         ].joined(separator: ". "))
     }
 
+    /// A core sentence that ends in a full stop is not given a second one.
+    func testTheSpokenRowHasNoDoubledFullStops() throws {
+        var copy = words
+        copy["analytics_models_not_priced_line"] = "NO PRICES, SO NOT COMPARED."
+        copy["analytics_models_scope"] = "SCOPE."
+        let row = try Self.row(Self.notPricedRow)
+        let spoken = InsightsModelsWords.accessibilityLabel(row, copy: copy)
+        XCTAssertEqual(spoken, "DOCS COST. NOT PRICED. NO PRICES, SO NOT COMPARED. model-a: 7 TRACES. model-b: 1 TRACE. SCOPE.")
+        XCTAssertFalse(spoken.contains(".."), spoken)
+    }
+
     // MARK: Shown or hidden
 
     @MainActor func testTheAnswersAreShownOnlyWhenEnabledAndReadable() async throws {

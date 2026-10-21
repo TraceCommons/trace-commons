@@ -271,10 +271,17 @@ enum InsightsModelsWords {
     }
 
     /// The row as VoiceOver reads it: the question, its lines, its basis
-    /// and its scope, as one element.
+    /// and its scope, as one element. A part that already ends a sentence
+    /// is not given a second full stop, and an empty part is skipped.
     static func accessibilityLabel(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> String {
-        ([title(row, copy: copy)] + lines(row, copy: copy) + [basisLine(row, copy: copy), scope(copy: copy)]
+        let parts = ([title(row, copy: copy)] + lines(row, copy: copy) + [basisLine(row, copy: copy), scope(copy: copy)]
             .compactMap { $0 })
-            .joined(separator: ". ")
+            .filter { !$0.isEmpty }
+        return parts.enumerated().reduce(into: "") { spoken, part in
+            if part.offset > 0 {
+                spoken += [".", "?", "!"].contains(spoken.last.map(String.init) ?? "") ? " " : ". "
+            }
+            spoken += part.element
+        }
     }
 }
