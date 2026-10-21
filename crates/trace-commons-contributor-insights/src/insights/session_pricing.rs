@@ -1266,4 +1266,51 @@ mod tests {
         assert_eq!(in_table.len(), expected.len());
         assert_eq!(catalog.tables()[0].entries.len(), expected.len() + 1);
     }
+
+    /// The page says "GPT-5.6 Sol's promotional pricing is available at least
+    /// through November 21, 2026", so the Sol rates end after that day (the
+    /// end is exclusive): a later turn is unpriced until a refetch, never
+    /// shown at a rate nobody pays. The other models carry no expiry.
+    #[test]
+    fn a_promotional_rate_stops_pricing_turns_after_its_stated_end() {
+        use crate::insights::pricing_catalog::production_pricing_catalog;
+
+        let catalog = production_pricing_catalog();
+        let price = |model: &str, when: DateTime<Utc>| {
+            let mut record = turn(
+                0,
+                Some(0),
+                Some(0),
+                [Some(1_000), Some(0), Some(0)],
+                Some(CacheWrite::TotalOnly(0)),
+            );
+            record.at = Some(when);
+            price_session(
+                &catalog,
+                PricingAccounting::Codex,
+                &labels(&[model]),
+                &[record],
+            )
+        };
+        let day = |month, day, hour, minute, second| {
+            Utc.with_ymd_and_hms(2026, month, day, hour, minute, second)
+                .unwrap()
+        };
+        // 1,000 tokens at $4 per million.
+        assert_eq!(
+            price("gpt-5.6-sol", day(11, 21, 23, 59, 59)).total_usd_micros,
+            Some(4_000)
+        );
+        let after = price("gpt-5.6-sol", day(11, 22, 0, 0, 0));
+        assert_eq!(after.total_usd_micros, None);
+        assert_eq!(
+            after.by_model["gpt-5.6-sol"].unpriced_reasons[&UnpricedReason::WindowUnresolved],
+            1
+        );
+        // A sibling model on the same page states no end.
+        assert_eq!(
+            price("gpt-5.6-luna", day(11, 22, 0, 0, 0)).total_usd_micros,
+            Some(200)
+        );
+    }
 }

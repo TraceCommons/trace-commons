@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "table_id": "sha256:d5d1bac294e9c504244f930865c7ddc3e83928b0351795e302e42690f21c150d",
+  "table_id": "sha256:6b4ef955f256c9ae1e46475c5d61abc78e02bf0f93b7c94780e518728d83258a",
   "version": 2,
   "currency": "usd",
   "published_at": "2026-10-20T20:17:01Z",
@@ -11,7 +11,7 @@
     "content_sha256": "sha256:40b0e4c46c4e27a384c30a646d2d73fb95563e2e37873e22d0a1b1a262b2b267",
     "reviewed_by": "Pending owner review",
     "reviewed_at": "2026-10-20T20:17:01Z",
-    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before retrieved_at. A '-' cache write is priced at the input rate."
+    "effective_from_basis": "No effective dates on the page: effective_from is the Monday 00:00 UTC starting the 13-week Insights window before retrieved_at. gpt-5.6-sol is promotional through 2026-11-21 (effective_until). A '-' write is priced at input."
   },
   "entries": [
     {
@@ -375,7 +375,7 @@
       "model": "gpt-5.6-sol",
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
-      "effective_until": null,
+      "effective_until": "2026-11-22T00:00:00Z",
       "prompt_tokens_at_most": 272000,
       "rates": [
         {
@@ -401,7 +401,7 @@
       "model": "gpt-5.6-sol",
       "accounting": "codex",
       "effective_from": "2026-07-20T00:00:00Z",
-      "effective_until": null,
+      "effective_until": "2026-11-22T00:00:00Z",
       "prompt_tokens_above": 272000,
       "rates": [
         {

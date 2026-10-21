@@ -34,6 +34,13 @@
 //! Neither page dates its rates, so every `effective_from` is the start of
 //! the 13-week Insights window before the fetch (the Monday, 00:00 UTC),
 //! as `provenance.effective_from_basis` says; an older turn is unpriced.
+//! The one dated statement is the OpenAI page's footnote, "GPT-5.6 Sol's
+//! promotional pricing is available at least through November 21, 2026":
+//! both gpt-5.6-sol entries end at 2026-11-22T00:00:00Z (`effective_until`
+//! is exclusive, so the 21st still prices), and a later turn is unpriced
+//! until a refetch. The page does not say when the promotion began, so the
+//! backdated `effective_from` may price some earlier turns at the promotional
+//! rate; that cannot be settled from the source.
 //!
 //! Prompt-size bands: Anthropic states its threshold in tokens (100,000).
 //! OpenAI labels its tiers "<=272K input tokens" and ">272K input tokens"
@@ -194,7 +201,7 @@ pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     ),
     (
         2,
-        "sha256:d5d1bac294e9c504244f930865c7ddc3e83928b0351795e302e42690f21c150d",
+        "sha256:6b4ef955f256c9ae1e46475c5d61abc78e02bf0f93b7c94780e518728d83258a",
     ),
 ];
 
@@ -406,7 +413,13 @@ mod tests {
                 Some(entry.model.as_str())
             );
             assert_eq!(entry.provider, pricing_provider(entry.accounting));
-            assert!(entry.effective_until.is_none());
+            // Only a rate the page itself ends carries an expiry.
+            assert_eq!(
+                entry.effective_until.is_some(),
+                entry.model == "gpt-5.6-sol",
+                "{}",
+                entry.model
+            );
         }
     }
 
