@@ -1201,3 +1201,132 @@ fn the_seed_is_pinned() {
     assert_eq!(split_mix64(&mut state), 0x6e78_9e6a_a1b9_65f4);
     assert_eq!(split_mix64(&mut state), 0x06c4_5d18_8009_454f);
 }
+
+/// A finished session of `task` in `mode`, taking `secs` and two turns.
+fn timed_in(
+    session_ref: &str,
+    label: &str,
+    task: InferredTask,
+    mode: EditMode,
+    secs: u32,
+) -> SessionInput {
+    with_facts(timed(session_ref, label, mode, secs, 2), |facts| {
+        facts.task = task;
+    })
+}
+
+#[test]
+fn finish_time_keeps_not_prompting_when_a_qualifier_there_fails_the_mix() {
+    // Not prompting: model-a qualifies in BugFix (5) but not Docs (4), so it
+    // covers 5 of 14 sessions' weight; model-b qualifies in both. Two models
+    // qualify there, so the row stays on not_prompting with one compared,
+    // even though prompting would compare two.
+    let mut sessions = Vec::new();
+    for ix in 0..5 {
+        for (prefix, label, task, mode, secs) in [
+            (
+                "anb",
+                "model-a",
+                InferredTask::BugFix,
+                EditMode::NotPrompting,
+                100,
+            ),
+            (
+                "bnb",
+                "model-b",
+                InferredTask::BugFix,
+                EditMode::NotPrompting,
+                300,
+            ),
+            (
+                "bnd",
+                "model-b",
+                InferredTask::Docs,
+                EditMode::NotPrompting,
+                300,
+            ),
+            (
+                "apb",
+                "model-a",
+                InferredTask::BugFix,
+                EditMode::Prompting,
+                100,
+            ),
+            (
+                "bpb",
+                "model-b",
+                InferredTask::BugFix,
+                EditMode::Prompting,
+                900,
+            ),
+        ] {
+            sessions.push(timed_in(&format!("{prefix}-{ix}"), label, task, mode, secs));
+        }
+    }
+    for ix in 0..4 {
+        sessions.push(timed_in(
+            &format!("and-{ix}"),
+            "model-a",
+            InferredTask::Docs,
+            EditMode::NotPrompting,
+            100,
+        ));
+    }
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.edit_mode, Some(EditMode::NotPrompting));
+    assert_eq!(q6.state, AnswerState::NotEnoughSessions);
+    assert!(q6.leader.is_none());
+    assert_eq!(q6.left_out.mix_too_different, 9);
+    assert_eq!(counts(q6), vec![("model-a", 9), ("model-b", 10)]);
+}
+
+#[test]
+fn finish_time_uses_prompting_when_neither_mode_has_two_qualifiers() {
+    // Not prompting has more sessions, but only model-a qualifies there.
+    let mut sessions = Vec::new();
+    for ix in 0..5 {
+        sessions.push(timed(
+            &format!("an-{ix}"),
+            "model-a",
+            EditMode::NotPrompting,
+            100,
+            2,
+        ));
+    }
+    for ix in 0..2 {
+        sessions.push(timed(
+            &format!("bn-{ix}"),
+            "model-b",
+            EditMode::NotPrompting,
+            100,
+            2,
+        ));
+    }
+    sessions.push(timed("ap-0", "model-a", EditMode::Prompting, 100, 2));
+    sessions.push(timed("bp-0", "model-b", EditMode::Prompting, 100, 2));
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.edit_mode, Some(EditMode::Prompting));
+    assert_eq!(q6.state, AnswerState::NotEnoughSessions);
+    assert_eq!(counts(q6), vec![("model-a", 1), ("model-b", 1)]);
+}
+
+#[test]
+fn a_model_with_no_qualifying_cell_does_not_weigh_in_the_mix() {
+    // model-a and model-b qualify in BugFix only; model-c has 4 Docs
+    // sessions and qualifies nowhere. Weighted across every model, BugFix
+    // would carry 10 of 14 (71%) and remove both; weighted across the
+    // models with a qualifying cell, it carries all of it.
+    let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 10, &[0; 5]);
+    sessions.extend(spread("bb", "model-b", InferredTask::BugFix, 10, &[3; 5]));
+    sessions.extend(spread("cd", "model-c", InferredTask::Docs, 10, &[0; 4]));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.left_out.mix_too_different, 0);
+    assert_eq!(ranked(q5), ("model-a".to_owned(), "model-b".to_owned()));
+    assert_eq!(
+        counts(q5),
+        vec![("model-a", 5), ("model-b", 5), ("model-c", 4)]
+    );
+}
