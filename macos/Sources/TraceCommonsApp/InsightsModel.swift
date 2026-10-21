@@ -22,6 +22,13 @@ final class InsightsModel {
     }
     private let weekReader: WeekReader?
     private var weekGeneration = UUID()
+    /// Reads `insights_model_answers` through the daemon client (feed T).
+    typealias ModelAnswersReader = @Sendable () async throws -> DaemonData.InsightsModelAnswers
+    private let modelAnswersReader: ModelAnswersReader?
+    private var modelAnswersGeneration = UUID()
+    /// The Models card's answers, held only while the daemon answered them
+    /// enabled and readable; `nil` draws no card, never an empty one.
+    private(set) var modelAnswers: DaemonData.InsightsModelAnswers?
     /// Feed T only when the daemon answered enabled and readable; feed S
     /// (saved imports) otherwise.
     private(set) var weekFeed: WeekFeed = .saved
@@ -86,9 +93,10 @@ final class InsightsModel {
             defer { if scoped { file?.stopAccessingSecurityScopedResource() } }
             return try TCInsights.call(request)
         }.value
-    }, weekReader: WeekReader? = nil) {
+    }, weekReader: WeekReader? = nil, modelAnswersReader: ModelAnswersReader? = nil) {
         self.service = service
         self.weekReader = weekReader
+        self.modelAnswersReader = modelAnswersReader
     }
 
     /// Ask the daemon for one week of feed T (`nil` is the current week).
@@ -110,6 +118,17 @@ final class InsightsModel {
             showSavedFeed(notice: !((error as? DaemonDataError)?.isNotServed ?? false))
         }
     }
+    /// Ask the daemon for the Models card's answers. Shown only when they
+    /// are switched on and readable, as feed T's week is; anything else, a
+    /// failed read included, takes the card away rather than keep an
+    /// earlier answer.
+    func loadModelAnswers() async {
+        let generation = UUID(); modelAnswersGeneration = generation
+        guard let modelAnswersReader else { modelAnswers = nil; return }
+        let answers = try? await modelAnswersReader()
+        guard modelAnswersGeneration == generation else { return }
+        modelAnswers = answers.flatMap { $0.showsCounterPass ? $0 : nil }
+    }
     private func showSavedFeed(notice: Bool) {
         weekFeed = .saved; counterWeek = nil
         counterPassNoticeKey = notice ? FeedLineKey.counterPassUnavailable : nil
@@ -120,10 +139,11 @@ final class InsightsModel {
         perform(.init("copy"))
         refreshEpisodes()
         if weekReader != nil { Task { [weak self] in await self?.loadWeek() } }
+        if modelAnswersReader != nil { Task { [weak self] in await self?.loadModelAnswers() } }
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
-        weekGeneration = UUID()
+        weekGeneration = UUID(); modelAnswersGeneration = UUID()
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
         cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
         cardResult = nil; cardText = nil; cardError = nil
