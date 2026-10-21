@@ -12,10 +12,9 @@ import XCTest
 /// content from inside that window's own layout. #1402 took the edge
 /// rail's sizing away from its hosting view and #1511 the menu-bar
 /// panel's, but the rail still crashed (#1517: the unified log names
-/// `EdgeRailPanel` at its closed 4 x 240 pt): its content opened and
-/// closed under an animation while the panel was at the other size, and
-/// `updateAnimatedWindowSize` is the animated path. The rail now sizes its
-/// panel around the change, never during it.
+/// `EdgeRailPanel` at its closed 4 x 240 pt). Its panel now drops every
+/// frame but its controller's, and grows before the rail opens and shrinks
+/// after it closes (`EdgeRailControllerTests`). These pin the menu-bar panel.
 ///
 /// There is no UI automation (no shell has any), so these pin the decision:
 /// pure frame logic, and the source shapes that keep every window frame
@@ -113,8 +112,8 @@ final class WindowResizeLoopTests: XCTestCase {
         XCTAssertTrue(monitor.contains(".windowResizability(.contentMinSize)"))
     }
 
-    /// The menu-bar panel's hosting view no longer sizes its window, as
-    /// the edge rail's does not (#1402); the panel sizes it, from a content
+    /// The menu-bar panel's hosting view takes #1402's empty sizing options
+    /// and safe area, as the edge rail's does; the panel sizes it, from a content
     /// size that does not depend on the window, and takes the sizing over
     /// only on the next turn, after SwiftUI has first sized the window.
     func test_theMenuBarPanelTakesItsWindowSizingFromSwiftUI() throws {
@@ -160,7 +159,8 @@ final class WindowResizeLoopTests: XCTestCase {
         XCTAssertFalse(view.contains("state.open ="), "the rail's view opens or closes the rail itself")
         XCTAssertFalse(view.contains("withAnimation"), "the rail's view animates a change of the rail's size")
         let controller = try Self.text(Self.railSource)
-        XCTAssertTrue(controller.contains("Self.transition(to: open, state: state, animation: animation)"))
+        XCTAssertTrue(controller.contains("self?.opening.set($0, animation: $1)"), "the view only asks the controller")
+        XCTAssertTrue(controller.contains("guard placing else { return }"), "the panel takes frames from its controller only")
     }
 
     /// The menu-bar panel's window is sized on the next turn from its
