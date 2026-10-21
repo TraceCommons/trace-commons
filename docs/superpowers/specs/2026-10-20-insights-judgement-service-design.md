@@ -1243,3 +1243,202 @@ and 5 stand as recorded there.
   recommendation is to keep the seal of section 3, which uses only `k256` and
   `ring`, unless a reviewer wants the standard construction enough to take a
   new crate.
+
+## 13. Changes the open slice PRs owe this revision
+
+The 2026-10-21 revision changes slices that are already open. This list
+combines the #1501 review with the slice reviews on #1529, #1530 and #1531.
+The slice fixers work from it. Paths are relative to the repository root.
+
+### #1527, slice 1: protocol (`crates/trace-commons-protocol/src/insights_judgement.rs`)
+
+1. Drop `JUDGEMENT_NONCE_HEADER` from the judgement route. Keep
+   `JudgementNonce` for the quote nonce only. Add `JudgementRequestNonce` (32
+   bytes, hex on the wire).
+2. Add the closed request plaintext `{wire_version, request_nonce, claim,
+   digest_b64, judgements}` (unknown fields refused). The digest cap applies to
+   the decoded bytes. Add `JUDGEMENT_SEALED_REQUEST_MAX_BYTES = 16_434`, which
+   is the 16 KiB plaintext cap plus 50 bytes of seal overhead.
+3. Add `request_nonce` to `JudgementResponse`. `judgement_signing_bytes` signs,
+   in order, `wire_version`, `request_nonce`, `digest_sha256`, every result
+   field, the `spend` bucket and `signed_at`. Re-freeze `FROZEN_VECTOR`, and
+   add tests that changing `wire_version`, `spend` or `request_nonce` changes
+   the bytes.
+4. Add four refusals: `judgement_seal_stale` (400), `judgement_request_replayed`
+   (409), `judgement_quote_unavailable` (503, the attestation route only, not
+   a capacity label) and `judgement_service_fault` (500, not retryable today).
+   `ALL` grows to 14. `is_judgement_capacity` stays true for exactly the three
+   capacity labels. The string pins are updated.
+5. Change the attestation response type to `{quote_hex, seal_public_key,
+   signing_address}`.
+6. Add a pure response-binding check for slice 7 and the drill to share:
+   given the sent digest bytes, the request nonce and the digest's
+   event-marker count, it requires the `digest_sha256`, the `request_nonce`,
+   `wire_version == 1`, each requested judgement exactly once, and every
+   `event_index` below the marker count (only the first 4 judged).
+
+### #1528, slice 2: shared verification (`crates/trace-commons-attestation`, `crates/trace-commons-contributor/src/witness/verify.rs`)
+
+1. In `report_data.rs`, make the layout a parameter (a `ReportDataLayout`
+   with `Witness` and `Judgement`) rather than only the domain tag. The
+   judgement layout is `"tcjudge1" | SHA-256("trace_commons.insights_judgement.boot_keys.v1\n"
+   || seal_pk(33) || signing_address(20))[0..24] | nonce(32)`, with the nonce
+   at `[32..64]`. The witness layout and its tests do not change.
+   `check_report_data` takes the layout.
+2. Add `judgement_seal.rs` (section 3): ECDH by k256 point arithmetic (no
+   `ecdh` feature), HKDF-SHA256 from `ring::hkdf`, ChaCha20-Poly1305 from
+   `ring::aead`, and zero nonces with single-use keys. The API is one-shot
+   types: sealing a request returns a response opener that `open` consumes,
+   and opening a request returns a response sealer. Tests: frozen vectors (a
+   test-only constructor injects `eph_sk`), refusal of a tampered ciphertext,
+   tag, `eph_pk` or version byte, an identity point refused, and a response
+   that does not open under another request's keys. Confirm that `cargo tree
+   -p trace-commons-attestation` and `Cargo.lock` are unchanged.
+3. `check_quote` takes the layout and its inputs. The witness passes
+   `Witness`. New tests: a judgement quote is accepted, a witness quote is
+   refused as a judgement quote, and the reverse.
+4. The `license_boundary.rs` expected sets do not change.
+
+### #1529, slice 3: service library (`crates/trace-commons-server/src/judgement_service/`)
+
+1. `model.rs`: `RawDecision` loses `answer` and `usage`, and the trait gains a
+   pure `parse_answer(&call, response_body)`. `receipt_check.rs` builds the
+   label, confidence and usage from `response_body`, and only after
+   `check_receipt` passes. The mock's faults change the body and re-sign the
+   fake receipt over it. New test: the label follows the body. (#1529 review
+   point 2.)
+2. `receipt_check.rs`: change the order to reserve, call, check the receipt,
+   then settle. On a verified receipt, settle to the parsed usage. On a
+   failed receipt, charge `max(reservation, reported)`. Test: `ResponseSwapped`
+   with `usage {0,0}` still charges the reservation. (#1529 review point 4.)
+3. `production.rs`: add a per-model latch on `ProductionCheck`. It is set on
+   `SignerUnpinned`, `NotProviderTee`, `WrongModel`, and verified usage above
+   the reservation. `call_check` refuses a latched model before reserving,
+   and only new pins clear it. Test: after one `SignerUnpinned`, the next
+   `judge` makes no model call (the mock's `calls()` does not move) and
+   charges nothing. `an_unpinned_signer_is_refused_but_still_metered` gains
+   that second-call assertion. (#1501 point 14, #1529 point 1.)
+4. `limiter.rs`: reserve `(request_bytes + 512) * input_price + max_tokens *
+   output_price`, with a named constant for the 512-token template allowance.
+   Settle may exceed the reservation only by charging the reported figure,
+   logging `judgement_usage_over_reservation` and setting the latch. Correct
+   the "upper bound" docs (`limiter.rs` module docs, `model.rs`) to state the
+   one-token-per-byte assumption. Tests: usage above the reservation; N
+   concurrent reservations of which exactly k fit, on one account and on the
+   operator total; two devices on one account. (#1501 point 13, #1529 point 3.)
+5. `limiter.rs` `roll_month`: advance the month only inside a reservation, only
+   to the month of the verified claim's `iat`, and never more than one month
+   past the last persisted month unless `iat` is in that month. Expose
+   `ledger_month()` for `reset_at`. Tests: a future clock's month is never
+   persisted, and `reset_at` derives from the ledger month. (#1529 point 5.)
+6. `prompts.rs` `material_sha256`: also hash `JUDGEMENT_MAX_TOKENS`, the
+   temperature and reasoning settings, the per-kind fallback label, the
+   fallback confidence and the decision thresholds. Re-pin the three
+   versions. (#1529 point 6.)
+7. `ledger.rs`: the associated data drops `signing_address` and uses the fixed
+   label `insights-judgement/ledger` with the file name and the format
+   version. The constructor stops taking an address. Test: a ledger written
+   under one set of per-boot keys reads back under another.
+8. `service.rs`: `judge` takes the opened plaintext, with the claim inside,
+   not headers. Add the request-nonce replay set: 20-minute TTL, at most
+   65,536 entries, and `judgement_saturated` when it is full.
+9. `claim.rs`: accept `now <= exp + 60`, `exp - now <= 960` and
+   `iat <= now + 60`. Expose `iat` for the limiter. Tests verify at the
+   issuer's time minus 30 s and plus 30 s. (#1530 point 2, verifier half.)
+10. `production.rs` or `catalog.rs`: `PRODUCTION_MODEL_ALLOWLIST` is an empty
+    constant, with a test that it is empty. Remove any Qwen production
+    wording. (#1501 point 15.)
+
+### #1530, slice 4: issuer (`trace_upload_claim_issuer.rs`, protocol `insights_judgement.rs`, `deploy/pilot-gcp/Caddyfile.template`)
+
+1. Clamp the claim lifetime to `min(max_ttl, 840)`, that is
+   `JUDGEMENT_CLAIM_MAX_LIFETIME_SECS - JUDGEMENT_CLAIM_CLOCK_SKEW_SECS`.
+   Test with slice 3's verifier at `issuer_now - 30` and `issuer_now + 30`.
+   (#1530 point 2.)
+2. Add a closed `JudgementClaimRefusal` (label, status, retry class) to the
+   protocol module. The handler returns only its labels, including for
+   today's 503 registry text and its 500 "failed to issue upload claim". A
+   test pins the strings. Correct the doc at `insights_judgement.rs` that
+   called them the upload-claim route's labels. (#1530 point 3.)
+3. Log no tenant, account, device key id or `device_ref` on the judgement
+   claim path. That includes `device_public_key_bytes`'s malformed-key line
+   when this route calls it: log a fixed label instead. Add a tracing-capture
+   test that mints once, hits each refusal, and asserts no captured line
+   contains the tenant id or the device key id. (#1530 point 1, #1501 point
+   10.)
+4. In `Caddyfile.template`, add `request>headers>X-Trace-Device-Key-Id delete`
+   and `request>headers>X-Trace-Device-Signature delete` to the issuer host's
+   log filter, and to the ingest host's for parity. Narrow the handler comment
+   and the PR body: the issuer process still sees which account mints a claim,
+   and when. (#1530 point 1.)
+
+### #1531, slice 5: binary, enclave seam and image
+
+1. `enclave.rs`: remove `JUDGEMENT_SIGNING_KEY_PATH` and the signing `GetKey`.
+   `JudgementEnclave::connect` generates the sealing and signing keys in
+   memory (`ring::rand::SystemRandom` into `k256::SecretKey`) and builds the
+   judgement report-data layout from slice 2. The boot self-check compares
+   that layout. Tests: two connects give different keys, and a structural
+   test asserts no `GetKey` call for signing. (#1501 point 1, #1531 point 1.)
+2. `http.rs` attestation route: return `{quote_hex, seal_public_key,
+   signing_address}`. Put a 4-permit semaphore and a 10 s
+   `tokio::time::timeout` around `identity.attest`, and map either limit to
+   `judgement_quote_unavailable`. (#1531 point 7.)
+3. `http.rs` judgement route: `application/octet-stream`, with no Bearer or
+   nonce header. Read the body under its own 32-permit semaphore, with a 10 s
+   timeout and a 16,434-byte cap, before taking any judgement permit. Then
+   open the seal (`judgement_seal_stale` on failure), parse, verify the
+   claim, check replay, and only then `try_acquire` a judgement permit.
+   Responses are sealed under `k_resp`; refusals stay plaintext. Test: a slow,
+   unauthenticated body holds no judgement permit. (#1531 point 4.)
+4. `http.rs`: a signing or serialization failure after settle returns `500
+   judgement_service_fault` with no `Retry-After`. (#1531 point 6.)
+5. `boot.rs`: any adapter that calls NEAR AI refuses boot with
+   `missing_control:judgement_near_gateway_pin` until check 5 is compiled in
+   and configured. Check 5 itself (the fingerprint-mode report, DCAP, the
+   gateway measurement pin `TRACE_COMMONS_JUDGEMENT_NEAR_GATEWAY_MEASUREMENTS`,
+   the SPKI binding, and the pinned verifier on the adapter's client) lands
+   before slice 9. It waits on owner decision S2 (the `rustls` edge) and on a
+   live fingerprint-mode fixture. (#1501 point 2, #1531 point 2.)
+6. `boot.rs`: refuse boot when the account cap or the operator budget is
+   unset or unparseable, and when a production build has an empty allowlist.
+   (#1501 point 15.)
+7. `deploy/judgement/docker-compose.yml`: set
+   `TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD=100`.
+8. `deploy/judgement/README.md`: add a Deploy section with the exact `phala
+   deploy --kms-id <id> --no-public-logs --no-public-sysinfo` and upgrade
+   commands. Add the mandatory `phala cvms get --json` `compose_file` read-back:
+   `public_logs` and `public_sysinfo` false, `allowed_envs ==
+   ["TRACE_COMMONS_JUDGEMENT_NEAR_AI_API_KEY"]` (development: `[]`), no
+   `DSTACK_AUTHORIZED_KEYS`, and no SSH pre-launch step. No measurement is
+   recorded unless the read-back passes. Also add the committed read-back
+   file, the stale-container poll, the ledger-reset log, the recovery steps for
+   `judgement_limiter_unreadable` and `judgement_limiter_missing`, the
+   volume-loss residual risk, and "a NEAR AI key rotation pauses
+   judgements". Drop the signing address from the measurement table.
+   (#1501 points 6 and 14, #1531 points 3 and 8.)
+9. Add `scripts/ci/check-judgement-compose-readback.sh` with a self-test.
+10. Add `scripts/ci/check-release-judgement-features.sh` with a self-test, wired
+    into `ci.yml` beside `check-release-credential-store.sh`. It refuses
+    `judgement-development` and `judgement-development-models`, and
+    `--all-features`, on release and image build lines. It refuses either
+    feature in a shipped crate's `default`, and a production Dockerfile arm
+    that is not exactly `near-attestation-collateral`. (#1501 point 7, #1531
+    point 5.)
+11. Tests for the misrouting scenario at the service seam: a request sealed to
+    instance P's key does not open at instance M.
+
+### Outside the five service slices
+
+- **#1525 (the digest builder)** does not merge until the addendum's O1 is
+  decided. Under option B it also needs: the scrub inside the builder
+  (`deterministic_only`, the masker, the residual gate, the whole text before
+  the cut); byte budgets of 320 and 240 bytes; 64 saturated turn-outcome
+  rows; 16 event markers; and the fixtures of the addendum's "The scrub" and
+  "Size".
+- **Slice 7 (the daemon client)** does not merge until O1 is decided. It
+  implements section 4's checks, the one-hour re-verification, the fixed
+  claim-mint schedule (section 6), the folder rule, and the send-time
+  in-memory build with no digest on disk (addendum).
+- **Slice 8 (the drill and runbook)** adds `judgement_model_latched` and the
+  read-back-versus-quote check to the drill.
