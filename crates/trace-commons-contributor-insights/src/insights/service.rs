@@ -1869,6 +1869,14 @@ mod tests {
             if name.contains("rejected") {
                 let key = format!("analytics_models_lead_{name}_undone");
                 assert!(copy[&key].contains("undone"), "{key}");
+                // The figure is a share of the model's edits, so the
+                // model with the lowest share can still have the most
+                // rejected edits: the fact names a share, never a count.
+                for key in [format!("analytics_models_lead_{name}"), key] {
+                    let words = &copy[&key];
+                    assert!(words.starts_with("Lowest share of edits"), "{key}");
+                    assert!(!words.to_lowercase().contains("fewest"), "{key}");
+                }
             }
         }
         let left_out = serde_json::to_value(LeftOut::default()).unwrap();

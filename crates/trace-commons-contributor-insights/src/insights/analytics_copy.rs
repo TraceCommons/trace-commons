@@ -543,30 +543,32 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     ("analytics_models_row_finish_time", "Time to finish"),
     // Each row's fact, by `question`, with `_undone` when the row's
-    // `basis` is `undone`.
+    // `basis` is `undone`. A rejection figure is a share of the model's
+    // edits, so its fact names a share: the lowest share can still be
+    // the most edits.
     (
         "analytics_models_lead_bug_fix_rejected",
-        "Fewest rejected edits in your bug-fix traces",
+        "Lowest share of edits rejected in your bug-fix traces",
     ),
     (
         "analytics_models_lead_bug_fix_rejected_undone",
-        "Fewest undone edits in your bug-fix traces",
+        "Lowest share of edits undone in your bug-fix traces",
     ),
     (
         "analytics_models_lead_refactor_rejected",
-        "Fewest rejected edits in your refactoring traces",
+        "Lowest share of edits rejected in your refactoring traces",
     ),
     (
         "analytics_models_lead_refactor_rejected_undone",
-        "Fewest undone edits in your refactoring traces",
+        "Lowest share of edits undone in your refactoring traces",
     ),
     (
         "analytics_models_lead_tests_rejected",
-        "Fewest rejected edits in your test traces",
+        "Lowest share of edits rejected in your test traces",
     ),
     (
         "analytics_models_lead_tests_rejected_undone",
-        "Fewest undone edits in your test traces",
+        "Lowest share of edits undone in your test traces",
     ),
     (
         "analytics_models_lead_docs_cost",
@@ -574,11 +576,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_models_lead_rejected_across_tasks",
-        "Fewest rejected edits across your task types",
+        "Lowest share of edits rejected across your task types, weighted by task mix",
     ),
     (
         "analytics_models_lead_rejected_across_tasks_undone",
-        "Fewest undone edits across your task types",
+        "Lowest share of edits undone across your task types, weighted by task mix",
     ),
     (
         "analytics_models_lead_finish_time",
