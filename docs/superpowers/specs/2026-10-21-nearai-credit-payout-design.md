@@ -526,7 +526,12 @@ before picking).
    lock on a fixed key (`pg_try_advisory_lock(hashtextextended(
    'nearai-payout-pass-v1', 0))`, the same hashing the pipeline uses at
    `versioned_pipeline.rs:2177`) and exits at once if another process holds
-   it. Every change to a link's state (`active` to `closing`, `closing` to
+   it. The pass pins one connection for its whole run, so a pooled
+   connection never carries the lock back to the pool, and releases it with
+   `pg_advisory_unlock` on every exit path; a crash drops the connection and
+   with it the lock. (If pinning a connection fights the per-tenant
+   `SET LOCAL` pattern, a lease row with an expiry is the alternative.)
+   Every change to a link's state (`active` to `closing`, `closing` to
    `closed`, `waiting` to `active`) is made by the pass while holding it.
    The link and unlink routes only record a request: a new `waiting` row,
    or `unlink_requested_at` on the live link. At the start of each tenant's
@@ -753,10 +758,11 @@ stack (`crates/trace-commons-contributor/src/inference_connection.rs:190-230`,
 
 `DELETE` on the same path unlinks, under the same gate.
 `GET` returns `{linked, org_ref, state, version}`, never the id or a name.
-`org_ref` is `sha256("nearai-payout-org-ref-v1:" || link_id || ":" ||
-org_id)`: the daemon, which kept the org id it sent, can check that the
-server holds the same org without the server echoing it, and the link id in
-the hash stops two links' refs from being compared. The status line's org
+`org_ref` is `sha256("nearai-payout-org-ref-v1:" || idempotency_key || ":"
+|| org_id)`, with the `idempotency_key` the daemon sent on that link
+request. The daemon keeps both beside each other, so it can recompute the
+ref and check that the server holds the same org without the server echoing
+it; the per-request key stops two links' refs from being compared. The status line's org
 name comes from the daemon's own `/users/me` read, matched by that id.
 
 ### Storage
