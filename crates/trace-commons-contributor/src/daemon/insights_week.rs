@@ -337,29 +337,43 @@ struct CounterRow {
     /// model by its index into the body's declared labels. `None` when the
     /// facts scan could not read the transcript, the row is unknown, or it
     /// was made before facts were kept. Never a path, a text, a command or
-    /// a price.
-    #[serde(default)]
+    /// a price. Left out of the file while `None`, as are the three fields
+    /// after it at their defaults, so a row with none of them is written
+    /// as an older daemon wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     facts: Option<SessionFacts>,
     /// The `SESSION_FACTS_VERSION` the row was read under, set on every row
     /// a pass makes, `facts` or not, so a session the scan cannot read is
     /// not read on every poll. A row under another version (`0`: made
     /// before facts were kept) is read once more, within the per-poll
     /// budget, even when its file is unchanged.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     facts_version: u32,
     /// Whether the session was started by a tool (`Automation`). An
     /// automated row is kept under its own allowance
     /// (`COUNTER_STORE_MAX_AUTOMATED_SESSIONS`), outside the shared caps,
     /// and the Models answers, the Patterns cards and the Sessions feed
     /// leave it out; the weekly token figures count it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Automation::is_unknown")]
     automation: Automation,
     /// Whether `automation` was looked for when the row was read. A Codex
     /// row made before it lacks it and is read once more, within the
     /// per-poll budget, even when its file is unchanged. Claude Code has no
     /// marker, so its rows are never read again for it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     automation_read: bool,
+}
+
+/// For `skip_serializing_if`.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl Automation {
+    /// For `skip_serializing_if`.
+    fn is_unknown(&self) -> bool {
+        *self == Automation::Unknown
+    }
 }
 
 impl CounterRow {
@@ -6388,6 +6402,34 @@ mod tests {
                 .sum();
             assert_eq!(total, 6);
         }
+    }
+
+    /// Fields an older daemon does not know are left out of the file while
+    /// they hold their defaults, so a row this build would write the way
+    /// an older one did is written the same way. A row with facts or a
+    /// read automation marker still names them (see the PR's downgrade note
+    /// and the IPC doc's "The store").
+    #[test]
+    fn default_row_fields_are_left_out_of_the_file() {
+        let mut row = codex_series_row(written(), 0, 1, 0);
+        row.facts = None;
+        row.facts_version = 0;
+        row.automation = Automation::Unknown;
+        row.automation_read = false;
+        let value = serde_json::to_value(&row).unwrap();
+        for field in ["facts", "facts_version", "automation", "automation_read"] {
+            assert!(value.get(field).is_none(), "{field} written: {value}");
+        }
+        assert_eq!(serde_json::from_value::<CounterRow>(value).unwrap(), row);
+        // Set, they are written and read back.
+        row.facts_version = SESSION_FACTS_VERSION;
+        row.automation = Automation::Person;
+        row.automation_read = true;
+        let value = serde_json::to_value(&row).unwrap();
+        for field in ["facts_version", "automation", "automation_read"] {
+            assert!(value.get(field).is_some(), "{field} missing: {value}");
+        }
+        assert_eq!(serde_json::from_value::<CounterRow>(value).unwrap(), row);
     }
 
     /// Automated sessions' series go before the person's, whatever their
