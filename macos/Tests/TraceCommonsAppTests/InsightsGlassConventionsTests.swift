@@ -13,6 +13,7 @@ final class InsightsGlassConventionsTests: XCTestCase {
         "Views/InsightsView.swift",
         "Views/InsightsOverviewTab.swift",
         "Views/InsightsPatternsTab.swift",
+        "Views/InsightsModelsCard.swift",
         "Views/InsightsSessionsTab.swift",
         "Views/Monitor/InsightsGlanceCard.swift",
         "Views/Monitor/InferenceViews.swift",
@@ -127,6 +128,27 @@ final class InsightsGlassConventionsTests: XCTestCase {
         let glass = try Self.text("Views/InsightsGlass.swift")
         let card = try XCTUnwrap(glass.range(of: "struct InsightsScopeCard: View {"))
         XCTAssertTrue(glass[card.upperBound...].prefix(600).contains("GlassCard(quiet: true, flush: true) {"))
+    }
+
+    /// The Models card (spec 2026-10-20 section 8) is drawn only from
+    /// answers the daemon gave, so an older daemon or counting off hides it,
+    /// never greys it; each row is one VoiceOver element with the row's
+    /// whole sentence, and its "i" stays a control of its own.
+    func test_theModelsCardIsHiddenNotGreyedAndEachRowIsOneElement() throws {
+        let patterns = try Self.text("Views/InsightsPatternsTab.swift")
+        XCTAssertTrue(patterns.contains("if let answers = models?.answers {\n"
+            + "                    InsightsModelsCard(answers: answers, copy: copy)"))
+        let card = try Self.text("Views/InsightsModelsCard.swift")
+        let row = try XCTUnwrap(card.range(of: "struct InsightsModelsRow: View {"))
+        let rowBody = card[row.upperBound...]
+        XCTAssertTrue(rowBody.contains(".accessibilityElement(children: .ignore)\n"
+            + "            .accessibilityLabel(InsightsModelsWords.accessibilityLabel(row, copy: copy))"))
+        XCTAssertTrue(rowBody.contains("InsightsInfo(InsightsModelsWords.title(row, copy: copy),"))
+        for greyed in [".disabled(", ".opacity(", "textTertiary"] {
+            XCTAssertFalse(card.contains(greyed), "the Models card draws \(greyed)")
+        }
+        let view = try Self.text("Views/InsightsView.swift")
+        XCTAssertTrue(view.contains("{ try await client.insightsModelAnswers() }"))
     }
 
     func test_noLiteralWhiteOrBlackInk() throws {

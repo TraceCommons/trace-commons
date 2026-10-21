@@ -68,6 +68,52 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
         }
     }
 
+    /// The Models card at the pane's width in the core's own words: every
+    /// row state, both bases, money and a time. Every line has words and no
+    /// hole is left unfilled.
+    @MainActor
+    func test_theModelsCardRendersAtThePaneWidthInTheCoresWords() throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        let cases = InsightsModelsCardTests.self
+        let rows = [
+            cases.undoneRow,
+            cases.undoneRow.replacingOccurrences(of: #""question":"bug_fix_rejected""#,
+                                                 with: #""question":"refactor_rejected""#)
+                .replacingOccurrences(of: #""basis":"undone""#, with: #""basis":"rejected""#),
+            #"{"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,"leader":null,"next":null,"sessions_by_model":[["claude-opus-4-7",4],["gpt-5.5",1]],"left_out":\#(cases.zeroLeftOut)}"#,
+            cases.notPricedRow,
+            cases.undoneRow.replacingOccurrences(of: #""question":"bug_fix_rejected","state":"answered""#,
+                                                 with: #""question":"rejected_across_tasks","state":"no_clear_difference""#),
+            cases.finishRow,
+        ]
+        let recorded = try cases.answers()
+        let json = #"{"enabled":true,"feed":"counter_pass","readable":true,"window_start":"2026-07-21T12:00:00+00:00","window_end":"2026-10-20T12:00:00+00:00","rows":["#
+            + rows.joined(separator: ",") + "]}"
+        let answers = try cases.answers(json)
+        for answer in [answers, recorded] {
+            for row in try XCTUnwrap(answer.rows) {
+                let said = [InsightsModelsWords.title(row, copy: copy), InsightsModelsWords.scope(copy: copy)]
+                    + InsightsModelsWords.lines(row, copy: copy) + InsightsModelsWords.info(row, copy: copy)
+                    + [InsightsModelsWords.basisLine(row, copy: copy)].compactMap { $0 }
+                for line in said {
+                    XCTAssertFalse(line.isEmpty, row.question)
+                    XCTAssertFalse(line.contains("{"), "\(row.question): \(line)")
+                }
+            }
+        }
+        for (name, answer) in [("models", answers), ("models-recorded", recorded)] {
+            for dark in [true, false] {
+                let view = AnyView(ScrollView { InsightsModelsCard(answers: answer, copy: copy) })
+                let png = try Self.render(view, height: 1500, dark: dark)
+                XCTAssertGreaterThan(png.count, 20_000, name)
+                if let dir = ProcessInfo.processInfo.environment["TC_INSIGHTS_RENDER_DIR"] {
+                    try png.write(to: URL(fileURLWithPath: dir)
+                        .appendingPathComponent("insights-\(name)-\(dark ? "dark" : "light").png"))
+                }
+            }
+        }
+    }
+
     @MainActor
     private func settle(_ done: () -> Bool) async throws {
         for _ in 0 ..< 200 where !done() { try await Task.sleep(nanoseconds: 10_000_000) }
