@@ -86,7 +86,7 @@ final class InsightsModelAnswersWireTests: XCTestCase {
         XCTAssertEqual(finish.leftOut.unknownFacts, 18)
         XCTAssertEqual(finish.leftOut.reasons.map(\.reason), [
             "unknown_facts", "automated", "delegated", "capped", "routed", "reviewer", "no_majority",
-            "unpriced", "too_few_edits", "mix_too_different",
+            "unpriced", "too_few_sessions", "too_few_edits", "mix_too_different",
         ])
         for row in rows where row.question != "docs_cost" {
             XCTAssertNil(row.nearAiCharge, row.question)
