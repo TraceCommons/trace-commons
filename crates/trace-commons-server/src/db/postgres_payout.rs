@@ -26,16 +26,16 @@ use super::postgres::PgBackend;
 use super::{
     PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutControl, PayoutLine,
     PayoutLineResolution, PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLink,
-    PayoutLinkAction, PayoutLinkInsert, PayoutLinkRequest, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkWrite, PayoutOwed, PayoutRateEpoch,
-    PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
+    PayoutLinkAction, PayoutLinkClose, PayoutLinkInsert, PayoutLinkRequest,
+    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition,
+    PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore,
+    PendingPayoutLineInsert, SealedRecipient,
 };
 use crate::error::DatabaseError;
 
-const ONE_LINK_PER_STATE: [&str; 3] = [
-    "trace_payout_links_one_active",
+const ONE_LINK_PER_STATE: [&str; 2] = [
+    "trace_payout_links_one_live",
     "trace_payout_links_one_waiting",
-    "trace_payout_links_one_closing",
 ];
 
 /// The audit row's hash of a link id. Hash-only: the link id itself is not
@@ -394,52 +394,49 @@ impl PayoutStore for PgBackend {
         link_id: Uuid,
         from: PayoutLinkState,
         to: PayoutLinkState,
-        final_paid: Option<AtomicUnits>,
+        action: PayoutAuditAction,
         actor_ref_hash: &str,
         label: Option<&str>,
-    ) -> Result<bool, DatabaseError> {
-        use PayoutLinkState::{Active, Closed, Closing, Waiting};
-        if !matches!(
-            (from, to),
-            (Waiting, Active) | (Active, Closing) | (Closing, Closed)
-        ) {
+    ) -> Result<PayoutLinkTransition, DatabaseError> {
+        if !action.fits_link_transition(from, to) {
             return Err(DatabaseError::Constraint(
                 "payout_link_transition_invalid".into(),
             ));
         }
-        if (to == Closed) != final_paid.is_some() {
-            return Err(DatabaseError::Constraint(
-                "payout_link_final_paid_required".into(),
-            ));
-        }
-        let final_paid = final_paid.map(|units| units.get().to_string());
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // A waiting link goes active only while the account has no active or
+        // closing link on the rail: both states share the `one_live` index,
+        // which refuses the move at the row, whatever races it.
         let row = tx
             .query_opt(
-                "UPDATE trace_payout_links
-                    SET state = $4, final_paid = $5::TEXT::NUMERIC,
-                        version = version + 1, updated_at = clock_timestamp()
-                  WHERE tenant_id = $1 AND link_id = $2 AND state = $3
-                  RETURNING rail_id",
-                &[&tenant, &link_id, &from.as_str(), &to.as_str(), &final_paid],
+                "UPDATE trace_payout_links AS l
+                    SET state = $4, version = l.version + 1, updated_at = clock_timestamp()
+                  WHERE l.tenant_id = $1 AND l.link_id = $2 AND l.state = $3
+                  RETURNING l.rail_id",
+                &[&tenant, &link_id, &from.as_str(), &to.as_str()],
             )
-            .await
-            .map_err(|error| match violated_constraint(&error) {
-                Some(constraint) if ONE_LINK_PER_STATE.contains(&constraint.as_str()) => {
-                    DatabaseError::Constraint("payout_link_state_taken".into())
-                }
-                _ => DatabaseError::Postgres(error),
-            })?;
+            .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(error)
+                if violated_constraint(&error).is_some_and(|constraint| {
+                    ONE_LINK_PER_STATE.contains(&constraint.as_str())
+                }) =>
+            {
+                return Ok(PayoutLinkTransition::LiveLinkTaken);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Some(row) = row else {
-            return Ok(false);
+            return Ok(PayoutLinkTransition::NotInState);
         };
         let rail: String = row.get(0);
         insert_audit(
             &tx,
             tenant,
             &rail,
-            PayoutAuditAction::for_link_state(to),
+            action,
             actor_ref_hash,
             Some(link_id),
             Some(from),
@@ -448,7 +445,95 @@ impl PayoutStore for PgBackend {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(PayoutLinkTransition::Moved)
+    }
+
+    async fn close_payout_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError> {
+        use PayoutLinkState::{Active, Closed, Closing, Waiting};
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let closed = tx
+            .query_opt(
+                "UPDATE trace_payout_links AS l
+                    SET state = 'closed', final_paid = $3::TEXT::NUMERIC,
+                        version = l.version + 1, updated_at = clock_timestamp()
+                  WHERE l.tenant_id = $1 AND l.link_id = $2 AND l.state = 'closing'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_payout_lines p
+                         WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id
+                           AND p.state = 'pending')
+                  RETURNING l.account_id, l.rail_id",
+                &[&tenant, &link_id, &final_paid.get().to_string()],
+            )
+            .await?;
+        let Some(closed) = closed else {
+            // Nothing changed; say why. The transaction rolls back on drop.
+            let closing: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_payout_links
+                                     WHERE tenant_id = $1 AND link_id = $2
+                                       AND state = 'closing')",
+                    &[&tenant, &link_id],
+                )
+                .await?
+                .get(0);
+            return Ok(if closing {
+                PayoutLinkClose::PendingLineOpen
+            } else {
+                PayoutLinkClose::NotClosing
+            });
+        };
+        let account: Uuid = closed.get(0);
+        let rail: String = closed.get(1);
+        insert_audit(
+            &tx,
+            tenant,
+            &rail,
+            PayoutAuditAction::LinkClosed,
+            actor_ref_hash,
+            Some(link_id),
+            Some(Closing),
+            Some(Closed),
+            label,
+        )
+        .await?;
+        if let Some(successor) = successor {
+            let activated = tx
+                .execute(
+                    "UPDATE trace_payout_links
+                        SET state = 'active', version = version + 1,
+                            updated_at = clock_timestamp()
+                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'waiting'
+                        AND account_id = $3 AND rail_id = $4",
+                    &[&tenant, &successor, &account, &rail],
+                )
+                .await?;
+            if activated == 0 {
+                return Ok(PayoutLinkClose::SuccessorNotWaiting);
+            }
+            insert_audit(
+                &tx,
+                tenant,
+                &rail,
+                PayoutAuditAction::LinkActivated,
+                actor_ref_hash,
+                Some(successor),
+                Some(Waiting),
+                Some(Active),
+                label,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(PayoutLinkClose::Closed)
     }
 
     async fn insert_pending_payout_line(
@@ -458,13 +543,20 @@ impl PayoutStore for PgBackend {
     ) -> Result<PendingPayoutLineInsert, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // Only onto the account's active link on the line's rail: never a
+        // waiting, closing or closed one.
         let inserted = tx
             .execute(
                 "INSERT INTO trace_payout_lines (
                      tenant_id, line_id, account_id, rail_id, link_id, target_total,
                      delta, owed_through_accrual_count, state
-                 ) VALUES ($1, $2, $3, $4, $5, $6::TEXT::NUMERIC, $7::TEXT::NUMERIC, $8,
-                           'pending')",
+                 )
+                 SELECT l.tenant_id, $2::UUID, l.account_id, l.rail_id, l.link_id,
+                        $6::TEXT::NUMERIC, $7::TEXT::NUMERIC, $8::BIGINT, 'pending'
+                   FROM trace_payout_links l
+                  WHERE l.tenant_id = $1::TEXT AND l.link_id = $5::UUID
+                    AND l.account_id = $3::UUID AND l.rail_id = $4::TEXT
+                    AND l.state = 'active'",
                 &[
                     &tenant,
                     &line.line_id,
@@ -477,12 +569,19 @@ impl PayoutStore for PgBackend {
                 ],
             )
             .await;
-        if let Err(error) = &inserted {
-            if violated_constraint(error).as_deref() == Some("trace_payout_lines_one_pending") {
+        let inserted = match inserted {
+            Ok(inserted) => inserted,
+            Err(error)
+                if violated_constraint(&error).as_deref()
+                    == Some("trace_payout_lines_one_pending") =>
+            {
                 return Ok(PendingPayoutLineInsert::LinkHasPendingLine);
             }
+            Err(error) => return Err(error.into()),
+        };
+        if inserted == 0 {
+            return Ok(PendingPayoutLineInsert::LinkNotActive);
         }
-        inserted?;
         tx.commit().await?;
         Ok(PendingPayoutLineInsert::Inserted)
     }

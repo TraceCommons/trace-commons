@@ -128,14 +128,18 @@ CREATE TABLE trace_payout_links (
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
         ON DELETE NO ACTION
 );
--- At most one active, one waiting and one closing link per account and rail.
--- No uniqueness on recipient_index: many accounts may name one recipient (D7).
-CREATE UNIQUE INDEX trace_payout_links_one_active
-    ON trace_payout_links (tenant_id, account_id, rail_id) WHERE state = 'active';
+-- At most one waiting link, and at most one link that is active OR
+-- closing, per account and rail. Active and closing share one slot: a new
+-- link's target is owed minus the closed links' final_paid, which leaves
+-- out what a still-closing link was paid, so a link may go active only once
+-- its predecessor is closed (the pass closes one and activates the other in
+-- one transaction). No uniqueness on recipient_index: many accounts may
+-- name one recipient (D7).
+CREATE UNIQUE INDEX trace_payout_links_one_live
+    ON trace_payout_links (tenant_id, account_id, rail_id)
+    WHERE state IN ('active', 'closing');
 CREATE UNIQUE INDEX trace_payout_links_one_waiting
     ON trace_payout_links (tenant_id, account_id, rail_id) WHERE state = 'waiting';
-CREATE UNIQUE INDEX trace_payout_links_one_closing
-    ON trace_payout_links (tenant_id, account_id, rail_id) WHERE state = 'closing';
 CREATE INDEX trace_payout_links_rail_state
     ON trace_payout_links (rail_id, state, tenant_id);
 CREATE INDEX trace_payout_links_pepper_ref ON trace_payout_links (index_pepper_ref);

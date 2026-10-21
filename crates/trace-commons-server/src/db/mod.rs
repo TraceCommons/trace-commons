@@ -2666,8 +2666,9 @@ use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
 use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
 use uuid::Uuid;
 
-/// A link's lifecycle on one rail. At most one `Active`, one `Waiting` and
-/// one `Closing` link per account and rail.
+/// A link's lifecycle on one rail. Per account and rail, at most one
+/// `Waiting` link and at most one link that is `Active` or `Closing`: a link
+/// goes active only once its predecessor is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PayoutLinkState {
     Waiting,
@@ -2802,14 +2803,17 @@ impl PayoutAuditAction {
         })
     }
 
-    /// The audit action a link transition into `state` records.
-    pub fn for_link_state(state: PayoutLinkState) -> Self {
-        match state {
-            PayoutLinkState::Waiting => Self::LinkConfirmed,
-            PayoutLinkState::Active => Self::LinkActivated,
-            PayoutLinkState::Closing => Self::LinkClosing,
-            PayoutLinkState::Closed => Self::LinkClosed,
-        }
+    /// Whether this action may record a `from` to `to` link transition made
+    /// by [`PayoutStore::transition_payout_link`]: `waiting` to `active` is
+    /// `LinkActivated`; `active` to `closing` is `LinkClosing` (a change or
+    /// an unlink) or `LinkReleased` (an operator release).
+    pub fn fits_link_transition(self, from: PayoutLinkState, to: PayoutLinkState) -> bool {
+        use PayoutLinkState::{Active, Closing, Waiting};
+        matches!(
+            (from, to, self),
+            (Waiting, Active, Self::LinkActivated)
+                | (Active, Closing, Self::LinkClosing | Self::LinkReleased)
+        )
     }
 }
 
@@ -2883,8 +2887,35 @@ pub struct PayoutLinkWrite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayoutLinkInsert {
     Inserted,
-    /// The account already has a link in that state on that rail.
+    /// The account already has a waiting link on that rail or, for an
+    /// active insert, an active or closing one.
     StateTaken,
+}
+
+/// The outcome of [`PayoutStore::transition_payout_link`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkTransition {
+    Moved,
+    /// The link is not in `from` in this tenant; nothing changed.
+    NotInState,
+    /// Activating would give the account a second active-or-closing link on
+    /// the rail; nothing changed. A waiting successor is activated by
+    /// [`PayoutStore::close_payout_link`] instead.
+    LiveLinkTaken,
+}
+
+/// The outcome of [`PayoutStore::close_payout_link`]. Every variant but
+/// `Closed` changed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkClose {
+    Closed,
+    /// The link is not `closing` in this tenant.
+    NotClosing,
+    /// The link still has a `pending` line, which recovery resolves first.
+    PendingLineOpen,
+    /// The named successor is not a `waiting` link of the same account and
+    /// rail.
+    SuccessorNotWaiting,
 }
 
 /// A stored link. `Debug` redacts the recipient and the program.
@@ -2932,6 +2963,9 @@ pub enum PendingPayoutLineInsert {
     Inserted,
     /// The link already has an unresolved line, which recovery handles first.
     LinkHasPendingLine,
+    /// The link is not `active` (or is not this account's on this rail): a
+    /// line is never written to a waiting, closing or closed link.
+    LinkNotActive,
 }
 
 /// A stored line. `Debug` redacts the account.
@@ -3183,11 +3217,12 @@ pub trait PayoutStore: Send + Sync {
         link: &PayoutLinkWrite,
     ) -> Result<PayoutLinkInsert, DatabaseError>;
 
-    /// Moves a link from `from` to `to` and writes its audit row, in one
-    /// transaction. `final_paid` is required for, and only for, `Closed`.
-    /// Returns false, changing nothing, when the link is not in `from`. A
-    /// move that would give the account a second link in `to` on the rail is
-    /// an error.
+    /// Moves a link `waiting` to `active`, or `active` to `closing`, and
+    /// writes `action`'s audit row, in one transaction. `action` must fit
+    /// the move ([`PayoutAuditAction::fits_link_transition`]); any other
+    /// pair is an error. A waiting link cannot go active while the account
+    /// has an active or closing link on the rail (`LiveLinkTaken`); closing
+    /// to closed is [`Self::close_payout_link`].
     #[allow(clippy::too_many_arguments)]
     async fn transition_payout_link(
         &self,
@@ -3195,11 +3230,31 @@ pub trait PayoutStore: Send + Sync {
         link_id: Uuid,
         from: PayoutLinkState,
         to: PayoutLinkState,
-        final_paid: Option<AtomicUnits>,
+        action: PayoutAuditAction,
         actor_ref_hash: &str,
         label: Option<&str>,
-    ) -> Result<bool, DatabaseError>;
+    ) -> Result<PayoutLinkTransition, DatabaseError>;
 
+    /// Closes a `closing` link with its program total `final_paid` and, when
+    /// `successor` names the same account's `waiting` link on the same rail,
+    /// activates it, in one transaction with an audit row for each (spec
+    /// section 5, "Closing"). Refuses, changing nothing, while the closing
+    /// link has a `pending` line. Concurrent writers are excluded by the
+    /// rail pass's single-flight lock; the V132 link trigger refuses a close
+    /// over a pending line as a backstop.
+    #[allow(clippy::too_many_arguments)]
+    async fn close_payout_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError>;
+
+    /// Writes a `pending` line, only onto the account's `active` link on the
+    /// line's rail.
     async fn insert_pending_payout_line(
         &self,
         tenant: &str,

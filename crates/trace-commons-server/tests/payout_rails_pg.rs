@@ -25,9 +25,10 @@ use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     Database, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutLineResolution,
-    PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLinkAction, PayoutLinkInsert,
-    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkWrite,
-    PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
+    PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLinkAction, PayoutLinkClose,
+    PayoutLinkInsert, PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState,
+    PayoutLinkTransition, PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore,
+    PendingPayoutLineInsert, SealedRecipient,
 };
 use uuid::Uuid;
 
@@ -476,13 +477,52 @@ async fn at_most_one_active_waiting_and_closing_link_per_account_and_rail() {
             PayoutLinkInsert::Inserted
         );
     }
-    // Closing: the active link moves to closing; a second closing is refused.
+    // Closing: the active link moves to closing, and closing shares the
+    // active slot, so neither a new active link nor a second closing one
+    // fits beside it.
     let near_ai = rail("near_ai");
     let active = store
         .payout_live_link(&tenant, accounts[0], &near_ai)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        store
+            .transition_payout_link(
+                &tenant,
+                active.link_id,
+                PayoutLinkState::Active,
+                PayoutLinkState::Closing,
+                PayoutAuditAction::LinkClosing,
+                ACTOR,
+                None,
+            )
+            .await
+            .unwrap(),
+        PayoutLinkTransition::Moved
+    );
+    let next = link(accounts[0], "near_ai", PayoutLinkState::Active, "next");
+    assert_eq!(
+        store.insert_payout_link(&tenant, &next).await.unwrap(),
+        PayoutLinkInsert::StateTaken,
+        "an active link inserted beside a closing one"
+    );
+    // An action that does not fit the move is refused before any write.
+    assert!(
+        store
+            .transition_payout_link(
+                &tenant,
+                active.link_id,
+                PayoutLinkState::Closing,
+                PayoutLinkState::Closed,
+                PayoutAuditAction::LinkClosed,
+                ACTOR,
+                None,
+            )
+            .await
+            .is_err(),
+        "closing to closed goes through close_payout_link"
+    );
     assert!(
         store
             .transition_payout_link(
@@ -490,64 +530,28 @@ async fn at_most_one_active_waiting_and_closing_link_per_account_and_rail() {
                 active.link_id,
                 PayoutLinkState::Active,
                 PayoutLinkState::Closing,
-                None,
-                ACTOR,
-                None,
-            )
-            .await
-            .unwrap()
-    );
-    // A new active is now allowed beside the closing one...
-    let next = link(accounts[0], "near_ai", PayoutLinkState::Active, "next");
-    assert_eq!(
-        store.insert_payout_link(&tenant, &next).await.unwrap(),
-        PayoutLinkInsert::Inserted
-    );
-    // ...but it cannot also become closing while the first still is.
-    let refused = store
-        .transition_payout_link(
-            &tenant,
-            next.link_id,
-            PayoutLinkState::Active,
-            PayoutLinkState::Closing,
-            None,
-            ACTOR,
-            None,
-        )
-        .await;
-    assert!(
-        refused.is_err(),
-        "two closing links on one account and rail"
-    );
-    // Closing needs the final total; closed then frees the slot.
-    assert!(
-        store
-            .transition_payout_link(
-                &tenant,
-                active.link_id,
-                PayoutLinkState::Closing,
-                PayoutLinkState::Closed,
-                None,
+                PayoutAuditAction::LinkActivated,
                 ACTOR,
                 None,
             )
             .await
             .is_err(),
-        "a link closed without final_paid"
+        "an audit action that does not fit the move"
     );
-    assert!(
+    // The close records the final total and frees the slot.
+    assert_eq!(
         store
-            .transition_payout_link(
+            .close_payout_link(
                 &tenant,
                 active.link_id,
-                PayoutLinkState::Closing,
-                PayoutLinkState::Closed,
-                Some(AtomicUnits::from_raw(7)),
-                ACTOR,
+                AtomicUnits::from_raw(7),
                 None,
+                ACTOR,
+                None
             )
             .await
-            .unwrap()
+            .unwrap(),
+        PayoutLinkClose::Closed
     );
     assert_eq!(
         store
@@ -556,20 +560,39 @@ async fn at_most_one_active_waiting_and_closing_link_per_account_and_rail() {
             .unwrap(),
         7
     );
-    // A transition from the wrong state changes nothing.
-    assert!(
-        !store
+    assert_eq!(
+        store.insert_payout_link(&tenant, &next).await.unwrap(),
+        PayoutLinkInsert::Inserted
+    );
+    // A transition or a close from the wrong state changes nothing.
+    assert_eq!(
+        store
             .transition_payout_link(
                 &tenant,
                 active.link_id,
                 PayoutLinkState::Active,
                 PayoutLinkState::Closing,
-                None,
+                PayoutAuditAction::LinkReleased,
                 ACTOR,
                 None,
             )
             .await
-            .unwrap()
+            .unwrap(),
+        PayoutLinkTransition::NotInState
+    );
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant,
+                active.link_id,
+                AtomicUnits::from_raw(8),
+                None,
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::NotClosing
     );
     // Every insert and transition wrote one audit row, as the runtime role.
     let audit = store.payout_audit_actions(&tenant, &near_ai).await.unwrap();
@@ -930,31 +953,41 @@ async fn atomic_units_round_trip_numeric_39() {
     assert_eq!(read.target_total.get(), big);
     assert_eq!(read.delta.get(), above_u64);
 
-    // Closed links' final totals.
+    // Closed links' final totals. The pending line is resolved first: a
+    // link with a pending line does not close.
     store
-        .transition_payout_link(
-            &tenant,
-            live.link_id,
-            PayoutLinkState::Active,
-            PayoutLinkState::Closing,
-            None,
-            ACTOR,
-            None,
-        )
+        .resolve_payout_line(&tenant, pending.line_id, &PayoutLineResolution::NoOp)
         .await
         .unwrap();
-    store
-        .transition_payout_link(
-            &tenant,
-            live.link_id,
-            PayoutLinkState::Closing,
-            PayoutLinkState::Closed,
-            Some(AtomicUnits::from_raw(big)),
-            ACTOR,
-            None,
-        )
-        .await
-        .unwrap();
+    assert_eq!(
+        store
+            .transition_payout_link(
+                &tenant,
+                live.link_id,
+                PayoutLinkState::Active,
+                PayoutLinkState::Closing,
+                PayoutAuditAction::LinkClosing,
+                ACTOR,
+                None,
+            )
+            .await
+            .unwrap(),
+        PayoutLinkTransition::Moved
+    );
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant,
+                live.link_id,
+                AtomicUnits::from_raw(big),
+                None,
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::Closed
+    );
     assert_eq!(
         store
             .payout_closed_links_final_paid(&tenant, accounts[0], &rail("near_ai"))
@@ -1531,4 +1564,223 @@ async fn an_account_with_payout_rows_refuses_deletion_at_the_statement() {
         .await
         .expect("a tenant delete cascades through accounts and payout rows");
     assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+async fn a_waiting_link_cannot_activate_beside_a_closing_one() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let old = link(accounts[0], "near_ai", PayoutLinkState::Active, "g1");
+    store.insert_payout_link(&tenant, &old).await.unwrap();
+    let moved = store
+        .transition_payout_link(
+            &tenant,
+            old.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved, PayoutLinkTransition::Moved);
+    let next = link(accounts[0], "near_ai", PayoutLinkState::Waiting, "g2");
+    store.insert_payout_link(&tenant, &next).await.unwrap();
+    // The new link's target leaves out what the closing link was paid, so
+    // activating it before the close would pay that amount twice.
+    let activated = store
+        .transition_payout_link(
+            &tenant,
+            next.link_id,
+            PayoutLinkState::Waiting,
+            PayoutLinkState::Active,
+            PayoutAuditAction::LinkActivated,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        activated,
+        PayoutLinkTransition::LiveLinkTaken,
+        "a waiting link went active while the account's closing link was open"
+    );
+    // The close activates it instead, in the same transaction.
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant,
+                old.link_id,
+                AtomicUnits::from_raw(4),
+                Some(next.link_id),
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::Closed
+    );
+    let live = store
+        .payout_live_link(&tenant, accounts[0], &rail("near_ai"))
+        .await
+        .unwrap()
+        .expect("the successor is active");
+    assert_eq!(live.link_id, next.link_id);
+    let audit = store
+        .payout_audit_actions(&tenant, &rail("near_ai"))
+        .await
+        .unwrap();
+    assert_eq!(
+        &audit[audit.len() - 2..],
+        &[
+            PayoutAuditAction::LinkClosed,
+            PayoutAuditAction::LinkActivated
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_close_with_a_bad_successor_changes_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let store = &fixture.runtime;
+    let old = link(accounts[0], "near_ai", PayoutLinkState::Active, "s1");
+    store.insert_payout_link(&tenant, &old).await.unwrap();
+    store
+        .transition_payout_link(
+            &tenant,
+            old.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    // Another account's waiting link is not this link's successor.
+    let other = link(accounts[1], "near_ai", PayoutLinkState::Waiting, "s2");
+    store.insert_payout_link(&tenant, &other).await.unwrap();
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant,
+                old.link_id,
+                AtomicUnits::from_raw(1),
+                Some(other.link_id),
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::SuccessorNotWaiting
+    );
+    // The close was rolled back with it: the link is still closing.
+    assert_eq!(
+        store
+            .payout_closed_links_final_paid(&tenant, accounts[0], &rail("near_ai"))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .close_payout_link(
+                &tenant,
+                old.link_id,
+                AtomicUnits::from_raw(1),
+                None,
+                ACTOR,
+                None
+            )
+            .await
+            .unwrap(),
+        PayoutLinkClose::Closed
+    );
+}
+
+#[tokio::test]
+async fn a_closing_link_with_a_pending_line_cannot_close() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let old = link(accounts[0], "near_ai", PayoutLinkState::Active, "c1");
+    store.insert_payout_link(&tenant, &old).await.unwrap();
+    store
+        .insert_pending_payout_line(&tenant, &line(&old, 9, 9))
+        .await
+        .unwrap();
+    store
+        .transition_payout_link(
+            &tenant,
+            old.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    // Recovery must resolve the line first: closing now would count a
+    // final_paid that a later re-send to the closed program could exceed.
+    let closed = store
+        .close_payout_link(
+            &tenant,
+            old.link_id,
+            AtomicUnits::from_raw(0),
+            None,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        closed,
+        PayoutLinkClose::PendingLineOpen,
+        "a link closed with a pending line still on it"
+    );
+}
+
+#[tokio::test]
+async fn a_line_is_written_only_to_an_active_link() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let old = link(accounts[0], "near_ai", PayoutLinkState::Active, "l1");
+    store.insert_payout_link(&tenant, &old).await.unwrap();
+    store
+        .transition_payout_link(
+            &tenant,
+            old.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    let waiting = link(accounts[0], "near_ai", PayoutLinkState::Waiting, "l2");
+    store.insert_payout_link(&tenant, &waiting).await.unwrap();
+    for (target, what) in [(&old, "closing"), (&waiting, "waiting")] {
+        let inserted = store
+            .insert_pending_payout_line(&tenant, &line(target, 3, 3))
+            .await;
+        assert_eq!(
+            inserted.unwrap(),
+            PendingPayoutLineInsert::LinkNotActive,
+            "a line was written to a {what} link"
+        );
+    }
 }
