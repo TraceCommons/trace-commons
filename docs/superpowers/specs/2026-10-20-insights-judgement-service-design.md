@@ -400,6 +400,30 @@ service verifies the claim offline against the issuer's Ed25519 public key(s)
 in its measured compose environment (`TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS`).
 It makes no call to ingest.
 
+- **Lifetime and clock skew** (#1530 review point 2). The issuer clamps a
+  judgement claim's lifetime to `min(max_ttl, 840)` seconds: 900 minus the
+  60 s skew allowance. The verifier accepts `now <= exp + 60`,
+  `exp - now <= 900 + 60` and `iat <= now + 60`. With the earlier clamp of 900
+  and no skew on the `exp - now` bound, a service clock one second behind the
+  issuer refused every claim once an operator raised the upload TTL to 900 or
+  more. Tests verify at `issuer_now - 30` and `issuer_now + 30`.
+- **The claim route's refusals are a closed set** (#1530 review point 3).
+  `insights_judgement.rs` gains `JudgementClaimRefusal`, which has a label, a
+  status and a retry class for each refusal. The handler returns only its
+  labels, and a test pins every string. Each of today's refusals maps to one
+  member:
+  - permanent: request malformed, device key id mismatch, device key not
+    registered, device key revoked, `judgement_account_ineligible` (not this
+    month);
+  - retry once with a fresh timestamp: `insights_judgement_claim_request_stale`;
+  - retry after 30 s: registry unavailable (today's 503), issue failed (today's
+    500 "failed to issue upload claim").
+
+  The doc comment that called these "the device-key labels the upload-claim
+  route already uses" is corrected. The upload-claim route spells them with
+  spaces, and this route does not. The daemon's re-mint logic (slice 7)
+  matches only the set, never prose.
+
 **Response, `200`:** `application/octet-stream`, `0x01 || ciphertext || tag`,
 sealed under `k_resp`. Only the daemon that made `eph_sk` can open it, so the
 labels do not cross the gateway in the clear either. The plaintext is this
@@ -841,6 +865,26 @@ The month is the UTC calendar month. A cap change is a new measurement.
   (`judgement_limiter_unreadable`). If the file is absent and
   `/data/limiter.initialized` exists, boot refuses. If both are absent, the
   service creates both and logs `limiter_initialized`.
+- **Losing the volume resets every cap, and nothing detects it** (#1531
+  review point 8). The ledger and the marker live on the same volume. A
+  recreated CVM, a volume that is not reattached, or a rolled-back snapshot
+  boots as fresh with zero spend. That is the residual risk until a counter
+  exists outside the volume: each such event allows up to one more $5 per
+  account and one more $100 of operator budget in that month. The only
+  signal is the `limiter_initialized` log label at a boot the operator did
+  not intend.
+- **Recovering from the two boot refusals.** Neither is repaired
+  automatically, and each recovery is a deliberate reset that is recorded:
+  - `judgement_limiter_unreadable` (the file exists and does not decrypt).
+    Compare the app id and KMS against `deploy/judgement/README.md`. If either
+    changed, this is the "Rotate" case of section 9. Otherwise the file is
+    corrupt. In both cases, keep a copy of the file, delete
+    `/data/limiter.v1.sealed` and `/data/limiter.initialized`, and boot.
+  - `judgement_limiter_missing` (the marker is present, the ledger is absent).
+    The ledger was deleted or lost. Delete the marker and boot.
+  - Either way, add a row to the ledger-reset log in
+    `deploy/judgement/README.md`: date, cause, and who. Spend for the month
+    restarts at zero.
 - **What an operator can still do:** delete the whole volume, or roll the file
   back to an older copy, and so reset spend. Both only spend the operator's
   own money; neither reveals anything, because the file is sealed. The
@@ -935,7 +979,8 @@ prompts, the digest, the claim, or NEAR AI response text.
 | Quote call exceeds 10 s or the attestation bound is full | `judgement_quote_unavailable`. |
 | No model configured, model not on the production allowlist, catalog check or signer pin fails at boot | Boot refuses. |
 | Issuer public key absent or malformed | Boot refuses. |
-| Limiter volume absent, or ledger unreadable or missing with the marker present | Boot refuses. |
+| Limiter volume absent, or ledger unreadable or missing with the marker present | Boot refuses. Recovery is a recorded, deliberate reset (section 6). |
+| Ledger and marker both absent (a lost or replaced volume) | Boots fresh with zero spend and logs `limiter_initialized`. Residual risk, stated in section 6. |
 | Catalog flag flips, or refresh stale over 24 h | That model's calls refused, `judgement_model_unattested`. |
 | NEAR AI gateway quote fails DCAP, its measurement is not pinned, its report data does not bind the nonce and `spki_hash`, or the fingerprint field is absent, at boot | Boot refuses. |
 | A NEAR AI-hosted model is configured but the gateway check is not compiled in or not configured | Boot refuses, `missing_control:judgement_near_gateway_pin`. |
