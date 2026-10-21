@@ -1330,3 +1330,36 @@ fn a_model_with_no_qualifying_cell_does_not_weigh_in_the_mix() {
         vec![("model-a", 5), ("model-b", 5), ("model-c", 4)]
     );
 }
+
+/// A session classified as no edits only because its edits could not be
+/// seen (Codex shell-only work: `edits` unknown) has an unknown task, so it
+/// is counted as left out on every row, never dropped silently as a known
+/// no-edit session is.
+#[test]
+fn a_no_edit_session_whose_edits_are_unknown_is_counted_as_left_out() {
+    let base = answer(&bugfix_pair());
+    let mut sessions = bugfix_pair();
+    sessions.push(claude(
+        "a-shell-only",
+        &["model-a"],
+        &[Some(0)],
+        Some(facts(
+            InferredTask::NoEdits,
+            vec![mf(0, None, None, Some(0), Some(0))],
+        )),
+    ));
+    sessions.push(solo(
+        "a-none",
+        "model-a",
+        InferredTask::NoEdits,
+        0,
+        Some(0),
+        0,
+    ));
+    let answers = answer(&sessions);
+    for (with, without) in answers.rows.iter().zip(&base.rows) {
+        let mut expected = without.clone();
+        expected.left_out.unknown_facts += 1;
+        assert_eq!(with, &expected, "{:?}", with.question);
+    }
+}
