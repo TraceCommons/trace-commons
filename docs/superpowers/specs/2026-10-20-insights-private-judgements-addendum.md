@@ -112,7 +112,11 @@ A **judgement digest**, built locally after the privacy filter runs:
   plus per-turn edit and command outcomes.
 - **Contributor prompts:** at most 12 per session, each scrubbed and cut to
   240 characters. With more than 12, take the first 4, the last 4, and the 4
-  just before each denial, interrupt or undo.
+  just before each denial, interrupt or undo (the 4 up to and including the
+  prompt whose turn carried it; earlier events win when slots run out).
+  Slots the events leave free go to the middle prompts not yet chosen, at
+  evenly spaced positions, so a session with more than 12 prompts always
+  sends 12. Never more than 12.
 - **Final message:** the first line of the model's final message, scrubbed and
   cut to 160 characters.
 - **Edited files:** each file's extension class, never its path.
