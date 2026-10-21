@@ -4,7 +4,8 @@ import Foundation
 import TCBridge
 
 /// Debug builds only: the saved traces the sample week's Analyze tab shows
-/// (`InsightsSampleWeek`), shaped as the core sends them. Five saved
+/// (`InsightsSampleWeek`), shaped as the core sends them and with the IDs
+/// and digests its store would check them against. Five saved
 /// snapshots in the sample week, Claude Code and Codex, three of them
 /// assessed, one with a commit and a test report linked; the saved history
 /// summary reduced from them as the core reduces it; one group of two of
@@ -71,14 +72,28 @@ extension InsightsSampleWeek {
     }
 
     /// A stable 64-digit lowercase hex digest, as the core's IDs are.
-    static func digest(_ seed: String) -> String {
-        SHA256.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
+    static func digest(_ seed: String) -> String { digest(Data(seed.utf8)) }
+
+    static func digest(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The core's members digest (`episodes::members_digest`): SHA-256 of
+    /// `trace-commons-episode-members-v1\0`, the member count as a big-endian
+    /// u64, then each member's ID and source digest, in canonical order.
+    static func membersDigest(_ members: [SampleTrace]) -> String {
+        var bytes = Data("trace-commons-episode-members-v1\0".utf8)
+        withUnsafeBytes(of: UInt64(members.count).bigEndian) { bytes.append(contentsOf: $0) }
+        for member in members { bytes.append(contentsOf: Data((member.id + member.sourceDigest).utf8)) }
+        return digest(bytes)
     }
 
     // MARK: The saved traces
 
     /// One metric as the core reports it: `nil` is unknown, with the
-    /// coverage it had.
+    /// coverage it had. The core's store holds a snapshot only if each one
+    /// keeps its rules (`validate_local_metrics`), so the sample keeps them
+    /// too: tokens and known outcomes are never reported.
     struct SampleMetric {
         let id: String
         let value: Int?
@@ -98,11 +113,14 @@ extension InsightsSampleWeek {
         let toolCalls: Int
         /// Failures and the tool results that said whether they failed.
         let failures: (value: Int, results: Int)?
-        let tokens: (input: Int, output: Int)?
         let annotation: (category: String, outcome: String, at: String)?
         let linked: Bool
 
-        var id: String { InsightsSampleWeek.digest("sample-snapshot-" + seed) }
+        /// The core's snapshot identity (`snapshot_identity`): the format's
+        /// stable ID and the source digest.
+        var id: String {
+            InsightsSampleWeek.digest((source == "claude_code" ? "ClaudeCode" : "Codex") + ":" + sourceDigest)
+        }
         var sourceDigest: String { InsightsSampleWeek.digest("sample-source-" + seed) }
 
         /// The report's metrics, in the core's order.
@@ -113,8 +131,8 @@ extension InsightsSampleWeek {
                 .init(id: "tool_calls", value: toolCalls, observed: events, total: events),
                 .init(id: "tool_failures", value: failures?.value,
                       observed: failures?.results ?? 0, total: failures == nil ? 1 : toolCalls),
-                .init(id: "input_tokens", value: tokens?.input, observed: tokens == nil ? 0 : 1, total: 1),
-                .init(id: "output_tokens", value: tokens?.output, observed: tokens == nil ? 0 : 1, total: 1),
+                .init(id: "input_tokens", value: nil, observed: 0, total: 1),
+                .init(id: "output_tokens", value: nil, observed: 0, total: 1),
                 .init(id: "known_outcomes", value: nil, observed: 0, total: 1),
             ]
         }
@@ -168,25 +186,29 @@ extension InsightsSampleWeek {
             ]
         }
 
-        /// The commit the work landed in and the test run against it.
+        /// The commit the work landed in and the test run against it. Each
+        /// link's ID is its evidence's identity, as the core's is
+        /// (`identity_digest`).
         private var outcomeLinks: [[String: Any]] {
             let commit = String(InsightsSampleWeek.digest("sample-commit-" + seed).prefix(40))
+            let repository = InsightsSampleWeek.digest("sample-repository")
+            let report = InsightsSampleWeek.digest("sample-report-" + seed)
             return [
-                ["id": InsightsSampleWeek.digest("sample-link-git-" + seed), "source_digest": sourceDigest,
-                 "linked_at": "2026-10-06T17:04:00Z", "provenance": "user_linked",
+                ["id": InsightsSampleWeek.digest("git-commit:\(repository):\(commit)"),
+                 "source_digest": sourceDigest, "linked_at": "2026-10-06T17:04:00Z", "provenance": "user_linked",
                  "evidence": ["type": "git_commit", "evidence": [
-                     "repository_path_digest": InsightsSampleWeek.digest("sample-repository"),
+                     "repository_path_digest": repository,
                      "object_id": commit,
                      "tree_id": String(InsightsSampleWeek.digest("sample-tree-" + seed).prefix(40)),
                      "parent_ids": [String(InsightsSampleWeek.digest("sample-parent-" + seed).prefix(40))],
                      "inspected_at": "2026-10-06T17:04:00Z", "provenance": "inspected_local_object",
                  ]]],
-                ["id": InsightsSampleWeek.digest("sample-link-test-" + seed), "source_digest": sourceDigest,
+                ["id": InsightsSampleWeek.digest("test-report:" + report), "source_digest": sourceDigest,
                  "linked_at": "2026-10-06T17:06:00Z", "provenance": "user_linked",
                  "evidence": ["type": "test_report", "evidence": [
                      "schema_version": 1, "runner": "cargo-test", "passed": 212, "failed": 0, "skipped": 3,
                      "observed_at": "2026-10-06T16:58:00Z", "commit_id": commit,
-                     "artifact_digest": InsightsSampleWeek.digest("sample-report-" + seed),
+                     "artifact_digest": report,
                      "imported_at": "2026-10-06T17:06:00Z", "provenance": "imported_report",
                  ]]],
             ]
@@ -202,23 +224,23 @@ extension InsightsSampleWeek {
     static let traces: [SampleTrace] = [
         .init(seed: "1", source: "claude_code", model: "claude-opus-5-5", analyzedAt: "2026-10-06T16:20:00Z",
               firstEvent: "2026-10-06T14:02:00Z", lastEvent: "2026-10-06T16:11:00Z", records: 468,
-              events: 412, toolCalls: 96, failures: (4, 96), tokens: (1_240_000, 18_600),
+              events: 412, toolCalls: 96, failures: (4, 96),
               annotation: ("refactor", "accepted", "2026-10-06T17:00:00Z"), linked: true),
         .init(seed: "2", source: "codex", model: "gpt-5-codex", analyzedAt: "2026-10-07T10:05:00Z",
               firstEvent: "2026-10-07T08:41:00Z", lastEvent: "2026-10-07T09:58:00Z", records: 214,
-              events: 188, toolCalls: 41, failures: nil, tokens: nil,
+              events: 188, toolCalls: 41, failures: nil,
               annotation: ("tests", "partial", "2026-10-07T11:00:00Z"), linked: false),
         .init(seed: "3", source: "claude_code", model: "claude-sonnet-5-5", analyzedAt: "2026-10-08T14:40:00Z",
               firstEvent: "2026-10-08T13:10:00Z", lastEvent: "2026-10-08T14:32:00Z", records: 301,
-              events: 264, toolCalls: 58, failures: (2, 55), tokens: (640_000, 9_800),
+              events: 264, toolCalls: 58, failures: (2, 55),
               annotation: nil, linked: false),
         .init(seed: "4", source: "codex", model: "gpt-5-codex", analyzedAt: "2026-10-09T09:15:00Z",
               firstEvent: "2026-10-09T08:20:00Z", lastEvent: "2026-10-09T09:07:00Z", records: 112,
-              events: 97, toolCalls: 22, failures: nil, tokens: nil,
+              events: 97, toolCalls: 22, failures: nil,
               annotation: ("debugging", "rejected", "2026-10-09T09:40:00Z"), linked: false),
         .init(seed: "5", source: "claude_code", model: "claude-opus-5-5", analyzedAt: "2026-10-09T17:30:00Z",
               firstEvent: "2026-10-09T15:05:00Z", lastEvent: "2026-10-09T17:21:00Z", records: 602,
-              events: 530, toolCalls: 131, failures: (7, 131), tokens: nil,
+              events: 530, toolCalls: 131, failures: (7, 131),
               annotation: nil, linked: false),
     ]
 
@@ -291,7 +313,7 @@ extension InsightsSampleWeek {
             "manual_assessment": [
                 "category": "debugging", "outcome": "partial", "provenance": "user_reported",
                 "recorded_at": "2026-10-09T17:50:00Z", "membership_revision": 1,
-                "members_digest": digest("sample-members-" + episodeMembers.map(\.id).joined()),
+                "members_digest": membersDigest(episodeMembers),
             ],
         ]
     }
