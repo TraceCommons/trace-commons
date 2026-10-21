@@ -62,10 +62,37 @@
 //! facts, so every weekly figure still counts them. A trimmed row is not
 //! evicted and not read again while its file is unchanged; the Sessions
 //! answers draw it as a row read before the per-turn reader, and the Models
-//! answers count it as unknown facts, never as zero. A session the caps evict is marked by its keyed digest, size
+//! answers count it as unknown facts, never as zero.
+//!
+//! Automated sessions (owner decision, 2026-10-20, option (b)): a Codex
+//! session whose first `session_meta` names a `subagent` source was started
+//! by its harness (the automatic approvals reviewer, or a thread an agent
+//! spawned), not by the person, and its row is classified `automated`
+//! when read. Nothing else is guessed: a session that cannot be told, a
+//! spawned thread carrying a person-started `session_meta` after its own,
+//! and every Claude Code session (whose delegated transcripts are never
+//! read as sessions) are unknown, and unknown counts as the person's.
+//! Automated rows stay out of the shared session, turn and tool-call caps
+//! and are kept under their own allowance
+//! (`COUNTER_STORE_MAX_AUTOMATED_SESSIONS`), oldest evicted first within
+//! it; their Codex series stay under the Codex series budget. The weekly
+//! token figures count them (they cost tokens; `insights_week` also says
+//! how many are stored, `automated_stored`), and past the allowance the
+//! oldest are gone from them. The Models answers leave them out, counted
+//! in `left_out.automated`; the Patterns cards and the Sessions feed leave
+//! them out with no switch to bring them back. A Codex row stored before
+//! the classification is read once more, within the per-poll budget; until
+//! every such row this poll finds is read, the eviction bounds below are
+//! not applied and an eviction of the person's is not marked, and marks
+//! written before the allowance are dropped, so a session of the person's
+//! that automated rows pushed out is read again.
+//!
+//! A session the caps evict is marked by its keyed digest, size
 //! and last write. A session with no row whose last write is no later than
-//! the newest mark, or, with the store at its session cap, earlier than every
-//! row kept, is not read: the caps would evict it again. An evicted file is
+//! the newest mark of the shared caps, or, with the person's rows at the
+//! session cap, earlier than every one of them, is not read: the caps would
+//! evict it again. An automated session is not read again while its own
+//! mark matches its unchanged file. An evicted file is
 //! read again once it changes, since a write moves its last write past the
 //! mark. A session older than the newest mark is not read even when rows
 //! leave for another reason, such as a Never folder, until that mark ages
@@ -129,9 +156,9 @@ use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
-    COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS, COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
-    COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
-    DIGEST_KEY_CUSTODY, DigestKeyCustody, SESSION_FACTS_VERSION,
+    COUNTER_STORE_MAX_AUTOMATED_SESSIONS, COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
+    COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS,
+    COUNTER_STORE_MAX_TURNS, DIGEST_KEY_CUSTODY, DigestKeyCustody, SESSION_FACTS_VERSION,
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
@@ -216,6 +243,24 @@ enum RowBody {
     },
 }
 
+/// Whether a stored session was started by a tool rather than by the
+/// person (owner decision, 2026-10-20, option (b)). Told from the
+/// transcript when the row is read, never guessed: `Unknown` when it cannot
+/// be told, and `Unknown` counts as the person's, so the contributor's own
+/// work is never set aside by a guess.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Automation {
+    #[default]
+    Unknown,
+    /// The transcript names how it was started, and not by its harness.
+    Person,
+    /// Started by its harness: a Codex session whose first `session_meta`
+    /// names a `subagent` source (the automatic approvals reviewer, or a
+    /// thread an agent spawned).
+    Automated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterRow {
@@ -294,9 +339,41 @@ struct CounterRow {
     /// budget, even when its file is unchanged.
     #[serde(default)]
     facts_version: u32,
+    /// Whether the session was started by a tool (`Automation`). An
+    /// automated row is kept under its own allowance
+    /// (`COUNTER_STORE_MAX_AUTOMATED_SESSIONS`), outside the shared caps,
+    /// and the Models answers, the Patterns cards and the Sessions feed
+    /// leave it out; the weekly token figures count it.
+    #[serde(default)]
+    automation: Automation,
+    /// Whether `automation` was looked for when the row was read. A Codex
+    /// row made before it lacks it and is read once more, within the
+    /// per-poll budget, even when its file is unchanged. Claude Code has no
+    /// marker, so its rows are never read again for it.
+    #[serde(default)]
+    automation_read: bool,
 }
 
 impl CounterRow {
+    /// Kept under the automated allowance, outside the shared caps. An
+    /// unknown row is the person's.
+    fn is_automated(&self) -> bool {
+        self.automation == Automation::Automated
+    }
+
+    /// A Codex row made before `automation` was looked for.
+    fn awaiting_classification(&self) -> bool {
+        !self.automation_read
+            && matches!(
+                self.body,
+                RowBody::Codex { .. }
+                    | RowBody::Unknown {
+                        source: AnalyticsSource::Codex,
+                        ..
+                    }
+            )
+    }
+
     /// The opaque reference the Sessions methods name this row by: the
     /// engine's own `session_ref`, the order the row was made in. Never a
     /// digest or a path. A row read again when its file grew is made again
@@ -361,6 +438,7 @@ impl CounterRow {
             // Feed T rows are one per session address, and the overlap rule
             // does not run here: no session ID is needed.
             harness_session: None,
+            automated: self.is_automated(),
             body: match &self.body {
                 RowBody::Claude {
                     model_labels,
@@ -460,6 +538,13 @@ struct CounterStore {
 struct Evicted {
     size_bytes: u64,
     modified_at: DateTime<Utc>,
+    /// Which allowance evicted it: `Some(true)` the automated one,
+    /// `Some(false)` the shared caps. `None` in a store written before the
+    /// automated allowance; those marks are dropped at the next write,
+    /// since the session they name may have been pushed out by automated
+    /// rows and should be read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automated: Option<bool>,
 }
 
 impl CounterStore {
@@ -934,19 +1019,44 @@ impl CounterPass {
         //   dropped stays below it and is not read again every poll.
         // - with the store at its session cap, the oldest row kept: a
         //   session older than it would be the first the caps evict.
+        //
+        // Both bounds are the shared caps' own: their marks and the
+        // person's rows (unknown ones included). The automated allowance
+        // evicts far more often, so its marks would hold the floor near the
+        // present and starve an older session of the person's that arrives
+        // late; an automated session is kept from being read again by its
+        // own unchanged mark instead. Marks made before the allowance
+        // (`automated: None`) bound nothing: they may name a session of the
+        // person's that automated rows pushed out.
+        //
+        // While a row this poll finds still awaits its classification, the
+        // person's share is not yet known, so neither bound applies and the
+        // caps mark no eviction of the person's (see `enforce_caps`).
+        let classifying = candidates.iter().any(|candidate| {
+            analytics_source(candidate.source).is_some()
+                && current
+                    .rows
+                    .get(&session_key(
+                        &key,
+                        candidate.source,
+                        &candidate.path.to_string_lossy(),
+                    ))
+                    .is_some_and(CounterRow::awaiting_classification)
+        });
         let eviction_floor = current
             .evicted
             .values()
+            .filter(|evicted| evicted.automated == Some(false))
             .map(|evicted| evicted.modified_at)
             .max();
-        let kept = || {
+        let kept_person = || {
             current
                 .rows
                 .iter()
-                .filter(|(session, _)| !removals.contains(*session))
+                .filter(|(session, row)| !removals.contains(*session) && !row.is_automated())
         };
-        let oldest_kept_at_cap = (kept().count() >= COUNTER_STORE_MAX_SESSIONS)
-            .then(|| kept().map(|(_, row)| row.modified_at).min())
+        let oldest_kept_at_cap = (kept_person().count() >= COUNTER_STORE_MAX_SESSIONS)
+            .then(|| kept_person().map(|(_, row)| row.modified_at).min())
             .flatten();
 
         let mut order: Vec<&CounterCandidate> = candidates.iter().collect();
@@ -972,6 +1082,7 @@ impl CounterPass {
                     && row.harness_session_read
                     && row.event_span_read
                     && row.facts_version == SESSION_FACTS_VERSION
+                    && !row.awaiting_classification()
                     && (row.streamed
                         || !matches!(
                             row.body,
@@ -987,9 +1098,17 @@ impl CounterPass {
             // No newer than a session the caps evicted, its own unchanged
             // file included, or older than every row a full store keeps:
             // reading it would only evict it again.
+            let own_mark = current.evicted.get(&session).is_some_and(|evicted| {
+                evicted.automated.is_some()
+                    && evicted.size_bytes == candidate.size_bytes
+                    && evicted.modified_at == candidate.modified_at
+            });
             if !current.rows.contains_key(&session)
-                && (eviction_floor.is_some_and(|floor| candidate.modified_at <= floor)
-                    || oldest_kept_at_cap.is_some_and(|oldest| candidate.modified_at < oldest))
+                && (own_mark
+                    || (!classifying
+                        && (eviction_floor.is_some_and(|floor| candidate.modified_at <= floor)
+                            || oldest_kept_at_cap
+                                .is_some_and(|oldest| candidate.modified_at < oldest))))
             {
                 continue;
             }
@@ -1042,6 +1161,8 @@ impl CounterPass {
                     streamed: true,
                     facts: read.facts,
                     facts_version: SESSION_FACTS_VERSION,
+                    automation: read.automation,
+                    automation_read: true,
                 },
             ));
         }
@@ -1095,6 +1216,8 @@ impl CounterPass {
             COUNTER_STORE_MAX_SESSIONS,
             COUNTER_STORE_MAX_TURNS,
             COUNTER_STORE_MAX_TOOL_CALLS,
+            COUNTER_STORE_MAX_AUTOMATED_SESSIONS,
+            !classifying,
         );
         trim_codex_series(
             &mut store,
@@ -1271,9 +1394,17 @@ impl CounterPass {
             .collect();
         let picker = dated_weeks(&inputs, &tz);
         let overview = counter_overview(&this, &earlier, tz.local_minus_utc(), picker.clone());
+        // The Patterns cards describe how the person works: automated
+        // sessions are left out of them, as from the Models answers and the
+        // Sessions feed. The token figures above count them.
+        let persons: Vec<SessionInput> = inputs
+            .iter()
+            .filter(|input| !input.automated)
+            .cloned()
+            .collect();
         let mut patterns = week_patterns(
             Feed::CounterPass,
-            &inputs,
+            &persons,
             this.week_start,
             tz,
             PATTERN_BAR_WEEKS,
@@ -1293,6 +1424,8 @@ impl CounterPass {
             "readable": true,
             "updated_at": updated_at,
             "sessions_stored": inputs.len(),
+            // Of those, the sessions started by a tool, not the person.
+            "automated_stored": inputs.len() - persons.len(),
             "iso_week": format!("{}-W{:02}", iso.year(), iso.week()),
             "week_start": this.week_start.to_string(),
             "comparable": comparable.is_ok(),
@@ -1422,10 +1555,12 @@ impl CounterPass {
         let rows: Vec<&CounterRow> = match (&key, &store) {
             (Some(key), Some(store)) => {
                 let never = never_digests(key, never_project_keys);
+                // The Sessions feed lists the person's sessions: automated
+                // ones are left out, and not counted in `sessions_stored`.
                 store
                     .rows
                     .values()
-                    .filter(|row| !never.contains(&row.project))
+                    .filter(|row| !never.contains(&row.project) && !row.is_automated())
                     .collect()
             }
             _ => Vec::new(),
@@ -1538,7 +1673,7 @@ impl CounterPass {
                 store
                     .rows
                     .values()
-                    .filter(|row| !never.contains(&row.project))
+                    .filter(|row| !never.contains(&row.project) && !row.is_automated())
                     .find(|row| row.reference() == reference)
             })
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
@@ -1902,6 +2037,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             first_event_at: None,
             span: None,
             facts: None,
+            automation: Automation::Unknown,
         };
     };
     let mut facts = scanned.facts;
@@ -1953,6 +2089,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             .map(|id| harness_session_digest(key, candidate.source, &id)),
         first_event_at: scanned.first_event_at,
         span: scanned.span,
+        automation: scanned.automation,
     }
 }
 
@@ -1967,6 +2104,7 @@ struct ReadBody {
     /// The session's facts; `None` when they could not be read or the body
     /// is unknown.
     facts: Option<SessionFacts>,
+    automation: Automation,
 }
 
 /// The extractors' results for one transcript, from one pass over its lines.
@@ -1979,6 +2117,59 @@ struct ScannedSession {
     harness_session_id: Option<String>,
     first_event_at: Option<DateTime<Utc>>,
     span: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    automation: Automation,
+}
+
+/// Tells a Codex session its harness started from one the person started,
+/// by the `source` its `session_meta` records name (owner decision,
+/// 2026-10-20, option (b)). Codex writes `source` as an object holding a
+/// `subagent` key when it spawns the thread itself (its automatic approvals
+/// reviewer, or a thread an agent spawned), and as a plain label (`cli`,
+/// `vscode`, `exec`, `mcp`) otherwise. Only the shape is read, never a
+/// value inside it.
+///
+/// The first `session_meta` decides. A spawned thread forked from its
+/// parent can carry the parent's `session_meta` after its own; when a
+/// later one is not spawned too, the session reads as unknown rather than
+/// automated, so a mixed transcript is never set aside. No `session_meta`,
+/// no `source`, or `source: "unknown"` is unknown. `exec` and `mcp`
+/// sessions read as the person's: a person can start either.
+#[derive(Default)]
+struct CodexAutomationScan {
+    first: Option<Automation>,
+    mixed: bool,
+}
+
+impl CodexAutomationScan {
+    fn observe(&mut self, record: &serde_json::Value) {
+        if record.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            return;
+        }
+        let class = match record
+            .get("payload")
+            .and_then(|payload| payload.get("source"))
+        {
+            Some(serde_json::Value::Object(source)) if source.contains_key("subagent") => {
+                Automation::Automated
+            }
+            None | Some(serde_json::Value::Null) => Automation::Unknown,
+            Some(serde_json::Value::String(label)) if label == "unknown" => Automation::Unknown,
+            Some(_) => Automation::Person,
+        };
+        match self.first {
+            None => self.first = Some(class),
+            Some(Automation::Automated) if class != Automation::Automated => self.mixed = true,
+            Some(_) => {}
+        }
+    }
+
+    fn finish(self) -> Automation {
+        if self.mixed {
+            Automation::Unknown
+        } else {
+            self.first.unwrap_or_default()
+        }
+    }
 }
 
 /// The source's counter evidence; `None` when the transcript does not parse.
@@ -2035,6 +2226,7 @@ fn scan_session(
     let mut codex_series =
         (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
+    let mut automation = (source == AnalyticsSource::Codex).then(CodexAutomationScan::default);
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
     let mut index: u64 = 0;
@@ -2081,6 +2273,9 @@ fn scan_session(
             continue;
         };
         identity.observe(&record);
+        if let Some(scan) = automation.as_mut() {
+            scan.observe(&record);
+        }
         if first_event.is_none() {
             first_event = record_timestamp(&record);
         }
@@ -2147,6 +2342,9 @@ fn scan_session(
         harness_session_id: identity.finish().filter(|_| utf8),
         first_event_at: first_event,
         span,
+        // Claude Code records no marker: its delegated transcripts are
+        // never read as sessions of their own, so its rows are unknown.
+        automation: automation.map_or(Automation::Unknown, CodexAutomationScan::finish),
     })
 }
 
@@ -2280,7 +2478,7 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
         &matched,
         gone,
         cutoff,
-        COUNTER_STORE_MAX_SESSIONS,
+        COUNTER_STORE_MAX_SESSIONS + COUNTER_STORE_MAX_AUTOMATED_SESSIONS,
     );
 }
 
@@ -2310,50 +2508,98 @@ pub(crate) fn fold_ledger_after_refresh(
 
 /// Drop the oldest sessions, by last write and then by the order they were
 /// counted, until every cap holds. Whole sessions go, never part of one, and
-/// each is marked evicted. The pass does not read a session that has no row
-/// and is no newer than the newest mark.
-fn enforce_caps(store: &mut CounterStore, max_sessions: usize, max_turns: usize, max_tools: usize) {
-    let mut turns: usize = store.rows.values().map(CounterRow::turns).sum();
-    let mut tools: usize = store.rows.values().map(CounterRow::tool_calls).sum();
-    if store.rows.len() <= max_sessions && turns <= max_turns && tools <= max_tools {
-        return;
-    }
-    let mut oldest: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
-        .rows
-        .iter()
-        .map(|(session, row)| (row.modified_at, row.seq, *session))
-        .collect();
-    oldest.sort();
-    for (_, _, session) in oldest {
-        if store.rows.len() <= max_sessions && turns <= max_turns && tools <= max_tools {
-            break;
+/// each is marked evicted. The person's rows (unknown ones included) answer
+/// to the shared caps, `max_sessions`, `max_turns` and `max_tools`; automated
+/// rows answer only to their own allowance, `max_automated`, so they never
+/// push a session of the person's out. The pass does not read a session that
+/// has no row and is no newer than the newest mark of the shared caps.
+///
+/// `mark_person` is false while a row still awaits its classification: an
+/// eviction of the person's is then not marked, since the automated rows
+/// not yet told apart may be what pushed it out. Marks from before the
+/// allowance are dropped. Each allowance's marks are capped, oldest first:
+/// the shared caps' at `max_sessions`, the automated allowance's at four
+/// times that, since it evicts more often and its marks bound nothing but
+/// their own sessions.
+fn enforce_caps(
+    store: &mut CounterStore,
+    max_sessions: usize,
+    max_turns: usize,
+    max_tools: usize,
+    max_automated: usize,
+    mark_person: bool,
+) {
+    let person = || store.rows.values().filter(|row| !row.is_automated());
+    let mut sessions = person().count();
+    let mut turns: usize = person().map(CounterRow::turns).sum();
+    let mut tools: usize = person().map(CounterRow::tool_calls).sum();
+    let mut automated = store.rows.len() - sessions;
+    let shared_over = |sessions: usize, turns: usize, tools: usize| {
+        sessions > max_sessions || turns > max_turns || tools > max_tools
+    };
+    if shared_over(sessions, turns, tools) || automated > max_automated {
+        let mut oldest: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
+            .rows
+            .iter()
+            .map(|(session, row)| (row.modified_at, row.seq, *session))
+            .collect();
+        oldest.sort();
+        for (_, _, session) in oldest {
+            let shared = shared_over(sessions, turns, tools);
+            if !shared && automated <= max_automated {
+                break;
+            }
+            let Some(is_automated) = store.rows.get(&session).map(CounterRow::is_automated) else {
+                continue;
+            };
+            if (is_automated && automated <= max_automated) || (!is_automated && !shared) {
+                continue;
+            }
+            let Some(row) = store.rows.remove(&session) else {
+                continue;
+            };
+            if is_automated {
+                automated -= 1;
+            } else {
+                sessions -= 1;
+                turns -= row.turns();
+                tools -= row.tool_calls();
+            }
+            if is_automated || mark_person {
+                store.evicted.insert(
+                    session,
+                    Evicted {
+                        size_bytes: row.size_bytes,
+                        modified_at: row.modified_at,
+                        automated: Some(is_automated),
+                    },
+                );
+            }
         }
-        if let Some(row) = store.rows.remove(&session) {
-            turns -= row.turns();
-            tools -= row.tool_calls();
-            store.evicted.insert(
-                session,
-                Evicted {
-                    size_bytes: row.size_bytes,
-                    modified_at: row.modified_at,
-                },
-            );
-        }
     }
+    store
+        .evicted
+        .retain(|_, evicted| evicted.automated.is_some());
     // The eviction marks are capped too, oldest going first: those are the
     // nearest to aging out. The newest mark is never the one dropped, and
     // every dropped mark is no newer than it, so the pass still skips the
-    // files the dropped marks named.
-    if store.evicted.len() > max_sessions {
+    // files the shared caps' dropped marks named.
+    for (class, cap) in [
+        (false, max_sessions),
+        (true, max_sessions.saturating_mul(4)),
+    ] {
         let mut marks: Vec<(DateTime<Utc>, KeyedDigest)> = store
             .evicted
             .iter()
+            .filter(|(_, evicted)| evicted.automated == Some(class))
             .map(|(session, evicted)| (evicted.modified_at, *session))
             .collect();
-        marks.sort();
-        let excess = marks.len() - max_sessions;
-        for (_, session) in marks.into_iter().take(excess) {
-            store.evicted.remove(&session);
+        if marks.len() > cap {
+            marks.sort();
+            let excess = marks.len() - cap;
+            for (_, session) in marks.into_iter().take(excess) {
+                store.evicted.remove(&session);
+            }
         }
     }
 }
@@ -3189,13 +3435,16 @@ mod tests {
             first_event_at,
             span,
             facts: None,
+            automation: Automation::Unknown,
         }
     }
 
-    /// `read` without what the whole-file read never made: the facts and
-    /// Codex's per-turn series, which the facts tests cover.
+    /// `read` without what the whole-file read never made: the facts,
+    /// Codex's per-turn series, which the facts tests cover, and the
+    /// automation class, which the automated-session tests cover.
     fn without_facts(mut read: ReadBody) -> ReadBody {
         read.facts = None;
+        read.automation = Automation::Unknown;
         if let RowBody::Codex { series, .. } = &mut read.body {
             *series = None;
         }
@@ -3534,17 +3783,19 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    automation: Automation::Unknown,
+                    automation_read: true,
                 },
             );
         }
-        enforce_caps(&mut store, 3, usize::MAX, usize::MAX);
+        enforce_caps(&mut store, 3, usize::MAX, usize::MAX, usize::MAX, true);
         let kept: Vec<u8> = store.rows.keys().map(|k| k.0[0]).collect();
         assert_eq!(kept, vec![2, 3, 4]);
         let evicted: Vec<u8> = store.evicted.keys().map(|k| k.0[0]).collect();
         assert_eq!(evicted, vec![0, 1]);
 
         // The eviction marks are capped by the same count, oldest first.
-        enforce_caps(&mut store, 1, usize::MAX, usize::MAX);
+        enforce_caps(&mut store, 1, usize::MAX, usize::MAX, usize::MAX, true);
         let kept: Vec<u8> = store.rows.keys().map(|k| k.0[0]).collect();
         assert_eq!(kept, vec![4]);
         let evicted: Vec<u8> = store.evicted.keys().map(|k| k.0[0]).collect();
@@ -3559,7 +3810,14 @@ mod tests {
         let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
         let turns = store.rows.values().map(CounterRow::turns).sum::<usize>();
         assert!(turns > 1);
-        enforce_caps(&mut store, usize::MAX, turns - 1, usize::MAX);
+        enforce_caps(
+            &mut store,
+            usize::MAX,
+            turns - 1,
+            usize::MAX,
+            usize::MAX,
+            true,
+        );
         assert!(store.rows.is_empty());
     }
 
@@ -3598,6 +3856,8 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    automation: Automation::Unknown,
+                    automation_read: true,
                 },
             );
         }
@@ -3681,6 +3941,8 @@ mod tests {
             streamed: true,
             facts: None,
             facts_version: SESSION_FACTS_VERSION,
+            automation: Automation::Unknown,
+            automation_read: true,
         }
     }
 
@@ -3693,6 +3955,7 @@ mod tests {
                 Evicted {
                     size_bytes: 1,
                     modified_at: written() + Duration::seconds(1),
+                    automated: Some(false),
                 },
             );
         }
@@ -5419,7 +5682,7 @@ mod tests {
         assert_eq!((row.turns(), row.tool_calls()), (0, 0));
         let store = (*f.pass.load_cached().unwrap().unwrap()).clone();
         let mut capped = store.clone();
-        enforce_caps(&mut capped, usize::MAX, 0, 0);
+        enforce_caps(&mut capped, usize::MAX, 0, 0, usize::MAX, true);
         assert_eq!(capped, store, "no row evicted, no series trimmed");
     }
 
@@ -5905,5 +6168,312 @@ mod tests {
             line["tokens"],
             synthetic as u64 * CODEX_SYNTHETIC_TOKENS + 80 + 30
         );
+    }
+
+    // Automated sessions (owner decision, 2026-10-20, option (b)). Every
+    // fixture here is synthetic.
+
+    /// `codex_bytes` whose `session_meta` names `source`; `None` leaves it
+    /// out.
+    fn codex_bytes_from(sources: &[Option<serde_json::Value>]) -> Vec<u8> {
+        let text = String::from_utf8(codex_bytes()).unwrap();
+        let mut lines: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
+        for source in sources.iter().rev() {
+            let mut payload =
+                serde_json::json!({"id": "PRIVATE-CODEX-ID", "model_provider": "openai"});
+            if let Some(source) = source {
+                payload["source"] = source.clone();
+            }
+            lines.insert(
+                0,
+                serde_json::json!({"type": "session_meta", "payload": payload}).to_string(),
+            );
+        }
+        lines.join("\n").into_bytes()
+    }
+
+    fn spawned() -> serde_json::Value {
+        serde_json::json!({"subagent": {"thread_spawn": {"depth": 1}}})
+    }
+
+    /// The one row a pass makes over `bytes` as a Codex session.
+    fn codex_row_of(bytes: &[u8]) -> CounterRow {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", bytes);
+        assert_eq!(f.run(&[candidate(SOURCE_CODEX, &path)]).read, 1);
+        only_row(&f.pass)
+    }
+
+    #[test]
+    fn a_codex_session_its_harness_spawned_is_automated() {
+        for source in [
+            spawned(),
+            serde_json::json!({"subagent": "review"}),
+            serde_json::json!({"subagent": {"other": "synthetic-reviewer"}}),
+        ] {
+            let row = codex_row_of(&codex_bytes_from(&[Some(source.clone())]));
+            assert_eq!(row.automation, Automation::Automated, "{source}");
+            assert!(row.automation_read);
+            assert!(row.session_input().automated, "{source}");
+            // The counters are read as for any other session.
+            assert!(matches!(
+                row.body,
+                RowBody::Codex {
+                    observed: Some(_),
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn a_codex_session_the_person_started_is_not_automated() {
+        for label in ["cli", "vscode", "exec", "mcp"] {
+            let row = codex_row_of(&codex_bytes_from(&[Some(serde_json::json!(label))]));
+            assert_eq!(row.automation, Automation::Person, "{label}");
+            assert!(!row.session_input().automated, "{label}");
+        }
+    }
+
+    /// Unknown is never automated: no `session_meta` source, Codex's own
+    /// `unknown`, a spawned thread carrying a person-started
+    /// `session_meta` after its own, or a Claude Code session.
+    #[test]
+    fn an_undeterminable_session_is_unknown_and_not_automated() {
+        for bytes in [
+            codex_bytes(),
+            codex_bytes_from(&[None]),
+            codex_bytes_from(&[Some(serde_json::json!("unknown"))]),
+            codex_bytes_from(&[Some(spawned()), Some(serde_json::json!("cli"))]),
+        ] {
+            let row = codex_row_of(&bytes);
+            assert_eq!(row.automation, Automation::Unknown);
+            assert!(row.automation_read);
+            assert!(!row.session_input().automated);
+        }
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let row = only_row(&f.pass);
+        assert_eq!(row.automation, Automation::Unknown);
+        assert!(!row.session_input().automated);
+    }
+
+    fn codex_body() -> RowBody {
+        RowBody::Codex {
+            observed: None,
+            series: None,
+            series_trimmed: false,
+        }
+    }
+
+    fn classed_row(at: DateTime<Utc>, seq: u64, automation: Automation) -> CounterRow {
+        let mut row = synthetic_row(at, seq, codex_body());
+        row.automation = automation;
+        row
+    }
+
+    /// A store full of the person's sessions keeps every one of them, older
+    /// automated rows or newer, while the automated rows fit their own
+    /// allowance; an unknown row counts as the person's.
+    #[test]
+    fn automated_rows_do_not_count_toward_the_shared_cap() {
+        let mut store = CounterStore::empty(KeyedDigest([0; 32]));
+        for i in 0..COUNTER_STORE_MAX_SESSIONS {
+            let class = if i % 2 == 0 {
+                Automation::Person
+            } else {
+                Automation::Unknown
+            };
+            store.rows.insert(
+                synthetic_digest(0x11, i),
+                classed_row(written() + Duration::seconds(2), i as u64, class),
+            );
+        }
+        for i in 0..8 {
+            let at = if i % 2 == 0 {
+                written()
+            } else {
+                written() + Duration::seconds(3)
+            };
+            store.rows.insert(
+                synthetic_digest(0xAA, i),
+                classed_row(at, 10_000 + i as u64, Automation::Automated),
+            );
+        }
+        enforce_caps(
+            &mut store,
+            COUNTER_STORE_MAX_SESSIONS,
+            COUNTER_STORE_MAX_TURNS,
+            COUNTER_STORE_MAX_TOOL_CALLS,
+            COUNTER_STORE_MAX_AUTOMATED_SESSIONS,
+            true,
+        );
+        assert_eq!(store.rows.len(), COUNTER_STORE_MAX_SESSIONS + 8);
+        assert!(store.evicted.is_empty());
+    }
+
+    #[test]
+    fn the_automated_allowance_evicts_the_oldest_automated_rows_first() {
+        let mut store = CounterStore::empty(KeyedDigest([0; 32]));
+        for i in 0..5u8 {
+            store.rows.insert(
+                KeyedDigest([0xA0 + i; 32]),
+                classed_row(
+                    written() + Duration::minutes(i64::from(i)),
+                    u64::from(i),
+                    Automation::Automated,
+                ),
+            );
+        }
+        // Older than every automated row, and not touched by its allowance.
+        for i in 0..2u8 {
+            store.rows.insert(
+                KeyedDigest([0x10 + i; 32]),
+                classed_row(
+                    written() - Duration::hours(1),
+                    10 + u64::from(i),
+                    Automation::Person,
+                ),
+            );
+        }
+        enforce_caps(&mut store, 2, usize::MAX, usize::MAX, 3, true);
+        let kept: Vec<u8> = store.rows.keys().map(|k| k.0[0]).collect();
+        assert_eq!(kept, vec![0x10, 0x11, 0xA2, 0xA3, 0xA4]);
+        let marks: Vec<(u8, Option<bool>)> = store
+            .evicted
+            .iter()
+            .map(|(k, mark)| (k.0[0], mark.automated))
+            .collect();
+        assert_eq!(marks, vec![(0xA0, Some(true)), (0xA1, Some(true))]);
+    }
+
+    /// Automated marks newer than a person's session do not stop it being
+    /// read: only the shared caps' own marks bound the person's sessions.
+    /// An automated session's own unchanged mark still keeps it from being
+    /// read again.
+    #[test]
+    fn automated_eviction_marks_do_not_starve_the_persons_sessions() {
+        let f = Fixture::new();
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        for i in 0..COUNTER_STORE_MAX_SESSIONS {
+            store.evicted.insert(
+                synthetic_digest(0xEE, i),
+                Evicted {
+                    size_bytes: 1,
+                    modified_at: written() + Duration::seconds(1),
+                    automated: Some(true),
+                },
+            );
+        }
+        let path = f.write("old-auto.jsonl", &codex_bytes_from(&[Some(spawned())]));
+        let auto = candidate(SOURCE_CODEX, &path);
+        store.evicted.insert(
+            session_key(&key, SOURCE_CODEX, &path.to_string_lossy()),
+            Evicted {
+                size_bytes: auto.size_bytes,
+                modified_at: auto.modified_at,
+                automated: Some(true),
+            },
+        );
+        f.pass.save(store).unwrap();
+        let path = f.write("old.jsonl", &claude_bytes());
+        let person = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(&[person.clone(), auto.clone()]).read, 1);
+        let row = only_row(&f.pass);
+        assert!(matches!(row.body, RowBody::Claude { .. }));
+        assert_eq!(f.run(&[person, auto]).read, 0);
+    }
+
+    /// A mark written before the automated allowance may name a person's
+    /// session that automated rows pushed out: it is dropped, so that
+    /// session is read again.
+    #[test]
+    fn an_eviction_mark_from_before_the_allowance_does_not_bound_reads() {
+        let f = Fixture::new();
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        store.evicted.insert(
+            synthetic_digest(0xEE, 0),
+            Evicted {
+                size_bytes: 1,
+                modified_at: written() + Duration::seconds(1),
+                automated: None,
+            },
+        );
+        f.pass.save(store).unwrap();
+        let path = f.write("old.jsonl", &claude_bytes());
+        assert_eq!(f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]).read, 1);
+        let store = f.pass.load_cached().unwrap().unwrap();
+        assert!(store.evicted.is_empty(), "the old mark is dropped");
+    }
+
+    /// A Codex row stored before the classification is read once more,
+    /// within the per-poll budget, and then not again; a Claude Code row is
+    /// not read again for it.
+    #[test]
+    fn a_row_from_before_the_classification_is_read_once_more() {
+        let f = Fixture::new();
+        let codex = f.write("c.jsonl", &codex_bytes_from(&[Some(spawned())]));
+        let claude = f.write("s.jsonl", &claude_bytes());
+        let mut claude = candidate(SOURCE_CLAUDE_CODE, &claude);
+        claude.modified_at = written() - Duration::minutes(1);
+        let candidates = [candidate(SOURCE_CODEX, &codex), claude];
+        assert_eq!(f.run(&candidates).read, 2);
+        edit_stored_rows(&f, |row| {
+            row.remove("automation");
+            assert!(row.remove("automation_read").is_some());
+        });
+        let restarted = f.reopened();
+        let rows = stored_rows(&restarted);
+        assert!(rows.iter().all(|row| row.automation == Automation::Unknown));
+        assert_eq!(
+            run_with(&restarted, &candidates, &[], false).read,
+            1,
+            "the Codex row only"
+        );
+        let rows = stored_rows(&restarted);
+        assert_eq!(rows.iter().filter(|row| row.is_automated()).count(), 1);
+        assert_eq!(run_with(&restarted, &candidates, &[], false).read, 0);
+    }
+
+    /// The Sessions feed and the Models answers leave an automated session
+    /// out; the week's token figures still count it, and the week answer
+    /// says how many automated sessions are stored.
+    #[test]
+    fn automated_sessions_leave_the_sessions_feed_and_the_models_answers() {
+        let f = Fixture::new();
+        let person = f.write(
+            "p.jsonl",
+            &codex_bytes_from(&[Some(serde_json::json!("cli"))]),
+        );
+        let auto = f.write("a.jsonl", &codex_bytes_from(&[Some(spawned())]));
+        let mut auto = candidate(SOURCE_CODEX, &auto);
+        auto.modified_at = written() - Duration::minutes(1);
+        assert_eq!(f.run(&[candidate(SOURCE_CODEX, &person), auto]).read, 2);
+
+        let sessions = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 200);
+        assert_eq!(sessions["sessions_stored"], 1);
+        assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1);
+
+        let week = f.week(&[]);
+        assert_eq!(week["sessions_stored"], 2);
+        assert_eq!(week["automated_stored"], 1);
+        let line = week["rollup"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|line| line["source"] == "codex")
+            .cloned()
+            .unwrap();
+        assert_eq!(line["tokens"], 2 * (80 + 30), "both cost tokens");
+
+        let answers = f
+            .pass
+            .model_answers_value(true, &NeverFolders::NONE, false, false, now());
+        for row in answers["rows"].as_array().unwrap() {
+            assert_eq!(row["left_out"]["automated"], 1, "{}", row["question"]);
+        }
     }
 }

@@ -549,6 +549,7 @@ fn weekly_codex_figures_ignore_the_series() {
         import_seq: 1,
         placed_at: None,
         harness_session: None,
+        automated: false,
         facts: None,
         body: SessionBody::Codex {
             observed: Some(CodexObserved {

@@ -608,7 +608,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
@@ -4602,13 +4602,45 @@ answer it as a Codex row read before the per-turn reader: `turns` and
 `series_unavailable` is `not_recorded`. `insights_model_answers` counts it
 in `left_out.unknown_facts`, never as zero turns. The allowance fits about 13
 weeks of heavy Codex use (measured: about 167000 stored turns and 161000
-tool calls), at most about 99 MB of the store file. A
-session the caps evict is marked by its keyed digest and the size and last
-write its row was made from; the marks age out with the rows and are capped
-at 2048, oldest first, so the newest mark stays while any does. A session
-with no row is not read when its last write is no later than the newest
-mark, or, with the store at 2048 sessions, earlier than every row kept: the
-caps would evict it again. An evicted file is read again once it changes,
+tool calls), at most about 99 MB of the store file.
+
+Automated sessions (owner decision, 2026-10-20, option (b)) are kept apart
+from the contributor's own. A Codex session is automated when the first
+`session_meta` record in its transcript names a `source` object holding a
+`subagent` key: Codex writes that shape when it starts the thread itself
+(its automatic approvals reviewer, or a thread an agent spawned), and a
+plain label (`cli`, `vscode`, `exec`, `mcp`) otherwise. Only that shape is
+read. A transcript with no `session_meta` or no `source`, `source:
+"unknown"`, a spawned thread that carries a later `session_meta` not
+spawned too (a fork of the person's session), and every Claude Code
+session are unknown, and unknown counts as the person's: no guess sets the
+contributor's work aside. `exec` and `mcp` sessions count as the person's,
+since a person can start either. Automated rows do not count toward the
+2048 sessions or the shared turn and tool-call caps; at most 1024 are kept
+beside them, the oldest evicted first within that allowance, and their
+Codex series stay under the Codex allowance above. The weekly token figures
+count them; past the allowance the oldest are gone from those figures (1024
+keeps two busy weeks of a heavy Codex user's automated sessions, so the
+current week and the one before stay whole). `insights_model_answers` leaves
+them out (`left_out.automated`), and `insights_week`'s `patterns` and
+`insights_sessions` leave them out with no switch to bring them back. A
+Codex row stored before the classification is read once more, within the
+per-poll limits, even when its file is unchanged.
+
+A session the caps evict is marked by its keyed digest and the size and last
+write its row was made from, and by which allowance evicted it; the marks
+age out with the rows and are capped, oldest first, at 2048 for the shared
+caps and 8192 for the automated allowance, so the newest mark stays while
+any does. A session with no row is not read when its last write is no later
+than the newest mark of the shared caps, or, with 2048 of the person's
+sessions stored, earlier than every one of them: the caps would evict it
+again. Automated marks do not bound other sessions, since a late-arriving
+session of the person's would otherwise be skipped; an automated session is
+not read again while its own mark matches its unchanged file. Marks written
+before the automated allowance bound nothing and are dropped at the next
+write, and while a row the pass finds still awaits its classification
+neither bound applies and an eviction of the person's is not marked, so a
+session of the person's that automated rows pushed out is read again. An evicted file is read again once it changes,
 since a write moves its last write past the mark. The limit: a session older
 than the newest mark is not read even when rows leave for another reason,
 such as a Never folder, until that mark ages out of the 13 weeks. Rows are
@@ -4658,7 +4690,8 @@ can mark exactly the token figures they leave unknown. Nothing is folded, and ne
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
 settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
 for a Never folder, or, once no stored row matches it, when its last call is
-more than 13 weeks old; at most 2048 are kept, oldest last call first.
+more than 13 weeks old; at most 3072 are kept (one per stored session, the
+person's and the automated), oldest last call first.
 `unenroll` removes them with the store. The answer joins each row to its
 session's tally by that digest, at answer time and inside the daemon; see
 `routing` below.
@@ -4699,6 +4732,7 @@ sessions on disk. Otherwise:
   "readable": true,
   "updated_at": "2026-10-08T09:59:12+00:00",
   "sessions_stored": 214,
+  "automated_stored": 31,
   "iso_week": "2026-W41",
   "week_start": "2026-10-05",
   "comparable": false,
@@ -4740,7 +4774,10 @@ sessions on disk. Otherwise:
 
 - `updated_at` is when a pass last finished in this daemon process, `null`
   before the first one; `sessions_stored` is the rows held, outside Never
-  folders, in any week.
+  folders, in any week, and `automated_stored` how many of those are
+  automated sessions (see "The store" above). The token figures (`rollup`,
+  `overview`, `history[]`) count automated sessions, since they cost
+  tokens; `patterns` leaves them out.
 - `rollup` is the week's figures exactly as the shared engine computes them
   for feed T: Claude Code and Codex are separate lines in `sources` and are
   **never summed**; `tokens`, `cache_share` and `by_day` are `null` when no
@@ -4835,7 +4872,8 @@ for a failed read:
   `patterns` operation returns (six weekly bars), with `feed:
   "counter_pass"`: `change` per card is filled only when both weeks are
   comparable, and a week below the floor draws a gap. Re-read files are
-  letters and extensions only.
+  letters and extensions only. Automated sessions are left out of it, with
+  no switch to bring them back.
 - `history[]` is one entry per kept week (13), oldest first, always ending at
   the week holding now whatever `iso_week` asked for. Each is
   `{"week_start", "comparable", "sessions", "tokens": {source: n},
@@ -4891,7 +4929,9 @@ Both are checked before the gate, so a bad param is refused whether counting
 is on or off.
 
 While enabled and readable it answers `updated_at`, `sessions_stored` (every
-row outside Never folders, never page-relative), `revision` (a whole number
+row outside Never folders, never page-relative; automated sessions are not
+listed, not counted here, and not found by `insights_session_drill`, with no
+switch to bring them back), `revision` (a whole number
 that moves only when a row is made; a pass that stores nothing leaves it,
 though `updated_at` moves on every pass), `truncated` (more rows
 follow this page), `next` (the cursor for the following page, or `null` at
@@ -5083,8 +5123,11 @@ updated_at, window_start, window_end, pricing, rows}`:
     `{kind: "finish_time", median_active_secs, median_user_turns}`.
   - `sessions_by_model`: `[[label, sessions], ...]`.
   - `left_out`: counts of sessions left out of that question, per reason:
-    `unknown_facts`, `delegated`, `capped`, `routed`, `reviewer`,
-    `no_majority`, `unpriced`, `too_few_edits`, `mix_too_different`. A fact
+    `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
+    `reviewer`, `no_majority`, `unpriced`, `too_few_edits`,
+    `mix_too_different`. `automated` counts the automated sessions in the
+    window (see "The store" above): compared on no row, and counted on
+    every row whatever their facts. A fact
     that could not be read is left out and counted here, never read as zero.
 
 Money crosses only as `figure.value` under `kind: "usd_micros"` on the
