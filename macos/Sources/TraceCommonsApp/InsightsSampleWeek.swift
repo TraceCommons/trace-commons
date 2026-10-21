@@ -10,11 +10,12 @@ import TCBridge
 /// variable.
 ///
 /// The week is shaped as the core sends it: a watched-folder week (feed T)
-/// with goals, the lever and the weekly summary, and one saved trace for
-/// Sessions. Sample figures, never a pilot's. Every word is still the core's
-/// copy: only the analytics answers are sampled, every other request goes
-/// to the real store, and a goal, lever or summary write is answered here
-/// and kept nowhere.
+/// with goals, the lever and the weekly summary, and the saved traces,
+/// summary and group Analyze shows (`InsightsSampleAnalyze.swift`), which
+/// Sessions drills into. Sample figures, never a pilot's. Every word is
+/// still the core's copy: the answers are sampled, only the core's copy and
+/// two Overview reads go to the real store, and a write is answered here
+/// and kept nowhere, or refused. No write reaches the store.
 enum InsightsSampleWeek {
     static var enabled: Bool {
         ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
@@ -22,30 +23,34 @@ enum InsightsSampleWeek {
 
     static let weekStart = "2026-10-05"
 
-    /// The analytics answers from the sample, everything else from `fallback`.
+    /// The sample's answers; the store's for `storeReads` only. Anything
+    /// else is refused here, so no write the window sends reaches the store.
     static func service(fallback: @escaping InsightsModel.Service) -> InsightsModel.Service {
         { request in
-            if let answer = try response(request.operation.type, snapshotID: request.operation.snapshot_id) {
-                return answer
-            }
+            if let answer = try response(request.operation) { return answer }
+            guard storeReads.contains(request.operation.type) else { throw InsightsError.service(refusal) }
             return try await fallback(request)
         }
     }
 
-    /// The sample's answer to an analytics request; `nil` for any other.
-    /// A drill answers for whichever trace was asked for.
-    static func response(_ type: String, snapshotID: String? = nil) throws -> InsightsResponse? {
-        let body: (String, Any)
+    /// The sample's answer to a request, decoded and checked as the core's
+    /// are (`TCInsights.decode`); `nil` for one it does not answer. A drill
+    /// answers for whichever trace was asked for.
+    static func response(_ operation: InsightsRequest.Operation) throws -> InsightsResponse? {
+        let type = operation.type
+        let body: [String: Any]
         switch type {
-        case "week_overview": body = ("overview", overview)
-        case "patterns": body = ("patterns", patterns)
-        case "comparisons": body = ("comparisons", comparisons)
-        case "session_drill": body = ("session", session(snapshotID ?? "sample"))
+        case "week_overview": body = ["type": type, "overview": overview]
+        case "patterns": body = ["type": type, "patterns": patterns]
+        case "comparisons": body = ["type": type, "comparisons": comparisons]
+        case "session_drill": body = ["type": type, "session": session(operation.snapshot_id ?? "sample")]
         case "goal_set", "goal_delete", "lever_feedback", "recap_opened":
-            body = ("state", ["goals": [Any](), "lever_card_off": false])
-        default: return nil
+            body = ["type": type, "state": ["goals": [Any](), "lever_card_off": false]]
+        default:
+            guard let answer = try analyzeBody(operation) else { return nil }
+            body = answer
         }
-        return try decode(InsightsResponse.self, ["type": type, body.0: body.1])
+        return try TCInsights.decode(JSONSerialization.data(withJSONObject: body), for: operation)
     }
 
     static var weekOverview: InsightsWeekOverview {
@@ -173,10 +178,11 @@ enum InsightsSampleWeek {
         ],
     ]
 
-    /// One Claude Code trace, 52 turns: context grows to the threshold,
-    /// the cache is written again after a pause, a file is read again, and
-    /// context shrinks.
+    /// One trace, 52 turns, dated and sourced as the saved trace asked for
+    /// (Claude Code otherwise): context grows to the threshold, the cache is
+    /// written again after a pause, a file is read again, and context shrinks.
     static func session(_ snapshotID: String) -> [String: Any] {
+        let saved = traces.first { $0.id == snapshotID }
         let turns: [[String: Any]] = (1 ... 52).map { turn in
             let context = turn < 48 ? 14_000 + 3_000 * turn : 60_000 + 3_000 * (turn - 48)
             let write = turn == 31 ? 96_000 : 3_000
@@ -185,7 +191,8 @@ enum InsightsSampleWeek {
                     "cache_write": write, "output": 900, "context": context]
         }
         return [
-            "feed": "saved", "session_ref": snapshotID, "source": "claude_code", "date": "2026-10-09", "tz": 0,
+            "feed": "saved", "session_ref": snapshotID, "source": saved?.source ?? "claude_code",
+            "date": saved.map { String($0.firstEvent.prefix(10)) } ?? "2026-10-09", "tz": 0,
             "turns": 52, "tokens": 4_400_000, "span_secs": 6480, "state": "known", "reasons": [String](),
             "long_context_threshold": 150_000, "series": turns,
             "markers": [

@@ -161,10 +161,12 @@ group that holds the Insights digest keys: its watched-folder counting
 answers `key_unavailable` and it cannot save an analysis, and every tab is
 empty. For a design review, a Debug build launched with
 `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
-fixed watched-folder week with goals, the lever, the weekly summary and one
-trace for Sessions. Only the analytics answers are sampled; a goal, lever or
-summary write is answered and kept nowhere. A release build never reads the
-variable.
+fixed watched-folder week with goals, the lever, the weekly summary, and
+for Analyze five saved traces, their saved history summary and one group
+(`InsightsSampleAnalyze.swift`). Only the core's copy and the Overview
+drill-downs go to the store. A write to something the sample holds is
+answered with it unchanged and kept nowhere; any other write is refused, so
+none reaches the store. A release build never reads the variable.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening
