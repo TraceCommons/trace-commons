@@ -76,14 +76,16 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         return FileManager.default.temporaryDirectory
     }
 
-    /// The item alone, unpadded, on the bar's ground, as a bitmap.
+    /// The item alone, unpadded, on a ground of grey level `ground`
+    /// (black or white, the bar's own, by default), as a bitmap.
     @MainActor
     private func bitmap(
-        traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, scheme: ColorScheme
+        traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, scheme: ColorScheme, ground: CGFloat? = nil
     ) throws -> NSBitmapImageRep {
+        let level = ground ?? (scheme == .dark ? 0 : 1)
         let renderer = ImageRenderer(
             content: GlassMenuBarStrip(traces: traces, privateAI: privateAI, condition: .live, badge: nil)
-                .background(scheme == .dark ? Color.black : Color.white)
+                .background(Color(.sRGB, red: level, green: level, blue: level))
                 .environment(\.colorScheme, scheme)
         )
         renderer.scale = 2
@@ -121,28 +123,38 @@ final class MenuBarGlyphRenderTests: XCTestCase {
     }
 
     /// No capsule behind the bars (owner, 2026-10-21): with nothing to
-    /// draw, the graph's upper reach is the bar's own ground, in both
-    /// appearances. The mark is the logo kit's single ink for the bar:
-    /// white on a dark one, black on a light one.
+    /// draw, the graph's upper reach is the ground it is drawn on, in both
+    /// appearances. The ground is mid-grey, since a dark tint on black or a
+    /// light one on white would leave the ground unchanged. The mark is the
+    /// logo kit's single ink for the bar: white on a dark one, black on a
+    /// light one.
     @MainActor
     func testNoCapsuleAndTheMarkTakesTheBarsInk() throws {
         let flat = (0..<6).map { GlassDayColumn(id: "s\($0)", up: 0, down: 0) }
+        func distance(_ rep: NSBitmapImageRep, _ x: CGFloat, _ y: CGFloat, from value: CGFloat) throws -> CGFloat {
+            let colour = try XCTUnwrap(rep.colorAt(x: Int(x * 2), y: Int(y * 2))?.usingColorSpace(.deviceRGB))
+            return abs(colour.redComponent - value) + abs(colour.greenComponent - value)
+                + abs(colour.blueComponent - value)
+        }
         for scheme in [ColorScheme.light, .dark] {
-            let rep = try bitmap(traces: flat, privateAI: flat, scheme: scheme)
-            let ground: CGFloat = scheme == .dark ? 0 : 1
-            func distance(_ x: CGFloat, _ y: CGFloat, from value: CGFloat) throws -> CGFloat {
-                let colour = try XCTUnwrap(rep.colorAt(x: Int(x * 2), y: Int(y * 2))?.usingColorSpace(.deviceRGB))
-                return abs(colour.redComponent - value) + abs(colour.greenComponent - value)
-                    + abs(colour.blueComponent - value)
-            }
             // Halfway along the graph, 3pt below its top edge.
             let graphMid = GlassMenuBarStrip.markSize + GlassMenuBarStrip.markGap
                 + GlassMenuBarStrip.graphWidth(steps: 6) / 2
             let graphTop = GlassMenuBarStrip.graphTop
-            XCTAssertLessThan(try distance(graphMid, graphTop + 3, from: ground), 0.05, "\(scheme): a fill behind the lines")
+            let grey = try bitmap(traces: flat, privateAI: flat, scheme: scheme, ground: 0.5)
+            let probe = try XCTUnwrap(grey.colorAt(x: Int(graphMid * 2), y: Int((graphTop + 3) * 2))?
+                .usingColorSpace(.deviceRGB))
+            let level = probe.redComponent
+            XCTAssertLessThan(
+                abs(probe.greenComponent - level) + abs(probe.blueComponent - level), 0.02, "\(scheme): a tint")
+            let ground = try XCTUnwrap(grey.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB)).redComponent
+            XCTAssertEqual(level, ground, accuracy: 0.01, "\(scheme): a fill behind the lines")
+
+            let rep = try bitmap(traces: flat, privateAI: flat, scheme: scheme)
+            let ink: CGFloat = scheme == .dark ? 1 : 0
             // Halfway up the N's left upright, which spans its first 15%.
             XCTAssertLessThan(
-                try distance(GlassMenuBarStrip.markSize * 0.077, 11, from: 1 - ground), 0.1, "\(scheme): the mark's ink")
+                try distance(rep, GlassMenuBarStrip.markSize * 0.077, 11, from: ink), 0.1, "\(scheme): the mark's ink")
         }
     }
 
