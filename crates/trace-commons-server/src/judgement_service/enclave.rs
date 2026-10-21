@@ -211,7 +211,7 @@ impl JudgementEnclave {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::witness_service::enclave::quote_offsets;
     use std::sync::Mutex;
@@ -257,16 +257,16 @@ mod tests {
         WrongMrTd,
     }
 
-    struct StubAgent {
+    pub(crate) struct StubAgent {
         signing: [u8; 32],
         limiter: [u8; 32],
         after_boot: AfterBoot,
-        keys_asked: Mutex<Vec<(String, String)>>,
+        pub(crate) keys_asked: Mutex<Vec<(String, String)>>,
         quotes_asked: Mutex<Vec<[u8; REPORT_DATA_LEN]>>,
     }
 
     impl StubAgent {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 signing: SCALAR_ONE,
                 limiter: LIMITER_ROOT,

@@ -40,6 +40,7 @@
 //! bucket. Never the account, a key derived from it, a label, a confidence,
 //! a prompt, the digest, the claim, or NEAR AI response text.
 
+pub mod boot;
 pub mod catalog;
 pub mod claim;
 pub mod digest;
