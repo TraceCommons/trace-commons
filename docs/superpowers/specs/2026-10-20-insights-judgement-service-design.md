@@ -818,12 +818,48 @@ adds it also adds its row to the index in `docs/operator/README.md`, as the
 repo rules require. `deploy/judgement/README.md` holds the recorded deployment
 values (app ids, CVM ids, KMS, measurements), as the witness README does.
 
-- **Deploy.** Build with `judgement-image.yml` (`profile`). Pin the digest in
-  `deploy/judgement/docker-compose.yml`. Deploy with `phala deploy` and an
-  explicit `--kms-id`. Read `compose_hash` from `phala cvms get --json`, and
-  poll a signed response until it carries the new measurement (the witness's
-  stale-container trap). Record app id and measurement. The signing address
-  and sealing key are per boot, so they are not recorded or pinned.
+- **Deploy, with the witness's `phala deploy` lessons** (#1501 review point 6;
+  `deploy/witness/README.md`, the `compose_file` read-back and the visibility
+  flags). `phala deploy` never reads `app-compose.json`. It builds its own
+  manifest, and by default it turns `public_logs` and `public_sysinfo` on and
+  adds `DSTACK_AUTHORIZED_KEYS` to `allowed_envs`, with a pre-launch script
+  that installs root SSH keys. A pinned measurement with those settings would
+  publish the service's logs and admit a root shell that can read digests and
+  claims in memory and call `GetKey` for the limiter root. So:
+  1. Build with `judgement-image.yml` (`profile`). Pin the image digest in
+     `deploy/judgement/docker-compose.yml`. Every release uses a new tag.
+  2. Deploy with `phala deploy --kms-id <id> --no-public-logs
+     --no-public-sysinfo`. Pass both `--no-` flags on every deploy. For an
+     upgrade, use `phala cvms upgrade` with the same flags where it accepts
+     them; step 3 is the check either way.
+  3. **Read the manifest back**: `phala cvms get <id> --json`, field
+     `compose_file`. Require all of these:
+     - `public_logs: false` and `public_sysinfo: false`;
+     - `allowed_envs` exactly `["TRACE_COMMONS_JUDGEMENT_NEAR_AI_API_KEY"]`
+       (development: `[]`, since the development adapters need no key in
+       `allowed_envs`);
+     - no `DSTACK_AUTHORIZED_KEYS` anywhere;
+     - a `pre_launch_script` that is empty, or that does not write
+       `authorized_keys` or set a password.
+     A deploy that fails any of these is torn down. Its measurement is never
+     recorded or pinned. Toggling a flag changes `compose_hash`, so read again
+     after any change.
+  4. Commit the read-back `compose_file` verbatim as
+     `deploy/judgement/compose-readback.<profile>.json`. A CI script
+     (`scripts/ci/check-judgement-compose-readback.sh`, with self-tests)
+     refuses a committed read-back that fails step 3's rules.
+  5. Read `compose_hash` from the same output. Then **poll** `GET
+     /v1/attestation` with fresh nonces until a verified quote's `mrconfigid`
+     carries that `compose_hash` (the `01 || compose_hash` form the witness
+     README records). Only then record the app id and measurement. This is
+     the witness's stale-container trap: for about a minute after an upgrade,
+     the old container answers with the old measurement. The signing address
+     and sealing key are per boot, so they are not recorded or pinned.
+  6. The drill (section 10) repeats step 3 from the quote: it hashes the
+     committed read-back for the pinned measurement, requires the hash to
+     equal the `compose_hash` in the live quote's `mrconfigid`, and checks
+     the step 3 fields in that file. A pinned `mrconfigid` therefore implies
+     the hardened manifest, and anyone can check it.
 - **Pin.** Add the production measurement (`mrtd`, `mrconfigid`) to the
   daemon's compiled-in set in a release. Development pins go only into development
   config.
@@ -905,7 +941,11 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
   - mints a drill claim for a dedicated drill account;
   - sends a fixed synthetic digest and verifies the signature;
   - requires every result to carry a verified `provider_tee` receipt and the
-    expected judge versions.
+    expected judge versions;
+  - hashes the committed `compose-readback.production.json` and requires it to
+    equal the `compose_hash` in the live quote's `mrconfigid`, with
+    `public_logs` and `public_sysinfo` false, `allowed_envs` exactly the NEAR
+    AI key, and no SSH pre-launch step (section 9, "Deploy").
 
   Evidence is hash-only: `purpose_hash`, the measurement, the judge versions
   and `digest_sha256`. Missing configuration reports
@@ -930,8 +970,10 @@ Each slice is one PR with its tests. None merges without review.
 4. **Issuer.** The `trace-commons-insights-judgement` audience, the
    `account_ref` claim and the pooled-tenant refusal.
 5. **Binary, enclave seam and image.** `trace-commons-judgement`, the
-   `GetKey` paths, the `tcjudge1` attestation route, `deploy/judgement/`,
-   `judgement-image.yml` with both profiles, and the pre-push boot checks.
+   limiter `GetKey` path and the per-boot keys, the `tcjudge1` attestation
+   route, `deploy/judgement/` (its README carries section 9's deploy steps,
+   the read-back rules and the stale-container poll), `judgement-image.yml`
+   with both profiles, and the pre-push boot checks.
 6. **Development deploy.** The development app with `JevAdapter` and
    synthetic data. Measured-image smoke.
 7. **Client.** `contributor/src/judgement/`, the compiled-in production pin
