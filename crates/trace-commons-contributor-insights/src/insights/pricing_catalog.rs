@@ -60,7 +60,7 @@ use std::collections::BTreeSet;
 
 use trace_commons_protocol::insights_pricing::{
     DeterministicCostEstimate, PricingError, PricingTable, PricingUsageInput,
-    calculate_estimated_cost,
+    ValidatedPricingTable, calculate_estimated_cost_validated,
 };
 
 const MAX_CATALOG_TABLES: usize = 256;
@@ -86,6 +86,9 @@ pub enum PricingCatalogError {
     InvalidQuery,
     #[error("insights_pricing_missing_price")]
     MissingPrice,
+    /// The newest applicable table matched but the arithmetic overflowed.
+    #[error("insights_pricing_arithmetic_overflow")]
+    ArithmeticOverflow,
     #[error("insights_pricing_window_unresolved")]
     UnresolvedWindow,
     /// Every table that prices the model was fetched more than
@@ -101,43 +104,47 @@ pub enum PricingCatalogError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PricingCatalog {
-    tables: Vec<PricingTable>,
+    /// Validated once, in [`Self::from_tables`], and immutable after: no
+    /// lookup repeats the validation.
+    tables: Vec<ValidatedPricingTable>,
 }
 
 impl PricingCatalog {
     /// Build one Trace Commons reviewed catalog release sequence. `version`
     /// is global within this sequence, rather than a publisher/provider-local
     /// counter, so two table bodies cannot claim the same release version.
-    pub fn from_tables(mut tables: Vec<PricingTable>) -> Result<Self, PricingCatalogError> {
+    pub fn from_tables(tables: Vec<PricingTable>) -> Result<Self, PricingCatalogError> {
         if tables.len() > MAX_CATALOG_TABLES {
             return Err(PricingCatalogError::InvalidCatalog);
         }
+        let mut validated = Vec::with_capacity(tables.len());
         let mut ids = BTreeSet::new();
         let mut versions = BTreeSet::new();
-        for table in &tables {
-            table
-                .validate()
+        for table in tables {
+            let table = table
+                .into_validated()
                 .map_err(|_| PricingCatalogError::InvalidCatalog)?;
-            if !ids.insert(table.table_id.as_str()) {
+            if !ids.insert(table.table_id.clone()) {
                 return Err(PricingCatalogError::DuplicateTable);
             }
             if !versions.insert(table.version) {
                 return Err(PricingCatalogError::DuplicateVersion);
             }
+            validated.push(table);
         }
-        tables.sort_by(|left, right| {
+        validated.sort_by(|left, right| {
             left.version
                 .cmp(&right.version)
                 .then_with(|| left.table_id.cmp(&right.table_id))
         });
-        Ok(Self { tables })
+        Ok(Self { tables: validated })
     }
 
-    pub fn tables(&self) -> &[PricingTable] {
+    pub fn tables(&self) -> &[ValidatedPricingTable] {
         &self.tables
     }
 
-    pub fn table(&self, table_id: &str) -> Option<&PricingTable> {
+    pub fn table(&self, table_id: &str) -> Option<&ValidatedPricingTable> {
         self.tables.iter().find(|table| table.table_id == table_id)
     }
 
@@ -157,11 +164,40 @@ impl PricingCatalog {
         &self,
         input: &PricingUsageInput,
     ) -> Result<&PricingTable, PricingCatalogError> {
+        self.resolve(input).map(|(table, _)| table.as_table())
+    }
+
+    /// [`Self::select_newest_applicable`] and the estimate from that table in
+    /// one pass, so a caller does not price the same turn a second time. An
+    /// overflow in the chosen table is `ArithmeticOverflow`, never a fall
+    /// back to an older table.
+    pub fn price_newest_applicable(
+        &self,
+        input: &PricingUsageInput,
+    ) -> Result<(&PricingTable, DeterministicCostEstimate), PricingCatalogError> {
+        let (table, estimate) = self.resolve(input)?;
+        let estimate = estimate.map_err(|_| PricingCatalogError::ArithmeticOverflow)?;
+        Ok((table.as_table(), estimate))
+    }
+
+    /// The chosen table and its result. The result is `Err` only for an
+    /// arithmetic overflow, the one failure that still selects its table.
+    fn resolve(
+        &self,
+        input: &PricingUsageInput,
+    ) -> Result<
+        (
+            &ValidatedPricingTable,
+            Result<DeterministicCostEstimate, PricingError>,
+        ),
+        PricingCatalogError,
+    > {
         validate_query(input)?;
         let mut matching_identity = false;
         let mut stale_identity = false;
-        let mut applicable = None;
-        for table in &self.tables {
+        // Newest first: the first table that applies is the answer. Tables
+        // that do not name the model are skipped before any arithmetic.
+        for table in self.tables.iter().rev() {
             if !table.entries.iter().any(|entry| {
                 entry.provider == input.provider
                     && entry.model == input.model
@@ -176,8 +212,11 @@ impl PricingCatalog {
             matching_identity = true;
             // Overflow is checked only after one entry matched, so it means
             // this table applies.
-            match calculate_estimated_cost(table, input) {
-                Ok(_) | Err(PricingError::ArithmeticOverflow) => applicable = Some(table),
+            match calculate_estimated_cost_validated(table, input) {
+                Ok(estimate) => return Ok((table, Ok(estimate))),
+                Err(PricingError::ArithmeticOverflow) => {
+                    return Ok((table, Err(PricingError::ArithmeticOverflow)));
+                }
                 Err(PricingError::MissingPrice | PricingError::UnresolvedWindow) => {}
                 Err(PricingError::InvalidInput) => return Err(PricingCatalogError::InvalidQuery),
                 Err(PricingError::InvalidTable) => {
@@ -185,7 +224,7 @@ impl PricingCatalog {
                 }
             }
         }
-        applicable.ok_or(if matching_identity {
+        Err(if matching_identity {
             PricingCatalogError::UnresolvedWindow
         } else if stale_identity {
             PricingCatalogError::StalePrices
@@ -209,7 +248,7 @@ impl PricingCatalog {
             .table(&saved.table_id)
             .filter(|table| table.version == saved.table_version)
             .ok_or(PricingCatalogError::StoredTableUnavailable)?;
-        calculate_estimated_cost(table, input).map_err(|error| match error {
+        calculate_estimated_cost_validated(table, input).map_err(|error| match error {
             PricingError::MissingPrice => PricingCatalogError::MissingPrice,
             PricingError::UnresolvedWindow => PricingCatalogError::UnresolvedWindow,
             PricingError::InvalidInput => PricingCatalogError::InvalidQuery,
@@ -300,6 +339,8 @@ mod tests {
         BillableTokenCategory, BillableTokenCount, ModelPriceEntry, PRICING_TABLE_SCHEMA_VERSION,
         PricingAccounting, PricingCurrency, PricingTableProvenance, TokenRate,
     };
+
+    use trace_commons_protocol::insights_pricing::calculate_estimated_cost;
 
     use super::*;
     use crate::insights::session_pricing::{normalize_model_label, pricing_provider};
@@ -491,8 +532,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        assert_eq!(catalog.table(&oldest.table_id), Some(&oldest));
-        assert_eq!(catalog.table(&newest.table_id), Some(&newest));
+        assert_eq!(
+            catalog.table(&oldest.table_id).map(|table| table.as_table()),
+            Some(&oldest)
+        );
+        assert_eq!(
+            catalog.table(&newest.table_id).map(|table| table.as_table()),
+            Some(&newest)
+        );
     }
 
     #[test]
