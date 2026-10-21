@@ -2833,8 +2833,9 @@ impl std::fmt::Debug for SealedRecipient {
 
 /// One accrual to insert. `award_units` and `rail_units` are magnitudes; a
 /// reversal is stored negated. `account_id` is `None` for a line keyed to a
-/// bare principal, owed to nobody until claimed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// bare principal, owed to nobody until claimed. `Debug` prints neither the
+/// account nor its hash.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutAccrualWrite {
     pub rail_id: RailId,
     pub kind: PayoutAccrualKind,
@@ -2866,7 +2867,8 @@ impl PayoutOwed {
 }
 
 /// A new link generation. Only `Waiting` or `Active` may be inserted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` redacts the account, the recipient and the program.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutLinkWrite {
     pub account_id: Uuid,
     pub rail_id: RailId,
@@ -2912,8 +2914,9 @@ impl std::fmt::Debug for PayoutLink {
     }
 }
 
-/// A line to write `pending`, committed before any network call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A line to write `pending`, committed before any network call. `Debug`
+/// redacts the account.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutLineWrite {
     pub line_id: Uuid,
     pub link_id: Uuid,
@@ -2931,7 +2934,8 @@ pub enum PendingPayoutLineInsert {
     LinkHasPendingLine,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A stored line. `Debug` redacts the account.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutLine {
     pub line_id: Uuid,
     pub link_id: Uuid,
@@ -2991,8 +2995,9 @@ impl PayoutLinkAction {
 }
 
 /// A link or unlink request awaiting a passkey confirmation. A link request
-/// carries its verified, sealed recipient; an unlink request none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// carries its verified, sealed recipient; an unlink request none. `Debug`
+/// redacts the account, the handle and the recipient.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutLinkRequestWrite {
     pub account_id: Uuid,
     pub rail_id: RailId,
@@ -3015,8 +3020,9 @@ pub enum PayoutLinkRequestInsert {
     IdempotencyConflict,
 }
 
-/// A taken link request. The caller checks `expires_at`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A taken link request. The caller checks `expires_at`. `Debug` redacts
+/// the account and the recipient.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PayoutLinkRequest {
     pub account_id: Uuid,
     pub rail_id: RailId,
@@ -3025,6 +3031,74 @@ pub struct PayoutLinkRequest {
     pub expected_current_version: Option<i64>,
     pub recipient: Option<(RecipientKind, SealedRecipient)>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+// Hash-only logging (spec, "Hash-only logging"): these `Debug` impls print
+// the rail, kinds and states, never an account id, its hash, a program, a
+// handle or a recipient. `payout_debug_tests` pins it.
+impl std::fmt::Debug for PayoutAccrualWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccrualWrite")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("rate_version", &self.rate_version)
+            .field("instrument_id", &self.instrument_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkWrite")
+            .field("rail_id", &self.rail_id)
+            .field("recipient_kind", &self.recipient_kind)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLineWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLineWrite")
+            .field("rail_id", &self.rail_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLine")
+            .field("rail_id", &self.rail_id)
+            .field("state", &self.state)
+            .field("attempts", &self.attempts)
+            .field("last_error_label", &self.last_error_label)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkRequestWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkRequestWrite")
+            .field("rail_id", &self.rail_id)
+            .field("action", &self.action)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkRequest")
+            .field("rail_id", &self.rail_id)
+            .field("action", &self.action)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Whether a rate epoch was recorded at boot.
@@ -3243,4 +3317,135 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Vec<String>, DatabaseError>;
+}
+
+#[cfg(test)]
+mod payout_debug_tests {
+    //! Hash-only logging: a `{:?}` of any payout row type must print neither
+    //! the account id nor the program, so a `tracing::warn!(?line)` cannot
+    //! leak either.
+
+    use super::*;
+
+    const ACCOUNT: &str = "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+    const PROGRAM: &str = "tc1-programsecretvalue";
+    const ACCOUNT_HASH: &str =
+        "sha256:abababababababababababababababababababababababababababababababab";
+    const HANDLE_HASH: &str =
+        "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+    fn account() -> Uuid {
+        Uuid::parse_str(ACCOUNT).unwrap()
+    }
+
+    fn rail() -> RailId {
+        RailId::new("near_ai").unwrap()
+    }
+
+    fn sealed() -> SealedRecipient {
+        SealedRecipient {
+            sealed: serde_json::json!({"ciphertext": "sealedvalue"}),
+            recipient_index: "sha256:00".into(),
+            recipient_key_ref: "key".into(),
+            index_pepper_ref: "pepper".into(),
+            subject_index: "sha256:11".into(),
+        }
+    }
+
+    fn assert_redacted(rendered: String) {
+        for secret in [ACCOUNT, PROGRAM, ACCOUNT_HASH, HANDLE_HASH, "sealedvalue"] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug printed {secret}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn payout_row_types_redact_account_and_program_in_debug() {
+        let kind = RecipientKind::new("test_recipient").unwrap();
+        let expires = chrono::Utc::now();
+        assert_redacted(format!(
+            "{:?}",
+            PayoutAccrualWrite {
+                rail_id: rail(),
+                kind: PayoutAccrualKind::Credit,
+                settlement_batch_id: Uuid::nil(),
+                credit_account_hash: ACCOUNT_HASH.into(),
+                reversal_event_id: None,
+                account_id: Some(account()),
+                award_units: AtomicUnits::from_raw(1),
+                rail_units: AtomicUnits::from_raw(1),
+                rate_version: "v1".into(),
+                instrument_id: InstrumentId::new("test_units").unwrap(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkWrite {
+                account_id: account(),
+                rail_id: rail(),
+                link_id: Uuid::nil(),
+                recipient_kind: kind.clone(),
+                recipient: sealed(),
+                program: PROGRAM.into(),
+                state: PayoutLinkState::Waiting,
+                actor_ref_hash: ACCOUNT_HASH.into(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLineWrite {
+                line_id: Uuid::nil(),
+                link_id: Uuid::nil(),
+                account_id: account(),
+                rail_id: rail(),
+                target_total: AtomicUnits::from_raw(1),
+                delta: AtomicUnits::from_raw(1),
+                owed_through_accrual_count: 1,
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLine {
+                line_id: Uuid::nil(),
+                link_id: Uuid::nil(),
+                account_id: account(),
+                rail_id: rail(),
+                target_total: AtomicUnits::from_raw(1),
+                delta: AtomicUnits::from_raw(1),
+                state: PayoutLineState::Pending,
+                receipt_hash: None,
+                attempts: 0,
+                last_error_label: None,
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkRequestWrite {
+                account_id: account(),
+                rail_id: rail(),
+                idempotency_key: Uuid::nil(),
+                handle_hash: HANDLE_HASH.into(),
+                request_digest: HANDLE_HASH.into(),
+                action: PayoutLinkAction::Link,
+                expected_current_version: None,
+                recipient: Some((kind.clone(), sealed())),
+                expires_at: expires,
+                actor_ref_hash: ACCOUNT_HASH.into(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkRequest {
+                account_id: account(),
+                rail_id: rail(),
+                idempotency_key: Uuid::nil(),
+                action: PayoutLinkAction::Link,
+                expected_current_version: None,
+                recipient: Some((kind, sealed())),
+                expires_at: expires,
+            }
+        ));
+    }
 }
