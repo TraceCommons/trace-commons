@@ -18,7 +18,6 @@ struct InsightsView: View {
     private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
-    @State private var source = "codex"
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -44,6 +43,13 @@ struct InsightsView: View {
                 try await client.insightsSessionLabel(sessionRef: reference, task: task, outcome: outcome)
             }
         }
+        // The daemon saves to the standard store only: with a custom store
+        // its snapshot would never show here, so the action is not offered.
+        var sessionAnalyzer: InsightsModel.SessionAnalyzer? = storeSelection.storeDirectory != nil
+            ? nil
+            : daemon.map { client in
+                { reference in try await client.insightsAnalyzeSession(sessionRef: reference, save: true) }
+            }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
@@ -51,6 +57,7 @@ struct InsightsView: View {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
             watchedReader = nil
+            sessionAnalyzer = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -58,7 +65,8 @@ struct InsightsView: View {
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
                   model: InsightsModel(service: service, weekReader: weekReader,
-                                       modelAnswersReader: modelAnswersReader),
+                                       modelAnswersReader: modelAnswersReader,
+                                       sessionAnalyzer: sessionAnalyzer),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
@@ -148,7 +156,9 @@ struct InsightsView: View {
                                     selectWeek: selectWeek)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
-                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text))
+                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
+                                    analysis: model.canAnalyzeSessions ? model : nil,
+                                    openAnalysis: { tab = .analyze })
             case .analyze: content
             }
         }
@@ -215,8 +225,7 @@ struct InsightsView: View {
                               recapCardEnabled: week?.recapCardEnabled ?? false)
     }
 
-    /// The Analyze tab: choosing and saving traces, and the saved-history
-    /// tools, each section on its own card under its title (owner,
+    /// The Analyze tab: the saved traces and the saved-history tools, each section on its own card under its title (owner,
     /// 2026-10-15: between hairlines they ran together). What a section is
     /// and what it keeps is behind its title's "i"; failures, a custom
     /// store and what an action needs first stay on the page.
@@ -240,7 +249,8 @@ struct InsightsView: View {
                         .insightsSection()
                     InsightCardsView(model: model)
                         .insightsSection()
-                    savedSection
+                    // While none is saved, the head says how to save one.
+                    if !model.snapshots.isEmpty { savedSection }
                 }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
@@ -250,14 +260,17 @@ struct InsightsView: View {
         }
     }
 
-    /// Choose a trace file to analyze. What analysis is and keeps, and that
-    /// closing discards late results, are behind the title's "i".
+    /// Analyze's head. Traces come from Sessions' Analyze & save, never a
+    /// file the person picks (Insights PM, 2026-10-21: terminal users never
+    /// see their trace files), so this says where to get one. What analysis
+    /// keeps, and that closing discards late results, are behind the
+    /// title's "i".
     private var analyzeSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // Refresh at the title's trailing end, as every refresh is
             // (owner, 2026-10-20).
             InsightsSectionTitle(title: model.text("analytics_tab_analyze"), info: [
-                model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
+                model.text("analytics_analyze_intro"), model.text("cancellation_notice"),
             ]) {
                 if model.busy { GlassSpinner() }
                 GlassRefreshButton(model.text("refresh_accessibility")) { model.refresh() }
@@ -268,19 +281,8 @@ struct InsightsView: View {
                     Text(location)
                         .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
                 }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    GlassSelect(model.text("source"), selection: $source, options: [
-                        GlassPickerOption(model.text("codex"), value: "codex"),
-                        GlassPickerOption(model.text("claude_code"), value: "claude_code"),
-                        GlassPickerOption(model.text("trajectory"), value: "trajectory"),
-                    ])
-                    .fixedSize()
-                    Button(model.text("choose_file")) {
-                        if let file = FolderPanel.chooseTraceFile(source: source) {
-                            model.analyze(file: file, source: source)
-                        }
-                    }
-                }.disabled(model.busy)
+                Text(model.text(model.snapshots.isEmpty ? "analytics_analyze_empty" : "analytics_analyze_how"))
+                    .insightsNote()
                 if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
                 if !model.invalidatedEpisodeIDs.isEmpty {
                     VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
@@ -355,7 +357,6 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsSectionTitle(model.text("saved"))
             VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
                 ForEach(model.snapshots) { insight in
                     Button { model.explain(insight.id) } label: {
                         VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {

@@ -11,11 +11,17 @@ snapshots you saved, **Patterns** shows where that week's tokens went,
 whole screen described below. **Spend** is shown disabled with a "Later"
 chip.
 
-Choose a Codex rollout, Claude Code session or trajectory file to analyze it
-locally. Analysis is
-temporary; **Re-read and save** reads the selected file again and saves derived
-observations to the same local store as the CLI. Saved snapshots update only
-on explicit import. Deleting a snapshot keeps the original file. Assessments
+Analyze picks no file (Insights PM, 2026-10-21: terminal users never see
+their session files). An open watched row in **Sessions** has **Analyze &
+save**: the daemon (`insights_analyze_session`) finds that session's file
+among the ones its watcher already watches, never in a Never folder, runs
+the same local analysis on it and saves derived observations to the
+standard store, the same local store as the CLI; the saved snapshot then
+opens in Analyze's detail. With a custom `--insights-store` the action is not
+offered, since the daemon writes only the standard store. A file moved or
+deleted since it was counted, or a row listed again since, says so under the
+row. While nothing is saved, Analyze says to save a session from Sessions.
+Saved snapshots update only when analyzed again. Deleting a snapshot keeps the original file. Assessments
 are user-reported and remain separate from verified outcomes.
 
 The saved-history summary loads on entry and refreshes after saving, deleting,

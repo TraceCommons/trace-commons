@@ -31,6 +31,12 @@ struct InsightsSessionsTab: View {
     /// Why watched-folder counting is not showing (the window's week, or
     /// this tab's own list), as Overview says it; `nil` otherwise.
     var notice: String? = nil
+    /// Analyze & save on the open watched row (Insights PM, 2026-10-21):
+    /// the model that asks the daemon and shows the snapshot; `nil` draws
+    /// no action (no daemon, or a custom store).
+    var analysis: InsightsModel? = nil
+    /// Opens Analyze once the saved snapshot is its detail.
+    var openAnalysis: () -> Void = {}
     /// The turn being read; `nil` reads the whole session.
     @State private var readTurn: Int?
     /// The feed row the arrow keys are on (Full Keyboard Access).
@@ -212,10 +218,12 @@ struct InsightsSessionsTab: View {
         .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
     }
 
-    /// The open row's drill, beneath it: the drill once read, the
-    /// unavailable line if it could not be, a spinner meanwhile.
+    /// The open row's Analyze & save, then its drill beneath it: the drill
+    /// once read, the unavailable line if it could not be, a spinner
+    /// meanwhile.
     @ViewBuilder
     private func expanded(_ row: DaemonData.InsightsWatchedSession) -> some View {
+        if let analysis { analyzeAction(row, analysis) }
         if let drill = model.drill, drill.session_ref == row.sessionRef {
             drillContent(drill)
         } else if model.failed {
@@ -223,6 +231,31 @@ struct InsightsSessionsTab: View {
         } else {
             GlassSpinner()
         }
+    }
+
+    /// The open row's one action: the daemon analyzes the trace it found
+    /// and saves the snapshot, which then opens in Analyze. A spinner while
+    /// it is asked, and the core's line if it could not be.
+    private func analyzeAction(_ row: DaemonData.InsightsWatchedSession, _ analysis: InsightsModel) -> some View {
+        let reference = row.sessionRef
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                Button(text("analytics_analyze_save")) {
+                    Task { if await analysis.analyzeAndSave(session: reference) { openAnalysis() } }
+                }
+                .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                .disabled(analysis.busy)
+                .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
+                    "analytics_analyze_save_a11y", row, copy: copy))
+                if analysis.analyzingSession == reference { GlassSpinner() }
+                Spacer(minLength: 0)
+            }
+            if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
+                Text(text(failure.key)).insightsError()
+            }
+        }
+        // Lined up under the label, past the harness tile, as the labels are.
+        .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
     }
 
     /// The foot of the feed: the loading row while the next page is read,
