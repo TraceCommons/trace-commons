@@ -154,7 +154,7 @@ enum DebugScreenshot {
                 state.open = true
                 state.peek = peek
                 render(
-                    EdgeRailView(state: state, data: railData, onOpenChange: { _, _ in })
+                    EdgeRailView(state: state, data: railData, request: { _, _ in })
                         .environmentObject(model),
                     to: directory + "/macos-shell-edge-rail-\(peek).png",
                     size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)
