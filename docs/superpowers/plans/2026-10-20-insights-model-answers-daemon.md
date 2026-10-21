@@ -504,6 +504,32 @@ Rules (spec section 6):
 - [ ] **Step 4: Run** all three suites, fmt, clippy and the `--no-default-features` checks — Expected: green against the baseline.
 - [ ] **Step 5: Commit**: `git commit -m "Serve the Models answers over a new local IPC method"` (with the trailer).
 
+### Addendum (2026-10-20): automated sessions out of the shared limit
+
+Owner decision, option (b): automated review sessions are kept out of the
+Insights store's shared 2,048-session limit and given their own small
+allowance. Landed on PR #1510:
+
+- Marker: a Codex session is automated when its first `session_meta` names
+  a `source` object holding a `subagent` key (Codex's automatic approvals
+  reviewer, or a thread an agent spawned). Only the shape is read. Neither
+  `approvals_reviewer: auto_review` (a session policy, set on sessions the
+  person started too) nor the `codex-auto-review` model label (only the
+  reviewer, not spawned threads) is used. No `session_meta`/`source`,
+  `source: "unknown"`, a spawned thread with a later non-spawned
+  `session_meta`, and every Claude Code session are unknown; unknown counts
+  as the person's. `exec` and `mcp` count as the person's.
+- Store: a row field `automation` (`unknown`/`person`/`automated`) with
+  `automation_read`; old Codex rows are read once more within the per-poll
+  budget. Automated rows are outside the shared session, turn and tool-call
+  caps, under `COUNTER_STORE_MAX_AUTOMATED_SESSIONS` (1024), oldest first.
+  Eviction marks record which allowance evicted them; only the shared caps'
+  marks bound unread sessions; marks from before the allowance are dropped.
+- Downstream: the Models answers leave them out under `left_out.automated`
+  (every row); the Patterns cards and the Sessions feed leave them out with
+  no switch (none existed); weekly token figures keep them, and
+  `insights_week` adds `automated_stored`. UI copy is a later PR.
+
 ---
 
 ## Self-review notes
