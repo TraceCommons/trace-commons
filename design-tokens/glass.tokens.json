@@ -87,7 +87,7 @@
     "menuModeArmed": { "hex": "#34c759", "note": "Menu-bar mode circle and Private AI on option: contribute automatically." },
     "menuModeNever": { "hex": "#ff453a", "note": "Menu-bar mode circle: never; also the menu-bar badge." },
     "menuPillOff": { "hex": "#5a5a5f", "note": "Menu-bar pill circle when paused or off.", "light": { "hex": "#aeaeb2" } },
-    "menuBarsPaused": { "hex": "#555555", "note": "Graph and strip bars while watching is paused.", "light": { "hex": "#b4b4b8" } },
+    "menuBarsPaused": { "hex": "#555555", "note": "The popover graph's bars while watching is paused. The menu-bar item's paused bars are menuItemMark at lower alpha.", "light": { "hex": "#b4b4b8" } },
     "menuItemMark": { "hex": "#ffffff", "note": "The NEAR AI mark on the menu-bar item, in the logo kit's single inks: white on a dark menu bar, black on a light one (owner, 2026-10-21). The item's centre line and paused bars are this ink at lower alpha.", "light": { "hex": "#000000" } },
     "menuStripShared": { "hex": "#b08bff", "note": "The menu-bar item's shared-traces bars, above the centre line. Drawn on the bar itself with no capsule (owner, 2026-10-21), so dark is dataShared's hue lifted to 3:1 or more on a dark bar; light is dataShared.", "light": { "hex": "#7a2cf5" } },
     "menuStripKept": { "hex": "#6aa6ff", "note": "The menu-bar item's kept-traces bars, below the centre line. Dark is dataKept's hue lifted to 3:1 or more on a dark bar; light is dataKept.", "light": { "hex": "#2f6bc4" } },

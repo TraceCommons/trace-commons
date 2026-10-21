@@ -152,7 +152,7 @@ public enum GlassTokens {
         public static let menuModeNever: GlassRGBA = GlassRGBA(0xFF453A, alpha: 1)
         /// Menu-bar pill circle when paused or off.
         public static let menuPillOff: GlassRGBA = GlassRGBA(0x5A5A5F, alpha: 1, light: GlassRGBA(0xAEAEB2, alpha: 1))
-        /// Graph and strip bars while watching is paused.
+        /// The popover graph's bars while watching is paused. The menu-bar item's paused bars are menuItemMark at lower alpha.
         public static let menuBarsPaused: GlassRGBA = GlassRGBA(0x555555, alpha: 1, light: GlassRGBA(0xB4B4B8, alpha: 1))
         /// The NEAR AI mark on the menu-bar item, in the logo kit's single inks: white on a dark menu bar, black on a light one (owner, 2026-10-21). The item's centre line and paused bars are this ink at lower alpha.
         public static let menuItemMark: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1, light: GlassRGBA(0x000000, alpha: 1))
