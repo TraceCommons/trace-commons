@@ -329,7 +329,7 @@ them. No permissive crate gains a server or gate dependency.
 `NearAiTransferClient` holds the base URL, sender org, source type and the
 credential as `SecretString`. It copies the scorer client's shape: TLS or
 loopback only, `redirect(Policy::none())`, a fixed user agent, a 15 s
-timeout (cloud-api's own whole-operation timeout is 10 s), `bearer_auth`.
+timeout (cloud-api wraps the send in a 10 s timeout, `credit_transfers.rs:51-53`), `bearer_auth`.
 It exposes four calls: `send_cumulative`, `send_amount` (Option A only),
 `capacity`, and `history_page`. It parses the error body's `type` field into
 a closed enum and keeps nothing else from an error.
@@ -382,11 +382,12 @@ repo's numbering convention (V130 is the highest; check the convention
 before picking).
 
 - `trace_nearai_payout_links`: `tenant_id`, `link_id`, `state`
-  (`active`, `closing`, `closed`), `sealed_org_id JSONB`, `org_index`
+  (`waiting`, `active`, `closing`, `closed`), `sealed_org_id JSONB`, `org_index`
   (keyed blind index), `org_key_ref`, `index_pepper_ref`, `payout_program`,
   `final_paid_nano NUMERIC(20,0)` (set on close), `version`, timestamps,
-  and a `tenant_storage_ref` column for Option A. A partial unique index
-  allows one `active` or `closing` row per tenant.
+  and a `tenant_storage_ref` column for Option A. Two partial unique
+  indexes allow at most one `waiting` or `active` row and at most one
+  `closing` row per tenant. Only an `active` link receives sends.
 - `trace_nearai_payout_lines`: `tenant_id`, `link_id`, `batch_id`,
   `target_nano`, `rate_version`, `state` (`pending`, `sent`, `confirmed`,
   `no_op`, `held`, `failed`), `transfer_id_hash`, `delta_nano`,
@@ -494,7 +495,12 @@ trust. The link call therefore follows the provision and bind shape:
 5. Ingest sends a liveness probe: `recipient_cumulative: 0` on a fixed probe
    program, from the reseller credential. Per the check order above, that
    returns 200 `no_op` only for an active recipient, writes no row and uses
-   no quota. A 404 refuses the link as `near_ai_org_unavailable`.
+   no quota. A 404 refuses the link as `near_ai_org_unavailable`. The send
+   policy runs first, including the credential's `allowed_recipient_ids`,
+   so on a closed pilot an org not on the list returns 409
+   `credential_transfer_limit_exceeded`. That refuses the link as
+   `near_ai_org_not_permitted`, which is expected on staging. A 403 means
+   our credential is bad and refuses as `payout_unavailable`.
 6. Ingest stores the link and answers with the org name it verified, so the
    app can show what was saved.
 
@@ -512,7 +518,7 @@ stack (`crates/trace-commons-contributor/src/inference_connection.rs:190-230`,
   (`docs/operator/native-step-up-page.md`);
 - outcomes: `linked`, `idempotency_conflict` (409), `version_conflict`,
   `subject_mismatch`, `org_not_owned`, `near_ai_org_unavailable`,
-  `account_ineligible`;
+  `near_ai_org_not_permitted`, `account_ineligible`;
 - audit row `account_payout_org_linked` with the link id hash and version
   only.
 
@@ -529,12 +535,14 @@ one org (section 9) without opening either. The key is not in the database.
 
 ### Change and unlink
 
-- **Change** closes the old link and opens a new generation in one
-  transaction. The old link goes to `closing`.
+- **Change** moves the old link to `closing` and inserts the new
+  generation as `waiting`, in one transaction.
 - **Closing.** The next pass sends nothing new to a closing link. It
   confirms any `pending` line, reads the program total from history, writes
-  `final_paid_nano`, and sets `closed`. Until then the new link gets no
-  sends, so the two never race.
+  `final_paid_nano`, sets the old link `closed` and the waiting one
+  `active`, in one transaction. A waiting link gets no sends, so the two
+  never race. A second change while one is `closing` replaces the
+  `waiting` row.
 - **Unlink** does the same with no new link. Credit keeps accruing and is
   sent when the contributor links again.
 
