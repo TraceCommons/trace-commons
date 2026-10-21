@@ -1,8 +1,27 @@
 # Insights private judgements -- addendum to the model-answers design
 
-Date: 2026-10-20. Owner: Zaki. Status: draft, for owner review. Nothing here
-is built, and nothing here blocks the model-answers PRs (PR 0, PR 1), which
-ship the local design first.
+Date: 2026-10-20. Owner: Zaki. Status: draft. The owner answered the open
+decisions on 2026-10-20 (see "Owner decisions"). Nothing here is built, and
+nothing here blocks the model-answers PRs (PR 0, PR 1), which ship the local
+design first.
+
+## Owner decisions (2026-10-20)
+
+1. **Build now, with a stand-in model:** the NEAR AI-routed Jev decision
+   model sits behind the same adapter until the NEAR AI decision model ships.
+   The earlier Jev hold (2026-09-22) was about *hosted* Jev leaving the
+   privacy boundary. Jev routed through NEAR AI private inference, and called
+   only from the attested service, is inside it.
+2. **Digest contents: delegated to the implementer.** The values are below,
+   under "What is sent".
+3. **Budget: $5 to start.** Recorded as a cap of $5 of NEAR AI spend per
+   contributor per calendar month, enforced by the service's limiter. If the
+   owner meant $5 in total for the first experiment, the limiter's per-user
+   cap becomes the total.
+4. **Account-bound calls**, not anonymous tokens. The service learns which
+   account made a call; mitigations are below.
+5. **Comparisons across users inside the TEE are in scope** as a later
+   phase. Outline below; it gets its own spec.
 
 Extends `2026-10-20-insights-model-answers-design.md` (spec PR #1501).
 
@@ -74,38 +93,41 @@ contributor daemon <--(labels + receipt evidence)-- +
 
 A **judgement digest**, built locally after the privacy filter runs:
 
-- the counts the model-answers design already stores (tool kinds, edit
-  counts, failing and passing commands, denial and interrupt markers);
-- per turn, at most N scrubbed excerpts: the contributor prompt, the first
-  line of the model's final message, and each edited file's extension class
-  (never its path);
-- no file contents, diffs, paths, repository names or identifiers.
+- **Counts:** the ones the model-answers design already stores (tool kinds,
+  edit counts, failing and passing commands, denial and interrupt markers),
+  plus per-turn edit and command outcomes.
+- **Contributor prompts:** at most 12 per session, each scrubbed and cut to
+  240 characters. With more than 12, take the first 4, the last 4, and the 4
+  just before each denial, interrupt or undo.
+- **Final message:** the first line of the model's final message, scrubbed and
+  cut to 160 characters.
+- **Edited files:** each file's extension class, never its path.
+- **Never:** file contents, diffs, paths, repository names or identifiers.
 
-The digest has a byte cap (default proposed: 8 KiB) and a hash. The daemon
+The digest has a byte cap of 8 KiB, and is dropped whole rather than truncated
+mid-field. It also has a hash. The daemon
 logs only the hash (CLAUDE.md, hash-only logging). The digest builder is pure
 and lives in the contributor-insights crate. A test over the serialized bytes
 pins that no path, file name or raw text beyond the scrubbed excerpts appears.
 
-### Per-user rate limiting without linking calls
+### Per-user rate limiting (account-bound, owner decision 4)
 
-The account identity would make every judgement call linkable to a person, so
-this addendum does not use it. The proposal:
-
-- At enrollment, and again per period, the daemon receives a batch of
-  **anonymous single-use tokens** (blind-signed, Privacy Pass style) from the
-  ingest server, which already knows the account.
-- Each judgement call spends one token. The service verifies the issuer's
-  signature and rejects reused tokens. It learns that a valid user spent a
-  token, never which user.
-- The batch size per period is the per-user limit. The operator's NEAR AI
-  budget is the sum.
-- It is the same goal as `witness_pacing`, which throttles background witness
-  work "without carrying identity". Its refusal shapes (capacity refusal is
-  retryable; policy and timeout refusals are distinct) are reused here.
-
-Open: blind-signature scheme and library. Any new dependency goes through the
-dependency policy (surface it for explicit approval, check license
-compatibility).
+- A call carries the contributor's existing account credential. The service
+  checks it, then keys the limiter on a **keyed digest of the account ID**,
+  under a key sealed to the enclave measurement, never the raw ID.
+- **Cap:** the limiter meters spend, not calls. Each call's cost is taken from
+  the NEAR AI usage the response reports. The cap is $5 per account per
+  calendar month (decision 3). A call that would pass the cap is refused with
+  a retryable capacity refusal that carries the reset time.
+- **Mitigations for linkability:**
+  - The service logs only digest hashes and fixed labels (CLAUDE.md).
+  - It stores no digests or labels, only the limiter's spend per keyed account.
+  - The operator sees the measurement, not the data.
+  - The consent copy says calls are tied to the account.
+- Refusal shapes follow `witness_pacing`: capacity refusal is retryable;
+  policy and timeout refusals are distinct.
+- An operator-wide monthly budget sits above the per-account cap. Spending
+  past it refuses every call with the same capacity refusal.
 
 ### What comes back, and where it goes
 
@@ -142,15 +164,37 @@ Answers that use judged fields say "judged privately" in their (i).
 
 ## Not decided (owner)
 
-1. Whether to build this before the decision model is available, using a
-   stand-in model behind the same interface, or wait.
-2. Digest contents and cap: excerpts per turn (N) and the byte cap.
-3. Rate limit per user per period, and the operator's monthly budget.
-4. Anonymous tokens (recommended) or account-bound calls (simpler, linkable).
-5. Whether the service may also compute **cross-user aggregates**, such as
-   "your rejection rate vs. others". That is a much larger design, with its own
-   threat model (k-anonymity, minimum cohort sizes) and its own consent. This
-   addendum excludes it.
+1. (Answered as decision 1: build now with the NEAR AI-routed Jev stand-in.)
+2. (Answered as decision 2: delegated; values are under "What is sent".)
+3. (Answered as decision 3: $5 per account per month to start. The
+   operator-wide budget is still open.)
+4. (Answered as decision 4: account-bound.)
+5. (Answered as decision 5: in scope as phase 2, outlined below.)
+
+## Phase 2: comparisons across users inside the TEE (outline)
+
+The owner put this in scope. With it, the service is no longer stateless:
+
+- **Opt-in to contribute:** a contributor who opts in sends their per-model
+  figures to the service. These are counts and rates per (task type, model),
+  never digests or labels. Opting in to contribute is separate from opting in
+  to judgements.
+- **Sealed store:** the figures are held only inside the enclave, encrypted
+  under a key sealed to its measurement, keyed by the keyed account digest so
+  a contributor can replace or delete theirs. A new enclave measurement needs a
+  defined key migration, or the store starts over.
+- **Answers:** the service answers only aggregates. An example is "your Opus
+  rejection rate in bug-fix sessions vs. the median of N contributors".
+  - Minimum cohort: at least 20 contributors per cell, with no aggregate
+    answered below that.
+  - Answers are rounded, so that one contributor joining or leaving a cell
+    cannot be inferred from two queries.
+- **Attestation:** the daemon verifies the measurement before sending
+  figures, as for judgements. The (i) on a cross-user answer names the cohort
+  size and says the comparison was computed inside an attested enclave.
+- **Own spec:** the threat model (query auditing against differencing,
+  measurement upgrades, sealed-key migration, deletion) needs its own spec
+  before any code.
 
 ## Unknowns
 
@@ -171,6 +215,7 @@ ships without per-request attestation, the receipt evidence is absent and the
    opt-in and off by default.
 3. The judgement service: CVM image, measurement pin, receipt verification,
    rate limiter. Its own spec, following the witness service spec's structure.
-4. The anonymous token issuer on ingest. Its own spec, with a dependency
-   proposal.
+4. The account-bound limiter (keyed account digest, spend metering, $5 cap)
+   inside the service.
 5. Consent copy and the opt-in UI (macOS first).
+6. Phase 2: comparisons across users. Its own spec first.
