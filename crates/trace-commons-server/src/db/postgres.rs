@@ -185,7 +185,7 @@ pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &[
 /// see the exclusion notes at the bottom of
 /// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
 /// opt-in published data and does not change the answer.
-/// `trace_payout_rate_epochs` and `trace_payout_control` (V131) are per rail,
+/// `trace_payout_rate_epochs` and `trace_payout_control` (V132) are per rail,
 /// not per tenant, with no tenant column either: they force RLS with a
 /// read-all policy and a write policy for `trace_payout_config_writer` only.
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
@@ -1855,13 +1855,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_score_hold_assessments",
         include_str!("../../../../migrations/V130__pipeline_score_hold_assessments.sql"),
     ),
-    // V131: the payout rail tables (links, link requests, accruals, lines,
+    // V132: the payout rail tables (links, link requests, accruals, lines,
     // holds, audit, rate epochs, control) and the enumerator and config
-    // writer roles. V129 stays unused: #1415 reserved it.
+    // writer roles. V129 stays unused: #1415 reserved it. V131 is #1536's.
     (
-        131,
+        132,
         "payout_rails",
-        include_str!("../../../../migrations/V131__payout_rails.sql"),
+        include_str!("../../../../migrations/V132__payout_rails.sql"),
     ),
 ];
 
@@ -8172,7 +8172,7 @@ mod tests {
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
-            include_str!("../../../../migrations/V131__payout_rails.sql"),
+            include_str!("../../../../migrations/V132__payout_rails.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -8216,7 +8216,7 @@ mod tests {
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
-            include_str!("../../../../migrations/V131__payout_rails.sql"),
+            include_str!("../../../../migrations/V132__payout_rails.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),

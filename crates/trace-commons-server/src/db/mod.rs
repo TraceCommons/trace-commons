@@ -2651,7 +2651,7 @@ pub enum InstanceEnrollmentOutcome {
 mod token_bundles;
 
 // ---------------------------------------------------------------------------
-// Payout rails (V131; docs/superpowers/specs/2026-10-21-nearai-credit-payout-
+// Payout rails (V132; docs/superpowers/specs/2026-10-21-nearai-credit-payout-
 // design.md, sections 4 and 5).
 //
 // One set of tables serves every rail, each row keyed by `rail_id`. Every

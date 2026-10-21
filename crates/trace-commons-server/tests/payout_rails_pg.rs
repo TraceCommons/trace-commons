@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The payout rail tables (V131) against a real PostgreSQL.
+//! The payout rail tables (V132) against a real PostgreSQL.
 //!
 //! Every store call here runs as a real `LOGIN` role whose only privilege
 //! sources are `trace_ingest_runtime` (inherited) and, with `INHERIT FALSE`,

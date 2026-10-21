@@ -9,7 +9,8 @@
 --
 -- NUMBERING. V129 is reserved by #1415 (closed) and may already be applied
 -- to someone's test database, where the runner would silently skip a reuse.
--- This takes the next free number above main's V130.
+-- V131 is taken by open PR #1536. This is the next number free on main and
+-- in every open PR.
 --
 -- AMOUNTS. Every amount is a rail's atomic units, u128 in Rust, stored as
 -- NUMERIC(39,0) and bounded to u128::MAX, as V94 bounds pipeline_run_
@@ -67,7 +68,7 @@
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
-        RAISE EXCEPTION 'V131: trace_ingest_runtime is missing; V90 creates it';
+        RAISE EXCEPTION 'V132: trace_ingest_runtime is missing; V90 creates it';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_payout_enumerator') THEN
         CREATE ROLE trace_payout_enumerator NOLOGIN NOBYPASSRLS;
@@ -83,7 +84,7 @@ DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles
                 WHERE rolname IN ('trace_payout_enumerator', 'trace_payout_config_writer')
                   AND (rolsuper OR rolbypassrls OR rolcanlogin)) THEN
-        RAISE EXCEPTION 'V131: a payout role is privileged or can log in';
+        RAISE EXCEPTION 'V132: a payout role is privileged or can log in';
     END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO trace_payout_enumerator, trace_payout_config_writer;

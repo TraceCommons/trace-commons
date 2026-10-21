@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The PostgreSQL payout rail store (V131).
+//! The PostgreSQL payout rail store (V132).
 //!
 //! Every tenant-scoped call opens a transaction in the auth-derived tenant's
 //! context first, so forced RLS (`trace_current_tenant_id()`) bounds every
