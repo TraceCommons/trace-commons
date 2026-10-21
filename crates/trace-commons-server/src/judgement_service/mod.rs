@@ -43,6 +43,7 @@
 pub mod catalog;
 pub mod claim;
 pub mod digest;
+pub mod enclave;
 pub mod ledger;
 pub mod limiter;
 #[cfg(any(test, feature = "judgement-development-models"))]
