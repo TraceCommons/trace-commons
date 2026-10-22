@@ -74,7 +74,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use secrecy::SecretString;
 use serde::Serialize;
-use trace_commons_attestation::measurements::ExpectedMeasurements;
+use trace_commons_attestation::measurements::{ExpectedMeasurements, MeasurementField};
 use trace_commons_attestation::quote::verify_quote;
 use trace_commons_attestation::staging_pins::{self, CHANNEL, FORMAT, MAX_LIFETIME_SECS};
 use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
@@ -83,7 +83,7 @@ use trace_commons_server::near_attestation::client::{
 };
 use trace_commons_server::near_attestation::key_drift::RandomNonce;
 use trace_commons_server::near_attestation::pin_observe::{
-    observe_measurement_sets, parse_registers,
+    DEFAULT_REGISTERS, observe_measurement_sets, parse_registers,
 };
 use zeroize::Zeroizing;
 
@@ -118,9 +118,10 @@ enum Command {
         /// A model id, as NEAR AI names it. Repeat for each model.
         #[arg(long = "model", required = true)]
         models: Vec<String>,
-        /// The registers each set names, comma-separated.
-        #[arg(long, default_value = "mrtd,rtmr0,rtmr1,rtmr2,rtmr3")]
-        registers: String,
+        /// The registers each set names, comma-separated. Default: mrtd and
+        /// rtmr0 to rtmr3.
+        #[arg(long)]
+        registers: Option<String>,
     },
     /// Sign a pin set. Reads the signing key from stdin.
     #[command(group(ArgGroup::new("served").required(true).args(["current", "first"])))]
@@ -384,8 +385,17 @@ fn read_stdin_secret() -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(buffer)
 }
 
-fn run_observe(models: &[String], registers: &str) -> Result<Vec<String>, String> {
-    let registers = parse_registers(registers)?;
+/// The registers `observe` reads: the operator's list, or
+/// [`DEFAULT_REGISTERS`] when none was given.
+fn observe_registers(registers: Option<&str>) -> Result<Vec<MeasurementField>, String> {
+    match registers {
+        Some(text) => parse_registers(text),
+        None => Ok(DEFAULT_REGISTERS.to_vec()),
+    }
+}
+
+fn run_observe(models: &[String], registers: Option<&str>) -> Result<Vec<String>, String> {
+    let registers = observe_registers(registers)?;
     let key = read_stdin_secret()?;
     let key = std::str::from_utf8(&key)
         .map(str::trim)
@@ -433,6 +443,11 @@ fn run_sign(
     current: Option<&Path>,
     out: &Path,
 ) -> Result<Signed, String> {
+    // Refuse an existing output before the key is read or used. write_new
+    // checks again at write time, which is what holds against a race.
+    if std::fs::symlink_metadata(out).is_ok() {
+        return Err("output_exists".to_string());
+    }
     let sets_text = std::fs::read_to_string(sets).map_err(|_| "sets_unreadable")?;
     let served = match current {
         Some(path) => Some(std::fs::read(path).map_err(|_| "served_document_unreadable")?),
@@ -449,18 +464,24 @@ fn run_sign(
             now: now_unix(),
         },
     )?;
+    write_new(out, &signed.document)?;
+    Ok(signed)
+}
+
+/// Write `bytes` to `path`, which must not exist yet: a served document is
+/// never overwritten.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(out)
+        .open(path)
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::AlreadyExists => "output_exists",
             _ => "output_unwritable",
         })?;
-    file.write_all(&signed.document)
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|_| "output_unwritable")?;
-    Ok(signed)
+        .map_err(|_| "output_unwritable".to_string())
 }
 
 fn run_public_key() -> Result<String, String> {
@@ -481,16 +502,18 @@ fn refuse(label: &str) -> ExitCode {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Observe { models, registers } => match run_observe(&models, &registers) {
-            Ok(sets) => {
-                for set in &sets {
-                    println!("{set}");
+        Command::Observe { models, registers } => {
+            match run_observe(&models, registers.as_deref()) {
+                Ok(sets) => {
+                    for set in &sets {
+                        println!("{set}");
+                    }
+                    eprintln!("observed models={} sets={}", models.len(), sets.len());
+                    ExitCode::SUCCESS
                 }
-                eprintln!("observed models={} sets={}", models.len(), sets.len());
-                ExitCode::SUCCESS
+                Err(label) => refuse(&label),
             }
-            Err(label) => refuse(&label),
-        },
+        }
         Command::Sign {
             sets,
             sequence,

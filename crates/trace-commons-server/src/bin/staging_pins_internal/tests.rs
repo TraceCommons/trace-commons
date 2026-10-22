@@ -377,3 +377,38 @@ fn registers_parse_by_name_and_refuse_unknowns_and_repeats() {
     );
     assert_eq!(parse_registers("").unwrap_err(), "registers_unknown");
 }
+
+#[test]
+fn observe_defaults_to_the_shared_register_list() {
+    // The default is DEFAULT_REGISTERS itself, not a second copy of it.
+    let cli = Cli::try_parse_from(["trace-commons-staging-pins", "observe", "--model", "m"])
+        .expect("observe with only a model parses");
+    let Command::Observe { registers, .. } = cli.command else {
+        panic!("parsed as observe");
+    };
+    assert_eq!(
+        observe_registers(registers.as_deref()).unwrap(),
+        trace_commons_server::near_attestation::pin_observe::DEFAULT_REGISTERS
+    );
+    assert_eq!(
+        observe_registers(Some("mrtd")).unwrap(),
+        [trace_commons_attestation::measurements::MeasurementField::Mrtd]
+    );
+}
+
+#[test]
+fn an_existing_output_is_never_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("current.json");
+    std::fs::write(&out, b"served bytes").unwrap();
+
+    assert_eq!(
+        write_new(&out, b"new document").unwrap_err(),
+        "output_exists"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"served bytes");
+
+    let fresh = dir.path().join("next.json");
+    write_new(&fresh, b"new document").expect("a new path is written");
+    assert_eq!(std::fs::read(&fresh).unwrap(), b"new document");
+}

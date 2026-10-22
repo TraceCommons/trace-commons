@@ -547,6 +547,55 @@ fn sign_never_reads_a_key_from_argv() {
 }
 
 #[test]
+fn sign_refuses_an_existing_output_before_reading_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = synthetic_seed_hex();
+    write_sets(dir.path());
+    let args = [
+        "sign",
+        "--sets",
+        "observed.txt",
+        "--sequence",
+        "1",
+        "--ttl-days",
+        "7",
+        "--first",
+    ];
+
+    let first = run(&args, &seed, dir.path());
+    assert!(first.status.success(), "stderr: {}", text(&first.stderr));
+    let written = std::fs::read(dir.path().join("current.json")).unwrap();
+
+    let again = run(&args, &seed, dir.path());
+    assert_eq!(again.status.code(), Some(1));
+    assert!(text(&again.stderr).contains("refused: output_exists"));
+    assert!(again.stdout.is_empty());
+    assert_eq!(
+        std::fs::read(dir.path().join("current.json")).unwrap(),
+        written,
+        "the existing document is untouched"
+    );
+
+    // With no key at all, the existing output is still what is reported:
+    // the check comes before the key is read.
+    let keyless = run(&args, "", dir.path());
+    assert!(
+        text(&keyless.stderr).contains("refused: output_exists"),
+        "stderr: {}",
+        text(&keyless.stderr)
+    );
+}
+
+#[test]
+fn observe_without_a_key_prints_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(&["observe", "--model", "m"], "", dir.path());
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(text(&out.stderr).trim(), "refused: api_key_missing");
+}
+
+#[test]
 fn nothing_logs_a_key_or_a_measurement() {
     let dir = tempfile::tempdir().unwrap();
     let seed = synthetic_seed_hex();
