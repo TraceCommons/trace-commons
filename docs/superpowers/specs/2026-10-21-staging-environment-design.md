@@ -845,8 +845,9 @@ which is why S16 also checks that record (Post-boot compose actions,
 below).
 
 **The RTMR3 replay.** The log is the model entry's own `event_log`, the
-top-level field of the `model_attestations[]` entry whose quote matched a
-set (Verified on 2026-10-22: the RTMR3 replay). Only its events with `imr`
+top-level field of the `model_attestations[]` entry (Verified on
+2026-10-22: the RTMR3 replay). The replay and the checks below run for
+every model entry the key depends on, each against its own quote. Only its events with `imr`
 3 take part. For each one the digest is recomputed, never taken from the
 log, as
 
@@ -1061,14 +1062,14 @@ sets from the signed document instead of ingest's unsigned one:
    accepted (a `near-ai-pins-sequence` file): lower is refused; equal with
    different payload bytes is refused; higher is accepted and recorded.
 5. Hand the sets to the existing checks.
-6. With the replay (S16, plan Task 6b): for the model entry whose quote
-   matched a set, replay that entry's `event_log` from the same report,
+6. With the replay (S16, plan Task 6b): for every model entry whose quote
+   the key depends on, replay that entry's `event_log` from the same report,
    with recomputed digests (5.2), require it to equal the verified quote's
    `rtmr[3]`, and check the RTMR3 events against the payload's
    `allowlist.rtmr3`: the ten names in order, `app-id`, `mr-kms`,
    `os-image-hash`, `key-provider` and the markers equal to the listed
    values, `compose-hash` equal to MRCONFIGID's, `instance-id` any value.
-7. Then check the same entry's `compose_manager_attestation` from the same
+7. Then check each such entry's `compose_manager_attestation` from the same
    report (5.2): its quote verifies against Intel collateral, its registers
    equal the model quote's, our nonce is at `report_data[32..64]`, the
    recomputed `actions_hash` is at `report_data[0..32]`, and every action
