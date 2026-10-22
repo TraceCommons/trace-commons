@@ -405,6 +405,37 @@ Spec: section 5 ("Verification on the server, not the client" steps 1-3, 7; "Con
 
 ---
 
+### Task 7a: Staging build of the whole NEAR AI path (`payout-rail-staging-build`, base `payout-rail-daemon-link`)
+
+Spec: owner decision D9; section 8 ("Known staging gap"); section 12 item 9.
+
+The `near-ai-staging` feature from task 4 switches only the daemon's credential API origin and the server's transfer base. D9 requires one build that runs sign-in, settlement and Private AI against staging together.
+
+**Files:**
+- Modify: `crates/trace-commons-contributor/src/managed/route.rs` (inference base), `src/envelope.rs` (receipt endpoint default), `src/daemon/nearai_credential/funding.rs` (`CLOUD_ORIGIN`) and `src/external_url.rs` (dashboard prefix): each switches under `near-ai-staging`, ideally from one shared host module so no host is missed
+- Modify: the attestation pins the daemon checks (gateway measurements, per-model receipt signers) so a staging build carries staging's pins; verification is never skipped
+- Modify: the IronWire upstream, if it holds its own host
+- Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (the daemon's status reports a staging build; wire up the existing `near_ai_staging()`)
+- Modify: `scripts/ci/check-release-staging-feature.sh` self-test only if a new manifest gains the feature
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test] fn a_staging_build_points_every_near_ai_host_at_staging() // grep-style: no production NEAR AI host is reachable under the feature
+#[test] fn a_staging_build_still_refuses_an_unpinned_receipt_signer()
+#[test] fn status_reports_a_staging_build()
+```
+
+- [ ] **Step 2: Run to verify they fail.** **Step 3: Implement.**
+- [ ] **Step 4: Verify** — `cargo test -p trace-commons-contributor` and `--features near-ai-staging`, both against baseline; the release staging check and its self-test; global checks.
+- [ ] **Step 5: Commit** — `Point the whole NEAR AI path at staging in a staging build`.
+
+**Blocked on facts from NEAR AI:** the staging inference host, and staging's gateway measurements and receipt-signer keys (spec section 12 item 9). Build the switch with placeholders that fail closed until they are filled in.
+
+**Done when:** a staging build signs in, makes an attested Private AI call and receives a payout, all on staging, and no shipped build can enable the feature.
+
+---
+
 ### Task 8: macOS org picker (`payout-rail-macos-picker`, base `payout-rail-daemon-link`)
 
 Spec: section 5 ("Consent copy"), D1, D5, D7.

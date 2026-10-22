@@ -71,6 +71,18 @@ All dated 2026-10-21. The owner's words are quoted.
   another. Every exactly-once, crash-recovery, ceiling, kill-switch and
   passkey rule in this design is stated per rail. D6 is the first instance
   of this rule.
+- **(D9) One staging build of the whole NEAR AI path.** "What we need is a
+  stageing build of the sign in, settlement and private inference system"
+  (2026-10-21). A `near-ai-staging` build points every NEAR AI host at
+  staging together: the daemon's sign-in and credential API, Private AI
+  inference and its receipt endpoint, the billing dashboard links, and the
+  server's transfer client. No part of one build talks to staging while
+  another part talks to production, so a staging sign-in mints a key that
+  staging inference accepts. Attestation stays on and fails closed: the
+  staging build carries staging's own gateway and receipt-signer pins,
+  never a switch that skips verification. The build reports itself as
+  staging in the daemon's status, and the release check refuses the feature
+  in any shipped build.
 
 This spec covers the rail interface and the payout pass that drives every
 external rail, and then the first external rail: paying Trace Commons
@@ -1183,10 +1195,12 @@ The quota can be raised by policy.
 
 ### Known staging gap
 
-The daemon's cloud-api origin and the server's NEAR AI base are compiled in
-as production. Plan: a build-time feature (`near-ai-staging`) that switches
-both, refused in any release workflow by a CI check and reported in
-readiness. Until it
+Every NEAR AI host the daemon and server use is compiled in as production.
+Plan (D9): a build-time feature (`near-ai-staging`) that switches all of
+them together (sign-in, Private AI inference and receipts, billing links,
+attestation pins, and the server's transfer client), refused in any release
+workflow by a CI check and reported in readiness and in the daemon's
+status. Until it
 exists, test the client against a mock #1271 server, and test the link flow
 against production with a closed recipient list.
 
@@ -1439,8 +1453,8 @@ each can change without reshaping the design.
 
 ### Still open
 
-None of these but item 9 is an owner decision about the design; each is
-a value or a fact to get before build, or a later rail's design.
+None of these is an owner decision about the design; each is a value or a
+fact to get before build, or a later rail's design.
 
 1. **Account ceiling** value, **retry tick** interval, and **credential
    expiry**.
@@ -1463,12 +1477,9 @@ a value or a fact to get before build, or a later rail's design.
 8. **Whether `trace_credit` moves onto the interface.** Today it is a rail
    in readiness only. Moving the NEP-141 outbox payout onto `PayoutRail`
    would be a separate change with its own migration of outbox state.
-9. **Staging inference (owner decision).** A `near-ai-staging` build
-   switches the daemon's sign-in host and the server's NEAR AI base, but
-   not the daemon's inference endpoint or the attestation gateway, which
-   stay on production. A staging sign-in therefore mints a key production
-   inference rejects. The staging plan (section 8) needs only the link
-   flow, so leaving inference on production is workable, but it should be
-   chosen, not inherited. Separately, the daemon does not yet report a
-   staging build in its status; that lands with the daemon IPC change
-   (PR 7).
+9. **Staging inference and attestation hosts.** Decided by D9: the
+   staging build switches inference too. Still to get from NEAR AI: the
+   staging inference host, and staging's gateway measurements and
+   per-model receipt-signer keys for the pins. PR 4 switches only the
+   sign-in origin and the server base; the rest lands with the daemon
+   change (PR 7), with the staging status report.
