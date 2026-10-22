@@ -449,7 +449,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "your terms",
             body: "Sign in with your NEAR AI account to get started.",
             invite_eyebrow: "Invite link",
-            invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
+            invite_placeholder: crate::channel::INVITE_PLACEHOLDER,
             look_up: "Look up",
             invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",

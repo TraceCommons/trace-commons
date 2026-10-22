@@ -81,9 +81,9 @@ fn canonical_origin(input: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
-// The native app RP is tracecommons.ai; its account API is deployed here.
+// The native app's RP and the account API deployed for it are the channel's.
 // An IPC URL or a retained credential cannot establish a new trust root.
-const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
+const NATIVE_ACCOUNT_ORIGIN: &str = crate::channel::NATIVE_ACCOUNT_ORIGIN;
 
 fn unconfigured_origin(origin: &str) -> Result<()> {
     if canonical_origin(origin)? != NATIVE_ACCOUNT_ORIGIN {
@@ -226,7 +226,7 @@ fn normalize_options(action: Action, start: &Value) -> Result<Value> {
         string(key.get("rp").ok_or_else(invalid)?, "id")?
     };
     // The signed app's associated domain and the production RP are fixed.
-    if rp != "tracecommons.ai" {
+    if rp != crate::channel::PASSKEY_RP_ID {
         return Err(invalid());
     }
     let challenge = bytes(key, "challenge")?;
@@ -374,7 +374,7 @@ fn validate_client_data(pending: &Pending, params: &Value) -> Result<()> {
     };
     if string(&data, "type")? != expected
         || string(&data, "challenge")? != pending.challenge
-        || string(&data, "origin")? != "https://tracecommons.ai"
+        || string(&data, "origin")? != crate::channel::PASSKEY_ORIGIN
         || data.get("crossOrigin").and_then(Value::as_bool) == Some(true)
     {
         return Err(invalid());

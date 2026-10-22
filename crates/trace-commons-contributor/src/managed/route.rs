@@ -33,7 +33,7 @@ pub(crate) fn near_ai_base_url() -> &'static str {
     if let Some(base_url) = TEST_BASE_URL.get() {
         return base_url;
     }
-    "https://cloud-api.near.ai/v1"
+    crate::channel::NEAR_AI_INFERENCE_BASE
 }
 
 /// The IronWire home of session `id`'s route: `<config dir>/managed-routes/

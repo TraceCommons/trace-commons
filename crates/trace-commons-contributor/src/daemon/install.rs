@@ -21,6 +21,7 @@ const UNIT_FILE_NAME: &str = "trace-commons-contributor.service";
 
 /// The systemd user unit text.
 pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
+    let env = crate::channel::STATE_DIR_ENV;
     format!(
         "[Unit]\n\
          Description=Trace Commons contributor background uploader\n\
@@ -30,7 +31,7 @@ pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} daemon run\n\
-         Environment=TRACE_COMMONS_CONTRIBUTOR_DIR={config_dir}\n\
+         Environment={env}={config_dir}\n\
          Restart=on-failure\n\
          RestartSec=30\n\
          \n\
@@ -142,7 +143,10 @@ mod tests {
             "/home/z/.config/trace-commons",
         );
         assert!(unit.contains("ExecStart=/usr/local/bin/trace-commons-contributor daemon run"));
-        assert!(unit.contains("TRACE_COMMONS_CONTRIBUTOR_DIR=/home/z/.config/trace-commons"));
+        assert!(unit.contains(&format!(
+            "{}=/home/z/.config/trace-commons",
+            crate::channel::STATE_DIR_ENV
+        )));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
     }

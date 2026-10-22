@@ -27,21 +27,16 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::time::Duration;
 
-/// The one service this credential is minted against.
-#[cfg(not(feature = "near-ai-staging"))]
-pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
-
-/// NEAR AI staging, in a `near-ai-staging` build only. The server's
-/// `near-ai-staging` feature switches its own NEAR AI base to the same
-/// host, so the org a staging daemon lists is the org a staging server
-/// verifies and pays. No release workflow or shipped manifest may enable
-/// it: `scripts/ci/check-release-staging-feature.sh` refuses one that does.
-#[cfg(feature = "near-ai-staging")]
-pub const CLOUD_API_ORIGIN: &str = "https://cloud-stg-api.near.ai";
+/// The one service this credential is minted against: the channel's NEAR AI
+/// API (`crate::channel`). In a `near-ai-staging` build it is NEAR AI
+/// staging; the server's `near-ai-staging` feature switches its own NEAR AI
+/// base to the same host, so the org a staging daemon lists is the org a
+/// staging server verifies and pays.
+pub const CLOUD_API_ORIGIN: &str = crate::channel::NEAR_AI_API_ORIGIN;
 
 /// Whether this build talks to NEAR AI staging (`near-ai-staging`).
 pub const fn near_ai_staging() -> bool {
-    cfg!(feature = "near-ai-staging")
+    crate::channel::near_ai_staging()
 }
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];

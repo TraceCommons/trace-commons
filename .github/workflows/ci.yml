@@ -993,6 +993,9 @@ jobs:
       # style/perf lints are the only ones suppressed from the default
       # clippy gate; everything else fails the build under -D warnings.
       - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The staging channel (`near-ai-staging`) compiles different values and
+      # tests than the default build; lint that build too.
+      - run: cargo clippy -p trace-commons-contributor -p trace-commons-contributor-ffi --all-targets --features trace-commons-contributor/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1027,6 +1030,7 @@ jobs:
       # A manifest change must not silently re-resolve reviewed Git dependencies.
       - run: cargo check --locked -p trace-commons-server -p trace-commons-ingest --bins
       - run: cargo check --locked -p trace-commons-contributor
+      - run: cargo check --locked -p trace-commons-contributor -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1409,6 +1413,17 @@ jobs:
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --workspace
+          '
+      # The staging channel's half of the channel checks: its host and
+      # identity scan, the production deny-list digests, its refusals of
+      # production hosts, its entitlements and its IronWire key gate. None of
+      # them is compiled into the default build above.
+      - name: Staging channel tests
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference
           '
       - name: Verify real Secret Service storage
         run: |

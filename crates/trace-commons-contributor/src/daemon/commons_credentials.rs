@@ -158,8 +158,10 @@ fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>
         super::test_credential_store::TestFileBackend::for_store(_store),
     );
     #[cfg(all(not(test), not(feature = "test-credential-store")))]
-    let backend: Arc<dyn SecretBackend> =
-        Arc::new(super::os_secret_store::OsSecretBackend::commons().map_err(|_| unavailable())?);
+    let backend: Arc<dyn SecretBackend> = Arc::new(
+        super::os_secret_store::OsSecretBackend::commons(&crate::channel::KEYCHAIN)
+            .map_err(|_| unavailable())?,
+    );
     Ok(CredentialStore::new(backend))
 }
 

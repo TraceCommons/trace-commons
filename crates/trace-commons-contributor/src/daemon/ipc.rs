@@ -8759,11 +8759,15 @@ pub async fn bind(store: &ConfigStore) -> Result<UnixListener> {
     // the OS username. The length plus the file name is enough to act on.
     let len = path.as_os_str().len();
     if len >= MAX_SOCKET_PATH_BYTES {
+        let (env, name) = (
+            crate::channel::STATE_DIR_ENV,
+            crate::channel::STATE_DIR_NAME,
+        );
         bail!(
             "the daemon socket path is {len} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte \
              kernel limit for unix sockets (the path is your state directory plus \
              {DAEMON_SOCK_FILE}). Use a shorter state directory, \
-             e.g. TRACE_COMMONS_CONTRIBUTOR_DIR=~/.config/trace-commons"
+             e.g. {env}=~/.config/{name}"
         );
     }
 

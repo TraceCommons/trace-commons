@@ -58,7 +58,7 @@ fn signed_proof() -> (VerifiedNearWalletSignIn, Value) {
     let url = url::Url::parse(&challenge.browser_url().unwrap()).unwrap();
     let query = challenge.browser_configuration();
     assert_eq!(query["message"], "Sign in to NEAR AI Cloud");
-    assert_eq!(query["recipient"], "cloud.near.ai");
+    assert_eq!(query["recipient"], crate::channel::NEAR_AI_WALLET_RECIPIENT);
     let nonce: Vec<u8> = serde_json::from_value(query["nonce"].clone()).unwrap();
     assert_eq!(nonce.len(), 32);
     assert_eq!(&nonce[..8], now.to_be_bytes());
@@ -90,7 +90,7 @@ fn signed_proof() -> (VerifiedNearWalletSignIn, Value) {
         },
         "payload": {
             "message": "Sign in to NEAR AI Cloud", "nonce": nonce,
-            "recipient": "cloud.near.ai"
+            "recipient": crate::channel::NEAR_AI_WALLET_RECIPIENT
         }
     });
     (proof, expected)

@@ -22,6 +22,23 @@ use crate::daemon::nearai_credential::near_wallet_page::{
 const DEADLINE: Duration = Duration::from_secs(3);
 const SCRIPT: &[u8] = b"globalThis.syntheticWallet = true;\n";
 
+/// The served page script checks the channel's NEP-413 recipient, and the
+/// placeholder never reaches a browser.
+#[tokio::test]
+async fn the_page_script_checks_the_channel_recipient() {
+    let mut assets = Assets::new().unwrap();
+    let script = assets
+        .load(&format!("{ASSET_PREFIX}browser.js"))
+        .await
+        .unwrap()
+        .to_owned();
+    assert!(script.contains(&format!(
+        "challenge.recipient !== \"{}\"",
+        crate::channel::NEAR_AI_WALLET_RECIPIENT
+    )));
+    assert!(!script.contains("__NEAR_AI_WALLET_RECIPIENT__"));
+}
+
 #[test]
 #[ignore = "requires Playwright/Chromium and anonymous downloads of hash-pinned adapters"]
 fn pinned_wallet_controls_obey_production_csp() {

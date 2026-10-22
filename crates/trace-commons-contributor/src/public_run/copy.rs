@@ -447,7 +447,7 @@ fn normalize_source_slug(source: &str) -> Result<Option<String>, ()> {
     }
     let url = url::Url::parse(source).map_err(|_| ())?;
     if url.scheme() != "https"
-        || url.host_str() != Some("tracecommons.ai")
+        || url.host_str() != Some(crate::channel::PUBLIC_SITE_HOST)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
@@ -563,7 +563,7 @@ mod tests {
                 event_id: Uuid::nil(),
                 excerpt: "The retry succeeded.".to_string(),
             }],
-            source: "https://tracecommons.ai/runs/run-source-workflow".to_string(),
+            source: format!("{}run-source-workflow", crate::channel::PUBLIC_RUNS_PREFIX),
         };
         let valid = validate_public_run_editor(input.clone());
         let draft = valid.draft.expect("valid draft");

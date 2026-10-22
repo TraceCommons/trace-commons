@@ -15,6 +15,7 @@ use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
 use super::InsightsStoreError;
@@ -852,18 +853,87 @@ pub enum LocalInsightsResponse {
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
+///
+/// The store refuses its digest key: see [`LocalInsightStore::open`]. A host
+/// that saves snapshots uses [`open_store_for`] with its channel's keychain.
 pub fn open_store(store_dir: Option<&std::path::Path>) -> Result<LocalInsightStore> {
-    LocalInsightStore::open(&store_path(store_dir)?)
+    open_store_with(store_dir, None)
+}
+
+/// [`list_saved`] in the store of the build's channel.
+pub fn list_saved_for(
+    store_dir: Option<&std::path::Path>,
+    channel: StoreChannel,
+) -> Result<Vec<LocalInsight>> {
+    list_saved(Some(&channel.store_dir(store_dir)?))
+}
+
+/// Where a host's Insights live: its channel's keychain namespace, which
+/// holds the digest key, and the name of its per-user state directory, under
+/// which the default store sits. Two hosts on one machine with different
+/// channels share neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreChannel {
+    pub keychain: KeychainIdentity,
+    pub state_dir_name: &'static str,
+}
+
+impl StoreChannel {
+    /// `store_dir`, or this channel's default store when it is `None`.
+    pub fn store_dir(&self, store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
+        match store_dir {
+            Some(path) => Ok(path.to_path_buf()),
+            None => default_store_dir(self.state_dir_name),
+        }
+    }
+
+    /// `request` with its store directory filled in from this channel when it
+    /// names none. Left as it was when there is no per-user data directory,
+    /// which every store operation then refuses as before.
+    fn fill(&self, mut request: LocalInsightsRequest) -> LocalInsightsRequest {
+        if request.store_dir.is_none() {
+            request.store_dir = default_store_dir(self.state_dir_name).ok();
+        }
+        request
+    }
+}
+
+/// The default store of the state directory named `state_dir_name`: its
+/// `insights` directory under the platform's per-user data directory.
+pub fn default_store_dir(state_dir_name: &str) -> Result<PathBuf> {
+    Ok(dirs::data_local_dir()
+        .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
+        .join(state_dir_name)
+        .join("insights"))
+}
+
+/// The state directory name of a host that names no channel.
+const UNCHANNELED_STATE_DIR_NAME: &str = "trace-commons";
+
+/// [`open_store`] in the store and keychain namespace of the build's channel.
+pub fn open_store_for(
+    store_dir: Option<&std::path::Path>,
+    channel: StoreChannel,
+) -> Result<LocalInsightStore> {
+    LocalInsightStore::open_for(&channel.store_dir(store_dir)?, channel.keychain)
+}
+
+fn open_store_with(
+    store_dir: Option<&std::path::Path>,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightStore> {
+    let path = store_path(store_dir)?;
+    match keychain {
+        Some(keychain) => LocalInsightStore::open_for(&path, keychain),
+        None => LocalInsightStore::open(&path),
+    }
 }
 
 fn store_path(store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
-    Ok(match store_dir {
-        Some(path) => path.to_path_buf(),
-        None => dirs::data_local_dir()
-            .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
-            .join("trace-commons")
-            .join("insights"),
-    })
+    match store_dir {
+        Some(path) => Ok(path.to_path_buf()),
+        None => default_store_dir(UNCHANNELED_STATE_DIR_NAME),
+    }
 }
 
 /// Reading an empty history must not create state before an explicit save.
@@ -931,14 +1001,37 @@ fn refresh_saved_weeks(store: &LocalInsightStore) {
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
 /// Dropping a UI task does not cancel a save/delete that has already started.
+///
+/// A snapshot saved here records its turn series as unknown, because no
+/// keychain namespace is named; hosts use [`execute_for`].
 pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let response = execute_inner(request)?;
+    execute_with(request, None)
+}
+
+/// [`execute`] in the store of the build's channel when the request names
+/// none, and with its keychain namespace, where the digest key for a saved
+/// snapshot's turn series lives.
+pub fn execute_for(
+    request: LocalInsightsRequest,
+    channel: StoreChannel,
+) -> Result<LocalInsightsResponse> {
+    execute_with(channel.fill(request), Some(channel.keychain))
+}
+
+fn execute_with(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let response = execute_inner(request, keychain)?;
     response_json(&response)?;
     Ok(response)
 }
 
-fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let store = || open_store(request.store_dir.as_deref());
+fn execute_inner(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let store = || open_store_with(request.store_dir.as_deref(), keychain);
     let episode_store = || {
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
@@ -1427,12 +1520,27 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
 
 /// Strict typed JSON boundary. Errors deliberately contain fixed labels only.
 pub fn dispatch_json(bytes: &[u8]) -> Result<String> {
+    dispatch_json_with(bytes, None)
+}
+
+/// [`dispatch_json`] in the store and keychain namespace of the build's
+/// channel, as [`execute_for`].
+pub fn dispatch_json_for(bytes: &[u8], channel: StoreChannel) -> Result<String> {
+    dispatch_json_with(bytes, Some(channel))
+}
+
+fn dispatch_json_with(bytes: &[u8], channel: Option<StoreChannel>) -> Result<String> {
     if bytes.len() > MAX_REQUEST_BYTES {
         bail!("insights-request-too-large");
     }
     let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("insights-request-invalid-utf8"))?;
-    let request = serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
-    let response = execute_inner(request).map_err(public_error)?;
+    let request: LocalInsightsRequest =
+        serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
+    let (request, keychain) = match channel {
+        Some(channel) => (channel.fill(request), Some(channel.keychain)),
+        None => (request, None),
+    };
+    let response = execute_inner(request, keychain).map_err(public_error)?;
     response_json(&response).map_err(public_error)
 }
 
@@ -1522,6 +1630,36 @@ fn response_json(response: &LocalInsightsResponse) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHANNEL: StoreChannel = StoreChannel {
+        keychain: KeychainIdentity {
+            access_group: "TEAM.example.group",
+            cloud_service: "example.cloud",
+            account_service: "example.account",
+            insights_digest_key_service: "example.insights",
+        },
+        state_dir_name: "example-channel",
+    };
+
+    /// A request naming no store is given the channel's default store, and
+    /// one naming a store keeps it. Resolving reads and creates nothing.
+    #[test]
+    fn a_channel_fills_in_its_own_default_store() {
+        let request = |store_dir| LocalInsightsRequest {
+            store_dir,
+            operation: LocalInsightsOperation::List {},
+        };
+        let filled = CHANNEL.fill(request(None)).store_dir.expect("filled");
+        assert!(filled.ends_with(std::path::Path::new("example-channel").join("insights")));
+        assert_eq!(filled, default_store_dir("example-channel").unwrap());
+        let named = PathBuf::from("/elsewhere/insights");
+        assert_eq!(
+            CHANNEL.fill(request(Some(named.clone()))).store_dir,
+            Some(named.clone())
+        );
+        assert_eq!(CHANNEL.store_dir(Some(&named)).unwrap(), named);
+        assert_eq!(CHANNEL.store_dir(None).unwrap(), filled);
+    }
 
     /// `ui_copy()` keys for these four enums are derived from their
     /// snake_case wire form by naming convention only, with nothing linking

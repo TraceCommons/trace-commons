@@ -896,8 +896,10 @@ pub struct Receipt {
     pub uploaded_bytes: Option<u64>,
 }
 
-/// The state directory's name under whichever per-user base the platform uses.
-const STATE_DIR_NAME: &str = "trace-commons";
+/// The state directory's name under whichever per-user base the platform
+/// uses: the channel's (`crate::channel`), so a staging build never opens
+/// production's directory by default.
+const STATE_DIR_NAME: &str = crate::channel::STATE_DIR_NAME;
 
 /// The default state directory for this platform.
 ///
@@ -977,17 +979,29 @@ pub struct ConfigStore {
     dir: PathBuf,
 }
 
+/// A config naming the other channel's issuer or ingest is neither loaded nor
+/// saved: a production build never talks to the staging server, nor the
+/// reverse, whether the address came from an invite or a hand edit.
+fn refuse_other_channel_services(cfg: &ContributorConfig) -> Result<()> {
+    for url in [&cfg.issuer_url, &cfg.ingest_url] {
+        crate::channel::refuse_other_channel_origin(url)?;
+    }
+    Ok(())
+}
+
 impl ConfigStore {
     /// Resolve the contributor state directory using precedence:
     /// 1. `explicit` flag
-    /// 2. `TRACE_COMMONS_CONTRIBUTOR_DIR` env var
+    /// 2. the channel's override variable, `crate::channel::STATE_DIR_ENV`
+    ///    (`TRACE_COMMONS_CONTRIBUTOR_DIR` in a production build); a staging
+    ///    build ignores the production variable
     /// 3. the platform default, see [`platform_default_dir`]
     ///
     /// Creates the directory (mode 0700 on unix) if it does not exist.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
         let dir = if let Some(dir) = explicit {
             dir
-        } else if let Ok(dir) = std::env::var("TRACE_COMMONS_CONTRIBUTOR_DIR") {
+        } else if let Ok(dir) = std::env::var(crate::channel::STATE_DIR_ENV) {
             PathBuf::from(dir)
         } else {
             platform_default_dir()?
@@ -1027,12 +1041,14 @@ impl ConfigStore {
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg =
+        let cfg: ContributorConfig =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        refuse_other_channel_services(&cfg)?;
         Ok(Some(cfg))
     }
 
     pub fn save_config(&self, cfg: &ContributorConfig) -> Result<()> {
+        refuse_other_channel_services(cfg)?;
         let body = serde_json::to_vec_pretty(cfg).context("serializing contributor config")?;
         crate::daemon::commons_credentials::save_config(self, cfg, &body)
     }

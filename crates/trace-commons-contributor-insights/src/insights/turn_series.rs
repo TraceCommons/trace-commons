@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights_usage_series::{
     CacheWrite, DigestKey, DigestKeyError, DigestKeyStore, InMemoryDigestKeyStore, KeyedDigest,
     MAX_SERIES_TOOL_CALLS, MAX_SERIES_TURNS, ToolCallRecord, ToolKind, TurnRecord, UsageSeries,
@@ -515,12 +516,19 @@ pub fn saved_turn_series(
 
 /// The key store an Insights store uses outside tests, chosen by
 /// [`DIGEST_KEY_CUSTODY`] (owner decision D16, open).
-pub fn default_digest_key_store(store_dir: PathBuf) -> Box<dyn DigestKeyStore + Send + Sync> {
+///
+/// `keychain` is the channel's keychain namespace. With none, the OS custody
+/// refuses every load: there is no production default here to fall back to,
+/// so a host that names no channel can never read another channel's key.
+pub fn default_digest_key_store(
+    store_dir: PathBuf,
+    keychain: Option<KeychainIdentity>,
+) -> Box<dyn DigestKeyStore + Send + Sync> {
     if cfg!(test) {
         return Box::new(InMemoryDigestKeyStore::with_seed([0x5a; 32]));
     }
     let custody: Box<dyn DigestKeyStore + Send + Sync> = match DIGEST_KEY_CUSTODY {
-        DigestKeyCustody::OsKeychain => Box::new(OsDigestKeyStore),
+        DigestKeyCustody::OsKeychain => Box::new(OsDigestKeyStore { keychain }),
         DigestKeyCustody::KeyFileInStore => Box::new(FileDigestKeyStore::new(store_dir.clone())),
     };
     Box::new(CreationLocked::new(custody, store_dir))
@@ -563,24 +571,33 @@ pub fn decode_key(stored: &[u8]) -> Result<DigestKey, DigestKeyError> {
 }
 
 /// The digest key in the OS keychain: macOS Keychain, Windows Credential
-/// Manager, Secret Service on Linux. One fixed entry per OS user.
+/// Manager, Secret Service on Linux. One fixed entry per OS user and channel.
 #[derive(Debug, Clone, Copy)]
-pub struct OsDigestKeyStore;
+pub struct OsDigestKeyStore {
+    /// The channel's keychain namespace; `None` refuses every operation.
+    pub keychain: Option<KeychainIdentity>,
+}
 
 impl OsDigestKeyStore {
-    fn backend()
-    -> Result<trace_commons_contributor_platform::os_secret_store::OsSecretBackend, DigestKeyError>
+    fn backend(
+        &self,
+    ) -> Result<trace_commons_contributor_platform::os_secret_store::OsSecretBackend, DigestKeyError>
     {
         refuse_in_test_build()?;
-        trace_commons_contributor_platform::os_secret_store::OsSecretBackend::insights_digest_key()
-            .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))
+        let keychain = self.keychain.ok_or(DigestKeyError::Unavailable(
+            "insights_digest_key_no_channel",
+        ))?;
+        trace_commons_contributor_platform::os_secret_store::OsSecretBackend::insights_digest_key(
+            &keychain,
+        )
+        .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))
     }
 }
 
 impl DigestKeyStore for OsDigestKeyStore {
     fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
         use trace_commons_contributor_platform::credential_store::CredentialError;
-        match Self::backend()?.read_insights_digest_key() {
+        match self.backend()?.read_insights_digest_key() {
             Ok(stored) => decode_key(&stored).map(Some),
             Err(CredentialError::NoEntry) => Ok(None),
             Err(_) => Err(DigestKeyError::Unavailable("insights_digest_key_keychain")),
@@ -592,7 +609,7 @@ impl DigestKeyStore for OsDigestKeyStore {
             return Ok(key);
         }
         let bytes = new_key_bytes()?;
-        Self::backend()?
+        self.backend()?
             .write_insights_digest_key(hex::encode(bytes).as_bytes())
             .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))?;
         // Read back: a concurrent creator may have written its key last, and
@@ -603,7 +620,7 @@ impl DigestKeyStore for OsDigestKeyStore {
 
     fn clear(&self) -> Result<(), DigestKeyError> {
         use trace_commons_contributor_platform::credential_store::CredentialError;
-        match Self::backend()?.delete_insights_digest_key() {
+        match self.backend()?.delete_insights_digest_key() {
             Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
             Err(_) => Err(DigestKeyError::Unavailable("insights_digest_key_keychain")),
         }
@@ -1213,11 +1230,11 @@ mod tests {
     #[test]
     fn the_os_key_store_refuses_under_test() {
         assert!(matches!(
-            OsDigestKeyStore.load_or_create(),
+            OsDigestKeyStore { keychain: None }.load_or_create(),
             Err(DigestKeyError::Unavailable(_))
         ));
         assert!(matches!(
-            OsDigestKeyStore.load(),
+            OsDigestKeyStore { keychain: None }.load(),
             Err(DigestKeyError::Unavailable(_))
         ));
     }

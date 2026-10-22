@@ -3667,6 +3667,9 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
     if !matches!(url.scheme(), "https" | "http") {
         anyhow::bail!("--invite must be an http(s) URL");
     }
+    // The other channel's issuer: refused here, before anything redeems the
+    // code, shows its host or asks the issuer about it.
+    crate::channel::refuse_other_channel_origin(url.as_str())?;
     let code = url
         .fragment()
         .map(str::to_string)
@@ -3790,11 +3793,11 @@ mod invite_tests {
     #[test]
     fn the_form_a_shell_actually_delivers() {
         let got = invite_from_deep_link(
-            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
+            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.example.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
         );
         assert_eq!(
             got.as_deref(),
-            Some("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+            Some("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6")
         );
     }
 
@@ -3810,9 +3813,9 @@ mod invite_tests {
 
     #[test]
     fn issuer_host_is_shown_without_the_code() {
-        let host = invite_issuer_host("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+        let host = invite_issuer_host("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6")
             .expect("a well-formed invite resolves to its host");
-        assert_eq!(host, "issuer.tracecommons.ai");
+        assert_eq!(host, "issuer.example.ai");
         // The point of the narrow return type: the credential is not in it.
         assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
     }
@@ -3823,7 +3826,7 @@ mod invite_tests {
         // because the interface shows one sentence for every failure here.
         assert_eq!(invite_issuer_host("VQWWPGYSG8Y4LTP6"), None);
         assert_eq!(
-            invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
+            invite_issuer_host("https://issuer.example.ai/onboard"),
             None
         );
     }
@@ -3836,19 +3839,19 @@ mod invite_tests {
     #[test]
     fn issuer_host_refuses_what_invite_lookup_refuses() {
         for bad in [
-            "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
-            "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
-            "https://someone:secret@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "http://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone@issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone:secret@issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
         ] {
             assert_eq!(invite_issuer_host(bad), None, "{bad}");
             assert!(super::acceptable_invite(bad).is_none(), "{bad}");
         }
-        let long = format!("https://issuer.tracecommons.ai/onboard#{}", "A".repeat(257));
+        let long = format!("https://issuer.example.ai/onboard#{}", "A".repeat(257));
         assert_eq!(invite_issuer_host(&long), None);
         assert_eq!(
-            invite_issuer_host("https://issuer.tracecommons.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
+            invite_issuer_host("https://issuer.example.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
                 .as_deref(),
-            Some("issuer.tracecommons.ai")
+            Some("issuer.example.ai")
         );
         assert_eq!(
             invite_issuer_host("http://127.0.0.1:8080/onboard#VQWWPGYSG8Y4LTP6").as_deref(),
@@ -3858,15 +3861,15 @@ mod invite_tests {
 
     #[test]
     fn parses_fragment_form() {
-        let p = parse_invite("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
-        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        let p = parse_invite("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.example.ai");
         assert_eq!(p.code, "VQWWPGYSG8Y4LTP6");
     }
 
     #[test]
     fn parses_query_form_when_fragment_was_stripped() {
-        let p = parse_invite("https://issuer.tracecommons.ai/onboard?code=ABC123XYZ").unwrap();
-        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        let p = parse_invite("https://issuer.example.ai/onboard?code=ABC123XYZ").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.example.ai");
         assert_eq!(p.code, "ABC123XYZ");
     }
 
@@ -3880,7 +3883,7 @@ mod invite_tests {
 
     #[test]
     fn rejects_a_url_with_no_code() {
-        let err = parse_invite("https://issuer.tracecommons.ai/onboard")
+        let err = parse_invite("https://issuer.example.ai/onboard")
             .unwrap_err()
             .to_string();
         assert!(err.contains("no code"), "got: {err}");
@@ -3889,6 +3892,26 @@ mod invite_tests {
     #[test]
     fn rejects_a_non_http_scheme() {
         assert!(parse_invite("file:///etc/passwd#CODE").is_err());
+    }
+
+    /// An invite to the other channel's issuer is refused when it is parsed,
+    /// which is before `enroll_with_invite_core` redeems it and before a
+    /// shell shows its host or the daemon's `invite_lookup` asks about it: a
+    /// production build never sends a code or a device key to the staging
+    /// issuer, nor the reverse.
+    #[test]
+    fn an_invite_to_the_other_channel_is_refused_before_any_request() {
+        #[cfg(not(feature = "near-ai-staging"))]
+        let other = format!("issuer.{}", ["staging", "tracecommons", "ai"].join("."));
+        #[cfg(feature = "near-ai-staging")]
+        let other = "issuer.tracecommons.ai".to_string();
+        let invite = format!("https://{other}/onboard#VQWWPGYSG8Y4LTP6");
+        let error = parse_invite(&invite).unwrap_err();
+        assert_eq!(error.to_string(), "service-origin-other-channel");
+        assert!(super::acceptable_invite(&invite).is_none());
+        assert_eq!(invite_issuer_host(&invite), None);
+        // Positive control: the same invite on another host parses.
+        parse_invite("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
     }
 }
 

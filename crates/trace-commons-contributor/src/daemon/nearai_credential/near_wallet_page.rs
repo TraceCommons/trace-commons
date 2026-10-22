@@ -15,7 +15,15 @@ use crate::daemon::nearai_credential::near_wallet::{NearWalletChallenge, NearWal
 
 pub const ASSET_PREFIX: &str = "/near-ai/near-wallet/assets/";
 const SDK: &str = include_str!("near_connect/near-connect-0.11.4.js");
-const BROWSER: &str = include_str!("near_wallet_browser.js");
+const BROWSER_SOURCE: &str = include_str!("near_wallet_browser.js");
+/// The placeholder `near_wallet_browser.js` holds where the NEP-413
+/// recipient goes, so the page checks the channel's recipient
+/// (`crate::channel::NEAR_AI_WALLET_RECIPIENT`) without a second copy of it.
+const RECIPIENT_PLACEHOLDER: &str = "__NEAR_AI_WALLET_RECIPIENT__";
+/// The served page script, with the channel's recipient filled in.
+static BROWSER: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    BROWSER_SOURCE.replace(RECIPIENT_PLACEHOLDER, super::near_wallet::RECIPIENT)
+});
 const MANIFEST: &str = include_str!("near_connect/manifest.json");
 const MAX_ADAPTER_BYTES: usize = 2 * 1024 * 1024;
 pub const ASSET_TIMEOUT: Duration = Duration::from_secs(15);
@@ -165,7 +173,7 @@ impl Assets {
             .ok_or(NearWalletError::Invalid)?;
         match name {
             "connector.js" => return Ok(SDK),
-            "browser.js" => return Ok(BROWSER),
+            "browser.js" => return Ok(BROWSER.as_str()),
             _ => {}
         }
         let id = name.strip_suffix(".js").ok_or(NearWalletError::Invalid)?;

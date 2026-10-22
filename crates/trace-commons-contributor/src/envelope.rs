@@ -110,7 +110,7 @@ pub fn build_redactor_with(
             let adapter = NearAiPrivacyFilterAdapter::new(
                 settings
                     .base_url
-                    .unwrap_or_else(|| "https://cloud-api.near.ai/v1".to_string()),
+                    .unwrap_or_else(|| crate::channel::NEAR_AI_PRIVACY_FILTER_BASE.to_string()),
                 settings
                     .model
                     .unwrap_or_else(|| "openai/privacy-filter".to_string()),
