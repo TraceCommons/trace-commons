@@ -3751,7 +3751,10 @@ pub(crate) fn acceptable_invite(raw: &str) -> Option<(ParsedInvite, reqwest::Url
 /// to find out.
 pub fn invite_from_deep_link(arg: &str) -> Option<String> {
     let url = reqwest::Url::parse(arg).ok()?;
-    if !url.scheme().eq_ignore_ascii_case("tracecommons") {
+    if !url
+        .scheme()
+        .eq_ignore_ascii_case(crate::channel::URL_SCHEME)
+    {
         return None;
     }
     if !url.host_str()?.eq_ignore_ascii_case("enroll") {
@@ -3767,18 +3770,27 @@ pub fn invite_from_deep_link(arg: &str) -> Option<String> {
 mod invite_tests {
     use super::{invite_from_deep_link, invite_issuer_host, parse_invite};
 
+    /// `rest` under this build's URL scheme (`tracecommons`, or
+    /// `tracecommons-staging` in a staging build), in `case`.
+    fn link(scheme_case: fn(&str) -> String, rest: &str) -> String {
+        format!("{}://{rest}", scheme_case(crate::channel::URL_SCHEME))
+    }
+
     #[test]
     fn deep_link_yields_the_invite() {
-        let got = invite_from_deep_link(
-            "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
-        );
+        let got = invite_from_deep_link(&link(
+            str::to_owned,
+            "enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        ));
         assert_eq!(got.as_deref(), Some("https://issuer.example/onboard#CODE"));
     }
 
     #[test]
     fn deep_link_scheme_and_host_are_case_insensitive() {
-        let got =
-            invite_from_deep_link("TraceCommons://ENROLL?invite=https%3A%2F%2Fi.example%2Fo%23C");
+        let got = invite_from_deep_link(&link(
+            str::to_uppercase,
+            "ENROLL?invite=https%3A%2F%2Fi.example%2Fo%23C",
+        ));
         assert_eq!(got.as_deref(), Some("https://i.example/o#C"));
     }
 
@@ -3792,9 +3804,10 @@ mod invite_tests {
     /// free to normalise as the Windows shell was.
     #[test]
     fn the_form_a_shell_actually_delivers() {
-        let got = invite_from_deep_link(
-            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.example.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
-        );
+        let got = invite_from_deep_link(&link(
+            str::to_owned,
+            "enroll/?invite=https%3A%2F%2Fissuer.example.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
+        ));
         assert_eq!(
             got.as_deref(),
             Some("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6")
@@ -3806,9 +3819,15 @@ mod invite_tests {
         // Registering a scheme handler means this is asked about every
         // argument the shell is ever launched with, including its own.
         assert_eq!(invite_from_deep_link("https://example.com/"), None);
-        assert_eq!(invite_from_deep_link("tracecommons://open?x=1"), None);
+        assert_eq!(
+            invite_from_deep_link(&link(str::to_owned, "open?x=1")),
+            None
+        );
         assert_eq!(invite_from_deep_link("--state-dir"), None);
-        assert_eq!(invite_from_deep_link("tracecommons://enroll?invite="), None);
+        assert_eq!(
+            invite_from_deep_link(&link(str::to_owned, "enroll?invite=")),
+            None
+        );
     }
 
     #[test]

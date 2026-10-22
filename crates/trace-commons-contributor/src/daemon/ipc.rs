@@ -1485,7 +1485,7 @@ impl DaemonShared {
             // on -- a daemon that has never been asked hosts nothing.
             private_inference: Arc::new(tokio::sync::Mutex::new(
                 super::private_inference::ironwire_home()
-                    .map(super::private_inference::PrivateInference::new),
+                    .map(super::private_inference::PrivateInference::for_channel),
             )),
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
@@ -9111,7 +9111,16 @@ fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), 
     let port = match req.params.get("port").and_then(serde_json::Value::as_u64) {
         // Port 0 is not a port a proxy listens on; it is the ask-the-kernel
         // sentinel, and accepting it would probe whatever it resolved to.
-        Some(port) if port > 0 && port <= u64::from(u16::MAX) => port as u16,
+        // A staging build also refuses any port but its own IronWire's, so
+        // a probe cannot hand a token to production's proxy (staging design
+        // 4.2, S10). The same label: a port this build will never read.
+        Some(port)
+            if port > 0
+                && port <= u64::from(u16::MAX)
+                && super::settings::ironwire_port_in_channel(port as u16) =>
+        {
+            port as u16
+        }
         _ => {
             return Err(Box::new(Response::err(
                 req.id,
@@ -14206,6 +14215,7 @@ mod tests {
     /// contributor declared and runs themselves answers from an account whose
     /// key was never handed to us, so demanding ours would refuse a connect
     /// that works and leave no way to make it work.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn only_a_destination_we_host_is_gated_on_our_credential() {
         let s = shared();
@@ -15700,6 +15710,7 @@ mod tests {
         assert_eq!(s.settings.lock().unwrap().ironwire, None);
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn private_inference_derives_metadata_only_and_withdraws_on_accepted_off() {
         let s = shared();
@@ -15858,6 +15869,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn derived_routing_refresh_withdraws_an_observed_exited_proxy_first() {
         let s = shared();
@@ -17491,6 +17503,7 @@ mod tests {
     }
 
     /// Serve `router` on a free loopback port and return the port.
+    #[cfg(not(feature = "near-ai-staging"))]
     async fn serve_on_loopback(router: axum::Router) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -17502,6 +17515,7 @@ mod tests {
         port
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_probe_against_a_dead_port_reports_unreachable_with_the_port() {
         // Bind and drop, so the port is real and definitely closed. The
@@ -17527,6 +17541,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_probe_that_cannot_read_the_token_names_the_path_it_tried() {
         // An empty directory: the resolution succeeds, the read does not.
@@ -17566,6 +17581,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_probe_never_returns_the_token() {
         // A reachable proxy that accepts the token: the outcome that has
@@ -17599,6 +17615,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_successful_probe_reports_reachable() {
         const TOKEN: &str = "the-right-token";
@@ -17645,6 +17662,7 @@ mod tests {
     /// `~/.ironwire/control.token` and got a live proxy's 401. The
     /// contributor fixes it by naming the directory, so the answer carries
     /// the path, not the port.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_proxy_that_refuses_the_token_reports_it_unreadable_with_the_path() {
         const STALE: &str = "a-stale-token";
@@ -17674,6 +17692,7 @@ mod tests {
 
     /// An empty `control.token` is unreadable in the only sense that
     /// matters: there is no credential in it to send.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn an_empty_token_file_is_treated_as_unreadable() {
         let dir = token_dir_holding("   \n");
@@ -17684,6 +17703,24 @@ mod tests {
             result["token_path"].as_str().map(std::path::Path::new),
             Some(dir.path().join("control.token").as_path())
         );
+    }
+
+    /// A staging build will not probe production's IronWire port, so the
+    /// probe cannot carry a token to it (staging design 4.2, S10).
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_probe_of_the_production_port_is_refused() {
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("production's port is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, "port-invalid");
     }
 
     #[tokio::test]
@@ -17708,11 +17745,13 @@ mod tests {
             assert_eq!(error.message, "port-invalid");
         }
         // And a token_dir that is not a string is refused rather than
-        // silently falling through to the environment.
+        // silently falling through to the environment. On a port this
+        // build would read, so the refusal is the token_dir's.
+        let usable_port = crate::channel::IRONWIRE_CONTROL_PORT.unwrap_or(8463);
         let req = Request {
             id: 7,
             method: "probe_routing".to_string(),
-            params: serde_json::json!({"port": 8463, "token_dir": 5}),
+            params: serde_json::json!({"port": usable_port, "token_dir": 5}),
         };
         let error = handle_probe_routing(&req)
             .await
@@ -17727,7 +17766,7 @@ mod tests {
         let req = Request {
             id: 7,
             method: "probe_routing".to_string(),
-            params: serde_json::json!({"port": 8463, "token_dir": "relative/ironwire"}),
+            params: serde_json::json!({"port": usable_port, "token_dir": "relative/ironwire"}),
         };
         let error = handle_probe_routing(&req)
             .await
@@ -17756,6 +17795,7 @@ mod tests {
     /// `handle_request_async` every test above still passes and the method
     /// is dead on the socket -- the async dispatcher is the only path a
     /// real client's request takes, so it is the one that has to answer.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_async_dispatcher_answers_a_probe_for_real() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -18126,6 +18166,7 @@ mod tests {
     // --- probe_routed_tools --------------------------------------------
 
     /// The same request shape as the probe, against the tool-list method.
+    #[cfg(not(feature = "near-ai-staging"))]
     fn routed_tools_request(port: u16, token_dir: Option<&std::path::Path>) -> Request {
         let mut req = probe_request(port, token_dir);
         req.method = "probe_routed_tools".to_string();
@@ -18135,6 +18176,7 @@ mod tests {
     /// The whole point of the method: three tools, three different answers,
     /// from one declaration. A shell rendering one switch as three verdicts
     /// would get two of these wrong.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_tool_list_is_per_tool_and_not_one_switch() {
         let port = serve_on_loopback(axum::Router::new().route(
@@ -18174,6 +18216,7 @@ mod tests {
     }
 
     /// Neither a path nor a shell command crosses the socket.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_tool_list_carries_no_path_and_no_command() {
         let port = serve_on_loopback(axum::Router::new().route(
@@ -18209,6 +18252,7 @@ mod tests {
 
     /// A dead port is `unreachable`, with the port, exactly as the probe
     /// reports it. One vocabulary for one connection.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_tool_list_against_a_dead_port_reports_unreachable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -18228,6 +18272,7 @@ mod tests {
 
     /// A refused credential is the token state, naming the path, and never
     /// an empty tool list that a shell could read as "nothing is wired".
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_refused_credential_is_a_token_answer_and_not_an_empty_list() {
         let port = serve_on_loopback(axum::Router::new().route(
@@ -18254,6 +18299,7 @@ mod tests {
     /// An answer that arrives but cannot be read is `reachable` with no
     /// tools: the proxy did answer, so nobody is sent to check a port that
     /// is fine, and no tool gets a verdict off a body nothing parsed.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn an_unreadable_body_yields_no_tools_rather_than_a_wrong_port() {
         let port = serve_on_loopback(axum::Router::new().route(
@@ -18344,6 +18390,26 @@ mod tests {
         dir
     }
 
+    /// A staging build never reads the `ironwire` CLI's pointer, which is
+    /// production's (staging design 4.2, S10): discovery finds nothing, so
+    /// the staging app cannot be pointed at production's proxy or token.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_discovers_nothing_from_the_production_pointer() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let result = handle_discover_routing(&discover_request())
+            .result
+            .expect("discovery answers with a result, never an IPC error");
+
+        assert_eq!(result, serde_json::json!({ "found": false }));
+    }
+
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn discovery_reports_what_a_running_proxy_published() {
         let dir = pointer_dir(9143, "a-secret-token");
@@ -18443,6 +18509,7 @@ mod tests {
     /// A declared proxy whose `control.token` is readable, so
     /// `ironwire_ledger_for` actually builds a ledger. Returns the
     /// directory, which must outlive the assertions.
+    #[cfg(not(feature = "near-ai-staging"))]
     fn declared_token_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -18453,6 +18520,7 @@ mod tests {
         dir
     }
 
+    #[cfg(not(feature = "near-ai-staging"))]
     fn watch_params(port: u16, dir: &std::path::Path) -> serde_json::Value {
         serde_json::json!({
             "ironwire": {
@@ -18466,6 +18534,7 @@ mod tests {
     /// The point of the hot swap: a contributor who declares the proxy in
     /// the app must get enrichment on the next poll, not after a restart.
     /// Nothing here reloads `DaemonShared`.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declaration_change_takes_effect_without_a_restart() {
         let dir = declared_token_dir();
@@ -18489,6 +18558,7 @@ mod tests {
     }
 
     /// `null` means off, and off must actually stop reading.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn clearing_the_declaration_drops_the_ledger() {
         let dir = declared_token_dir();
@@ -18515,6 +18585,7 @@ mod tests {
     /// A settings write that does not touch the declaration must not throw
     /// away a warm snapshot. Rebuilding on every `set_settings` would blank
     /// the overlay whenever a contributor moved an unrelated slider.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn an_unrelated_settings_change_keeps_the_same_ledger() {
         let dir = declared_token_dir();
@@ -18538,6 +18609,7 @@ mod tests {
     }
 
     /// Cold start is not an error state and must not be reported as one.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_rebuilt_ledger_reports_declared_but_nothing_seen() {
         let dir = declared_token_dir();
@@ -18564,6 +18636,7 @@ mod tests {
     /// and the daemon holds no ledger, exactly as it does for a contributor
     /// who declared nothing at all. Reporting `not_declared` for it printed
     /// "Off" under a switch the contributor could see was on.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declared_proxy_whose_token_cannot_be_read_is_not_reported_as_undeclared() {
         // A directory with no `control.token` in it, which is what a
@@ -18611,6 +18684,7 @@ mod tests {
     /// The third state, and the one that proves `last_refresh_at` reports a
     /// refresh that actually reached the proxy rather than one that was
     /// merely attempted.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn status_reports_rows_seen_after_a_refresh_that_reached_the_proxy() {
         let router = axum::Router::new().route(
@@ -18656,6 +18730,7 @@ mod tests {
     /// exists so a contributor can tell "the proxy answered and had nothing"
     /// from "the proxy has not answered at all", and stamping it on a failed
     /// attempt would erase that difference.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn an_unreachable_proxy_stamps_no_refresh_time() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -18680,6 +18755,7 @@ mod tests {
     /// Unit-testing `status_value` alone would not catch a `status` method
     /// that never returns it -- the failure mode this plan already hit once
     /// with async dispatch.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_routing_block_reaches_a_shell_through_the_real_dispatcher() {
         let dir = declared_token_dir();

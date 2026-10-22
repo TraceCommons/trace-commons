@@ -204,6 +204,11 @@ fn pointer_path() -> Option<PathBuf> {
 /// Infallible: every failure is "nothing to discover". See the module doc.
 #[must_use]
 pub fn read_pointer() -> Option<IronWirePointer> {
+    // The pointer is production's IronWire's, whatever `IRONWIRE_HOME`
+    // says. A staging build never reads it (staging design 4.2, S10).
+    if !crate::channel::IRONWIRE_READS_POINTER {
+        return None;
+    }
     let path = pointer_path()?;
     let metadata = trustworthy_file(&path)?;
     if metadata.len() > MAX_POINTER_BYTES {
@@ -247,7 +252,7 @@ fn allowed_token_dir() -> Option<PathBuf> {
 /// nothing logs the path, which is the contributor's home directory laid out
 /// in a log line.
 #[must_use]
-fn confine_token_path(candidate: &Path, allowed_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn confine_token_path(candidate: &Path, allowed_dir: &Path) -> Option<PathBuf> {
     let resolved = std::fs::canonicalize(candidate).ok()?;
     let allowed = std::fs::canonicalize(allowed_dir).ok()?;
     (resolved != allowed && resolved.starts_with(&allowed)).then_some(resolved)
@@ -320,6 +325,9 @@ pub(crate) mod test_support {
 
     static OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
     static LOCK: Mutex<()> = Mutex::new(());
+    /// The variable this build's IronWire home follows: `IRONWIRE_HOME`, or
+    /// `IRONWIRE_STAGING_HOME` in a staging build.
+    const HOME_ENV: &str = crate::channel::IRONWIRE_HOME_ENV;
 
     pub(super) fn override_path() -> Option<PathBuf> {
         OVERRIDE
@@ -362,9 +370,9 @@ pub(crate) mod test_support {
             // it; both the override and the environment were still restored
             // by its guard's drop, so there is nothing here to refuse over.
             let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            let previous_home = std::env::var_os("IRONWIRE_HOME");
+            let previous_home = std::env::var_os(HOME_ENV);
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
-            unsafe { std::env::remove_var("IRONWIRE_HOME") };
+            unsafe { std::env::remove_var(HOME_ENV) };
             Self {
                 _lock: lock,
                 previous_home,
@@ -374,7 +382,7 @@ pub(crate) mod test_support {
         /// `IRONWIRE_HOME` at `home`, and no pointer.
         pub(crate) fn home(home: &Path) -> Self {
             let guard = Self::none();
-            unsafe { std::env::set_var("IRONWIRE_HOME", home) };
+            unsafe { std::env::set_var(HOME_ENV, home) };
             guard
         }
 
@@ -400,8 +408,8 @@ pub(crate) mod test_support {
         fn drop(&mut self) {
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
             match self.previous_home.take() {
-                Some(v) => unsafe { std::env::set_var("IRONWIRE_HOME", v) },
-                None => unsafe { std::env::remove_var("IRONWIRE_HOME") },
+                Some(v) => unsafe { std::env::set_var(HOME_ENV, v) },
+                None => unsafe { std::env::remove_var(HOME_ENV) },
             }
         }
     }
@@ -568,6 +576,29 @@ mod tests {
         }
     }
 
+    /// A staging build never reads the `ironwire` CLI's pointer: it is
+    /// production's whatever `IRONWIRE_HOME` says (staging design 4.2, S10).
+    /// A valid pointer with a token beside it is still nothing to discover.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_ignores_the_production_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = dir.path().join("control.token");
+        std::fs::write(&token, "tok\n").expect("write token");
+        let path = dir.path().join("endpoint.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9111",
+                "token_path": token,
+            }))
+            .expect("fixture serialises"),
+        )
+        .expect("write pointer");
+        let _at = test_support::IronWireAt::pointer(&path);
+        assert_eq!(read_pointer(), None);
+    }
+
     /// The rule the whole module exists to obey. No file is the ordinary
     /// state of a machine without IronWire, and it must reach the caller as
     /// "nothing to discover" rather than as anything to handle.
@@ -588,6 +619,8 @@ mod tests {
     /// `a_token_path_outside_the_token_directory_is_refused` and its `..`
     /// and symlink siblings. What is left here is what the name says: a
     /// token inside the token directory is read back, exactly.
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn a_token_path_inside_the_token_directory_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -625,6 +658,8 @@ mod tests {
     /// daemon read that file and send its contents as a `Bearer` to a
     /// loopback port the same attacker chose. One press, arbitrary file,
     /// attacker's listener.
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn a_token_path_outside_the_token_directory_is_refused() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -655,6 +690,8 @@ mod tests {
     /// `..` does not escape either, because both sides are canonicalized
     /// before the comparison. Spelled separately from the plain outside case
     /// because a `starts_with` on unresolved paths accepts this one.
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn a_token_path_that_climbs_out_with_dot_dot_is_refused() {
         let outer = tempfile::tempdir().expect("tempdir");
@@ -681,6 +718,8 @@ mod tests {
     /// And a symlink inside the directory pointing out of it is refused, for
     /// the same reason and by the same canonicalization.
     #[cfg(unix)]
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn a_token_path_symlinked_out_of_the_token_directory_is_refused() {
         let outer = tempfile::tempdir().expect("tempdir");

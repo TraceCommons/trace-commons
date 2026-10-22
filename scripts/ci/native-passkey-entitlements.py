@@ -15,6 +15,13 @@ DOMAIN_KEY = 'com.apple.developer.associated-domains'
 DOMAIN = 'webcredentials:tracecommons.ai'
 TEAM = 'KXSWJN7WY8'
 NATIVE_BUNDLE = 'ai.tracecommons.shell'
+# The native app's channels (staging design 4.2): each bundle has its own App
+# ID, keychain access group (the team prefix plus the bundle id) and passkey
+# domain. Neither channel's bundle passes with the other's identity.
+NATIVE_DOMAINS = {
+    NATIVE_BUNDLE: DOMAIN,
+    'ai.tracecommons.shell.staging': 'webcredentials:staging.tracecommons.ai',
+}
 
 
 class Refusal(ValueError):
@@ -22,21 +29,22 @@ class Refusal(ValueError):
 
 
 def validate(entitlements, profile, bundle_id, require_passkeys):
-    if bundle_id != NATIVE_BUNDLE:
+    if bundle_id not in NATIVE_DOMAINS:
         if require_passkeys:
             raise Refusal('native passkey qualification requires the native bundle')
         return
+    domain = NATIVE_DOMAINS[bundle_id]
     if not isinstance(entitlements, dict) or not isinstance(profile, dict):
         raise Refusal('unreadable native entitlement metadata')
     grant = profile.get('Entitlements')
     if not isinstance(grant, dict):
         raise Refusal('profile has no entitlement dictionary')
     for metadata in (entitlements, grant):
-        if metadata.get('com.apple.application-identifier') != TEAM + '.' + NATIVE_BUNDLE:
+        if metadata.get('com.apple.application-identifier') != TEAM + '.' + bundle_id:
             raise Refusal('native application identifier mismatch')
         if metadata.get('com.apple.developer.team-identifier') != TEAM:
             raise Refusal('native team identifier mismatch')
-    access_group = TEAM + '.' + NATIVE_BUNDLE
+    access_group = TEAM + '.' + bundle_id
     if entitlements.get('keychain-access-groups') != [access_group]:
         raise Refusal('native keychain access group mismatch')
     keychain_grants = grant.get('keychain-access-groups')
@@ -45,14 +53,14 @@ def validate(entitlements, profile, bundle_id, require_passkeys):
             or not any(x in (TEAM + '.*', access_group) for x in keychain_grants)):
         raise Refusal('profile does not grant native keychain access group')
     requested = entitlements.get(DOMAIN_KEY)
-    if requested != [DOMAIN]:
-        raise Refusal('native passkeys require exactly webcredentials:tracecommons.ai')
+    if requested != [domain]:
+        raise Refusal('native passkeys require exactly ' + domain)
     allowed = grant.get(DOMAIN_KEY)
     # Apple's renewed Developer ID CMS represents the wildcard grant as a
     # scalar '*'. Signed requested entitlements must still be an exact array.
     if allowed != '*' and (not isinstance(allowed, list)
             or not all(isinstance(x, str) for x in allowed)
-            or not any(x in ('*', DOMAIN) for x in allowed)):
+            or not any(x in ('*', domain) for x in allowed)):
         raise Refusal('profile does not grant native webcredentials domain')
 
 
@@ -81,7 +89,7 @@ def main():
         else:
             profile = plistlib.loads(args.profile.read_bytes())
         validate(entitlements, profile, args.bundle_id, args.require_passkeys)
-        if args.bundle_id == NATIVE_BUNDLE:
+        if args.bundle_id in NATIVE_DOMAINS:
             expiry = profile.get('ExpirationDate')
             if not isinstance(expiry, datetime.datetime):
                 raise Refusal('profile has no expiration date')

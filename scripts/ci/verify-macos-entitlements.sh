@@ -12,6 +12,10 @@
 # by one app has to be readable by the other. So the group below is fixed,
 # and everything app-specific -- the bundle id, the executable name -- is
 # read from the bundle's own Info.plist.
+#
+# The one exception is the native shell's staging build (staging design
+# 4.2), ai.tracecommons.shell.staging: it has its own group, so that it never
+# reads a production credential, and it is held to that group exactly.
 set -euo pipefail
 
 APP="${1:?usage: verify-macos-entitlements.sh <path to a Near.ai or Trace Commons .app>}"
@@ -31,6 +35,9 @@ BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$INFO" 2>/dev/null)" \
 EXECUTABLE="$(plutil -extract CFBundleExecutable raw -o - "$INFO" 2>/dev/null)" \
   || { echo "FAIL: Info.plist carries no CFBundleExecutable"; exit 1; }
 echo "bundle $BUNDLE_ID, executable $EXECUTABLE"
+if [ "$BUNDLE_ID" = "ai.tracecommons.shell.staging" ]; then
+  ACCESS_GROUP="$TEAM_ID.ai.tracecommons.shell.staging"
+fi
 
 echo "--- the profile is embedded"
 test -f "$PROFILE" || { echo "FAIL: no embedded.provisionprofile in the bundle"; exit 1; }
@@ -55,7 +62,9 @@ PLIST="$(security cms -D -i "$PROFILE" 2>/dev/null)" \
   || { echo "FAIL: embedded.provisionprofile is not readable CMS"; exit 1; }
 GRANTED="$(printf '%s' "$PLIST" | plutil -extract Entitlements.keychain-access-groups xml1 -o - - 2>/dev/null)" \
   || { echo "FAIL: profile carries no Entitlements.keychain-access-groups"; exit 1; }
-echo "$GRANTED" | grep -qE "KXSWJN7WY8\.(\*|ai\.tracecommons\.shell)" \
+# The team wildcard, or this exact group: a grant of the production group
+# does not cover the staging one.
+echo "$GRANTED" | grep -qE "<string>($TEAM_ID\.\*|${ACCESS_GROUP//./\\.})</string>" \
   || { echo "FAIL: profile does not grant the requested access group"; exit 1; }
 
 echo "--- the profile is this app's profile"

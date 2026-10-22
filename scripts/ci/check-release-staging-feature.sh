@@ -58,6 +58,8 @@ BUILD_FILES=(
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   macos/scripts/info-plist.sh                 # reads the bundle channel (spec 4.1)
+  macos/scripts/channel.sh                    # loads the bundle channel file
+  macos/channels/production.env               # the production bundle channel
   windows/scripts/make-msix.ps1
   windows/scripts/make-appinstaller.ps1
   windows/src/TraceCommons.App/TraceCommons.App.csproj
@@ -539,6 +541,24 @@ check() {
     failures=$((failures + 1))
   fi
 
+  # 10. Both macOS build scripts check the bundle's channel before it can be
+  #     signed, and the check reads the FFI library as well as the plist and
+  #     the CLI (spec 4.3). Only CI runs this file on every PR; the check
+  #     itself runs only inside a real bundle build, so without this a
+  #     deleted call would go unnoticed until a DMG that cannot start ships.
+  for file in macos/scripts/make-app-bundle.sh macos/scripts/make-release-dmg.sh; do
+    [[ -f "$file" ]] || continue
+    if ! grep -q -x -F -- 'assert_bundle_channel "$APP"' "$file"; then
+      echo "REFUSING: $file no longer checks the bundle channel (assert_bundle_channel \"\$APP\")" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  if [[ -f macos/scripts/channel.sh ]] \
+    && ! grep -q -x -F -- '  lib_report="$(library_channel "$app/Contents/Frameworks/libtrace_commons_contributor_ffi.dylib")" || {' macos/scripts/channel.sh; then
+    echo "REFUSING: macos/scripts/channel.sh: the bundle channel check no longer reads the FFI library" >&2
+    failures=$((failures + 1))
+  fi
+
   if ((failures > 0)); then
     echo "$failures release staging-feature violation(s)." >&2
     return 1
@@ -672,9 +692,19 @@ self_test() {
     "the staging workflow reading the production WIF provider|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_WIF_PROVIDER }}\"\\n/"
     "the staging workflow creating a full release|.github/workflows/staging-macos.yml|s/\\z/      - run: gh release create staging-x dist\\/a.dmg\\n/"
     # The bundle's declared channel (spec 4.3).
-    "the bundle plist without TCChannel|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n//m"
-    "the bundle plist naming the staging channel|macos/scripts/info-plist.sh|s/<key>TCChannel<\\/key><string>production</<key>TCChannel<\\/key><string>staging</"
-    "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n/\$&\$&/m"
+    "the bundle plist without TCChannel|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}<\\/string>\\n//m"
+    "the bundle plist naming the staging channel|macos/scripts/info-plist.sh|s/<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}</<key>TCChannel<\\/key><string>staging</"
+    "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}<\\/string>\\n/\$&\$&/m"
+    # The bundle channel files (spec 4.1): production's file is a release
+    # file, and the loader's default is production.
+    "the production channel file giving the dylib the feature|macos/channels/production.env|s/^TC_FFI_CARGO_FEATURES=\\n/TC_FFI_CARGO_FEATURES=trace-commons-contributor\\/near-ai-staging\\n/m"
+    "the production channel file giving the CLI the feature|macos/channels/production.env|s/^TC_CLI_CARGO_FEATURES=\\n/TC_CLI_CARGO_FEATURES=near-ai-staging\\n/m"
+    "the channel loader defaulting to staging|macos/scripts/channel.sh|s/TC_CHANNEL:-production/TC_CHANNEL:-staging/"
+    # The bundle channel check before signing (spec 4.3).
+    "the release DMG script no longer checking the bundle channel|macos/scripts/make-release-dmg.sh|s/^assert_bundle_channel \"\\\$APP\"\n//m"
+    "the release DMG script checking the bundle channel only in a comment|macos/scripts/make-release-dmg.sh|s/^assert_bundle_channel \"\\\$APP\"\n/# assert_bundle_channel \"\\\$APP\"\n/m"
+    "the bundle script no longer checking the bundle channel|macos/scripts/make-app-bundle.sh|s/^assert_bundle_channel \"\\\$APP\"\n//m"
+    "the bundle channel check no longer reading the FFI library|macos/scripts/channel.sh|s/^  lib_report=.*\n/  lib_report=\"\\\$TC_CHANNEL \\\$TC_URL_SCHEME\"\n/m"
     # A TOML escape spells the feature without its literal name.
     "the FFI enabling it through a TOML escape|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"near-ai-\\\\u0073taging\"] }#m"
   )

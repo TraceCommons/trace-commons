@@ -101,5 +101,62 @@ class NativePasskeyEntitlementsTests(unittest.TestCase):
                 module.validate(self.entitlements, self.profile, 'ai.tracecommons.shell', False)
 
 
+class StagingPasskeyEntitlementsTests(unittest.TestCase):
+    """The staging app: its own App ID, keychain group and passkey domain."""
+
+    BUNDLE = 'ai.tracecommons.shell.staging'
+    DOMAIN = 'webcredentials:staging.tracecommons.ai'
+
+    def setUp(self):
+        self.entitlements = {
+            'com.apple.application-identifier': 'KXSWJN7WY8.ai.tracecommons.shell.staging',
+            'com.apple.developer.team-identifier': 'KXSWJN7WY8',
+            'keychain-access-groups': ['KXSWJN7WY8.ai.tracecommons.shell.staging'],
+            module.DOMAIN_KEY: [self.DOMAIN],
+        }
+        self.profile = {'Entitlements': dict(self.entitlements)}
+
+    def test_the_staging_bundle_passes_with_its_own_domain_and_group(self):
+        for grant in [[self.DOMAIN], ['*'], '*']:
+            self.profile['Entitlements'][module.DOMAIN_KEY] = grant
+            module.validate(self.entitlements, self.profile, self.BUNDLE, True)
+
+    def test_the_staging_bundle_refuses_production_identity(self):
+        for key, value in [
+            (module.DOMAIN_KEY, ['webcredentials:tracecommons.ai']),
+            ('keychain-access-groups', ['KXSWJN7WY8.ai.tracecommons.shell']),
+            ('com.apple.application-identifier', 'KXSWJN7WY8.ai.tracecommons.shell'),
+        ]:
+            with self.subTest(key=key):
+                entitlements = dict(self.entitlements, **{key: value})
+                profile = {'Entitlements': dict(self.profile['Entitlements'], **{key: value})}
+                with self.assertRaises(module.Refusal):
+                    module.validate(entitlements, profile, self.BUNDLE, True)
+
+    def test_the_production_bundle_refuses_the_staging_domain(self):
+        entitlements = {
+            'com.apple.application-identifier': 'KXSWJN7WY8.ai.tracecommons.shell',
+            'com.apple.developer.team-identifier': 'KXSWJN7WY8',
+            'keychain-access-groups': ['KXSWJN7WY8.ai.tracecommons.shell'],
+            module.DOMAIN_KEY: [self.DOMAIN],
+        }
+        profile = {'Entitlements': dict(entitlements, **{module.DOMAIN_KEY: '*'})}
+        with self.assertRaises(module.Refusal):
+            module.validate(entitlements, profile, 'ai.tracecommons.shell', True)
+
+    def test_a_production_profile_does_not_qualify_the_staging_bundle(self):
+        profile = {'Entitlements': dict(
+            self.profile['Entitlements'],
+            **{'com.apple.application-identifier': 'KXSWJN7WY8.ai.tracecommons.shell'})}
+        with self.assertRaises(module.Refusal):
+            module.validate(self.entitlements, profile, self.BUNDLE, True)
+
+    def test_the_staging_refusal_names_the_staging_domain(self):
+        entitlements = dict(self.entitlements, **{module.DOMAIN_KEY: []})
+        with self.assertRaisesRegex(module.Refusal,
+                                    '^native passkeys require exactly webcredentials:staging.tracecommons.ai$'):
+            module.validate(entitlements, self.profile, self.BUNDLE, True)
+
+
 if __name__ == '__main__':
     unittest.main()
