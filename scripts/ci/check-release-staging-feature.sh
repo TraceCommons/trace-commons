@@ -22,6 +22,13 @@
 # references it; no release workflow's tag filter can match a staging tag;
 # and the manifests carry only the exact definitions listed in check 3.
 #
+# The macOS bundle scripts pick their channel from macos/channels/
+# $TC_CHANNEL.env (spec 4.1), so the feature name never appears in them and
+# check 1 cannot see a release build switched to staging. Checks 6 and 8
+# close that: no release, packaging or deploy file may reference the staging
+# channel file, and none may set or default TC_CHANNEL to anything but the
+# literal `production`. Reading it (`$TC_CHANNEL`, `${TC_CHANNEL}`) is fine.
+#
 # Usage:
 #   scripts/ci/check-release-staging-feature.sh check [ROOT]
 #       Scan the release, packaging and deploy files and the manifests of
@@ -50,6 +57,7 @@ BUILD_FILES=(
   scripts/operator/pipeline_tooling/promote.py
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
+  macos/scripts/info-plist.sh                 # reads the bundle channel (spec 4.1)
   windows/scripts/make-msix.ps1
   windows/scripts/make-appinstaller.ps1
   windows/src/TraceCommons.App/TraceCommons.App.csproj
@@ -90,7 +98,7 @@ SHIPPED_MANIFESTS=(
 # by which another workflow could reach the staging build.
 STAGING_WORKFLOW=.github/workflows/staging-macos.yml
 STAGING_TAG_PREFIX="staging-"
-STAGING_REFERENCES=(staging-macos channels/staging.env)
+STAGING_REFERENCES=(staging-macos staging.env)
 # The one server bin that may require the feature: the staging pin re-sign
 # tool.
 STAGING_PINS_BIN="trace-commons-staging-pins"
@@ -99,6 +107,8 @@ STAGING_PINS_BIN="trace-commons-staging-pins"
 # case-insensitive strings: the production appcast and update bucket, the
 # pilot artifact bucket, the release workflows and the Homebrew tap.
 PRODUCTION_DESTINATIONS=(
+  # Redundant with tracecommons-flatpak below; kept so the list names the
+  # production appcast spec 6.2 refuses by itself.
   storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml
   tracecommons-flatpak
   tc-pilot-artifacts-
@@ -106,6 +116,18 @@ PRODUCTION_DESTINATIONS=(
   release-contributor
   homebrew-tap
   TraceCommons/tap
+)
+
+# Production credentials no staging file may name. These are repository
+# secrets, readable from any workflow, so a staging run naming one could
+# publish to production with the destination held in a variable. Matched as
+# whole names: a staging secret of its own (STAGING_..., ..._STAGING) passes.
+PRODUCTION_SECRETS=(
+  HOMEBREW_TAP_TOKEN
+  GCP_FLATPAK_PUBLISHER_SA
+  GCP_WIF_PROVIDER
+  WINGET_PKGS_TOKEN
+  SPARKLE_PUBLIC_ED_KEY
 )
 
 check() {
@@ -210,6 +232,17 @@ check() {
     )
   done
 
+  # 3b. No TOML escape in a shipped manifest. `"near-ai-\u0073taging"`
+  #     decodes to the feature name and never contains it, so the scans
+  #     above cannot see it. No shipped manifest needs a backslash today.
+  for file in "${SHIPPED_MANIFESTS[@]}"; do
+    [[ -f "$file" ]] || continue
+    while IFS= read -r hit; do
+      echo "REFUSING: $file:$hit: a backslash escape in a shipped manifest can spell '$FEATURE' past this check." >&2
+      failures=$((failures + 1))
+    done < <(grep -n -F -- "\\" "$file" | grep -v -E '^[0-9]+:[[:space:]]*#' || true)
+  done
+
   # 4. The staging build's own files. Each must name the feature (so a
   #    rename or rewrite cannot quietly drop the staging build out of this
   #    list) and must name no production destination, comments included.
@@ -226,6 +259,27 @@ check() {
         failures=$((failures + 1))
       done < <(grep -n -i -F -- "$destination" "$file" || true)
     done
+    local secret
+    for secret in "${PRODUCTION_SECRETS[@]}"; do
+      while IFS= read -r hit; do
+        echo "REFUSING: $file:$hit: a staging file names the production credential '$secret'." >&2
+        failures=$((failures + 1))
+      done < <(grep -n -E -- "(^|[^A-Za-z0-9_])$secret([^A-Za-z0-9_]|\$)" "$file" || true)
+    done
+    # A GitHub release from a staging file is a pre-release, never a full
+    # one. Continuation lines are joined first, as in check 2.
+    while IFS= read -r hit; do
+      echo "REFUSING: $file: a staging release must be a pre-release: $hit" >&2
+      failures=$((failures + 1))
+    done < <(
+      awk '{
+          line = $0
+          if (sub(/[\\`][ \t]*$/, "", line)) { buf = buf line " "; next }
+          print buf line; buf = ""
+        } END { if (buf != "") print buf }' "$file" |
+        grep -E 'gh[[:space:]]+release[[:space:]]+(create|edit)' |
+        grep -v -E -- '--prerelease([[:space:]]|$)' || true
+    )
   done
 
   # 5. The staging workflow runs on a manual dispatch and nothing else: one
@@ -270,24 +324,73 @@ check() {
     )
   fi
 
-  # 6. No other workflow or action calls the staging workflow or reads the
-  #    staging channel file, so neither can be reached from a release.
-  local needle
+  # 5b. Every job environment in the staging workflow is exactly `staging`,
+  #     inline or as a block's name:. The release environment carries the
+  #     production publishing identity (its WIF subject is bound to it).
+  if [[ -f "$STAGING_WORKFLOW" ]]; then
+    while IFS= read -r hit; do
+      echo "REFUSING: $STAGING_WORKFLOW: $hit" >&2
+      failures=$((failures + 1))
+    done < <(
+      awk '
+        function indent_of(s) { match(s, /^[ ]*/); return RLENGTH }
+        function unquote(v) { gsub(/^["'"'"']|["'"'"']$/, "", v); return v }
+        function close_env() {
+          if (in_env && !named) printf "line %d: an environment block with no name: staging\n", env_line
+          in_env = 0
+        }
+        /^[[:space:]]*(#|$)/ { next }
+        {
+          ind = indent_of($0)
+          text = $0; sub(/[[:space:]]+#.*$/, "", text); sub(/[[:space:]]+$/, "", text)
+          key = text; sub(/^[[:space:]]*/, "", key)
+        }
+        in_env && ind <= env_ind { close_env() }
+        in_env {
+          if (key ~ /^name:/) {
+            value = key; sub(/^name:[[:space:]]*/, "", value)
+            named = 1
+            if (unquote(value) != "staging") printf "line %d: the environment must be staging, not %s\n", NR, value
+          }
+          next
+        }
+        key ~ /^environment:/ {
+          value = key; sub(/^environment:[[:space:]]*/, "", value)
+          if (value == "") { in_env = 1; named = 0; env_ind = ind; env_line = NR }
+          else if (unquote(value) != "staging") printf "line %d: the environment must be staging, not %s\n", NR, value
+        }
+        END { close_env() }' "$STAGING_WORKFLOW"
+    )
+  fi
+
+  # 6. No other workflow or action, and no release, packaging or deploy file,
+  #    calls the staging workflow or reads the staging channel file, so
+  #    neither can be reached from a release.
+  local needle reference_files=()
   while IFS= read -r file; do
-    [[ "$file" == "$STAGING_WORKFLOW" ]] && continue
+    reference_files+=("$file")
+  done < <(find .github/workflows .github/actions -type f 2>/dev/null | sort)
+  for file in "${files[@]}"; do
+    [[ " ${reference_files[*]} " == *" $file "* ]] || reference_files+=("$file")
+  done
+  for file in "${reference_files[@]}"; do
+    [[ "$file" == "$STAGING_WORKFLOW" || ! -f "$file" ]] && continue
     for needle in "${STAGING_REFERENCES[@]}"; do
       while IFS= read -r hit; do
         echo "REFUSING: $file:$hit references '$needle'; only the staging workflow may." >&2
         failures=$((failures + 1))
       done < <(grep -n -F -- "$needle" "$file" || true)
     done
-  done < <(find .github/workflows .github/actions -type f 2>/dev/null | sort)
+  done
 
   # 7. The staging pre-release pushes a `staging-` tag. No release workflow
   #    may run on it: each push trigger needs a `tags:` (or `branches:`)
   #    filter, no `tags-ignore:`, and no tag pattern whose literal prefix is
   #    compatible with the staging prefix. Conservative: `st*` or `*` is
   #    refused although it might never meet a staging tag in practice.
+  #    Publishing that pre-release also fires `release` and `create`, and
+  #    `workflow_run` chains off any workflow, so none of the three may
+  #    trigger a release workflow.
   for file in "${files[@]}"; do
     [[ "$file" == .github/workflows/* && -f "$file" ]] || continue
     while IFS= read -r hit; do
@@ -331,6 +434,8 @@ check() {
             value = text; sub(/^[^:]*:[[:space:]]*/, "", value)
             if (value ~ /(^|[^a-z_])push([^a-z_]|$)/)
               printf "line %d: an inline push trigger has no tag filter: %s\n", NR, text
+            if (value ~ /(^|[^a-z_])(release|create|workflow_run)([^a-z_]|$)/)
+              printf "line %d: an inline trigger the staging pre-release also fires: %s\n", NR, text
             in_on = 1; child = -1
           }
           next
@@ -340,6 +445,8 @@ check() {
           if (child < 0) child = ind
           if (ind <= child) {
             close_push()
+            if (ind == child && key ~ /^["'"'"']?(release|create|workflow_run)["'"'"']?[[:space:]]*:/)
+              printf "line %d: the %s trigger also fires on the staging pre-release or its tag\n", NR, key
             if (ind == child && key ~ /^push:/) {
               in_push = 1; push_line = NR; has_tags = 0; has_branches = 0; grand = -1
               value = key; sub(/^push:[[:space:]]*/, "", value)
@@ -372,6 +479,46 @@ check() {
     )
   done
 
+  # 8. No release, packaging or deploy file sets or defaults TC_CHANNEL to
+  #    anything but the literal `production` (spec 4.1: the channel file
+  #    carries the feature, so a staging channel is a staging build). A read
+  #    -- $TC_CHANNEL, ${TC_CHANNEL} -- is fine; an assignment (sh, YAML
+  #    env:, PowerShell $env:) or a ${TC_CHANNEL<op>value} expansion must
+  #    name production. Comment lines are skipped.
+  for file in "${files[@]}"; do
+    [[ -f "$file" ]] || continue
+    while IFS= read -r hit; do
+      echo "REFUSING: $file: $hit" >&2
+      failures=$((failures + 1))
+    done < <(
+      awk '
+        function unquote(v) { gsub(/^["'"'"']|["'"'"';]$/, "", v); gsub(/["'"'"']$/, "", v); return v }
+        /^[[:space:]]*#/ { next }
+        {
+          rest = $0
+          while ((i = index(rest, "TC_CHANNEL")) > 0) {
+            before = substr(rest, 1, i - 1); after = substr(rest, i + 10); rest = after
+            if (after ~ /^[A-Za-z0-9_]/ || before ~ /[A-Za-z0-9_]$/) continue
+            if (before ~ /\$\{$/) {
+              if (after ~ /^\}/) continue
+              val = after; sub(/\}.*$/, "", val)
+              if (val !~ /^:?[-=]production$/)
+                printf "line %d: TC_CHANNEL expanded with a value other than production: %s\n", NR, $0
+              continue
+            }
+            if (before ~ /\$$/) continue
+            if (match(after, /^["'"'"']?[[:space:]]*(\+?=|:)/) && after !~ /^["'"'"']?[[:space:]]*==/) {
+              val = substr(after, RLENGTH + 1)
+              sub(/^[[:space:]]+/, "", val); sub(/[[:space:]]+#.*$/, "", val); sub(/[[:space:]]+$/, "", val)
+              val = unquote(val)
+              if (val != "production" && val !~ /^\$\{TC_CHANNEL:?[-=]production\}$/)
+                printf "line %d: TC_CHANNEL set to something other than production: %s\n", NR, $0
+            }
+          }
+        }' "$file"
+    )
+  done
+
   if ((failures > 0)); then
     echo "$failures release staging-feature violation(s)." >&2
     return 1
@@ -387,7 +534,8 @@ self_test() {
 
   local file
   for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "${STAGING_FILES[@]}" \
-    "$repo"/.github/workflows/*.yml "$repo"/.github/workflows/*.yaml; do
+    "$repo"/.github/workflows/*.yml "$repo"/.github/workflows/*.yaml \
+    "$repo"/.github/actions/*/action.yml; do
     [[ "$file" == *'*'* ]] && continue
     file="${file#"$repo"/}"
     mkdir -p "$scratch/$(dirname "$file")"
@@ -409,6 +557,11 @@ self_test() {
     "the attestation crate's own empty definition|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\n/m"
     "the re-sign tool requiring it|crates/trace-commons-server/Cargo.toml|s/^\\[dev-dependencies\\]/[[bin]]\\nname = \"trace-commons-staging-pins\"\\npath = \"src\/bin\/trace-commons-staging-pins.rs\"\\nrequired-features = [\"$FEATURE\"]\\n\\n\$&/m"
     "the staging workflow taking a dispatch input|.github/workflows/staging-macos.yml|s/^  workflow_dispatch:\\n/\$&    inputs:\\n      ref:\\n        type: string\\n        required: false\\n/m"
+    "a build script defaulting the channel to production and reading its file|macos/scripts/make-app-bundle.sh|s/\\z/TC_CHANNEL=\"\\\${TC_CHANNEL:-production}\"\\nsource \"\\\$(dirname \"\\\$0\")\\/..\\/channels\\/\\\${TC_CHANNEL}.env\"\\nif [[ \"\\\$TC_CHANNEL\" == production ]]; then :; fi\\n/"
+    "a release workflow pinning the production channel|.github/workflows/release-apps.yml|s/\\z/env:\\n  TC_CHANNEL: production\\n/"
+    "the staging workflow declaring the staging environment|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: staging\\n/m"
+    "the staging workflow reading its own staging secrets|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.STAGING_SPARKLE_PUBLIC_ED_KEY }} \\\${{ secrets.GCP_WIF_PROVIDER_STAGING }}\"\\n/"
+    "the staging workflow creating a pre-release over two lines|.github/workflows/staging-macos.yml|s/\\z/      - run: |\\n          gh release create staging-x dist\\/a.dmg \\\\\\n            --prerelease\\n/"
   )
 
   # Each case: a description, a file, and a perl substitution seeding one
@@ -465,6 +618,41 @@ self_test() {
     "the re-sign tool's requirement on a near-named bin|crates/trace-commons-server/Cargo.toml|s/^\\[dev-dependencies\\]/[[bin]]\\nname = \"trace-commons-staging-pins-extra\"\\npath = \"src\/bin\/x.rs\"\\nrequired-features = [\"$FEATURE\"]\\n\\n\$&/m"
     "the re-sign tool requiring it with another feature|crates/trace-commons-server/Cargo.toml|s/^\\[dev-dependencies\\]/[[bin]]\\nname = \"trace-commons-staging-pins\"\\npath = \"src\/bin\/trace-commons-staging-pins.rs\"\\nrequired-features = [\"$FEATURE\", \"gcs-client\"]\\n\\n\$&/m"
     "the re-sign tool's requirement in the ingest manifest|crates/trace-commons-ingest/Cargo.toml|s/\\z/\\n[[bin]]\\nname = \"trace-commons-staging-pins\"\\npath = \"src\/bin\/x.rs\"\\nrequired-features = [\"$FEATURE\"]\\n/"
+    # A staging file deleted outright: only the existence check catches it.
+    "the staging channel file deleted|macos/channels/staging.env|DELETE"
+    "the staging workflow with a second, empty on: block|.github/workflows/staging-macos.yml|s/\\z/on:\\n/"
+    "the staging workflow with an empty on: block|.github/workflows/staging-macos.yml|s/^on:\\n  workflow_dispatch:\\n/on:\\n/m"
+    "a shallower sibling key under the staging workflow's on:|.github/workflows/staging-macos.yml|s/^on:\\n  workflow_dispatch:\\n/on:\\n    workflow_dispatch:\\n  push:\\n/m"
+    "a composite action reading the staging channel file|.github/actions/trim-cargo-cache/action.yml|s/\\A/# source macos\\/channels\\/staging.env\\n/"
+    "the staging channel file naming a production bucket in upper case|macos/channels/staging.env|s/\\z/TC_BUCKET=TRACECOMMONS-FLATPAK\\n/"
+    "a release tag filter longer than the staging prefix|.github/workflows/release-apps.yml|s/\"app-v\\*\"/\"staging-2026*\"/"
+    "a release push trigger with tags-ignore: beside its tags:|.github/workflows/release-apps.yml|s/    tags:\\n      - \"app-v\\*\"\\n/\$&    tags-ignore:\\n      - \"x\"\\n/"
+    # The channel indirection (spec 4.1): a build script reads
+    # channels/\$TC_CHANNEL.env, so the feature name never appears in it.
+    "a build script reading the staging channel file|macos/scripts/make-app-bundle.sh|s/\\z/source \"\\\$(dirname \"\\\$0\")\\/..\\/channels\\/staging.env\"\\n/"
+    "a build script reading staging.env by a relative name|macos/scripts/make-release-dmg.sh|s/\\z/cd channels \\&\\& . .\\/staging.env\\n/"
+    "a release workflow setting the staging channel|.github/workflows/release-apps.yml|s/\\z/env:\\n  TC_CHANNEL: staging\\n/"
+    "a release workflow taking the channel from an input|.github/workflows/release-contributor.yml|s/\\z/env:\\n  TC_CHANNEL: \\\${{ inputs.channel }}\\n/"
+    "a build script defaulting the channel to staging|macos/scripts/make-release-dmg.sh|s/\\z/TC_CHANNEL=\"\\\${TC_CHANNEL:-staging}\"\\n/"
+    "a build script defaulting the channel inline to staging|macos/scripts/make-app-bundle.sh|s/\\z/source \"channels\\/\\\${TC_CHANNEL:-staging}.env\"\\n/"
+    "a build script exporting the channel from its arguments|macos/scripts/make-app-bundle.sh|s/\\z/export TC_CHANNEL=\\\$1\\n/"
+    "a PowerShell build script setting the staging channel|windows/scripts/make-msix.ps1|s/\\z/\\\$env:TC_CHANNEL = 'staging'\\n/"
+    # Release workflows run on events the staging pre-release also fires.
+    "a release workflow running on a published release|.github/workflows/release-apps.yml|s/^on:\\n/on:\\n  release:\\n    types: [published]\\n/m"
+    "a release workflow running on a created tag|.github/workflows/release-apps.yml|s/^on:\\n/on:\\n  create:\\n/m"
+    "a release workflow running after another workflow|.github/workflows/release-contributor.yml|s/^on:\\n/on:\\n  workflow_run:\\n    workflows: [staging-build]\\n    types: [completed]\\n/m"
+    "a release workflow with an inline release trigger|.github/workflows/release-contributor.yml|s/^on:\\n  push:\\n    tags:\\n      - \"contributor-v\\*\"\\n/on: release\\nx:\\n/m"
+    # Production credentials the staging build must not borrow.
+    "the staging workflow using the release environment|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment: release\\n/m"
+    "the staging workflow using the release environment by name|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: 'release'\\n/m"
+    "the staging workflow reading the tap token|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.HOMEBREW_TAP_TOKEN }}\"\\n/"
+    "the staging workflow reading the flatpak publisher|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}\"\\n/"
+    "the staging workflow reading the winget token|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets['WINGET_PKGS_TOKEN'] }}\"\\n/"
+    "the staging workflow reading the production Sparkle key|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.SPARKLE_PUBLIC_ED_KEY }}\"\\n/"
+    "the staging workflow reading the production WIF provider|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_WIF_PROVIDER }}\"\\n/"
+    "the staging workflow creating a full release|.github/workflows/staging-macos.yml|s/\\z/      - run: gh release create staging-x dist\\/a.dmg\\n/"
+    # A TOML escape spells the feature without its literal name.
+    "the FFI enabling it through a TOML escape|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"near-ai-\\\\u0073taging\"] }#m"
   )
   local entry desc target program
   for entry in "${accepted[@]}"; do
@@ -486,8 +674,13 @@ self_test() {
   for entry in "${cases[@]}"; do
     IFS='|' read -r desc target program <<<"$entry"
     cp "$scratch/$target" "$scratch/.before"
-    perl -0pi -e "$program" "$scratch/$target"
-    if cmp -s "$scratch/$target" "$scratch/.before"; then
+    # DELETE removes the file instead of editing it.
+    if [[ "$program" == DELETE ]]; then
+      rm "$scratch/$target"
+    else
+      perl -0pi -e "$program" "$scratch/$target"
+    fi
+    if [[ -f "$scratch/$target" ]] && cmp -s "$scratch/$target" "$scratch/.before"; then
       echo "self-test: seeding '$desc' changed nothing in $target; the fixture drifted" >&2
       status=1
     elif (check "$scratch" >/dev/null 2>&1); then
