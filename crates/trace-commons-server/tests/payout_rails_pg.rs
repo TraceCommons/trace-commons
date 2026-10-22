@@ -2795,7 +2795,9 @@ async fn a_batch_is_priced_at_the_epoch_in_force_at_its_time() {
         &fixture.owner,
         &tenant,
         "finalized",
-        second + Duration::seconds(1),
+        // After the second epoch, and (unlike a whole second later) behind
+        // the database clock by the time accrual reads it, so it is priced.
+        second + Duration::microseconds(1),
         &[item(&account_ref(accounts[0]), 1_000, &[], None)],
     )
     .await;
@@ -2838,6 +2840,31 @@ async fn a_batch_older_than_the_first_epoch_uses_the_first() {
     assert_eq!(rows[0].settlement_batch_id, batch);
     assert_eq!(rows[0].rate_version, "v1");
     assert_eq!(rows[0].rail_units.get(), 50);
+}
+
+/// A batch dated ahead of the database clock (application clock skew) is
+/// not priced yet: an epoch recorded before the database reaches its time
+/// would be the one in force for it.
+#[tokio::test]
+async fn a_batch_dated_ahead_of_the_database_clock_is_not_priced_yet() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let rail_id = fresh_rail("future");
+    record_epoch(&fixture, &rail_id, "v1", 1, 1).await;
+    batch_with_lines(
+        &fixture.owner,
+        &tenant,
+        "finalized",
+        Utc::now() + Duration::hours(1),
+        &[item(&account_ref(accounts[0]), 5, &[], None)],
+    )
+    .await;
+    let report = accrue(&fixture, &tenant, &rail_id, "test_units").await;
+    assert_eq!(report.credits_inserted, 0);
+    assert_eq!(report.skipped.get("payout_batch_in_future"), Some(&1));
+    assert!(accruals(&fixture, &tenant, &rail_id).await.is_empty());
 }
 
 #[tokio::test]

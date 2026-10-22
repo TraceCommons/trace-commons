@@ -269,6 +269,12 @@ impl PayoutStore for PgBackend {
         Ok(rows.len() as u64)
     }
 
+    async fn payout_database_now(&self) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError> {
+        let client = self.payout_tenant_client().await?;
+        let row = client.query_one("SELECT clock_timestamp()", &[]).await?;
+        Ok(row.get(0))
+    }
+
     async fn payout_principal_accounts(
         &self,
         tenant: &str,

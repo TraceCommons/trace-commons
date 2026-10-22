@@ -10,17 +10,24 @@
 //! and writes one `trace_payout_accruals` row per settled account line (a
 //! credit) and per reversal of a settled event (a reversal), each priced
 //! once at the rail's rate epoch in force at the batch's creation. It is a
-//! pure function of stored rows: rerunning it writes nothing new, and it
-//! gives the same prices whenever it runs. It makes no network call, reads
-//! no other rail's rows, and never writes the settlement tables, the ledger
-//! or the NEP-141 outbox (D6).
+//! pure function of stored rows and the database clock: rerunning it writes
+//! nothing new, and it gives the same prices whenever it runs, because a
+//! batch dated at or after the database clock waits for a later run. It
+//! makes no network call, reads no other rail's rows, and never writes the
+//! settlement tables, the ledger, the tenant row or the NEP-141 outbox (D6).
 //!
-//! Order within one run: credits, then reversals (priced at the version
-//! their credit used), then claims of unowned accruals by the account their
-//! principal is now linked to, then holds for reversals that cannot be
-//! priced.
+//! An event is settled when a finalized batch lists it, settlement's own
+//! rule; ledger state does not say so.
+//!
+//! Order within one run: credits, then reversals in ledger order (priced at
+//! the version their credit used, against what is left of their line), then
+//! claims of unowned accruals by the account their principal is now linked
+//! to, then holds for reversals that cannot be priced, each opened at most
+//! once per reversal event.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use chrono::{DateTime, Utc};
 
 use trace_commons_gate_api::pipeline::{AtomicUnits, Microcredits};
 use trace_commons_gate_api::{RailDescriptor, RailId, RailRate};
@@ -114,6 +121,11 @@ pub struct AccrualInputs<'a> {
     pub existing: &'a [PayoutAccrual],
     /// This rail's rate epochs.
     pub epochs: &'a [PayoutRateEpoch],
+    /// The database clock, read before the epochs. A batch's `created_at`
+    /// comes from the application clock; one at or after this instant is
+    /// left for a later run (`payout_batch_in_future`), since an epoch
+    /// recorded after this run could still be the one in force at its time.
+    pub now: DateTime<Utc>,
 }
 
 /// A hold accrual asks for. A hold for a reversal it cannot price names
@@ -249,11 +261,20 @@ pub fn plan_rail_accruals(
             .ok_or(AccrualError::Overflow)?;
     }
 
-    // Credits: every positive line of every finalized batch.
-    let finalized = inputs
-        .batches
-        .iter()
-        .filter(|batch| batch.status == TraceCreditSettlementBatchStatus::Finalized);
+    // Credits: every positive line of every finalized batch whose creation
+    // is behind the database clock. A batch at or after it waits, whole,
+    // for a later run (see `AccrualInputs::now`).
+    let mut finalized = Vec::new();
+    for batch in inputs.batches {
+        if batch.status != TraceCreditSettlementBatchStatus::Finalized {
+            continue;
+        }
+        if batch.created_at >= inputs.now {
+            plan.skip("payout_batch_in_future");
+            continue;
+        }
+        finalized.push(batch);
+    }
     // Source event -> (batch, line) for locating reversals.
     let mut line_of_event = HashMap::new();
     // Every event a finalized batch settled, by the batch-level list:
@@ -502,6 +523,13 @@ pub async fn accrue_rail(
     actor_ref_hash: &str,
 ) -> Result<AccrualReport, AccrualError> {
     let rail = &descriptor.rail_id;
+    // The database clock first, then the epochs: any epoch recorded after
+    // this read is observed after `now`, so it cannot be in force for a
+    // batch this run prices.
+    let now = payouts
+        .payout_database_now()
+        .await
+        .map_err(|_| AccrualError::Store)?;
     let epochs = payouts
         .payout_rate_epochs(rail)
         .await
@@ -545,6 +573,7 @@ pub async fn accrue_rail(
             principal_accounts: &principal_accounts,
             existing: &existing,
             epochs: &epochs,
+            now,
         },
     )?;
 
@@ -729,6 +758,7 @@ mod tests {
                 principal_accounts: principals,
                 existing,
                 epochs: &epochs(),
+                now: Utc.timestamp_opt(1_000_000, 0).unwrap(),
             },
         )
         .unwrap()
@@ -823,6 +853,36 @@ mod tests {
             Some(account)
         );
         assert_eq!(accrual_owner_for_line("principal-a"), None);
+    }
+
+    /// A batch whose application-clock `created_at` is not yet in the past
+    /// by the database clock is priced on a later run, after any epoch that
+    /// could be in force at its time has been recorded.
+    #[test]
+    fn a_batch_dated_after_the_database_clock_waits_for_a_later_run() {
+        let account = Uuid::new_v4();
+        let batches = [batch(
+            TraceCreditSettlementBatchStatus::Finalized,
+            vec![line(&format!("account:{account}"), 10, &[])],
+        )];
+        let (principals, epochs) = (HashMap::new(), epochs());
+        let inputs = |now: i64| AccrualInputs {
+            batches: &batches,
+            events: &[],
+            principal_accounts: &principals,
+            existing: &[],
+            epochs: &epochs,
+            now: Utc.timestamp_opt(now, 0).unwrap(),
+        };
+        // The batch is created at t = 1000.
+        for now in [500, 1_000] {
+            let planned = plan_rail_accruals(&descriptor(), &inputs(now)).unwrap();
+            assert!(planned.writes.is_empty(), "now = {now}");
+            assert_eq!(planned.skipped.get("payout_batch_in_future"), Some(&1));
+        }
+        let planned = plan_rail_accruals(&descriptor(), &inputs(1_001)).unwrap();
+        assert_eq!(planned.writes.len(), 1);
+        assert!(planned.skipped.is_empty());
     }
 
     #[test]

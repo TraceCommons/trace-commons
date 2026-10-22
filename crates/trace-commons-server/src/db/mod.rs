@@ -3229,6 +3229,10 @@ pub trait PayoutStore: Send + Sync {
         principals: &[String],
     ) -> Result<std::collections::HashMap<String, Uuid>, DatabaseError>;
 
+    /// The database clock (`clock_timestamp()`), the clock rate epochs'
+    /// `observed_at` is taken from.
+    async fn payout_database_now(&self) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError>;
+
     /// Every accrual on `rail` in this tenant, oldest first.
     async fn payout_accruals(
         &self,
