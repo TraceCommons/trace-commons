@@ -12,9 +12,13 @@
 //! AES-256-GCM under the `ledger-seal` key (HKDF from the enclave-derived
 //! `judgement-limiter` root, see [`super::limiter::LimiterKeys`]). The file
 //! is `nonce(12) || ciphertext`, with a fresh random nonce per write. The
-//! associated data binds the file name, the format version and the service's
-//! signing address, so a ledger renamed, read by another format, or copied
-//! between deployments does not open. The service encrypts it itself, so
+//! associated data is the file name, the format version and the fixed label
+//! [`LEDGER_AD_LABEL`], so a ledger renamed or read by another format does
+//! not open. It binds nothing about the boot: the sealing and signing keys
+//! are per boot, and a ledger bound to them would be unreadable after every
+//! restart. The binding to the deployment comes from the `ledger-seal` key
+//! itself, which derives from the app-id-bound limiter root, so a ledger
+//! copied to another app does not open. The service encrypts it itself, so
 //! whether dstack also encrypts the volume does not affect confidentiality.
 //!
 //! # Writes
@@ -30,7 +34,11 @@
 //! - the ledger exists and does not decrypt: refuse
 //!   (`judgement_limiter_unreadable`);
 //! - the ledger is absent and `limiter.initialized` exists: refuse;
-//! - both are absent: create both, log `limiter_initialized`.
+//! - both are absent: create both, log `limiter_initialized`;
+//! - the ledger opens and the marker is absent (a crash between the first
+//!   ledger write and the marker): write the marker, log
+//!   `limiter_marker_restored`, so a later loss of the ledger still
+//!   refuses.
 //!
 //! An operator can still delete the volume or roll the file back to an older
 //! copy, and so reset spend. That only spends the operator's own money and
@@ -51,10 +59,11 @@ pub const LEDGER_FILE: &str = "limiter.v1.sealed";
 pub const MARKER_FILE: &str = "limiter.initialized";
 /// The plaintext format version, also bound into the associated data.
 pub const LEDGER_FORMAT_VERSION: u32 = 1;
+/// The fixed label in the associated data.
+pub const LEDGER_AD_LABEL: &[u8] = b"insights-judgement/ledger";
 
 const NONCE_LEN: usize = 12;
 const ACCOUNT_KEY_LEN: usize = 32;
-const SIGNING_ADDRESS_LEN: usize = 20;
 
 /// The ledger's contents: one UTC month.
 ///
@@ -106,7 +115,6 @@ pub trait LedgerStore: Send + Sync {
 pub struct SealedLedger {
     dir: PathBuf,
     key: Zeroizing<[u8; 32]>,
-    signing_address: [u8; SIGNING_ADDRESS_LEN],
 }
 
 impl std::fmt::Debug for SealedLedger {
@@ -121,7 +129,6 @@ impl SealedLedger {
     pub fn open(
         dir: &Path,
         seal_key: Zeroizing<[u8; 32]>,
-        signing_address: [u8; SIGNING_ADDRESS_LEN],
     ) -> Result<(Self, LedgerState), LedgerBootError> {
         if !dir.is_dir() {
             return Err(LedgerBootError::VolumeAbsent);
@@ -129,12 +136,21 @@ impl SealedLedger {
         let ledger = Self {
             dir: dir.to_path_buf(),
             key: seal_key,
-            signing_address,
         };
         let marker = dir.join(MARKER_FILE);
         match std::fs::read(ledger.ledger_path()) {
             Ok(sealed) => {
                 let state = ledger.unseal(&sealed).ok_or(LedgerBootError::Unreadable)?;
+                if !marker.exists() {
+                    // The first boot crashed between the ledger and the
+                    // marker. Without the marker, a later loss of the
+                    // ledger would boot fresh rather than refuse.
+                    write_durably(dir, &marker, b"1\n").map_err(|_| LedgerBootError::Io)?;
+                    tracing::info!(
+                        target: "trace_commons_judgement",
+                        event = "limiter_marker_restored"
+                    );
+                }
                 Ok((ledger, state))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -163,7 +179,8 @@ impl SealedLedger {
         ad.extend_from_slice(&(LEDGER_FILE.len() as u64).to_le_bytes());
         ad.extend_from_slice(LEDGER_FILE.as_bytes());
         ad.extend_from_slice(&LEDGER_FORMAT_VERSION.to_le_bytes());
-        ad.extend_from_slice(&self.signing_address);
+        ad.extend_from_slice(&(LEDGER_AD_LABEL.len() as u64).to_le_bytes());
+        ad.extend_from_slice(LEDGER_AD_LABEL);
         ad
     }
 
@@ -282,8 +299,6 @@ fn decode_state(bytes: &[u8]) -> Option<LedgerState> {
 mod tests {
     use super::*;
 
-    const ADDRESS: [u8; 20] = [7u8; 20];
-
     fn key(byte: u8) -> Zeroizing<[u8; 32]> {
         Zeroizing::new([byte; 32])
     }
@@ -302,7 +317,7 @@ mod tests {
     #[test]
     fn a_fresh_volume_is_initialized_with_the_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (_, state) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (_, state) = SealedLedger::open(dir.path(), key(1)).expect("opens");
         assert_eq!(state, LedgerState::default());
         assert!(dir.path().join(LEDGER_FILE).exists());
         assert!(dir.path().join(MARKER_FILE).exists());
@@ -311,16 +326,16 @@ mod tests {
     #[test]
     fn the_seal_round_trips_through_the_volume() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (ledger, _) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
         ledger.persist(&sample_state()).expect("persists");
-        let (_, state) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("reopens");
+        let (_, state) = SealedLedger::open(dir.path(), key(1)).expect("reopens");
         assert_eq!(state, sample_state());
     }
 
     #[test]
     fn the_file_holds_no_plaintext_account_key_or_amount() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (ledger, _) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
         ledger.persist(&sample_state()).expect("persists");
         let bytes = std::fs::read(dir.path().join(LEDGER_FILE)).expect("read");
         assert!(!bytes.windows(32).any(|w| w == [1u8; 32] || w == [2u8; 32]));
@@ -340,41 +355,75 @@ mod tests {
     #[test]
     fn a_wrong_key_refuses_the_boot() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (ledger, _) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
         ledger.persist(&sample_state()).expect("persists");
         assert_eq!(
-            SealedLedger::open(dir.path(), key(2), ADDRESS).unwrap_err(),
+            SealedLedger::open(dir.path(), key(2)).unwrap_err(),
             LedgerBootError::Unreadable
         );
     }
 
     #[test]
-    fn another_deployments_ledger_refuses_the_boot() {
+    fn a_ledger_reads_back_whatever_the_per_boot_keys_are() {
+        // The per-boot sealing and signing keys change at every boot, so
+        // nothing about them may be bound into the ledger: a restart must
+        // read back the spend it wrote.
         let dir = tempfile::tempdir().expect("tempdir");
-        let (ledger, _) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("first boot");
         ledger.persist(&sample_state()).expect("persists");
+        drop(ledger);
+        let (_, state) = SealedLedger::open(dir.path(), key(1)).expect("second boot");
+        assert_eq!(state, sample_state());
+    }
+
+    #[test]
+    fn the_associated_data_is_the_file_name_the_format_and_a_fixed_label() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&17u64.to_le_bytes());
+        expected.extend_from_slice(b"limiter.v1.sealed");
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&25u64.to_le_bytes());
+        expected.extend_from_slice(b"insights-judgement/ledger");
+        assert_eq!(ledger.associated_data(), expected);
+    }
+
+    #[test]
+    fn a_ledger_found_without_its_marker_gets_the_marker_back() {
+        // A crash after the first ledger write and before the marker
+        // leaves a ledger without a marker. It opens, and the marker is
+        // written then, so a later loss of the ledger is still refused.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
+        ledger.persist(&sample_state()).expect("persists");
+        std::fs::remove_file(dir.path().join(MARKER_FILE)).expect("remove marker");
+        let (_, state) = SealedLedger::open(dir.path(), key(1)).expect("reopens");
+        assert_eq!(state, sample_state());
+        assert!(dir.path().join(MARKER_FILE).exists());
+        std::fs::remove_file(dir.path().join(LEDGER_FILE)).expect("remove ledger");
         assert_eq!(
-            SealedLedger::open(dir.path(), key(1), [8u8; 20]).unwrap_err(),
-            LedgerBootError::Unreadable
+            SealedLedger::open(dir.path(), key(1)).unwrap_err(),
+            LedgerBootError::MissingWithMarker
         );
     }
 
     #[test]
     fn a_corrupt_ledger_refuses_the_boot() {
         let dir = tempfile::tempdir().expect("tempdir");
-        SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        SealedLedger::open(dir.path(), key(1)).expect("opens");
         let path = dir.path().join(LEDGER_FILE);
         let mut bytes = std::fs::read(&path).expect("read");
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         std::fs::write(&path, &bytes).expect("write");
         assert_eq!(
-            SealedLedger::open(dir.path(), key(1), ADDRESS).unwrap_err(),
+            SealedLedger::open(dir.path(), key(1)).unwrap_err(),
             LedgerBootError::Unreadable
         );
         std::fs::write(&path, [0u8; 4]).expect("write");
         assert_eq!(
-            SealedLedger::open(dir.path(), key(1), ADDRESS).unwrap_err(),
+            SealedLedger::open(dir.path(), key(1)).unwrap_err(),
             LedgerBootError::Unreadable
         );
     }
@@ -382,10 +431,10 @@ mod tests {
     #[test]
     fn a_missing_ledger_with_the_marker_refuses_the_boot() {
         let dir = tempfile::tempdir().expect("tempdir");
-        SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        SealedLedger::open(dir.path(), key(1)).expect("opens");
         std::fs::remove_file(dir.path().join(LEDGER_FILE)).expect("remove");
         assert_eq!(
-            SealedLedger::open(dir.path(), key(1), ADDRESS).unwrap_err(),
+            SealedLedger::open(dir.path(), key(1)).unwrap_err(),
             LedgerBootError::MissingWithMarker
         );
     }
@@ -395,13 +444,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("data");
         assert_eq!(
-            SealedLedger::open(&missing, key(1), ADDRESS).unwrap_err(),
+            SealedLedger::open(&missing, key(1)).unwrap_err(),
             LedgerBootError::VolumeAbsent
         );
         // A file where the volume should be is not a volume.
         std::fs::write(&missing, b"").expect("write");
         assert_eq!(
-            SealedLedger::open(&missing, key(1), ADDRESS).unwrap_err(),
+            SealedLedger::open(&missing, key(1)).unwrap_err(),
             LedgerBootError::VolumeAbsent
         );
     }
@@ -422,7 +471,7 @@ mod tests {
     #[test]
     fn no_temp_file_is_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (ledger, _) = SealedLedger::open(dir.path(), key(1), ADDRESS).expect("opens");
+        let (ledger, _) = SealedLedger::open(dir.path(), key(1)).expect("opens");
         ledger.persist(&sample_state()).expect("persists");
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .expect("list")

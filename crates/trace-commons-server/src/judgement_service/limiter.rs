@@ -793,7 +793,7 @@ pub(crate) mod tests {
         let account = keys().account_key("near-a");
         {
             let (ledger, state) =
-                SealedLedger::open(dir.path(), keys().ledger_seal_key(), [1u8; 20]).expect("opens");
+                SealedLedger::open(dir.path(), keys().ledger_seal_key()).expect("opens");
             let limiter = Limiter::new(caps(), state, Arc::new(ledger));
             let reservation = limiter
                 .reserve(&account, 7_000, ClaimTime::at(NOW))
@@ -804,7 +804,7 @@ pub(crate) mod tests {
             drop(limiter);
         }
         let (ledger, state) =
-            SealedLedger::open(dir.path(), keys().ledger_seal_key(), [1u8; 20]).expect("reopens");
+            SealedLedger::open(dir.path(), keys().ledger_seal_key()).expect("reopens");
         let limiter = Limiter::new(caps(), state, Arc::new(ledger));
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 7_000);
         assert_eq!(limiter.operator_spent_nanousd(NOW), 7_000);
