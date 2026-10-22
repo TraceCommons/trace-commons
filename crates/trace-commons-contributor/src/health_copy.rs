@@ -262,6 +262,23 @@ pub const STATE_DIR_OVERRIDE_REFUSED: &str = concat!(
     " again."
 );
 
+/// The short label a staging build shows, persistently, in its main window
+/// (staging design S7 and section 4.8), so a tester never mistakes the
+/// staging app for production. A notice under `docs/ui-copy-guide.md`
+/// section 9: the owner approved it existing (S7) and its wording.
+/// Approved 2026-10-22.
+pub const STAGING_WINDOW_LABEL: &str = "Staging";
+
+/// The label this build shows in its main window: [`STAGING_WINDOW_LABEL`]
+/// on the staging channel, none on production.
+pub const fn window_label() -> Option<&'static str> {
+    if crate::channel::near_ai_staging() {
+        Some(STAGING_WINDOW_LABEL)
+    } else {
+        None
+    }
+}
+
 /// The button beside [`core_down_copy`] in a shell that can ask its
 /// background service to start again, and the same button while it is
 /// asking. Not part of [`core_down_copy`] itself: nothing in the core
@@ -494,5 +511,29 @@ mod tests {
             serde_json::to_value(health_copy_for_label(health::LABEL_QUEUE_FULL, None)).unwrap();
         assert_eq!(queue_full["action_kind"], "review_queue");
         assert_eq!(queue_full["severity"], "actionable");
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_channel_shows_the_label() {
+        assert_eq!(window_label(), Some(STAGING_WINDOW_LABEL));
+    }
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_channel_shows_none() {
+        assert_eq!(window_label(), None);
+    }
+
+    /// The approved wording (2026-10-22) is one word, with no sentence
+    /// punctuation and nothing that names a host or a build.
+    #[test]
+    fn the_staging_window_label_is_the_approved_word() {
+        assert_eq!(STAGING_WINDOW_LABEL, "Staging");
+        assert!(!STAGING_WINDOW_LABEL.contains(char::is_whitespace));
+        assert!(!STAGING_WINDOW_LABEL.ends_with('.'));
+        for internal in ["near-ai", "tracecommons", "channel", "feature"] {
+            assert!(!STAGING_WINDOW_LABEL.to_lowercase().contains(internal));
+        }
     }
 }

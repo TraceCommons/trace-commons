@@ -831,6 +831,22 @@ pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
     })
 }
 
+/// The label the app shows, persistently, in its main window:
+/// `health_copy::window_label`, the core's word on a staging build and the
+/// empty string on production, which shows nothing (staging design S7,
+/// section 4.8).
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_channel_window_label() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::window_label().unwrap_or(""),
+        ))
+    })
+}
+
 /// The state directory the contributor crate's `ConfigStore::resolve` would
 /// pick (`config::resolve_state_dir`), so a shell that chooses its own
 /// directory still gets the core's refusal of the other channel's.

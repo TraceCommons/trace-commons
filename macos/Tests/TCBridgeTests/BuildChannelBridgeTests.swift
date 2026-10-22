@@ -23,4 +23,13 @@ final class BuildChannelBridgeTests: XCTestCase {
         let line = try XCTUnwrap(TCBuildChannel.mismatchLine())
         XCTAssertTrue(line.hasSuffix("."))
     }
+
+    /// Spec S7, 4.8: a staging dylib gives the main window its label, a
+    /// production one gives none.
+    func test_onlyAStagingDylibGivesAWindowLabel() throws {
+        let channel = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
+        let label = TCBuildChannel.windowLabel()
+        XCTAssertEqual(label != nil, channel.channel == "staging")
+        if let label { XCTAssertFalse(label.isEmpty) }
+    }
 }

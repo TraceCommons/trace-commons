@@ -768,6 +768,11 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     HStack(spacing: Self.settingsGap) {
+                        // A staging build's label (spec S7, 4.8), always
+                        // shown, in the core's word; production has none.
+                        if let label = BuildChannelGate.windowLabel {
+                            GlassTag(label, tone: .ask)
+                        }
                         Spacer(minLength: 0)
                         // No View menu (owner, 2026-10-19): its one item,
                         // Show ignored folders, is in the Traces list's filter
