@@ -265,6 +265,16 @@ Spec: sections 3.9, 3.11.
 
 ---
 
+### Task 7b: Allow-list admission (`staging-allowlist-admission`, base `staging-server-guard`)
+
+Spec: S5, section 3.12.
+
+- A staging-only setting holding the allowed staging NEAR AI subjects (a file path or env value, operator-edited). Compiled and read only under `near-ai-staging`.
+- On a NEAR AI sign-in whose verified subject is on the list and has no account, admit it into a new tenant without an invite. Any other subject without an invite is refused with a safe label; no tenant or account row is written. An empty or missing list admits nobody.
+- Logs carry a subject hash only.
+
+Tests first: `an_allowed_subject_is_admitted_without_an_invite`, `an_unlisted_subject_is_refused_and_writes_nothing`, `an_empty_list_admits_nobody`, `a_default_build_ignores_the_list`, `an_invite_still_admits`.
+
 ### Task 8: The app reads its channel from the dylib (`staging-ffi-channel`)
 
 Spec: sections 4.1 (last paragraph), 4.3.
@@ -298,6 +308,15 @@ Spec: sections 4.1, 4.2, 4.5, 4.7.
 - [ ] **Step 5: Commit** — `Build the macOS bundle for a channel from one file`.
 
 ---
+
+### Task 9b: The in-window staging label (`staging-window-label`, base `staging-bundle-channel`)
+
+Spec: S7, section 4.8.
+
+- One short persistent label in the main window when the channel is staging; nothing in a production build.
+- The string lives in the Rust copy tables, follows docs/ui-copy-guide.md, and is marked for owner approval in the PR.
+
+Tests first: `a_staging_channel_shows_the_label`, `a_production_channel_shows_none`, and the copy-table checks.
 
 ### Task 10: The staging workflow (`staging-macos-workflow`)
 

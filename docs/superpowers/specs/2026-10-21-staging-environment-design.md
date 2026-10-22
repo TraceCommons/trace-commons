@@ -51,6 +51,25 @@ All dated 2026-10-21. The owner's words are quoted.
   attestation pins and the server's transfer client. Attestation stays on and
   fails closed. The release check refuses the feature in shipped builds.
 
+- **(S5) Admission by allow-list.** Asked who can sign in: "Allow-list of
+  NEAR AI accounts". A staging NEAR AI account on a list the operator keeps
+  is admitted without an invite; any other staging NEAR AI account is
+  refused (3.12).
+- **(S6) DMG on a GitHub pre-release.** "GitHub pre-release". A `staging-*`
+  pre-release in the public repo, never marked latest (6.1).
+- **(S7) A staging label in the window.** "Yes, a small staging label". Its
+  wording still goes through the copy review in the PR that adds it (4.8).
+- **(S8) Manual re-signing.** "Manual for now". An operator runs the re-sign
+  tool after a NEAR AI staging redeploy (5.4).
+- **(S9) Built infrastructure.** Already created in the pilot project on
+  2026-10-21 at the owner's request ("Create the VM, setup the secrets
+  manager setup postgres etc"): the VM `tc-staging-host` (e2-standard-4) on
+  a reserved address, the `tc-staging-runtime` SA, firewall rules for the
+  `tc-staging` tag, the `tc-staging/kek-v1` key, a versioned CMEK bucket
+  `tc-staging-artifacts-20261021`, PostgreSQL 16 on the VM, and the DNS
+  names `staging.tracecommons.ai`, `ingest.staging.tracecommons.ai` and
+  `issuer.staging.tracecommons.ai`. Secret names are in 3.7.
+
 Everything else here is a proposal. Section 10 lists what is still open.
 
 ## Verified on 2026-10-21
@@ -210,9 +229,8 @@ witness path is untested in staging; see open item 9).
 | Updates | production appcast, production Sparkle key | staging appcast, staging Sparkle key |
 | Distribution | `release-apps.yml` on a tag | `staging-macos.yml`, manual dispatch only |
 
-`<staging host>` is a subdomain of `tracecommons.ai`, for example
-`staging.tracecommons.ai`. The exact name is open item 1. Below it is
-written `STAGING_HOST`.
+`<staging host>` is `staging.tracecommons.ai` (S9). Below it is written
+`STAGING_HOST`.
 
 ## 3. The staging server
 
@@ -335,15 +353,16 @@ a `README.md` pointing at the runbook. The runbook is
 ### 3.7 Secrets and how they load
 
 Secrets live only in Secret Manager in the pilot project, each named
-`staging-*`, readable only by the staging runtime SA and the owner:
+`tc-staging-*` and labelled `env=staging`, readable only by the staging
+runtime SA and the owner. The first four exist (S9):
 
 | Secret | Used by |
 |---|---|
-| `staging-near-ai-inference-key` | scorer and privacy filter (`TRACE_COMMONS_NEAR_AI_API_KEY`, `TRACE_NEAR_AI_PRIVACY_API_KEY`) |
-| `staging-near-ai-payout-credential` | payout rail (payout design section 2, step 6) |
-| `staging-db-app-password`, `staging-db-login-resolver-password` | PostgreSQL roles |
-| `staging-near-ai-pin-signing-key` | the pin re-sign tool only; **not** readable by the runtime SA (5.5) |
-| `staging-sparkle-signing-key` | the staging workflow only (6.1) |
+| `tc-staging-nearai-inference-key` | scorer and privacy filter (`TRACE_COMMONS_NEAR_AI_API_KEY`, `TRACE_NEAR_AI_PRIVACY_API_KEY`) |
+| `tc-staging-nearai-reseller-key` | payout rail (payout design section 2, step 6) |
+| `tc-staging-db-app-password`, `tc-staging-db-login-resolver-password` | PostgreSQL roles |
+| `tc-staging-nearai-pin-signing-key` | the pin re-sign tool only; **not** readable by the runtime SA (5.5) |
+| `tc-staging-sparkle-signing-key` | the staging workflow only (6.1) |
 
 They load the way the pilot's do: rendered into
 `/etc/tracecommons/ingest.env` and `issuer.env`, root-owned, group
@@ -403,7 +422,7 @@ plan, on this VM. The rail's host is the compiled-in staging base. Mode
 starts `dry_run`; `allowed_recipient_ids` on the staging credential lists
 only testers' staging orgs. The reseller org, its grant and its credential
 are made by the owner on NEAR AI staging and held only in
-`staging-near-ai-payout-credential`.
+`tc-staging-nearai-reseller-key`.
 
 ### 3.11 Readiness
 
@@ -414,12 +433,15 @@ payout design adds reports the same flag per rail.
 
 ### 3.12 Who can sign in
 
-"Everyone has to sign into staging" (S1). Default: invite-free admission
-off; each tester gets an individual invite minted on the staging issuer,
-like the pilot's individual invites, and signs in with a NEAR AI staging
-account. A NEAR AI staging account alone does not admit anyone, since
-anyone can make one. Open item 3 asks whether the owner prefers invite-free
-admission limited to a list of staging NEAR AI subjects instead.
+"Everyone has to sign into staging" (S1), admitted by allow-list (S5). The
+staging server keeps a list of staging NEAR AI subjects, operator-edited,
+hash-only in logs. A sign-in whose verified NEAR AI subject is on the list
+is admitted without an invite, into its own tenant; any other subject is
+refused with a safe label, and no tenant or account is created. A NEAR AI
+staging account alone admits nobody, since anyone can make one. An empty or
+missing list admits nobody (fail closed). Invites still work for the
+operator. The list lives in staging config only; a production build never
+reads it.
 
 ## 4. The staging macOS app
 
@@ -520,7 +542,7 @@ its origin is in the staging RP origin list (3.8).
 ### 4.7 Updates
 
 A separate appcast, `.../staging/appcast.xml` in the staging bucket, signed
-with a separate Sparkle EdDSA key, `staging-sparkle-signing-key`. The staging
+with a separate Sparkle EdDSA key, `tc-staging-sparkle-signing-key`. The staging
 app's Info.plist names only the staging feed and staging public key, so a
 production appcast can never update it and a staging appcast can never
 update production. `scripts/updates/generate-appcast.sh` takes the output
@@ -608,14 +630,14 @@ operators run it, nothing ships it) with `required-features = ["near-ai-staging"
   the currently served file and a TTL above 14 days.
 - `verify <file>`: what the app does, for the operator to check.
 
-The private key is `staging-near-ai-pin-signing-key` in Secret Manager,
+The private key is `tc-staging-nearai-pin-signing-key` in Secret Manager,
 readable by the owner (and later a dedicated pin-signing SA, open item 7),
 **never** by the staging VM's runtime SA: a compromised staging VM can then
 serve a stale set but never forge a new one. The re-sign runs on an
 operator machine:
 
 ```
-gcloud secrets versions access latest --secret=staging-near-ai-pin-signing-key \
+gcloud secrets versions access latest --secret=tc-staging-nearai-pin-signing-key \
   | trace-commons-staging-pins sign --sets observed.txt --sequence <n+1> --ttl-days 7
 ```
 
@@ -726,7 +748,7 @@ lists it explicitly instead (6.2).
   (`TC_CHANNEL=staging`); `swift test`; build, sign with
   `entitlements-staging.plist` and the staging profile, notarize and staple
   `Near.ai Staging.dmg`; check the channel agreement (4.3); generate the
-  staging appcast with `staging-sparkle-signing-key`; upload DMG and appcast
+  staging appcast with `tc-staging-sparkle-signing-key`; upload DMG and appcast
   to the staging bucket; create a GitHub pre-release tagged
   `staging-<date>-<short sha>` marked pre-release, with the DMG attached.
   It never touches the Homebrew tap, the production bucket or a release that
@@ -873,31 +895,23 @@ The plan breaks this into small PRs. In order:
 
 ## 10. Open items
 
-1. **The staging host name.** `staging.tracecommons.ai` is the example.
-   It needs three DNS records in the `tracecommons.ai` zone.
-2. **PostgreSQL on the VM or Cloud SQL.** Default local (3.2).
-3. **Admission.** Individual invites (default) or invite-free admission for
-   a list of staging NEAR AI subjects.
-4. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
+Settled on 2026-10-21: the host name, PostgreSQL on the VM, admission, the
+in-window label (wording still to approve), re-signing and where the DMG
+lives (S5-S9). Still open:
+
+1. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
    with the keychain group and associated domain, and a Developer ID
    provisioning profile for it.
-5. **The staging icon, and whether the app shows a staging label** inside
-   its windows. A label is a new notice and needs approval for existence and
-   wording.
-6. **NEAR AI facts still needed:** whether staging has per-model completions
+2. **The staging icon** and the label's wording.
+3. **NEAR AI facts still needed:** whether staging has per-model completions
    hosts; which registers staging pins (5.2); staging's current
-   measurements and the per-model receipt signers
-   for `Qwen/Qwen3.8-27B` (needs a staging key to fetch); whether an API key
-   minted before a redeploy survives the JWT rotation or only sessions break;
-   whether staging is reachable from a GCP VM without an allowlist.
-7. **Re-sign automation.** Manual (default) or a scheduled job with its own
-   service account and the key.
-8. **Where the DMG lives.** GitHub pre-release (default) or the staging
-   bucket only.
-9. **Witness and self-hosted filter in staging.** Not built now.
-10. **The "Ask me" default** for staging sources.
-11. **Where testers report**: a GitHub issue template labelled staging, or
-    a private channel.
+   measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
+   whether an API key minted before a redeploy survives the JWT rotation or
+   only sessions break.
+4. **Witness and self-hosted filter in staging.** Not built now.
+5. **The "Ask me" default** for staging sources.
+6. **Where testers report**: a GitHub issue template labelled staging, or a
+   private channel.
 
 ## 11. Where the code differs from the brief
 
