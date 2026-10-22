@@ -416,7 +416,10 @@ pub(crate) mod tests {
         // The sealing key and the signing key are two key pairs: the seal
         // key's x is not the signing key's.
         let signing_public = first.signing_key.verifying_key().to_encoded_point(true);
-        assert_ne!(first.seal_public_key().as_slice(), signing_public.as_bytes());
+        assert_ne!(
+            first.seal_public_key().as_slice(),
+            signing_public.as_bytes()
+        );
         // The limiter root, which must survive a restart, does not change.
         assert_eq!(
             first.limiter_keys().account_key("near-acct").as_bytes(),

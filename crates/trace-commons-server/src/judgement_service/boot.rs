@@ -1381,10 +1381,7 @@ mod tests {
             );
             assert!(agent.keys_asked.lock().expect("lock").is_empty());
             assert!(
-                std::fs::read_dir(dir.path())
-                    .expect("dir")
-                    .next()
-                    .is_none(),
+                std::fs::read_dir(dir.path()).expect("dir").next().is_none(),
                 "nothing written to the volume"
             );
         }

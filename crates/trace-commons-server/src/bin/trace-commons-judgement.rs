@@ -34,8 +34,8 @@ use trace_commons_server::judgement_service::boot::{
     volume_is_mounted,
 };
 use trace_commons_server::judgement_service::http::{
-    AttestationBound, JudgementHttpState, JudgementIdentity, JudgementLoadBound,
-    judgement_router, system_clock,
+    AttestationBound, JudgementHttpState, JudgementIdentity, JudgementLoadBound, judgement_router,
+    system_clock,
 };
 use trace_commons_server::near_attestation::client::{
     ATTESTATION_GATEWAY_BASE_URL, AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,

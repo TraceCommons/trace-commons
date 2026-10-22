@@ -205,7 +205,9 @@ impl JudgementLoadBound {
             return Err("judgement body read limit must be positive");
         }
         if body_read_timeout.is_zero() || body_read_timeout >= request_timeout {
-            return Err("judgement body read timeout must be positive and inside the request timeout");
+            return Err(
+                "judgement body read timeout must be positive and inside the request timeout",
+            );
         }
         Ok(Self {
             permits: Arc::new(Semaphore::new(max_concurrent_requests)),
@@ -531,6 +533,7 @@ mod tests {
         seal: SealSecretKey,
         quote: Quote,
         sign_fails: bool,
+        attests: std::sync::atomic::AtomicUsize,
     }
 
     impl StubIdentity {
@@ -543,6 +546,7 @@ mod tests {
                 seal: SealSecretKey::generate().expect("a sealing key"),
                 quote: Quote::Answers,
                 sign_fails: false,
+                attests: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -567,6 +571,8 @@ mod tests {
             self.seal.public_key().to_bytes()
         }
         async fn attest(&self, nonce: &JudgementNonce) -> Result<Vec<u8>, EnclaveError> {
+            self.attests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.quote {
                 Quote::Answers => {}
                 Quote::Fails => return Err(EnclaveError::Transport),
@@ -832,8 +838,8 @@ mod tests {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
         let request = judgement_request(&h.issuer.valid_claim(), 0x14);
-        let (body, _) = seal_request(&h.identity.seal_key(), request.to_json().as_bytes())
-            .expect("sealed");
+        let (body, _) =
+            seal_request(&h.identity.seal_key(), request.to_json().as_bytes()).expect("sealed");
         let (status, _, _) = send(&h.router, post(body.clone())).await;
         assert_eq!(status, StatusCode::OK);
         let calls = h.model.calls();
@@ -1014,11 +1020,8 @@ mod tests {
             .await
             .expect("connect");
         slow.write_all(
-            format!(
-                "POST /v1/judgement HTTP/1.1\r\nHost: judgement\r\n\
-                 Content-Type: application/octet-stream\r\nContent-Length: 4096\r\n\r\n\x01\x02"
-            )
-            .as_bytes(),
+            b"POST /v1/judgement HTTP/1.1\r\nHost: judgement\r\n\
+              Content-Type: application/octet-stream\r\nContent-Length: 4096\r\n\r\n\x01\x02",
         )
         .await
         .expect("write");
@@ -1243,16 +1246,24 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(h.attestation.permits.available_permits(), 1);
 
+        assert_eq!(
+            h.identity.attests.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // A full bound refuses without asking the agent at all.
         let _held = Arc::clone(&h.attestation.permits)
             .try_acquire_owned()
             .expect("the only slot");
-        let started = std::time::Instant::now();
         let (status, _, body) = send(&h.router, get_attestation(Some(NONCE_HEX))).await;
         assert_eq!(
             refusal_of(status, &body).refusal(),
             JudgementRefusal::QuoteUnavailable
         );
-        assert!(started.elapsed() < Duration::from_millis(50));
+        assert_eq!(
+            h.identity.attests.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         // The judgement permits are a different bound.
         assert_eq!(h.load.permits.available_permits(), 4);
     }
