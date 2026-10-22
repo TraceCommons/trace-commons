@@ -71,6 +71,15 @@ jobs:
         run: |
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
+      # Seconds, no build. `near-ai-staging` switches the compiled-in NEAR AI
+      # host (server, ingest and the contributor daemon) to NEAR AI staging,
+      # for the payout staging run only. This refuses any release, packaging
+      # or deploy file or shipped manifest that could turn it on; the
+      # self-test seeds each violation and requires a refusal.
+      - name: No shipped build enables the NEAR AI staging host
+        run: |
+          scripts/ci/check-release-staging-feature.sh check
+          scripts/ci/check-release-staging-feature.sh self-test
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py

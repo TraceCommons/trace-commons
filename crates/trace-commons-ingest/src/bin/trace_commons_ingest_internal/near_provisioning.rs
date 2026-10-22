@@ -5,6 +5,7 @@ use super::*;
 use trace_commons_server::account_onboarding::{
     NativeProvisioningPending, PendingNearProvisioning, ProvisioningAssertion,
 };
+use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
 
 /// Operator-published trust data, served only after the admission gate is ready.
 #[derive(Deserialize, serde::Serialize)]
@@ -993,10 +994,13 @@ const NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS: i64 =
 /// per contributor per device -- so the bound can be short.
 const NEAR_AI_INTROSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Where `GET /me` lives. A compiled-in constant with no environment override:
-/// there is nothing configurable for a host allowlist to protect, and making it
-/// configurable would create the very thing the allowlist exists for.
-const NEAR_AI_API_BASE_URL: &str = "https://cloud-api.near.ai/v1";
+// Where `GET /me` lives: `trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL`,
+// imported above. A compiled-in constant with no environment override: there
+// is nothing configurable for a host allowlist to protect, and making it
+// configurable would create the very thing the allowlist exists for. It lives
+// in the server crate because the NEAR AI payout rail sends to the same host:
+// the host that verified an org is the host that pays it. The
+// `near-ai-staging` build feature switches both together.
 
 /// The nonce as it goes on the wire: **standard base64**, matching the wallet
 /// ceremony on this same surface and matching what the client decodes.

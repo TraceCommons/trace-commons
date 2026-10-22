@@ -30,6 +30,14 @@ repository.workspace = true
 # exact definition.
 test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store"]
 
+# Switch the daemon's compiled-in NEAR AI cloud-api origin
+# (`daemon/nearai_credential/api.rs`, `CLOUD_API_ORIGIN`) to NEAR AI staging,
+# for a staging test of the NEAR AI payout link. Never enabled in a release
+# workflow or a shipped manifest: scripts/ci/check-release-staging-feature.sh
+# refuses one that does. One line, so that script can permit this exact
+# definition.
+near-ai-staging = []
+
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }

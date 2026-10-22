@@ -28,7 +28,21 @@ use serde::Deserialize;
 use std::time::Duration;
 
 /// The one service this credential is minted against.
+#[cfg(not(feature = "near-ai-staging"))]
 pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
+
+/// NEAR AI staging, in a `near-ai-staging` build only. The server's
+/// `near-ai-staging` feature switches its own NEAR AI base to the same
+/// host, so the org a staging daemon lists is the org a staging server
+/// verifies and pays. No release workflow or shipped manifest may enable
+/// it: `scripts/ci/check-release-staging-feature.sh` refuses one that does.
+#[cfg(feature = "near-ai-staging")]
+pub const CLOUD_API_ORIGIN: &str = "https://cloud-stg-api.near.ai";
+
+/// Whether this build talks to NEAR AI staging (`near-ai-staging`).
+pub const fn near_ai_staging() -> bool {
+    cfg!(feature = "near-ai-staging")
+}
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];
 /// This client's own agent. Also the agent recorded for a NEAR wallet
@@ -964,5 +978,29 @@ AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
             api.refresh_session("rt_example", USER_AGENT).await.is_err(),
             "presenting our own User-Agent must not be treated as a live session"
         );
+    }
+}
+
+#[cfg(test)]
+mod staging_origin_tests {
+    use super::*;
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_default_build_pins_production() {
+        assert!(!near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-api.near.ai");
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_says_so() {
+        assert!(near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-stg-api.near.ai");
+    }
+
+    #[test]
+    fn the_origin_passes_the_pinned_client_checks() {
+        assert!(CloudApi::live().is_ok());
     }
 }

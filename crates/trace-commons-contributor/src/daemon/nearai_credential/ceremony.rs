@@ -793,6 +793,10 @@ mod tests {
         // The URL sends the browser at the pinned service and names a
         // loopback callback this process is already listening on.
         let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
+        let pinned =
+            reqwest::Url::parse(crate::daemon::nearai_credential::api::CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(url.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(url.host_str(), Some("cloud-api.near.ai"));
         let callback = url
             .query_pairs()
