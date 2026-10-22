@@ -87,6 +87,7 @@ Spec: section 6.2.
   - `push:` added to `staging-macos.yml`
   - `workflow_call:` added to `staging-macos.yml`
   - a `release-*.yml` that references `staging-macos.yml` or `macos/channels/staging.env`
+  - a release workflow tag filter that matches the staging tag prefix `staging-`
   - the contributor's forward widened by one more crate
   - the attestation crate's definition forwarding anywhere
   - `required-features = ["near-ai-staging"]` on a bin other than `trace-commons-staging-pins`
@@ -114,7 +115,7 @@ Spec: sections 4.1, 4.2; Verified, first two tables.
 
 ```rust
 #[test] fn a_staging_build_names_no_production_host()   // cfg(feature): scans src/ of contributor, ffi, platform for host literals outside channel.rs and #[cfg(test)]
-#[test] fn a_default_build_names_no_staging_host()      // cfg(not(feature)): same scan, and channel.rs's default values
+#[test] fn a_default_build_names_no_staging_host()      // cfg(not(feature)): same scan, and channel.rs's default values; the deny list holds only SHA-256 digests of staging hosts
 #[test] fn every_near_ai_host_in_a_build_is_one_host()  // API origin, inference base, gateway share a host per channel
 #[test] fn a_production_build_refuses_a_staging_ingest_origin()
 #[test] fn the_staging_entitlements_grant_the_staging_access_group()
@@ -189,7 +190,7 @@ Spec: sections 5.1, 5.3, 5.5, 5.6, 5.7.
 
 **Files:**
 - Modify: `crates/trace-commons-contributor/Cargo.toml` (the feature forwards to `trace-commons-attestation/near-ai-staging`, the exact line task 1 allows)
-- Modify: `crates/trace-commons-contributor/src/channel.rs` (staging only: `STAGING_PIN_URL`, `STAGING_PIN_PUBLIC_KEY` as 32 bytes; the real key once the owner has generated it, until then a value no private key matches, so every document is refused)
+- Modify: `crates/trace-commons-contributor/src/channel.rs` (staging only: `STAGING_PIN_URL`, `STAGING_PIN_PUBLIC_KEY`; the real 32-byte key once the owner has generated it, until then a deliberately malformed 31-byte value that `ring` rejects outright, so every document is refused with an error)
 - Modify: `crates/trace-commons-contributor/src/routing/proof_attestor.rs` (`PinProvider`: under the feature, the signed document is the only source; the ingest document and the env override are not compiled; the sequence file `near-ai-pins-sequence` in the state directory; refresh timing unchanged)
 - Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (status reports the pin refusal label)
 - Tests: `proof_attestor.rs` tests with a mock pin server
@@ -305,7 +306,7 @@ Spec: sections 6.1, 5.7.
 **Files:**
 - Modify: `.github/workflows/staging-macos.yml` (the real job: `workflow_dispatch` only, `environment: staging`, build with `TC_CHANNEL=staging`, `swift test`, sign, notarize, staple, channel agreement, staging appcast, upload to the staging bucket, GitHub pre-release `staging-<date>-<sha>`; `actions/checkout@v6`, `actions/cache@v5`, ends with `./.github/actions/trim-cargo-cache` if it caches `target`)
 - Modify: `scripts/updates/generate-appcast.sh` (output path and key secret name as arguments; production defaults unchanged)
-- Create: `scripts/ci/assert-no-staging-markers.sh` (fails if a binary contains the staging pin key bytes or a staging host) and its self-test
+- Create: `scripts/ci/assert-no-staging-markers.sh` (fails if a binary contains the staging pin key bytes, the pin URL path or the `trace-commons-near-ai-pins/v1` format string; staging host names are not markers, since production holds only their digests) and its self-test
 - Modify: `.github/workflows/release-apps.yml` (run the marker scan on the dylib and CLI after the macOS build)
 - Tests: the marker script's self-test (a seeded binary with the key bytes is refused)
 

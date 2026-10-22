@@ -575,12 +575,15 @@ The payload:
 
 The signature is over `b"trace-commons-near-ai-pins/v1\n" || payload bytes`,
 so the key signs nothing else usefully. Each set is `ExpectedMeasurements`
-syntax and must parse; any one set matching is a pass, as today. Which
-registers to pin is the re-sign tool's choice, recorded in the set:
-`rtmr3` changes per boot under dstack, so including it would force a
-re-sign on every restart; the default pins `mrtd`, `rtmr0-2` and
-`mrconfigid` (which commits to the compose hash). Several sets cover a
-rolling deploy where two images serve at once.
+syntax and must parse; any one set matching is a pass, as today. The
+re-sign tool records which registers each set names. Its default mirrors
+what production pins today, `mrtd` and `rtmr0-3`
+(`deploy/pilot-gcp/ingest.env.template:66`,
+`docs/operator/near-attestation-drill.md`). Whether staging should drop
+`rtmr3` (which may change per boot under dstack and would then force a
+re-sign on every restart) or add `mrconfigid` (which commits to the
+compose hash) is open item 6. Several sets cover a rolling deploy where
+two images serve at once.
 
 ### 5.3 Serving
 
@@ -678,8 +681,11 @@ behind `near-ai-staging`. A default build has no code that reads a signed
 pin set and no staging key bytes. Two checks hold that: a unit test in the
 default build that the channel module exposes no staging key, and a
 release-workflow step, `scripts/ci/assert-no-staging-markers.sh`, that
-greps the built dylib and CLI for the staging key's bytes and the staging
-hosts and fails if it finds any.
+greps the built dylib and CLI for the staging key's bytes, the pin URL
+path and the `trace-commons-near-ai-pins/v1` format string, and fails if
+it finds any. Staging host names are not markers: a production build
+holds SHA-256 digests of them for its deny list (section 8), never the
+names themselves.
 
 ### 5.8 Licensing
 
@@ -725,6 +731,11 @@ lists it explicitly instead (6.2).
   `staging-<date>-<short sha>` marked pre-release, with the DMG attached.
   It never touches the Homebrew tap, the production bucket or a release that
   is not a pre-release.
+- Creating that pre-release pushes a tag. The release workflows trigger on
+  tags `app-v*` (`release-apps.yml:14-15`) and `contributor-v*`
+  (`release-contributor.yml:11-12`), so a `staging-` tag starts neither.
+  The release check (6.2) refuses a staging tag prefix that any release
+  workflow's tag filter would match.
 - Version: production's next version with a `-staging.<run number>` build
   suffix in `CFBundleShortVersionString`, and a `CFBundleVersion` that only
   rises, so Sparkle orders staging builds.
@@ -759,7 +770,8 @@ widened, in one PR, by exact lines rather than patterns:
    `crates/trace-commons-protocol/Cargo.toml` join `SHIPPED_MANIFESTS`.
 4. **Self-test cases** for each: a staging file that loses the feature, a
    staging file that names a production bucket, a `push:` trigger added to
-   the staging workflow, a release workflow calling the staging one, each
+   the staging workflow, a release workflow calling the staging one, a
+   release workflow tag filter that matches the staging tag prefix, each
    new manifest line widened by one more forward.
 
 The release workflows gain `assert-no-staging-markers.sh` (5.7) after their
@@ -810,8 +822,9 @@ production. The "Ask me" default (7, step 5) makes it a choice.
 **A production app enrolling at staging.** A production invite parser would
 take an `issuer.STAGING_HOST` invite. Default: a production build refuses
 the staging hosts as an ingest or issuer origin, from a deny list in the
-channel module. A hostname is not a secret, so production carrying it is
-acceptable.
+channel module. The list holds SHA-256 digests of the host names, not the
+names, so the marker scan (5.7) can still refuse any staging string in a
+production binary.
 
 **A staging build mistaken for production.** The name, icon, bundle id,
 status `channel` field, and the dylib check (4.3). A staging app can never
