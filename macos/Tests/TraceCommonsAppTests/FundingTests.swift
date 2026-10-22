@@ -85,11 +85,19 @@ private final class FundingViewDaemon: DaemonCalling {
     private var replies: [FundingDaemon] = []
     private var allReplies: [FundingDaemon] = []
     private var recorded: [FundingDaemon.Call] = []
+    private var credentialStatusReply: String?
 
     var calls: [FundingDaemon.Call] {
         lock.lock()
         defer { lock.unlock() }
         return recorded
+    }
+
+    /// What `near_ai_credential_status` answers; nil keeps the synthetic refusal.
+    func answerCredentialStatus(_ response: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        credentialStatusReply = response
     }
 
     func enqueue(_ response: String, held: Bool = false, entered: XCTestExpectation? = nil) -> FundingDaemon {
@@ -112,7 +120,9 @@ private final class FundingViewDaemon: DaemonCalling {
         lock.lock()
         recorded.append(.init(method: method, params: paramsJSON))
         let reply = method == "near_ai_funding" && !replies.isEmpty ? replies.removeFirst() : nil
+        let credential = method == "near_ai_credential_status" ? credentialStatusReply : nil
         lock.unlock()
+        if let credential { return credential }
         return reply?.call(method, params: paramsJSON)
             ?? #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
     }
@@ -464,6 +474,41 @@ final class FundingTests: XCTestCase {
             try await click(view, reply: ready(), bound: true)
             XCTAssertEqual(view.opened.count, 1, "The replacement action must remain usable")
         }
+    }
+
+    /// A session-state change clears the row, and a visible row reads its
+    /// account again by itself instead of leaving the unavailable line up.
+    @MainActor
+    func testHostedSessionStateChangeReloadsTheVisibleRow() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        try await prime(view)
+        let fundingCalls = view.daemon.calls.filter { $0.method == "near_ai_funding" }.count
+        let entered = expectation(description: "The row reads again after the sign-in lands")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        view.daemon.answerCredentialStatus(#"{"id":1,"result":{"state":"present","session_state":"present"}}"#)
+        view.model.refreshNearAiCredential()
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        XCTAssertEqual(view.daemon.calls.filter { $0.method == "near_ai_funding" }.count, fundingCalls + 1)
+        try assertLastFundingCall(view, bound: false)
+        XCTAssertTrue(view.opened.isEmpty, "A reload must not open a browser")
+    }
+
+    /// The row reloads once a credential write finishes, not only when its
+    /// own button is pressed.
+    @MainActor
+    func testHostedRowReloadsWhenCredentialBusyReturnsToFalse() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        try await prime(view)
+        let entered = expectation(description: "The row reads again after the busy cycle")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        let browser = await view.model.startNearAiCredential()
+        XCTAssertNil(browser)
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        try assertLastFundingCall(view, bound: false)
     }
 
     @MainActor

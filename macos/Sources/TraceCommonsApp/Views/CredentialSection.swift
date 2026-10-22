@@ -51,14 +51,6 @@ struct CredentialSection: View {
         ]
     }
 
-    /// How often a ceremony in flight is re-read.
-    ///
-    /// It finishes in a browser this app does not own, so nothing here is
-    /// told when it does; the poll is what closes that. It runs only while
-    /// the shared table still offers a cancel, which is the one state that
-    /// has an outcome pending.
-    private static let pollInterval = Duration.seconds(2)
-
     var body: some View {
         let status = model.credentialStatus
         let tone = CredentialSurface.tone(status, calls: model.credentialCalls)
@@ -134,15 +126,6 @@ struct CredentialSection: View {
             // chooser it uses, and never doubles this card's own button: the
             // decision is `BalanceSurface.actionToDraw`'s, not this view's.
             actionButton(balanceAction)
-        }
-        .task(id: action) {
-            // A state nobody could read polls nothing. There is no outcome
-            // pending and no attempt to name.
-            while action == .cancel, !Task.isCancelled {
-                try? await Task.sleep(for: Self.pollInterval)
-                guard !Task.isCancelled else { return }
-                model.refreshNearAiCredential()
-            }
         }
     }
 
