@@ -61,10 +61,9 @@
 //! the bytes sent. That is the `digest_sha256` the service signs and the
 //! daemon checks against what it sent (service design, section 4).
 //!
-//! # Rules (owner-approved values)
+//! # Rules (owner-approved values, byte budgets from the addendum's "Size")
 //!
-//! - At most [`MAX_PROMPT_EXCERPTS`] prompts, each cut to
-//!   [`PROMPT_EXCERPT_CHARS`] characters. With more, the first
+//! - At most [`MAX_PROMPT_EXCERPTS`] prompts. With more, the first
 //!   [`EDGE_PROMPTS`], the last [`EDGE_PROMPTS`], then for each marked event
 //!   in session order the [`EVENT_WINDOW_PROMPTS`] prompts up to and
 //!   including the prompt whose turn carried the event, nearest first, until
@@ -72,14 +71,26 @@
 //!   changes the bytes). Any slots still free are filled from the middle
 //!   prompts not yet chosen, at evenly spaced positions, so a long session
 //!   always sends 12. Deduplicated, in session order.
-//! - The final message's first line, cut to [`FINAL_LINE_CHARS`] characters.
-//! - Truncation counts Unicode scalar values and never splits a codepoint.
-//! - The serialized digest is at most [`DIGEST_BYTE_CAP`] bytes. Over it,
-//!   whole excerpts are dropped from the middle outward and the number
-//!   dropped is recorded. No field is cut mid-string. If the digest is still
-//!   over the cap with no excerpts left, it is refused whole
-//!   ([`DigestError::OverCap`]); the per-turn and event caps below keep that
-//!   case out of reach.
+//! - Each excerpt is cut to at most [`PROMPT_EXCERPT_CHARS`] characters and
+//!   at most [`PROMPT_EXCERPT_BYTES`] bytes serialized; the final message's
+//!   first line to [`FINAL_LINE_CHARS`] characters and [`FINAL_LINE_BYTES`]
+//!   bytes. Serialized bytes are counted after JSON escaping, without the
+//!   quotes ([`serialized_len`]). A cut never splits a codepoint or an
+//!   escape.
+//! - At most [`MAX_TURN_OUTCOMES`] per-turn rows. Over that, the first and
+//!   last [`TURN_OUTCOME_EDGE_ROWS`], and the rest nearest the marked events'
+//!   turns (evenly spaced when no event turn is known), with
+//!   `turn_outcomes_truncated`. The ordinal saturates at 65,535 and each
+//!   count at 255, by type.
+//! - At most [`MAX_DIGEST_EVENTS`] event markers, the earliest first, with
+//!   `events_truncated`. `prompt_ix` saturates at 65,535, by type.
+//! - The serialized digest is at most [`DIGEST_BYTE_CAP`] bytes. The budgets
+//!   keep every digest under it by construction. Were a future field to push
+//!   one over, the middle excerpts are shortened to
+//!   [`SHORTENED_EXCERPT_BYTES`] first, then whole excerpts are dropped from
+//!   the middle outward and counted in `excerpts_dropped`. The refusal
+//!   ([`DigestError::OverCap`]) is kept only as a fail-closed backstop; the
+//!   tests show no bounded input reaches it.
 //!
 //! The digest is not wired into the daemon here; that is a later delivery
 //! step.
@@ -102,20 +113,29 @@ pub const JUDGEMENT_DIGEST_VERSION: u32 = 1;
 pub const MAX_PROMPT_EXCERPTS: usize = 12;
 /// Characters each prompt excerpt is cut to.
 pub const PROMPT_EXCERPT_CHARS: usize = 240;
+/// Serialized bytes each prompt excerpt is cut to.
+pub const PROMPT_EXCERPT_BYTES: usize = 320;
+/// Serialized bytes a middle excerpt is shortened to if a digest were ever
+/// over the cap.
+pub const SHORTENED_EXCERPT_BYTES: usize = 160;
 /// Prompts taken from each end of a long session.
 pub const EDGE_PROMPTS: usize = 4;
 /// Prompts taken before each marked event.
 pub const EVENT_WINDOW_PROMPTS: usize = 4;
 /// Characters the final message line is cut to.
 pub const FINAL_LINE_CHARS: usize = 160;
+/// Serialized bytes the final message line is cut to.
+pub const FINAL_LINE_BYTES: usize = 240;
 /// Hard cap on the serialized digest.
 pub const DIGEST_BYTE_CAP: usize = 8 * 1024;
 /// Most per-turn outcomes a digest carries; turns past it set
 /// `turn_outcomes_truncated`.
 pub const MAX_TURN_OUTCOMES: usize = 64;
-/// Most marked events a digest carries; events past it set
-/// `events_truncated`.
-pub const MAX_DIGEST_EVENTS: usize = 64;
+/// Rows kept from each end of a long session's per-turn outcomes.
+pub const TURN_OUTCOME_EDGE_ROWS: usize = 16;
+/// Most marked events a digest carries, the earliest first; events past it
+/// set `events_truncated`. The service judges the first four.
+pub const MAX_DIGEST_EVENTS: usize = 16;
 
 /// The class of an edited file. The only file information a digest carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,11 +183,23 @@ pub enum EventKind {
 }
 
 /// A denial, interrupt or undo, placed by the zero-based index of the
-/// contributor prompt whose turn carried it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// contributor prompt whose turn carried it. Input only; the digest carries
+/// a [`DigestEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventMarker {
     pub prompt_ix: u32,
+    pub kind: EventKind,
+    /// The usage series' ordinal of the turn that carried the event, when
+    /// known. Chooses which per-turn rows a long session keeps; never sent.
+    pub turn_ordinal: Option<u32>,
+}
+
+/// A marked event as the digest carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DigestEvent {
+    /// Saturates at 65,535.
+    pub prompt_ix: u16,
     pub kind: EventKind,
 }
 
@@ -223,9 +255,10 @@ pub struct DigestCounts {
 }
 
 /// One turn's edit and command outcomes, serialized as
-/// `[ordinal, edits, edits_failed, commands_passed, commands_failed]`.
+/// `[ordinal, edits, edits_failed, commands_passed, commands_failed]`. The
+/// ordinal saturates at 65,535 and each count at 255 ("255 or more").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnOutcome(pub u32, pub u32, pub u32, pub u32, pub u32);
+pub struct TurnOutcome(pub u16, pub u8, pub u8, pub u8, pub u8);
 
 /// Distinct edited files per class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,11 +287,13 @@ pub struct JudgementDigest {
     pub turn_outcomes: Vec<TurnOutcome>,
     pub turn_outcomes_truncated: bool,
     pub edited_file_classes: FileClassCounts,
-    pub events: Vec<EventMarker>,
+    pub events: Vec<DigestEvent>,
     pub events_truncated: bool,
     pub prompts_total: u32,
     pub excerpts: Vec<PromptExcerpt>,
-    /// Excerpts dropped to fit [`DIGEST_BYTE_CAP`].
+    /// Selected excerpts not sent: dropped by the scrub's residual gate,
+    /// withheld because the session's residual risk was not Low, or dropped
+    /// to fit [`DIGEST_BYTE_CAP`].
     pub excerpts_dropped: u32,
     pub final_line: Option<String>,
 }
@@ -339,6 +374,36 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     }
 }
 
+/// Bytes one character takes inside a JSON string as serde_json writes it.
+fn escaped_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Bytes `text` takes serialized as a JSON string, without the quotes.
+pub fn serialized_len(text: &str) -> usize {
+    text.chars().map(escaped_len).sum()
+}
+
+/// Cuts `text` to at most `max_chars` characters and at most `max_bytes`
+/// serialized bytes, on a character boundary.
+pub fn cut_to_budget(text: &str, max_chars: usize, max_bytes: usize) -> String {
+    let mut bytes = 0;
+    let mut end = 0;
+    for (n, (at, c)) in text.char_indices().enumerate() {
+        let len = escaped_len(c);
+        if n == max_chars || bytes + len > max_bytes {
+            return text[..at].to_owned();
+        }
+        bytes += len;
+        end = at + c.len_utf8();
+    }
+    text[..end].to_owned()
+}
+
 fn first_line(text: &str) -> &str {
     let line = text.split('\n').next().unwrap_or("");
     line.strip_suffix('\r').unwrap_or(line)
@@ -403,39 +468,97 @@ fn counts(facts: &SessionFacts, series: Option<&UsageSeries>) -> DigestCounts {
     }
 }
 
+fn saturate_u8(n: u32) -> u8 {
+    u8::try_from(n).unwrap_or(u8::MAX)
+}
+
+fn saturate_u16(n: u32) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
 /// Per-turn outcomes for turns with an edit or a command, in ordinal order,
 /// at most [`MAX_TURN_OUTCOMES`]; the flag is set when more were dropped.
-fn turn_outcomes(series: Option<&UsageSeries>) -> (Vec<TurnOutcome>, bool) {
+/// Over the cap, the first and last [`TURN_OUTCOME_EDGE_ROWS`] stay, and the
+/// rest are the middle rows nearest an event turn (ties to the earlier row),
+/// or evenly spaced when no event turn is known.
+fn turn_outcomes(series: Option<&UsageSeries>, events: &[EventMarker]) -> (Vec<TurnOutcome>, bool) {
     let Some(series) = series else {
         return (Vec::new(), false);
     };
-    let mut by_turn: BTreeMap<u32, TurnOutcome> = BTreeMap::new();
+    // (edits, edits_failed, commands_passed, commands_failed), unsaturated.
+    let mut by_turn: BTreeMap<u32, [u32; 4]> = BTreeMap::new();
     for call in &series.tool_calls {
         let edit = call.tool.is_edit();
         let command = call.tool == ToolKind::Bash;
         if !edit && !command {
             continue;
         }
-        let row =
-            by_turn
-                .entry(call.turn_ordinal)
-                .or_insert(TurnOutcome(call.turn_ordinal, 0, 0, 0, 0));
+        let row = by_turn.entry(call.turn_ordinal).or_default();
         if edit {
-            row.1 = row.1.saturating_add(1);
+            row[0] = row[0].saturating_add(1);
             if call.success == Some(false) {
-                row.2 = row.2.saturating_add(1);
+                row[1] = row[1].saturating_add(1);
             }
         } else {
             match call.success {
-                Some(true) => row.3 = row.3.saturating_add(1),
-                Some(false) => row.4 = row.4.saturating_add(1),
+                Some(true) => row[2] = row[2].saturating_add(1),
+                Some(false) => row[3] = row[3].saturating_add(1),
                 None => {}
             }
         }
     }
-    let truncated = by_turn.len() > MAX_TURN_OUTCOMES;
-    let rows = by_turn.into_values().take(MAX_TURN_OUTCOMES).collect();
-    (rows, truncated)
+    let rows: Vec<(u32, [u32; 4])> = by_turn.into_iter().collect();
+    let truncated = rows.len() > MAX_TURN_OUTCOMES;
+    let kept: Vec<usize> = if truncated {
+        pick_turn_rows(&rows, events)
+    } else {
+        (0..rows.len()).collect()
+    };
+    let out = kept
+        .into_iter()
+        .map(|i| {
+            let (ordinal, [edits, failed, passed, cmd_failed]) = rows[i];
+            TurnOutcome(
+                saturate_u16(ordinal),
+                saturate_u8(edits),
+                saturate_u8(failed),
+                saturate_u8(passed),
+                saturate_u8(cmd_failed),
+            )
+        })
+        .collect();
+    (out, truncated)
+}
+
+/// Row indices to keep from more than [`MAX_TURN_OUTCOMES`] rows, in order.
+fn pick_turn_rows(rows: &[(u32, [u32; 4])], events: &[EventMarker]) -> Vec<usize> {
+    let n = rows.len();
+    let mut picked: BTreeSet<usize> = (0..TURN_OUTCOME_EDGE_ROWS)
+        .chain(n - TURN_OUTCOME_EDGE_ROWS..n)
+        .collect();
+    let slots = MAX_TURN_OUTCOMES - picked.len();
+    let middle: Vec<usize> = (TURN_OUTCOME_EDGE_ROWS..n - TURN_OUTCOME_EDGE_ROWS).collect();
+    let event_turns: Vec<u32> = events.iter().filter_map(|e| e.turn_ordinal).collect();
+    if event_turns.is_empty() {
+        // The j-th of `slots` picks is the row at the centre of the j-th of
+        // `slots` equal spans; the middle holds more rows than slots.
+        for j in 0..slots {
+            picked.insert(middle[(2 * j + 1) * middle.len() / (2 * slots)]);
+        }
+    } else {
+        let mut ranked = middle;
+        ranked.sort_by_key(|&i| {
+            let ordinal = rows[i].0;
+            let distance = event_turns
+                .iter()
+                .map(|&turn| turn.abs_diff(ordinal))
+                .min()
+                .unwrap_or(u32::MAX);
+            (distance, ordinal)
+        });
+        picked.extend(ranked.into_iter().take(slots));
+    }
+    picked.into_iter().collect()
 }
 
 fn file_classes(extensions: &[&str]) -> FileClassCounts {
@@ -835,34 +958,66 @@ pub fn build_judgement_digest(input: &DigestInput<'_>) -> Result<BuiltDigest, Di
         .into_iter()
         .map(|(ix, text)| PromptExcerpt {
             ix: to_u32(ix),
-            text: truncate_chars(&text, PROMPT_EXCERPT_CHARS),
+            text: cut_to_budget(&text, PROMPT_EXCERPT_CHARS, PROMPT_EXCERPT_BYTES),
         })
         .collect();
-    let (turn_outcomes, turn_outcomes_truncated) = turn_outcomes(input.series);
+    let (turn_outcomes, turn_outcomes_truncated) = turn_outcomes(input.series, &events);
     let mut digest = JudgementDigest {
         schema_version: JUDGEMENT_DIGEST_VERSION,
         counts: counts(input.facts, input.series),
         turn_outcomes,
         turn_outcomes_truncated,
         edited_file_classes: file_classes(input.edited_extensions),
-        events: events.into_iter().take(MAX_DIGEST_EVENTS).collect(),
+        events: events
+            .iter()
+            .take(MAX_DIGEST_EVENTS)
+            .map(|event| DigestEvent {
+                prompt_ix: saturate_u16(event.prompt_ix),
+                kind: event.kind,
+            })
+            .collect(),
         events_truncated,
         prompts_total: to_u32(input.prompts.len()),
         excerpts,
         excerpts_dropped: scrubbed.dropped,
         final_line: scrubbed
             .final_line
-            .map(|line| truncate_chars(&line, FINAL_LINE_CHARS)),
+            .map(|line| cut_to_budget(&line, FINAL_LINE_CHARS, FINAL_LINE_BYTES)),
     };
+    let bytes = fit_to_cap(&mut digest, DIGEST_BYTE_CAP)?;
+    let sha256 = Sha256::digest(&bytes).into();
+    Ok(BuiltDigest {
+        digest,
+        bytes,
+        sha256,
+    })
+}
+
+/// Indices of `n` items, middle first, alternating outward (earlier side
+/// first on a tie).
+fn middle_out(n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| ((2 * i).abs_diff(n.saturating_sub(1)), i));
+    order
+}
+
+/// Serializes `digest`, bringing it under `cap` if it is over: the middle
+/// excerpts are shortened to [`SHORTENED_EXCERPT_BYTES`] one at a time, then
+/// whole excerpts are dropped from the middle outward. Refuses only when no
+/// excerpt is left and it is still over.
+pub(crate) fn fit_to_cap(digest: &mut JudgementDigest, cap: usize) -> Result<Vec<u8>, DigestError> {
     loop {
-        let bytes = serde_json::to_vec(&digest).map_err(|_| DigestError::Serialize)?;
-        if bytes.len() <= DIGEST_BYTE_CAP {
-            let sha256 = Sha256::digest(&bytes).into();
-            return Ok(BuiltDigest {
-                digest,
-                bytes,
-                sha256,
-            });
+        let bytes = serde_json::to_vec(&*digest).map_err(|_| DigestError::Serialize)?;
+        if bytes.len() <= cap {
+            return Ok(bytes);
+        }
+        let long = middle_out(digest.excerpts.len())
+            .into_iter()
+            .find(|&i| serialized_len(&digest.excerpts[i].text) > SHORTENED_EXCERPT_BYTES);
+        if let Some(i) = long {
+            let text = &mut digest.excerpts[i].text;
+            *text = cut_to_budget(text, PROMPT_EXCERPT_CHARS, SHORTENED_EXCERPT_BYTES);
+            continue;
         }
         if digest.excerpts.is_empty() {
             return Err(DigestError::OverCap);
@@ -870,7 +1025,7 @@ pub fn build_judgement_digest(input: &DigestInput<'_>) -> Result<BuiltDigest, Di
         // Repeatedly removing the middle one drops from the middle outward,
         // alternating sides.
         digest.excerpts.remove(digest.excerpts.len() / 2);
-        digest.excerpts_dropped += 1;
+        digest.excerpts_dropped = digest.excerpts_dropped.saturating_add(1);
     }
 }
 

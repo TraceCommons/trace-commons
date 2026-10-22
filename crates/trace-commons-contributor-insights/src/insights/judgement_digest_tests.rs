@@ -54,7 +54,21 @@ fn prompts(n: usize) -> Vec<String> {
 }
 
 fn ev(prompt_ix: u32, kind: EventKind) -> EventMarker {
-    EventMarker { prompt_ix, kind }
+    EventMarker {
+        prompt_ix,
+        kind,
+        turn_ordinal: None,
+    }
+}
+
+fn wire(events: &[EventMarker]) -> Vec<DigestEvent> {
+    events
+        .iter()
+        .map(|e| DigestEvent {
+            prompt_ix: e.prompt_ix as u16,
+            kind: e.kind,
+        })
+        .collect()
 }
 
 fn input<'a>(
@@ -186,7 +200,7 @@ fn the_digest_carries_selected_excerpts_with_their_positions() {
     assert_eq!(ixs, vec![0, 1, 2, 3, 12, 13, 14, 15, 26, 27, 28, 29]);
     assert_eq!(built.digest.excerpts[4].text, "prompt 12");
     assert_eq!(built.digest.prompts_total, 30);
-    assert_eq!(built.digest.events, events.to_vec());
+    assert_eq!(built.digest.events, wire(&events));
     assert_eq!(built.digest.excerpts_dropped, 0);
 }
 
@@ -207,17 +221,19 @@ fn truncation_counts_characters_not_bytes() {
 }
 
 #[test]
-fn prompts_are_cut_to_240_characters_and_the_final_line_to_160() {
+fn prompts_and_the_final_line_are_cut_to_characters_and_bytes() {
     let facts = facts();
     let p = vec!["x".repeat(500), "😀".repeat(300), "short".to_owned()];
     let fin = format!("{}\nsecond line never sent", "é".repeat(200));
     let built = build_judgement_digest(&input(&facts, &p, Some(fin.as_str()), &[], &[])).unwrap();
     let ex = &built.digest.excerpts;
     assert_eq!(ex[0].text.chars().count(), PROMPT_EXCERPT_CHARS);
-    assert_eq!(ex[1].text, "😀".repeat(240));
+    // 80 four-byte characters is the 320-byte budget.
+    assert_eq!(ex[1].text, "😀".repeat(80));
     assert_eq!(ex[2].text, "short");
     let line = built.digest.final_line.as_deref().unwrap();
-    assert_eq!(line, "é".repeat(160));
+    // 120 two-byte characters is the 240-byte budget.
+    assert_eq!(line, "é".repeat(120));
     assert!(
         !String::from_utf8(built.bytes.clone())
             .unwrap()
@@ -236,24 +252,37 @@ fn only_the_first_line_of_a_short_final_message_is_sent() {
 // ---- byte cap ----
 
 #[test]
-fn over_the_cap_whole_excerpts_drop_from_the_middle_out() {
+fn over_a_cap_middle_excerpts_are_shortened_then_dropped_middle_out() {
     let facts = facts();
-    // Twelve excerpts of 240 four-byte characters: about 11.5 KiB.
     let p: Vec<String> = (0..12)
-        .map(|i| format!("{i:02}{}", "😀".repeat(300)))
+        .map(|i| format!("{i:02}{}", "a".repeat(400)))
         .collect();
     let built = build_judgement_digest(&input(&facts, &p, None, &[], &[])).unwrap();
-    assert!(
-        built.bytes.len() <= DIGEST_BYTE_CAP,
-        "{}",
-        built.bytes.len()
-    );
-    let kept: Vec<u32> = built.digest.excerpts.iter().map(|e| e.ix).collect();
-    let dropped = built.digest.excerpts_dropped as usize;
+    let full = built.bytes.len();
+    // Each excerpt is 240 bytes; shortening one saves 80.
+    let mut digest = built.digest.clone();
+    let bytes = fit_to_cap(&mut digest, full - 1).unwrap();
+    assert!(bytes.len() < full);
+    assert_eq!(digest.excerpts.len(), 12);
+    assert_eq!(digest.excerpts_dropped, 0);
+    let short: Vec<u32> = digest
+        .excerpts
+        .iter()
+        .filter(|e| serialized_len(&e.text) <= SHORTENED_EXCERPT_BYTES)
+        .map(|e| e.ix)
+        .collect();
+    // The middle one of twelve goes first.
+    assert_eq!(short, vec![5]);
+
+    // A cap that every shortening cannot meet drops whole excerpts, middle
+    // out, keeping a balanced prefix and suffix.
+    let mut digest = built.digest.clone();
+    let bytes = fit_to_cap(&mut digest, full - 12 * 80 - 400).unwrap();
+    assert!(bytes.len() <= full - 12 * 80 - 400);
+    let kept: Vec<u32> = digest.excerpts.iter().map(|e| e.ix).collect();
+    let dropped = digest.excerpts_dropped as usize;
     assert!(dropped > 0);
     assert_eq!(kept.len() + dropped, 12);
-    // What survives is a prefix and a suffix of the selection, balanced
-    // within one.
     let head = kept.iter().take_while(|&&ix| (ix as usize) < 6).count();
     let tail = kept.len() - head;
     assert_eq!(&kept[..head], &(0..head as u32).collect::<Vec<_>>()[..]);
@@ -262,12 +291,10 @@ fn over_the_cap_whole_excerpts_drop_from_the_middle_out() {
         &((12 - tail) as u32..12).collect::<Vec<_>>()[..]
     );
     assert!(head.abs_diff(tail) <= 1, "head {head} tail {tail}");
-    // Every surviving excerpt is whole.
-    for ex in &built.digest.excerpts {
-        assert_eq!(ex.text.chars().count(), PROMPT_EXCERPT_CHARS);
-    }
-    // One more excerpt would not have fit.
-    assert!(built.bytes.len() + 4 * 240 > DIGEST_BYTE_CAP);
+
+    // With no excerpts left and still over, the digest is refused.
+    let mut digest = built.digest.clone();
+    assert_eq!(fit_to_cap(&mut digest, 10), Err(DigestError::OverCap));
 }
 
 #[test]
@@ -279,9 +306,62 @@ fn under_the_cap_nothing_is_dropped() {
     assert_eq!(built.digest.excerpts_dropped, 0);
 }
 
+// ---- byte budgets (addendum, "Size") ----
+
 #[test]
-fn the_largest_digest_without_excerpts_fits_the_cap() {
-    // Every bounded field at its bound: the refusal case stays out of reach.
+fn serialized_len_matches_serde_json_escaping() {
+    for text in [
+        "plain",
+        "中文",
+        "😀",
+        "\"quoted\"",
+        "back\\slash",
+        "\u{1}\u{8}\u{c}\n\r\t\u{1f}",
+        "\u{7f}/<>&'",
+    ] {
+        let json = serde_json::to_string(text).unwrap();
+        assert_eq!(serialized_len(text), json.len() - 2, "{text:?}");
+    }
+}
+
+#[test]
+fn excerpt_budgets_keep_the_measured_character_counts() {
+    let cut = |c: char| cut_to_budget(&c.to_string().repeat(240), 240, PROMPT_EXCERPT_BYTES);
+    assert_eq!(cut('a').chars().count(), 240);
+    assert_eq!(cut('中').chars().count(), 106);
+    assert_eq!(cut('😀').chars().count(), 80);
+    assert_eq!(cut('"').chars().count(), 160);
+    assert_eq!(cut('\u{1}').chars().count(), 53);
+    let mixed: String = "中\u{1}".repeat(120);
+    assert_eq!(
+        cut_to_budget(&mixed, 240, PROMPT_EXCERPT_BYTES)
+            .chars()
+            .count(),
+        71
+    );
+    for c in ['a', '中', '😀', '"', '\u{1}'] {
+        assert!(serialized_len(&cut(c)) <= PROMPT_EXCERPT_BYTES);
+    }
+    let line = |c: char| cut_to_budget(&c.to_string().repeat(400), 160, FINAL_LINE_BYTES);
+    assert_eq!(line('a').chars().count(), 160);
+    assert_eq!(line('中').chars().count(), 80);
+}
+
+/// A 500-turn session: every turn edits once (failing) and runs two
+/// commands, at turn ordinals past the saturation point.
+fn long_series() -> UsageSeries {
+    let mut series = UsageSeries::default();
+    for i in 0..500u32 {
+        let ordinal = 70_000 + i;
+        series.push_turn(turn(ordinal));
+        series.push_tool_call(call(ordinal, ToolKind::Edit, Some(false)));
+        series.push_tool_call(call(ordinal, ToolKind::Bash, Some(true)));
+        series.push_tool_call(call(ordinal, ToolKind::Bash, Some(false)));
+    }
+    series
+}
+
+fn saturated_facts() -> SessionFacts {
     let mut facts = facts();
     facts.models = (0..8)
         .map(|i| ModelFacts {
@@ -292,48 +372,244 @@ fn the_largest_digest_without_excerpts_fits_the_cap() {
             interrupted: Some(u32::MAX),
         })
         .collect();
-    let mut series = UsageSeries::default();
-    for ordinal in 0..200u32 {
-        series.push_turn(turn(ordinal));
-        for tool in [
-            ToolKind::Read,
-            ToolKind::Edit,
-            ToolKind::Write,
-            ToolKind::MultiEdit,
-            ToolKind::NotebookEdit,
-            ToolKind::Bash,
-            ToolKind::Grep,
-            ToolKind::Glob,
-            ToolKind::ApplyPatch,
-            ToolKind::Other,
-        ] {
-            series.push_tool_call(call(u32::MAX - 200 + ordinal, tool, Some(false)));
-        }
-    }
-    let events: Vec<EventMarker> = (0..500)
-        .map(|i| ev(u32::MAX - i, EventKind::Interrupt))
-        .collect();
-    let fin = "😀".repeat(400);
+    facts.user_turns = Some(u32::MAX);
+    facts.active_secs = Some(u32::MAX);
+    facts.shape.lines_added = Some(u32::MAX);
+    facts.shape.lines_removed = Some(u32::MAX);
+    facts.shape.renamed_files = u32::MAX;
+    facts
+}
+
+/// 64 event markers spread over 600 prompts, at known turns.
+fn many_events() -> Vec<EventMarker> {
+    (0..64u32)
+        .map(|i| EventMarker {
+            prompt_ix: 10 + i * 9,
+            kind: EventKind::Interrupt,
+            turn_ordinal: Some(70_000 + i * 7),
+        })
+        .collect()
+}
+
+fn assert_worst_case_fits(prompt: &str, label: &str) {
+    let facts = saturated_facts();
+    let series = long_series();
+    let events = many_events();
+    let prompts: Vec<String> = (0..600).map(|_| prompt.to_owned()).collect();
+    let fin = prompt.to_owned();
     let exts = vec!["rs"; 1000];
     let built = build_judgement_digest(&DigestInput {
         facts: &facts,
         series: Some(&series),
-        prompts: &[],
+        prompts: &prompts,
         final_message: Some(fin.as_str()),
         scrub: ScrubContext::default(),
         edited_extensions: &exts,
         events: &events,
     })
     .unwrap();
-    assert!(built.digest.turn_outcomes_truncated);
-    assert!(built.digest.events_truncated);
-    assert_eq!(built.digest.turn_outcomes.len(), MAX_TURN_OUTCOMES);
-    assert_eq!(built.digest.events.len(), MAX_DIGEST_EVENTS);
     assert!(
         built.bytes.len() <= DIGEST_BYTE_CAP,
-        "{}",
+        "{label}: {}",
         built.bytes.len()
     );
+    assert_eq!(built.digest.excerpts.len(), MAX_PROMPT_EXCERPTS, "{label}");
+    assert_eq!(built.digest.excerpts_dropped, 0, "{label}");
+    for ex in &built.digest.excerpts {
+        assert!(serialized_len(&ex.text) <= PROMPT_EXCERPT_BYTES, "{label}");
+    }
+    assert!(built.digest.final_line.is_some(), "{label}");
+    assert_eq!(built.digest.turn_outcomes.len(), MAX_TURN_OUTCOMES);
+    assert!(built.digest.turn_outcomes_truncated);
+    assert_eq!(built.digest.events.len(), MAX_DIGEST_EVENTS);
+    assert!(built.digest.events_truncated);
+}
+
+#[test]
+fn twelve_maximal_cjk_prompts_fit_whole() {
+    assert_worst_case_fits(&"中".repeat(400), "cjk");
+}
+
+#[test]
+fn twelve_maximal_emoji_prompts_fit_whole() {
+    assert_worst_case_fits(&"😀".repeat(400), "emoji");
+}
+
+#[test]
+fn twelve_escape_heavy_prompts_fit_whole() {
+    assert_worst_case_fits(&"\"".repeat(400), "quotes");
+    assert_worst_case_fits(&"\\".repeat(400), "backslashes");
+    assert_worst_case_fits(&"\u{1}".repeat(400), "control");
+    assert_worst_case_fits(&"中\u{1}".repeat(200), "cjk and control");
+    assert_worst_case_fits(&"a".repeat(400), "ascii");
+}
+
+#[test]
+fn every_field_at_its_bound_fits_the_cap_without_dropping() {
+    // The digest at every budget at once, built directly: the refusal and
+    // the drop are out of reach by construction.
+    let facts = saturated_facts();
+    let mut counts = counts(&facts, Some(&long_series()));
+    for kind in [
+        ToolKind::Read,
+        ToolKind::Edit,
+        ToolKind::Write,
+        ToolKind::MultiEdit,
+        ToolKind::NotebookEdit,
+        ToolKind::Bash,
+        ToolKind::Grep,
+        ToolKind::Glob,
+        ToolKind::ApplyPatch,
+        ToolKind::Other,
+    ] {
+        counts.tool_kinds.insert(kind, u32::MAX);
+    }
+    counts.commands_passed = u32::MAX;
+    counts.commands_failed = u32::MAX;
+    counts.commands_unknown = u32::MAX;
+    counts.failed_before_first_edit_then_passed = u32::MAX;
+    let full = FileClassCounts {
+        test: u32::MAX,
+        doc: u32::MAX,
+        source: u32::MAX,
+        config: u32::MAX,
+    };
+    counts.stored_edited_files = full;
+    for unit in ["中", "😀", "\"", "\u{1}", "a"] {
+        let text = cut_to_budget(
+            &unit.repeat(400),
+            PROMPT_EXCERPT_CHARS,
+            PROMPT_EXCERPT_BYTES,
+        );
+        let line = cut_to_budget(&unit.repeat(400), FINAL_LINE_CHARS, FINAL_LINE_BYTES);
+        let mut digest = JudgementDigest {
+            schema_version: JUDGEMENT_DIGEST_VERSION,
+            counts: counts.clone(),
+            turn_outcomes: vec![TurnOutcome(u16::MAX, u8::MAX, u8::MAX, u8::MAX, u8::MAX); 64],
+            turn_outcomes_truncated: true,
+            edited_file_classes: full,
+            events: vec![
+                DigestEvent {
+                    prompt_ix: u16::MAX,
+                    kind: EventKind::Interrupt,
+                };
+                MAX_DIGEST_EVENTS
+            ],
+            events_truncated: true,
+            prompts_total: u32::MAX,
+            excerpts: (0..12)
+                .map(|i| PromptExcerpt {
+                    ix: u32::MAX - i,
+                    text: text.clone(),
+                })
+                .collect(),
+            excerpts_dropped: u32::MAX,
+            final_line: Some(line),
+        };
+        let bytes = fit_to_cap(&mut digest, DIGEST_BYTE_CAP).unwrap();
+        assert!(bytes.len() <= DIGEST_BYTE_CAP, "{unit:?}: {}", bytes.len());
+        assert_eq!(digest.excerpts.len(), 12, "{unit:?}");
+        assert_eq!(digest.excerpts_dropped, u32::MAX, "{unit:?}");
+        assert!(
+            digest.excerpts.iter().all(|e| e.text == text),
+            "{unit:?} was shortened"
+        );
+    }
+}
+
+#[test]
+fn a_long_session_keeps_the_edge_turns_and_those_nearest_the_events() {
+    let facts = facts();
+    let mut series = UsageSeries::default();
+    for ordinal in 0..100u32 {
+        series.push_turn(turn(ordinal));
+        series.push_tool_call(call(ordinal, ToolKind::Edit, Some(true)));
+    }
+    let events = [EventMarker {
+        prompt_ix: 3,
+        kind: EventKind::Undo,
+        turn_ordinal: Some(50),
+    }];
+    let built = build_judgement_digest(&DigestInput {
+        facts: &facts,
+        series: Some(&series),
+        prompts: &[],
+        final_message: None,
+        scrub: ScrubContext::default(),
+        edited_extensions: &[],
+        events: &events,
+    })
+    .unwrap();
+    let ordinals: Vec<u16> = built.digest.turn_outcomes.iter().map(|r| r.0).collect();
+    let expected: Vec<u16> = (0..16).chain(34..66).chain(84..100).collect();
+    assert_eq!(ordinals, expected);
+    assert!(built.digest.turn_outcomes_truncated);
+
+    // With no event turn known, the middle rows are spread evenly.
+    let built = build_judgement_digest(&DigestInput {
+        facts: &facts,
+        series: Some(&series),
+        prompts: &[],
+        final_message: None,
+        scrub: ScrubContext::default(),
+        edited_extensions: &[],
+        events: &[],
+    })
+    .unwrap();
+    let ordinals: Vec<u16> = built.digest.turn_outcomes.iter().map(|r| r.0).collect();
+    assert_eq!(ordinals.len(), MAX_TURN_OUTCOMES);
+    assert_eq!(&ordinals[..16], &(0..16).collect::<Vec<u16>>()[..]);
+    assert_eq!(&ordinals[48..], &(84..100).collect::<Vec<u16>>()[..]);
+    assert!(ordinals.windows(2).all(|w| w[0] < w[1]));
+    // Evenly: the middle picks are about two apart (68 rows into 32).
+    let middle = &ordinals[16..48];
+    assert!(
+        middle.windows(2).all(|w| (2..=3).contains(&(w[1] - w[0]))),
+        "{middle:?}"
+    );
+}
+
+#[test]
+fn per_turn_counts_saturate_and_events_keep_the_earliest_sixteen() {
+    let facts = facts();
+    let mut series = UsageSeries::default();
+    series.push_turn(turn(70_000));
+    for _ in 0..300 {
+        series.push_tool_call(call(70_000, ToolKind::Edit, Some(false)));
+        series.push_tool_call(call(70_000, ToolKind::Bash, Some(true)));
+        series.push_tool_call(call(70_000, ToolKind::Bash, Some(false)));
+    }
+    let events: Vec<EventMarker> = (0..40u32)
+        .rev()
+        .map(|i| ev(70_000 + i, EventKind::Denial))
+        .collect();
+    let built = build_judgement_digest(&DigestInput {
+        facts: &facts,
+        series: Some(&series),
+        prompts: &[],
+        final_message: None,
+        scrub: ScrubContext::default(),
+        edited_extensions: &[],
+        events: &events,
+    })
+    .unwrap();
+    assert_eq!(
+        built.digest.turn_outcomes,
+        vec![TurnOutcome(u16::MAX, 255, 255, 255, 255)]
+    );
+    assert_eq!(built.digest.events.len(), MAX_DIGEST_EVENTS);
+    assert!(built.digest.events_truncated);
+    assert!(
+        built
+            .digest
+            .events
+            .iter()
+            .all(|e| e.prompt_ix == u16::MAX && e.kind == EventKind::Denial)
+    );
+    let small: Vec<EventMarker> = (0..20u32).rev().map(|i| ev(i, EventKind::Undo)).collect();
+    let built = build_judgement_digest(&input(&facts, &[], None, &[], &small)).unwrap();
+    let ixs: Vec<u16> = built.digest.events.iter().map(|e| e.prompt_ix).collect();
+    assert_eq!(ixs, (0..16).collect::<Vec<u16>>());
 }
 
 // ---- determinism and hash ----
@@ -370,7 +646,7 @@ fn the_same_input_gives_the_same_bytes_and_hash() {
     assert_eq!(back, a.digest);
     assert_eq!(back.schema_version, JUDGEMENT_DIGEST_VERSION);
     // Events are carried in session order.
-    assert_eq!(back.events, vec![events[1], events[0]]);
+    assert_eq!(back.events, wire(&[events[1], events[0]]));
 }
 
 #[test]
