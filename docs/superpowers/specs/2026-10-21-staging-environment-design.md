@@ -51,10 +51,11 @@ All dated 2026-10-21. The owner's words are quoted.
   attestation pins and the server's transfer client. Attestation stays on and
   fails closed. The release check refuses the feature in shipped builds.
 
-- **(S5) Admission by allow-list.** Asked who can sign in: "Allow-list of
-  NEAR AI accounts". A staging NEAR AI account on a list the operator keeps
-  is admitted without an invite; any other staging NEAR AI account is
-  refused (3.12).
+- **(S5) Admission by allow-list.** *Superseded by S12 on 2026-10-22.*
+  Asked who can sign in: "Allow-list of NEAR AI accounts". A staging NEAR AI
+  account on a list the operator keeps was to be admitted without an invite,
+  and any other staging NEAR AI account refused. Built in #1554 and withdrawn
+  there before it merged.
 - **(S6) DMG on a GitHub pre-release.** "GitHub pre-release". A `staging-*`
   pre-release in the public repo, never marked latest (6.1).
 - **(S7) A staging label in the window.** "Yes, a small staging label". Its
@@ -74,6 +75,10 @@ All dated 2026-10-21. The owner's words are quoted.
   admission token and tool connections live apart from production's, so
   neither app reads the other's inference rows or reconfigures the other's
   proxy (4.2, IronWire rows).
+- **(S12) Open sign-up on staging.** "Ideall for staging we don't use
+  invites at all. People with near.ai accounts just sign up" (2026-10-22).
+  Any staging NEAR AI account can sign up; there is no allow-list and no
+  invite. Supersedes S5.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -400,7 +405,7 @@ too.
 | `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | the staging set, written by the re-sign tool (5.9) |
 | `TRACE_COMMONS_NEAR_AI_PAYOUT_*` | payout design section 2, step 6; mode starts `dry_run` |
 | `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | `0`, as on the pilot's template |
-| `TRACE_COMMONS_ADMISSION_ENABLED` | `false` (3.12) |
+| `TRACE_COMMONS_ADMISSION_ENABLED` | `true`, with the ledger's limits and signers; today's code opens NEAR AI sign-in only when it is on (3.12) |
 | `TRACE_COMMONS_COMMUNITY_*` | off; staging has no public community page |
 | `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME`, `_REMOTE_OBJECT_STORE_*` | the `tc-staging` key and staging bucket |
 
@@ -438,15 +443,31 @@ payout design adds reports the same flag per rail.
 
 ### 3.12 Who can sign in
 
-"Everyone has to sign into staging" (S1), admitted by allow-list (S5). The
-staging server keeps a list of staging NEAR AI subjects, operator-edited,
-hash-only in logs. A sign-in whose verified NEAR AI subject is on the list
-is admitted without an invite, into its own tenant; any other subject is
-refused with a safe label, and no tenant or account is created. A NEAR AI
-staging account alone admits nobody, since anyone can make one. An empty or
-missing list admits nobody (fail closed). Invites still work for the
-operator. The list lives in staging config only; a production build never
-reads it.
+"Everyone has to sign into staging" (S1), and anyone with a staging NEAR AI
+account may (S12). A staging ingest provisions and binds NEAR AI logins
+exactly as a default build does: a verified login with no account gets one,
+in its own tenant, with no invite and no list; a login that has an account
+signs in to it. There is no staging-only admission code and no staging-only
+setting for it. `open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite`
+runs in both builds and holds them to the same answer.
+
+The one staging difference is that the NEAR wallet ceremony is refused
+(`staging_wallet_provisioning_closed`) whatever the configuration says, so
+NEAR AI is the only way to make a staging account.
+
+What opens NEAR AI sign-in is the same readiness check as on the pilot
+(`near_ai_login_readiness_named`): `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true`,
+the account registry database, the account identity
+(`TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER`, `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY`),
+the issuer (`TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL`, `_AUDIENCE`), and
+`near_provisioning_admission_ready`. The last is true only when the
+admission ledger is configured (`TRACE_COMMONS_ADMISSION_ENABLED=true` and
+its limits and signers), and the ledger refuses to start without a pinned
+redaction witness and a durable, RLS-ready database. Staging therefore needs
+the witness (open item 4) before anyone can sign in, or a code change that
+lets a staging build provision NEAR AI logins without the ledger. Tenant
+access grants (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS`) play no part in
+NEAR AI sign-in.
 
 ## 4. The staging macOS app
 
@@ -771,9 +792,10 @@ lists it explicitly instead (6.2).
   rises, so Sparkle orders staging builds.
 
 The pre-release is internal in intent but public in fact (the repository is
-public). The DMG is notarized and points only at staging hosts, so a
-stranger who installs it gets an app that needs a staging invite. Open item
-8 asks whether to keep the DMG off GitHub and only in the bucket.
+public). The DMG is notarized and points only at staging hosts. Since
+sign-up is open (S12), a stranger who installs it and makes a staging NEAR
+AI account can use staging (section 8). Open item 8 asks whether to keep the
+DMG off GitHub and only in the bucket.
 
 ### 6.2 What the release check must allow
 
@@ -815,7 +837,8 @@ user-facing copy it adds follows `docs/ui-copy-guide.md`.
 1. Make a NEAR AI staging account at `cloud-stg.near.ai`. It is separate
    from a production NEAR AI account, even with the same GitHub or Google
    login.
-2. Receive an individual staging invite from the owner.
+2. Get the staging DMG link from the owner. No invite is needed: any
+   staging NEAR AI account can sign up (S12).
 3. Download `Near.ai Staging.dmg` from the staging pre-release and drag it to
    Applications. It sits beside `Near.ai.app` and shares nothing with it:
    separate sign-in, folder, keychain items and updates.
@@ -876,6 +899,15 @@ rolled back), refuse service, and read staging traces and staging keys. It
 cannot sign pins, reach the pilot's database or bucket, or mint production
 tokens.
 
+**Anyone can use staging.** Anyone can make a staging NEAR AI account
+(S12), so anyone who has the app can sign up, upload traces to our staging
+server, and spend our staging NEAR AI credit through it: Private AI
+inference, scoring and the privacy filter. Rate limits and the admission
+ledger's cost limits bound how fast; nothing bounds who. Staging credit is
+worth nothing in production and staging shares nothing with it (above).
+The operator stops all of it by shutting the staging service down; there is
+no per-person switch.
+
 **A leaked staging NEAR AI key or payout credential.** Spends staging
 credit only. The payout credential is capped by its constraints and
 `allowed_recipient_ids` (payout design section 2).
@@ -903,9 +935,10 @@ The plan breaks this into small PRs. In order:
 
 ## 10. Open items
 
-Settled on 2026-10-21: the host name, PostgreSQL on the VM, admission, the
-in-window label (wording still to approve), re-signing and where the DMG
-lives (S5-S9). Still open:
+Settled on 2026-10-21: the host name, PostgreSQL on the VM, the in-window
+label (wording still to approve), re-signing and where the DMG lives
+(S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12). Still
+open:
 
 1. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
    with the keychain group and associated domain, and a Developer ID
@@ -916,7 +949,11 @@ lives (S5-S9). Still open:
    measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
    whether an API key minted before a redeploy survives the JWT rotation or
    only sessions break.
-4. **Witness and self-hosted filter in staging.** Not built now.
+4. **Witness and self-hosted filter in staging.** Not built now. NEAR AI
+   sign-in needs the admission ledger, and the ledger needs a pinned witness
+   (3.12), so without a witness nobody can sign in to staging. Either build
+   the witness for staging or change the ingest so a staging build
+   provisions NEAR AI logins without the ledger.
 5. **The "Ask me" default** for staging sources.
 6. **Where testers report**: a GitHub issue template labelled staging, or a
    private channel.

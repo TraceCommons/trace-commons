@@ -265,15 +265,15 @@ Spec: sections 3.9, 3.11.
 
 ---
 
-### Task 7b: Allow-list admission (`staging-allowlist-admission`, base `staging-server-guard`)
+### Task 7b: Open sign-up, and the ingest under `near-ai-staging` in CI (`staging-allowlist-admission`, base `staging-server-guard`)
 
-Spec: S5, section 3.12.
+Spec: S12 (supersedes S5), section 3.12. The branch name predates S12.
 
-- A staging-only setting holding the allowed staging NEAR AI subjects (a file path or env value, operator-edited). Compiled and read only under `near-ai-staging`.
-- On a NEAR AI sign-in whose verified subject is on the list and has no account, admit it into a new tenant without an invite. Any other subject without an invite is refused with a safe label; no tenant or account row is written. An empty or missing list admits nobody.
-- Logs carry a subject hash only.
+- No staging admission code and no staging setting: a staging ingest provisions and binds a new NEAR AI login exactly as a default build does, with no invite and no list.
+- A staging build refuses the NEAR wallet ceremony by name (`staging_wallet_provisioning_closed`) before reading any configuration, and both capabilities endpoints report `ready: false` for it, so NEAR AI is the only way to make a staging account.
+- CI checks, lints and runs the whole ingest lib under `near-ai-staging` (`trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL`, not a required check), and requires the two tests below to have run.
 
-Tests first: `an_allowed_subject_is_admitted_without_an_invite`, `an_unlisted_subject_is_refused_and_writes_nothing`, `an_empty_list_admits_nobody`, `a_default_build_ignores_the_list`, `an_invite_still_admits`.
+Tests first: `open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite` (no `cfg`; runs in both builds, red under the feature while S5's list was in place), `a_staging_build_never_offers_wallet_provisioning`.
 
 ### Task 8: The app reads its channel from the dylib (`staging-ffi-channel`)
 
@@ -351,6 +351,15 @@ Spec: sections 3.1-3.8, 3.10, 3.12.
 - [ ] **Steps 2-4.** No `gcloud` command runs in this task.
 - [ ] **Step 5: Commit** — `Parameterise the pilot deploy for a staging server`.
 
+**NEAR AI sign-in (S12, spec 3.12).** `staging.env.template` leaves NEAR AI login provisioning open: there is no allow-list setting and no invite to configure, and it must not require tenant access grants for sign-in (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS` is not read by the sign-in path; keep the pilot template's value). What `near_ai_login_readiness_named` requires today, each of which the template or its secrets must supply:
+- `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true` (the literal `true`).
+- The account registry database (the PostgreSQL mirror).
+- `TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER` and `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` (secrets).
+- `TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL` (https) and `TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE`.
+- `near_provisioning_admission_ready`, which is true only when the admission ledger is configured: `TRACE_COMMONS_ADMISSION_ENABLED=true` with `_WINDOW_ATTEMPTS`, `_ACCOUNT_COST_LIMIT`, `_GLOBAL_COST_LIMIT`, `_PROCESSING_COST_BOUND`, `_LEASE_SECONDS`, `_CHALLENGE_TTL_SECONDS`, `_PROVIDER_SIGNERS` (or `_GATEWAY_SIGNERS`), `_ACCEPTED_MODELS` and `_MIN_REQUEST_BYTES` (`docs/operator/invite-free-admission.md` 2.7). The ledger refuses to boot without the redaction witness bypass (`TRACE_COMMONS_WITNESS_BYPASS_ENABLED`, `_SIGNING_ADDRESS`, `_EXPECTED_MEASUREMENTS`, `_ALLOWED_POLICY_VERSIONS`), `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES=true` and `TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY=true`.
+
+The last item conflicts with spec open item 4 (no witness on staging). Until it is resolved, a staging ingest without a witness refuses every NEAR AI sign-in with `near_provisioning_admission_ready`. The wallet settings (`_WITNESS_JSON`, `_PUBLIC_ORIGIN`) are not needed: a staging build refuses the wallet ceremony.
+
 **Notes from Task 7's boot guard (#1548):**
 - `staging.env.template` must always set `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL`, even with no scorer configured. Unset, it resolves to the production gateway, and a staging ingest refuses to boot.
 - The guard accepts only the exact staging API host. If NEAR AI staging serves per-model completions hosts (spec open item 3), a staging scorer configured on one is refused at boot. Once that item is answered, either let the staging build accept those hosts, or add their digests to the default build's refusal so a production ingest cannot name them.
@@ -363,8 +372,8 @@ Spec: sections 3.1-3.8, 3.10, 3.12.
 Spec: sections 3, 5.4, 7.
 
 **Files:**
-- Create: `docs/operator/staging-environment.md` (provisioning order, Secret Manager names and IAM, DNS, first deploy, the pin re-sign procedure, the payout steps by reference to the payout design section 2, rollback, what to check after a NEAR AI staging redeploy)
-- Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`)
+- Create: `docs/operator/staging-environment.md` (provisioning order, Secret Manager names and IAM, DNS, first deploy, the pin re-sign procedure, the payout steps by reference to the payout design section 2, rollback, what to check after a NEAR AI staging redeploy, and that sign-up is open to any staging NEAR AI account (S12): there is no list to keep, and stopping the ingest service is how to shut staging to everyone)
+- Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`; no invite step: a tester makes a staging NEAR AI account and signs in)
 - Modify: `docs/operator/README.md` (index), `README.md` if its operator checklist lists environments
 
 - [ ] **Step 1:** Walk the runbook against the merged tasks; every command names a real script or flag (grep for each).
