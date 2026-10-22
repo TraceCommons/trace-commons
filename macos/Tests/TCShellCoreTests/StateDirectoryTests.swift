@@ -12,6 +12,7 @@ final class StateDirectoryTests: XCTestCase {
 
     func testFallsBackToThePerUserDirectoryWhenNothingIsSet() throws {
         let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.production,
             explicit: nil,
             environment: [:],
             homeDirectory: home,
@@ -26,6 +27,7 @@ final class StateDirectoryTests: XCTestCase {
 
     func testTheEnvironmentVariableWinsOverTheDefault() throws {
         let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.production,
             explicit: nil,
             environment: ["TRACE_COMMONS_CONTRIBUTOR_DIR": "/tmp/from-env"],
             homeDirectory: home,
@@ -36,6 +38,7 @@ final class StateDirectoryTests: XCTestCase {
 
     func testAnExplicitDirectoryWinsOverTheEnvironment() throws {
         let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.production,
             explicit: "/tmp/explicit",
             environment: ["TRACE_COMMONS_CONTRIBUTOR_DIR": "/tmp/from-env"],
             homeDirectory: home,
@@ -50,6 +53,7 @@ final class StateDirectoryTests: XCTestCase {
 
     func testAnEmptyEnvironmentVariableIsTreatedAsUnset() throws {
         let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.production,
             explicit: nil,
             environment: ["TRACE_COMMONS_CONTRIBUTOR_DIR": ""],
             homeDirectory: home,
@@ -67,6 +71,7 @@ final class StateDirectoryTests: XCTestCase {
         // here because it does not exist yet would put the fresh-install
         // case straight back into the dead end this slice removes.
         let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.production,
             explicit: nil,
             environment: [:],
             homeDirectory: home,
@@ -79,6 +84,7 @@ final class StateDirectoryTests: XCTestCase {
     func testAPathThatExistsButIsAFileIsRefused() {
         XCTAssertThrowsError(
             try StateDirectory.resolve(
+                channel: BuildChannelFixture.production,
                 explicit: "/tmp/a-file",
                 environment: [:],
                 homeDirectory: home,
@@ -97,6 +103,7 @@ final class StateDirectoryTests: XCTestCase {
         let long = "/tmp/" + String(repeating: "x", count: 120)
         XCTAssertThrowsError(
             try StateDirectory.resolve(
+                channel: BuildChannelFixture.production,
                 explicit: long,
                 environment: [:],
                 homeDirectory: home,
@@ -116,6 +123,7 @@ final class StateDirectoryTests: XCTestCase {
         let long = "/tmp/" + String(repeating: "é", count: 60)
         XCTAssertThrowsError(
             try StateDirectory.resolve(
+                channel: BuildChannelFixture.production,
                 explicit: long,
                 environment: [:],
                 homeDirectory: home,
@@ -126,5 +134,41 @@ final class StateDirectoryTests: XCTestCase {
                 return XCTFail("expected pathTooLong, got \(error)")
             }
         }
+    }
+
+    func testDefaultDirectoryComesFromTheDylib() throws {
+        // A staging build names its own directory and reads only its own
+        // override: the production variable is ignored, so it can never
+        // point staging at production's enrollment (spec 4.2).
+        let resolved = try StateDirectory.resolve(
+            channel: BuildChannelFixture.staging,
+            explicit: nil,
+            environment: ["TRACE_COMMONS_CONTRIBUTOR_DIR": "/tmp/production-dir"],
+            homeDirectory: home,
+            probe: .init { _ in .absent }
+        )
+        XCTAssertEqual(
+            resolved.path, "/Users/someone/Library/Application Support/trace-commons-staging")
+
+        let overridden = try StateDirectory.resolve(
+            channel: BuildChannelFixture.staging,
+            explicit: nil,
+            environment: [
+                "TRACE_COMMONS_CONTRIBUTOR_DIR": "/tmp/production-dir",
+                "TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR": "/tmp/staging-dir",
+            ],
+            homeDirectory: home,
+            probe: .init { _ in .directory }
+        )
+        XCTAssertEqual(overridden.path, "/tmp/staging-dir")
+
+        let compute = try StateDirectory.resolveCompute(
+            channel: BuildChannelFixture.staging,
+            environment: ["TRACE_COMMONS_CONTRIBUTOR_DIR": "/tmp/production-dir"],
+            homeDirectory: home,
+            probe: .init { _ in .absent }
+        )
+        XCTAssertEqual(
+            compute.path, "/Users/someone/Library/Application Support/trace-commons-staging")
     }
 }

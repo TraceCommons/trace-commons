@@ -8,7 +8,7 @@ import XCTest
 final class PlatformPasskeyProviderTests: XCTestCase {
     func testRegistrationUsesPlatformProviderAndPreservesServerPreferences() throws {
         let begin = try options()
-        let request = try XCTUnwrap(PlatformPasskeyProvider.authorizationRequest(for: begin.validated(for: .add))
+        let request = try XCTUnwrap(PlatformPasskeyProvider.authorizationRequest(for: begin.validated(for: .add, relyingParty: "tracecommons.ai"))
             as? ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest)
         XCTAssertEqual(request.relyingPartyIdentifier, "tracecommons.ai")
         XCTAssertEqual(request.challenge, Data([1, 2, 3]))
@@ -20,7 +20,7 @@ final class PlatformPasskeyProviderTests: XCTestCase {
     }
 
     func testAssertionCarriesAllowedCredentialsAndUserVerification() throws {
-        let request = try XCTUnwrap(PlatformPasskeyProvider.authorizationRequest(for: options().validated(for: .login))
+        let request = try XCTUnwrap(PlatformPasskeyProvider.authorizationRequest(for: options().validated(for: .login, relyingParty: "tracecommons.ai"))
             as? ASAuthorizationPlatformPublicKeyCredentialAssertionRequest)
         XCTAssertEqual(request.allowedCredentials.map(\.credentialID), [Data([7, 8, 9])])
         XCTAssertEqual(request.userVerificationPreference, .required)
@@ -28,7 +28,7 @@ final class PlatformPasskeyProviderTests: XCTestCase {
 
     func testMissingPresentationAnchorRefusesWithoutApplePrompt() async throws {
         let provider = PlatformPasskeyProvider(presentationAnchor: { nil })
-        do { _ = try await provider.authorize(options().validated(for: .create)); XCTFail("A window is required") }
+        do { _ = try await provider.authorize(options().validated(for: .create, relyingParty: "tracecommons.ai")); XCTFail("A window is required") }
         catch { XCTAssertEqual(error as? NativePasskeyFailure, .presentationUnavailable) }
     }
 

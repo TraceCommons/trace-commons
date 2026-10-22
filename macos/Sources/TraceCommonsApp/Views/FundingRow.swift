@@ -33,8 +33,16 @@ struct FundingDestination: Decodable, Equatable, Sendable {
         self.connectionRevision = connectionRevision
     }
 
+    /// The credits page on the linked dylib's NEAR AI dashboard. The origin
+    /// is the dylib's (staging design 4.1), never a Swift copy, so a staging
+    /// build links to the staging dashboard. Nil when the dylib cannot say.
     var browserURL: URL? {
-        URL(string: "https://cloud.near.ai/dashboard/organizations/\(organizationID)/credits")
+        browserURL(dashboardOrigin: BuildChannelGate.dylibChannel?.nearAiDashboardOrigin)
+    }
+
+    func browserURL(dashboardOrigin: String?) -> URL? {
+        guard let dashboardOrigin, !dashboardOrigin.isEmpty else { return nil }
+        return URL(string: "\(dashboardOrigin)/dashboard/organizations/\(organizationID)/credits")
     }
 
     private enum CodingKeys: String, CodingKey {

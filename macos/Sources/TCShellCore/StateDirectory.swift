@@ -6,7 +6,7 @@ import Foundation
 /// Carved out of the app target for the same reason `TCUpdates` was: so it
 /// can be tested without a framework, a bundle, or a running app. The defect
 /// that prompted it is exactly the kind one unit test catches -- the shipped
-/// app read `TRACE_COMMONS_CONTRIBUTOR_DIR` and nothing else, so a Finder
+/// app read its override variable and nothing else, so a Finder
 /// launch, which carries no shell environment, always refused. Every launch
 /// that ever worked was a shell launch, which inherits the variable and hides
 /// it.
@@ -81,13 +81,15 @@ public enum StateDirectory {
     static let socketFileName = "/daemon.sock"
 
     public static func resolve(
+        channel: BuildChannel,
         explicit: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String = NSHomeDirectory(),
         probe: Probe = .filesystem
     ) throws -> Resolution {
         let dir = chooseDirectory(
-            explicit: explicit, environment: environment, homeDirectory: homeDirectory)
+            channel: channel, explicit: explicit, environment: environment,
+            homeDirectory: homeDirectory)
 
         let socketBytes = (dir + socketFileName).utf8.count
         guard socketBytes <= maxSocketPathBytes else {
@@ -110,17 +112,25 @@ public enum StateDirectory {
     /// Compute uses no daemon socket, so a long directory must not inherit
     /// the watcher's Unix socket-path refusal. Folder validity still applies.
     public static func resolveCompute(
+        channel: BuildChannel,
         explicit: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String = NSHomeDirectory(),
         probe: Probe = .filesystem
     ) throws -> Resolution {
-        let dir = chooseDirectory(explicit: explicit, environment: environment, homeDirectory: homeDirectory)
+        let dir = chooseDirectory(
+            channel: channel, explicit: explicit, environment: environment,
+            homeDirectory: homeDirectory)
         if case .file = probe.verdict(dir) { throw Refusal.notADirectory }
         return Resolution(path: dir)
     }
 
+    /// The directory name and override variable come from the dylib
+    /// (`channel`), never from Swift: a staging build reads only its own
+    /// variable and names its own directory, so it cannot open production's
+    /// enrollment (staging design, section 4.2).
     private static func chooseDirectory(
+        channel: BuildChannel,
         explicit: String?,
         environment: [String: String],
         homeDirectory: String
@@ -128,13 +138,14 @@ public enum StateDirectory {
         if let explicit, !explicit.isEmpty {
             return explicit
         }
-        if let fromEnvironment = environment["TRACE_COMMONS_CONTRIBUTOR_DIR"],
+        if let fromEnvironment = environment[channel.stateDirEnv],
             !fromEnvironment.isEmpty
         {
             return fromEnvironment
         }
-        // The Homebrew cask's `zap` stanza already treats this as the state
-        // directory, and it is where a contributor's identity already lives.
-        return homeDirectory + "/Library/Application Support/trace-commons"
+        // For production, the Homebrew cask's `zap` stanza already treats
+        // this as the state directory, and it is where a contributor's
+        // identity already lives.
+        return homeDirectory + "/Library/Application Support/" + channel.stateDirName
     }
 }
