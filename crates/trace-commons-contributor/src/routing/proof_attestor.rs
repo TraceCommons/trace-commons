@@ -342,16 +342,17 @@ impl std::fmt::Debug for StagingPinSource {
 impl SignedPinSource for StagingPinSource {
     async fn fetch(&self) -> Result<Vec<u8>, SourceUnavailable> {
         // An operator who narrowed egress keeps it narrowed: an enforcing
-        // allowlist must admit the pin URL too.
-        if let Some(cfg) = self
-            .store
-            .as_ref()
-            .and_then(|store| store.load_config().ok().flatten())
-        {
-            let configured = crate::config::allowlist_for(cfg.allowed_hosts.as_deref());
-            if configured.is_enforcing() {
-                configured.check(&self.url).map_err(|_| SourceUnavailable)?;
-            }
+        // allowlist, from the config or else the environment, must admit the
+        // pin URL too. A config that cannot be loaded fails closed rather
+        // than skipping the check.
+        let cfg = match self.store.as_ref() {
+            Some(store) => store.load_config().map_err(|_| SourceUnavailable)?,
+            None => None,
+        };
+        let configured =
+            crate::config::allowlist_for(cfg.as_ref().and_then(|c| c.allowed_hosts.as_deref()));
+        if configured.is_enforcing() {
+            configured.check(&self.url).map_err(|_| SourceUnavailable)?;
         }
         let mut response = self
             .http
@@ -766,7 +767,7 @@ impl PinProvider {
     /// The cached set, refreshed on its interval. A fetch that fails keeps
     /// the last good set until [`PIN_TTL`] after it was fetched and never
     /// past its own expiry; a document fetched and refused pins nothing at
-    /// once.
+    /// once, and stands as an empty set until the next refresh.
     async fn refreshed(&self, now_unix: u64) -> CurrentPins {
         let mut guard = self.cache.lock().await;
         let (cache, last_failure) = &mut *guard;
@@ -796,8 +797,15 @@ impl PinProvider {
                 }
                 #[cfg(feature = "near-ai-staging")]
                 Ok(Fetched::Refused(label)) => {
-                    *last_failure = Some(now_unix);
-                    *cache = None;
+                    // The refusal is cached as an empty set: nothing older is
+                    // ever served after it, and the document is asked for
+                    // again on the usual refresh interval.
+                    *last_failure = None;
+                    *cache = Some(CachedPins {
+                        pins: CurrentPins::default(),
+                        fetched_at: now_unix,
+                        valid_until: None,
+                    });
                     tracing::warn!(
                         control = CONTROL,
                         label,
@@ -2123,37 +2131,59 @@ mod tests {
         assert_eq!(overridden.source_kind(), "fixed");
     }
 
-    /// A default build carries nothing of the staging verifier: the channel
-    /// module defines the staging pin key and URL only under the feature, so
-    /// they are not in this build at all.
+    /// A default build carries nothing of the staging verifier: every
+    /// `STAGING_PIN_*` value in the crate's source is defined only under the
+    /// feature, so none of them is in this build at all.
     #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn a_default_build_has_no_staging_pin_key() {
-        let source = include_str!("../channel.rs");
-        let lines: Vec<&str> = source.lines().collect();
-        let mut definitions = 0;
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            if !(trimmed.starts_with("pub const STAGING_PIN_")
-                || trimmed.starts_with("const STAGING_PIN_"))
-            {
-                continue;
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
             }
-            definitions += 1;
-            // The nearest attribute above the definition, past its doc
-            // comment, must be the feature gate.
-            let gate = lines[..i]
-                .iter()
-                .rev()
-                .map(|l| l.trim())
-                .find(|l| !l.starts_with("///"))
-                .unwrap_or("");
-            assert_eq!(
-                gate,
-                "#[cfg(feature = \"near-ai-staging\")]",
-                "line {}: a staging pin value outside the feature",
-                i + 1
-            );
+        }
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut definitions = 0;
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap();
+            let lines: Vec<&str> = source.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                let trimmed = trimmed
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| trimmed.strip_prefix("pub "))
+                    .unwrap_or(trimmed);
+                if !(trimmed.starts_with("const STAGING_PIN_")
+                    || trimmed.starts_with("static STAGING_PIN_"))
+                {
+                    continue;
+                }
+                definitions += 1;
+                // The nearest attribute above the definition, past its doc
+                // comment, must be the feature gate.
+                let gate = lines[..i]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .find(|l| !l.starts_with("///"))
+                    .unwrap_or("");
+                assert_eq!(
+                    gate,
+                    "#[cfg(feature = \"near-ai-staging\")]",
+                    "{}:{}: a staging pin value outside the feature",
+                    file.display(),
+                    i + 1
+                );
+            }
         }
         assert_eq!(definitions, 2, "the staging pin key and URL are defined");
     }
@@ -2402,6 +2432,52 @@ mod tests {
             assert_eq!(small.fetch().await, Ok(b"{}".to_vec()));
         }
 
+        /// An enforcing allowlist that leaves out the pin host refuses the
+        /// fetch, and so does a config that cannot be loaded: an operator's
+        /// narrowed egress is never skipped because the config is unreadable.
+        /// Neither reaches the server.
+        #[tokio::test]
+        async fn the_pin_fetch_keeps_to_the_allowlist() {
+            let (base, seen, _stop) = recording_server().await;
+            let url = format!("{base}/near-ai-pins/current.json");
+
+            let narrowed = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(narrowed.path().to_path_buf()).unwrap();
+            let config = serde_json::json!({
+                "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+                "issuer_url": "https://issuer.example",
+                "ingest_url": "https://ingest.example",
+                "audience": "trace-commons-upload",
+                "tenant_id": "tenant-abc",
+                "instance_id": "instance-1",
+                "user_subject": "user-1",
+                "device_key_id": "sha256:00",
+                "consent_scopes": ["debugging_evaluation"],
+                "allowed_hosts": "issuer.example,ingest.example",
+            });
+            std::fs::write(
+                narrowed.path().join(crate::config::CONFIG_FILE),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            let loaded = store.load_config().unwrap().expect("the config loads");
+            assert!(crate::config::allowlist_for(loaded.allowed_hosts.as_deref()).is_enforcing());
+            let source = StagingPinSource::new(&url, Some(store)).unwrap();
+            assert_eq!(source.fetch().await, Err(SourceUnavailable));
+
+            let broken = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(broken.path().to_path_buf()).unwrap();
+            std::fs::write(broken.path().join(crate::config::CONFIG_FILE), b"not json").unwrap();
+            let source = StagingPinSource::new(&url, Some(store)).unwrap();
+            assert_eq!(source.fetch().await, Err(SourceUnavailable));
+
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "{:?}",
+                seen.lock().unwrap()
+            );
+        }
+
         /// The daemon's provider in a staging build asks the signed pin URL
         /// and nothing else: ingest's unsigned document is never fetched,
         /// and with the signed one missing nothing is pinned.
@@ -2463,6 +2539,7 @@ mod tests {
                 "no fallback to 5"
             );
             assert_eq!(first.status_label(), "pins_rollback");
+            assert_no_fallback_after_refusal(&first, &source, later, "pins_rollback").await;
 
             let restarted = provider(&source, &signer, dir.path());
             assert!(restarted.current(later).await.sets.is_empty());
@@ -2491,6 +2568,43 @@ mod tests {
             let later = T0 + PIN_REFRESH_AFTER.as_secs();
             assert!(provider.current(later).await.sets.is_empty());
             assert_eq!(provider.status_label(), "pins_sequence_conflict");
+            assert_no_fallback_after_refusal(&provider, &source, later, "pins_sequence_conflict")
+                .await;
+        }
+
+        /// After a document refused at `refused_at`, while a good set from
+        /// before is still inside `PIN_TTL`: the good set is never served
+        /// again, inside the retry floor or past it, and the refused
+        /// document is asked for again only on the refresh interval, not
+        /// every retry floor.
+        async fn assert_no_fallback_after_refusal(
+            provider: &PinProvider,
+            source: &Arc<Served>,
+            refused_at: u64,
+            label: &str,
+        ) {
+            let calls = source.calls();
+            for after in [30, PIN_RETRY_FLOOR.as_secs() + 30] {
+                assert!(
+                    provider.current(refused_at + after).await.sets.is_empty(),
+                    "+{after}s: an older set served after a refusal"
+                );
+                assert_eq!(provider.status_label(), label, "+{after}s");
+            }
+            assert_eq!(
+                source.calls(),
+                calls,
+                "a refused document is asked for again before the refresh interval"
+            );
+            assert!(
+                provider
+                    .current(refused_at + PIN_REFRESH_AFTER.as_secs())
+                    .await
+                    .sets
+                    .is_empty()
+            );
+            assert_eq!(source.calls(), calls + 1, "refreshed on its interval");
+            assert_eq!(provider.status_label(), label);
         }
 
         /// A failed fetch keeps the last good set until `PIN_TTL` after it
@@ -2663,6 +2777,41 @@ mod tests {
                 assert_eq!(provider.status_label(), expected, "{name}");
             }
 
+            // The sequence record cannot be written (its directory is
+            // missing), or cannot be read (a directory stands in its place).
+            let unrecordable: Vec<(&str, fn(&std::path::Path) -> std::path::PathBuf, &str)> = vec![
+                (
+                    "an unwritable sequence record",
+                    |dir| dir.join("missing").join(SEQUENCE_FILE),
+                    "pins_sequence_unwritable",
+                ),
+                (
+                    "a sequence record that is a directory",
+                    |dir| {
+                        let path = dir.join(SEQUENCE_FILE);
+                        std::fs::create_dir(&path).unwrap();
+                        path
+                    },
+                    "pins_sequence_unreadable",
+                ),
+            ];
+            for (name, sequence_file, expected) in unrecordable {
+                let dir = tempfile::tempdir().unwrap();
+                let source = Served::serving(signer.sign(&payload(serde_json::json!({}))));
+                let provider = Arc::new(PinProvider::signed_with(
+                    Box::new(Arc::clone(&source)),
+                    &signer.public(),
+                    sequence_file(dir.path()),
+                ));
+                let (attestor, _) = attestor_over(Arc::clone(&provider), at);
+                let answer = attestor.model_keys(NEAR_AI_BACKEND, MODEL).await;
+                assert!(
+                    !matches!(answer, Attestation::Keys(_)),
+                    "{name}: {answer:?}"
+                );
+                assert_eq!(provider.status_label(), expected, "{name}");
+            }
+
             // Positive control: the same signer, the same sets and time,
             // with nothing wrong, does earn the key.
             let dir = tempfile::tempdir().unwrap();
@@ -2690,6 +2839,34 @@ mod tests {
             );
             assert!(provider.current(T0).await.sets.is_empty());
             assert_eq!(provider.status_label(), label_unknown_key());
+
+            // A document that names the compiled-in key's id reaches the
+            // signature check, which refuses it.
+            let dir = tempfile::tempdir().unwrap();
+            let claimed = signer.wrap(
+                &Signer::payload(1, T0, T0 + 86_400, &sets(&["aa"]), serde_json::json!({})),
+                &staging_pins::key_id(crate::channel::STAGING_PIN_PUBLIC_KEY),
+            );
+            let source = Served::serving(claimed);
+            let provider = PinProvider::signed_with(
+                Box::new(Arc::clone(&source)),
+                crate::channel::STAGING_PIN_PUBLIC_KEY,
+                dir.path().join(SEQUENCE_FILE),
+            );
+            assert!(provider.current(T0).await.sets.is_empty());
+            assert_eq!(provider.status_label(), PinRefusal::BadSignature.label());
+        }
+
+        /// Until the real staging pin key exists, the compiled-in key is a
+        /// fixed, searchable placeholder one byte short of an Ed25519 key,
+        /// so a release scan can find it and no signature can verify.
+        #[test]
+        fn the_compiled_in_key_is_a_real_key_or_the_placeholder() {
+            let key = crate::channel::STAGING_PIN_PUBLIC_KEY;
+            if key.len() != 32 {
+                assert_eq!(key, b"TC-STAGING-PIN-KEY-PLACEHOLDER!");
+                assert_eq!(key.len(), 31);
+            }
         }
 
         fn label_unknown_key() -> &'static str {

@@ -234,12 +234,15 @@ pub const STAGING_PIN_URL: &str =
 /// The Ed25519 public key a staging pin set must be signed by (spec 5.4),
 /// as its 32 raw bytes.
 ///
-/// PLACEHOLDER until the staging pin-signing key pair exists: 31 bytes, one
-/// short of an Ed25519 public key, so `ring` rejects it outright and every
-/// document is refused with a label in the daemon status. Nothing is pinned
-/// until the real public key replaces it here, the only place it is written.
+/// PLACEHOLDER until the staging pin-signing key pair exists: 31 fixed
+/// ASCII bytes, one short of an Ed25519 public key, so a release scan can
+/// search a binary for them and no signature can verify against them. A
+/// document under another key id is refused as an unknown key; one claiming
+/// this key's id fails its signature check. Either way the refusal label is
+/// in the daemon status and nothing is pinned until the real public key
+/// replaces this, the only place it is written.
 #[cfg(feature = "near-ai-staging")]
-pub const STAGING_PIN_PUBLIC_KEY: &[u8] = &[0; 31];
+pub const STAGING_PIN_PUBLIC_KEY: &[u8] = b"TC-STAGING-PIN-KEY-PLACEHOLDER!";
 
 /// The environment variable that moves the IronWire home (spec 4.2, S10).
 /// A staging build reads only its own, so a production `IRONWIRE_HOME` never
