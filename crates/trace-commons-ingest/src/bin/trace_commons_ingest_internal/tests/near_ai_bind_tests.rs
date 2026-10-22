@@ -44,13 +44,20 @@ struct ProvisioningEnv {
 
 impl ProvisioningEnv {
     fn publish() -> Self {
-        let vars = [
+        #[allow(unused_mut)]
+        let mut vars: Vec<(&'static str, String)> = vec![
             (
                 "TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL",
-                "https://issuer.example",
+                "https://issuer.example".into(),
             ),
-            ("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload"),
+            ("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload".into()),
         ];
+        // On a staging build the fixture's subjects are on the allow-list.
+        #[cfg(feature = "near-ai-staging")]
+        vars.push((
+            "TRACE_COMMONS_STAGING_ALLOWED_NEAR_AI_SUBJECTS_PATH",
+            super::fixture_allow_list_path(),
+        ));
         let previous = vars
             .iter()
             .map(|(name, _)| (*name, std::env::var(name).ok()))
@@ -95,9 +102,13 @@ fn identity() -> trace_commons_server::near_account_identity::NearAccountIdentit
     .expect("fixture identity")
 }
 
-/// A NEAR AI subject nobody has used, per call.
+/// A NEAR AI subject nobody has used, per call. On a staging build it is on
+/// the fixture allow-list.
 fn fresh_subject() -> String {
-    format!("auth0|z2-s3-bind-{}", Uuid::new_v4().simple())
+    let subject = format!("auth0|z2-s3-bind-{}", Uuid::new_v4().simple());
+    #[cfg(feature = "near-ai-staging")]
+    super::list_fixture_subject(&subject);
+    subject
 }
 
 /// A stand-in for NEAR AI's `GET /users/me` answering `subject` to any token,
@@ -3193,15 +3204,17 @@ mod staging_allow_list {
     async fn an_empty_list_admits_nobody() {
         let Some(h) = harness().await else { return };
         let admin = h.admin().await;
-        for (what, list) in [
-            ("an empty file", AllowList::with(&[])),
-            (
-                "comments and blank lines",
-                AllowList::with(&["# none yet", "", "   "]),
-            ),
-            ("a missing file", AllowList::missing()),
-            ("no setting", AllowList::unset()),
-        ] {
+        // One setting at a time: each is made, used and restored in turn.
+        let settings: [(&str, fn() -> AllowList); 4] = [
+            ("an empty file", || AllowList::with(&[])),
+            ("comments and blank lines", || {
+                AllowList::with(&["# none yet", "", "   "])
+            }),
+            ("a missing file", AllowList::missing),
+            ("no setting", AllowList::unset),
+        ];
+        for (what, setting) in settings {
+            let list = setting();
             let before = rows(&admin).await;
             let reply = sign_in(&h, &Device::new()).await;
             assert_not_admitted(&reply, &h, what);
