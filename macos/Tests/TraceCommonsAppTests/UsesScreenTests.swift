@@ -399,7 +399,7 @@ final class UsesScreenTests: XCTestCase {
         let more = try XCTUnwrap(source.range(of: "if more {"))
         XCTAssertLessThan(lead.lowerBound, more.lowerBound)
         XCTAssertTrue(source.contains("[copy.privateAi.offerMore, privateAI.offerExposure, privateAI.offerNoRepoint]"))
-        XCTAssertTrue(source.contains("Button(copy.privateAi.learnMore) { more = true }"))
+        XCTAssertTrue(source.contains("Button { more = true } label: {\n                            Text(copy.privateAi.learnMore)"))
         XCTAssertTrue(source.contains("GlassButtonStyle(.link)"))
         XCTAssertFalse(source.contains("privateAI.offerWhat"))
     }

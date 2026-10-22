@@ -580,7 +580,7 @@ struct JoinScreen: View {
             let pulse = signedInAt.map { date.timeIntervalSince($0) / 1.6 }
             ZStack {
                 Circle()
-                    .strokeBorder(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .strokeBorder(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
                     .frame(width: 140, height: 140)
                     .rotationEffect(.degrees(reduceMotion ? 0 : (time / 90).truncatingRemainder(dividingBy: 1) * 360))
                 if let pulse, pulse < 1, !reduceMotion {

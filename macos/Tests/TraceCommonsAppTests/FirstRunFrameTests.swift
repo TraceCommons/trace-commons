@@ -63,7 +63,7 @@ final class FirstRunFrameTests: XCTestCase {
         let back = try XCTUnwrap(frame.range(of: "Button(copy.frame.back)"))
         let after = String(frame[back.upperBound...].prefix(200))
         XCTAssertTrue(after.contains("FirstRunNavigation.back(state)"))
-        XCTAssertTrue(after.contains("GlassButtonStyle(.glass, size: .bar)"))
+        XCTAssertTrue(after.contains("GlassButtonStyle(.glass, size: .stage)"))
     }
 
     /// The action bar: Back on its left, then a spacer, then the link
@@ -79,8 +79,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertFalse(order.contains(nil), "\(order)")
         let found = order.compactMap { $0 }
         XCTAssertEqual(found, found.sorted())
-        XCTAssertTrue(body.contains("GlassButtonStyle(.secondary, size: .bar)"))
-        XCTAssertTrue(body.contains("GlassButtonStyle(.link)"))
+        XCTAssertTrue(body.contains("GlassButtonStyle(.secondary, size: .stage)"))
+        XCTAssertTrue(body.contains("GlassButtonStyle(.link, size: .stage)"))
+        XCTAssertTrue(body.contains("GlassButtonStyle(.primary, size: .stage)"), "the canvas's semibold Continue")
         XCTAssertTrue(body.contains("if footer.busy { GlassSpinner() }"))
         XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).cancel, "no Cancel unless a screen gives one")
         XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).link, "no link unless a screen gives one")
@@ -207,6 +208,12 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(join.contains("busy: starting && runner.isCommitting"))
         XCTAssertFalse(join.contains("bodyEmphasis"))
         let privateAI = try Self.appSource("Views/FirstRun/PrivateAIScreen.swift")
-        XCTAssertTrue(privateAI.contains("GlassToggleStyle(.settings)"))
+        // The canvas's switch row (Ron, 2026-10-22): the switch first, named
+        // by the destination, its name beside it.
+        XCTAssertTrue(privateAI.contains("GlassToggleStyle(.watch, showsLabel: false)"))
+        XCTAssertTrue(privateAI.contains("let name = privateAI?.destination ?? copy.privateAi.toggleLoading"))
+        let toggle = try XCTUnwrap(privateAI.range(of: "GlassToggleStyle(.watch, showsLabel: false)"))
+        let label = try XCTUnwrap(privateAI.range(of: "Text(name)"))
+        XCTAssertLessThan(toggle.lowerBound, label.lowerBound)
     }
 }

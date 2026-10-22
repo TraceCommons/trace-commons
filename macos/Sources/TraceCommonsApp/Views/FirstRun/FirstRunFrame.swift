@@ -207,7 +207,7 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
                 Button(copy.frame.back) {
                     state = FirstRunNavigation.back(state)
                 }
-                .buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                .buttonStyle(GlassButtonStyle(.glass, size: .stage))
             }
             Spacer(minLength: 0)
             if let link = footer.link {
@@ -221,13 +221,13 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
                             .accessibilityHidden(true)
                     }
                 }
-                .buttonStyle(GlassButtonStyle(.link))
+                .buttonStyle(GlassButtonStyle(.link, size: .stage))
                 .disabled(!link.isEnabled)
                 .accessibilityAddTraits(link.isOpen ? .isSelected : [])
             }
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
-                    .buttonStyle(GlassButtonStyle(.secondary, size: .bar))
+                    .buttonStyle(GlassButtonStyle(.secondary, size: .stage))
             }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {
@@ -235,7 +235,7 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
                     Text(footer.title)
                 }
             }
-            .buttonStyle(GlassButtonStyle(.primary))
+            .buttonStyle(GlassButtonStyle(.primary, size: .stage))
             .disabled(!footer.isEnabled)
         }
         .padding(.horizontal, FirstRunFrameLayout.barInset)

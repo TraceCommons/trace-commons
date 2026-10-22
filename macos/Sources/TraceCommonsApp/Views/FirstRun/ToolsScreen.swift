@@ -458,7 +458,7 @@ struct ToolsRing: View {
 
     private func ring(center: CGPoint, tight: Bool, time: TimeInterval, elapsed: Double?) -> some View {
         Circle()
-            .stroke(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 1.5, dash: [3, 7]))
+            .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1.5, dash: [3, 7]))
             .frame(width: ToolsRingLayout.looseRadius * 2, height: ToolsRingLayout.looseRadius * 2)
             .rotationEffect(.degrees(reduceMotion ? 0 : (time / 90).truncatingRemainder(dividingBy: 1) * 360))
             .scaleEffect(tight ? ToolsRingLayout.tightRadius / ToolsRingLayout.looseRadius : 1)
@@ -611,7 +611,7 @@ struct ToolChecks: View {
                 .fixedSize(horizontal: false, vertical: !open && !showsRepos)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(GlassTokens.Color.nodeCardFill.color))
+                        .fill(GlassTokens.Color.firstRunCard.color))
             AddToolTile(copy: copy, runner: runner, adding: adding)
                 .modifier(RowRise(shown: shown, index: rows.count, reduceMotion: reduceMotion))
         }
@@ -805,7 +805,7 @@ struct AddToolTile: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(
-                            dragging ? GlassTokens.Color.purpleText.color : GlassTokens.Color.rule.color,
+                            dragging ? GlassTokens.Color.purpleText.color : GlassTokens.Color.firstRunRule.color,
                             style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
                 .contentShape(Rectangle())
             }

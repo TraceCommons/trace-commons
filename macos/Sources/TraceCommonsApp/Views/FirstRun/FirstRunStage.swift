@@ -185,7 +185,7 @@ struct FirstRunStepThread: View {
                 path.move(to: CGPoint(x: 0, y: 1.5))
                 path.addLine(to: CGPoint(x: Self.segmentWidth, y: 1.5))
             }
-            .stroke(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 2, lineCap: .butt, dash: [2, 4]))
+            .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 2, lineCap: .butt, dash: [2, 4]))
             Capsule()
                 .fill(
                     LinearGradient(
@@ -294,8 +294,8 @@ struct FirstRunToolFace: View {
         GeometryReader { geometry in
             let side = min(geometry.size.width, geometry.size.height)
             RoundedRectangle(cornerRadius: side * 14 / 52, style: .continuous)
-                .fill(GlassTokens.Color.nodeCardFill.color)
-                .shadow(color: GlassTokens.Color.scrim.opacity(0.5).color, radius: side * 10 / 52, y: side * 8 / 52)
+                .fill(GlassTokens.Color.firstRunTile.color)
+                .shadow(color: GlassTokens.Color.firstRunTileShadow.color, radius: side * 10 / 52, y: side * 8 / 52)
                 .overlay {
                     if let logo = tool.logo {
                         GlassToolLogoShape(logo)
@@ -388,7 +388,8 @@ private struct FirstRunMarkerCheck: View {
 }
 
 /// The check's stroke in its own 44 by 44 box: a short down-stroke, then a
-/// long flick up and out past the box's corner.
+/// flick up and a little out past the box's corner (shortened by a quarter,
+/// Ron 2026-10-22: the tail ran too far out).
 struct FirstRunMarkerCheckShape: Shape {
     func path(in rect: CGRect) -> Path {
         let sx = rect.width / 44
@@ -397,7 +398,7 @@ struct FirstRunMarkerCheckShape: Shape {
         var path = Path()
         path.move(to: p(11, 27))
         path.addCurve(to: p(18, 35), control1: p(13, 29), control2: p(15.5, 32))
-        path.addCurve(to: p(41, 4), control1: p(23, 25), control2: p(31, 13))
+        path.addCurve(to: p(35, 12), control1: p(22, 27.5), control2: p(28, 18.5))
         return path
     }
 }
@@ -496,6 +497,6 @@ extension View {
         self.padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(GlassTokens.Color.nodeCardFill.color))
+                    .fill(GlassTokens.Color.firstRunCard.color))
     }
 }

@@ -181,24 +181,36 @@ struct PrivateAIScreen: View {
                         .glassType(GlassTokens.TypeScale.label.weight(.regular))
                         .foregroundStyle(GlassColor.textSecondary)
                 }
+                // The canvas's row (Ron, 2026-10-22): the switch on the
+                // left, named by the destination, and Learn more on the right.
                 HStack(spacing: GlassTokens.Space.s5) {
+                    let name = privateAI?.destination ?? copy.privateAi.toggleLoading
                     Toggle(
-                        privateAI?.offerTitle ?? copy.privateAi.toggleLoading,
+                        name,
                         isOn: Binding(
                             get: { runner.state.privateAI && privateAI != nil },
                             set: { runner.state.privateAI = $0 })
                     )
-                    .toggleStyle(GlassToggleStyle(.settings))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                     .disabled(privateAI == nil)
+                    // The switch already says its name to assistive tech.
+                    Text(name)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .opacity(privateAI == nil ? GlassTokens.Opacity.disabled : 1)
+                        .accessibilityHidden(true)
                     Spacer(minLength: GlassTokens.Space.s6)
                     if privateAI != nil, !more {
-                        Button(copy.privateAi.learnMore) { more = true }
-                            .buttonStyle(GlassButtonStyle(.link))
+                        Button { more = true } label: {
+                            Text(copy.privateAi.learnMore)
+                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        }
+                        .buttonStyle(GlassButtonStyle(.link))
                     }
                 }
                 .padding(.top, GlassTokens.Space.s4)
             }
-            .frame(width: 420, alignment: .leading)
+            .frame(width: 460, alignment: .leading)
             .firstRunCard(padding: EdgeInsets(top: 14, leading: 20, bottom: 16, trailing: 20))
         }
     }

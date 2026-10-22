@@ -117,7 +117,7 @@ struct WelcomeScreen: View {
                 Button(copy.welcome.start) {
                     runner.state = FirstRunNavigation.next(runner.state)
                 }
-                .buttonStyle(GlassButtonStyle(.primary))
+                .buttonStyle(GlassButtonStyle(.primary, size: .stage))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
                 Spacer(minLength: 0)

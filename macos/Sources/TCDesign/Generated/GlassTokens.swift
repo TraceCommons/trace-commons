@@ -91,6 +91,20 @@ public enum GlassTokens {
         public static let firstRunApprove: GlassRGBA = GlassRGBA(0x2C9E57, alpha: 1)
         /// The review gate's fill toward its rim, under firstRunApprove.
         public static let firstRunApproveDeep: GlassRGBA = GlassRGBA(0x1D7A42, alpha: 1)
+        /// A card on the first run's scene (canvas --card): the tool list and Customize, the Uses list, the Traces estimate, the Private AI card, Join's cards and Uses' This Mac and commons nodes. Lighter than the scene so it reads as a card on it (Ron, 2026-10-22: nodeCardFill was too close to the navy).
+        public static let firstRunCard: GlassRGBA = GlassRGBA(0x171C33, alpha: 0.78, light: GlassRGBA(0xFFFFFF, alpha: 0.78))
+        /// The review gate's disc on Uses before it fills (canvas --card-solid): the card's colour, opaque, so the line does not show through it.
+        public static let firstRunCardSolid: GlassRGBA = GlassRGBA(0x1A2039, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// A tool tile's raised face on the first run's stage (canvas --tile).
+        public static let firstRunTile: GlassRGBA = GlassRGBA(0x1B2140, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// The shadow under a tool tile and the review gate (canvas --tile-shadow, 0 8 20 in dark, 0 6 16 in light).
+        public static let firstRunTileShadow: GlassRGBA = GlassRGBA(0x02030A, alpha: 0.5, light: GlassRGBA(0x1D2A4A, alpha: 0.14))
+        /// A glass button in the first run's action bar, Back (canvas --control): a light glass over the scene, where the flat theme's control is a dark well.
+        public static let firstRunControl: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.09, light: GlassRGBA(0xFFFFFF, alpha: 0.72))
+        /// firstRunControl under the pointer (canvas --control-h).
+        public static let firstRunControlHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.15, light: GlassRGBA(0xFFFFFF, alpha: 0.92))
+        /// The first run's dashed lines and rules (canvas --rule): the Tools ring, the step thread still to go, the Uses path, the Traces streams, the commons and Join rings, the add-a-tool row's dashed edge. Stronger than rule so a dashed line reads on the scene (Ron, 2026-10-22).
+        public static let firstRunRule: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
         /// The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).
         public static let chartSurface: GlassRGBA = GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF7F8FA, alpha: 1))
         /// Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).
@@ -265,6 +279,13 @@ public enum GlassTokens {
             "firstRunBeamCore": firstRunBeamCore,
             "firstRunApprove": firstRunApprove,
             "firstRunApproveDeep": firstRunApproveDeep,
+            "firstRunCard": firstRunCard,
+            "firstRunCardSolid": firstRunCardSolid,
+            "firstRunTile": firstRunTile,
+            "firstRunTileShadow": firstRunTileShadow,
+            "firstRunControl": firstRunControl,
+            "firstRunControlHover": firstRunControlHover,
+            "firstRunRule": firstRunRule,
             "chartSurface": chartSurface,
             "chartGrid": chartGrid,
             "chartSeries1": chartSeries1,

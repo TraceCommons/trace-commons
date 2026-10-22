@@ -391,7 +391,7 @@ struct UsesFlow: View {
                         line.move(to: CGPoint(x: left + UsesFlowLayout.lineStart, y: y))
                         line.addLine(to: CGPoint(x: left + UsesFlowLayout.lineEnd, y: y))
                     }
-                    .stroke(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 2, dash: [4, 6]))
+                    .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 2, dash: [4, 6]))
                     mac(at: CGPoint(x: left + 210, y: y))
                     gate(at: CGPoint(x: left + 430, y: y), t: t, path: path)
                     commons(at: CGPoint(x: left + 650, y: y), t: t, path: path, elapsed: elapsed)
@@ -417,11 +417,11 @@ struct UsesFlow: View {
     private func mac(at center: CGPoint) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(GlassTokens.Color.nodeCardFill.color)
+                .fill(GlassTokens.Color.firstRunCard.color)
                 .frame(width: 112, height: 78)
                 .overlay(alignment: .bottom) {
                     Capsule()
-                        .fill(GlassTokens.Color.rule.color)
+                        .fill(GlassTokens.Color.firstRunRule.color)
                         .frame(width: 44, height: 3)
                         .padding(.bottom, 10)
                 }
@@ -441,8 +441,8 @@ struct UsesFlow: View {
         let look: UsesFlowLayout.Gate = t.map { UsesFlowLayout.gate(path, loop: $0) } ?? .rest
         return ZStack {
             Circle()
-                .fill(GlassTokens.Color.nodeCardFill.color)
-                .shadow(color: GlassTokens.Color.scrim.opacity(0.5).color, radius: 10, y: 8)
+                .fill(GlassTokens.Color.firstRunCardSolid.color)
+                .shadow(color: GlassTokens.Color.firstRunTileShadow.color, radius: 10, y: 8)
             approval
                 .opacity(look.fill)
             thumb(look)
@@ -515,7 +515,7 @@ struct UsesFlow: View {
     private func satellites(_ filled: Int) -> some View {
         ZStack {
             Circle()
-                .strokeBorder(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                .strokeBorder(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
             ForEach(0..<5, id: \.self) { place in
                 satellite(place, filled: filled)
             }

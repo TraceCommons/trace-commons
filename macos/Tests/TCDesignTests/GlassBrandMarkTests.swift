@@ -153,4 +153,19 @@ final class GlassBrandMarkTests: XCTestCase {
             XCTAssertFalse(band.intersects(box), "the shine rests on the mark at \(end)")
         }
     }
+
+    /// The light leans with its band (Ron, 2026-10-22): the gradient runs
+    /// square to the band's edge, from its left edge to its right, so its
+    /// brightest line is the band's forward-leaning centre, not upright.
+    func test_theShineLeansForward() {
+        let strip = GlassBrandMark.shineBand(at: 100)
+        let lean = tan(18 * CGFloat.pi / 180)
+        // The band's edge, going down: x falls as y grows.
+        let edge = CGVector(dx: -lean, dy: 1)
+        let across = CGVector(dx: strip.to.x - strip.from.x, dy: strip.to.y - strip.from.y)
+        XCTAssertEqual(edge.dx * across.dx + edge.dy * across.dy, 0, accuracy: 0.0001, "square to the edge")
+        XCTAssertGreaterThan(across.dy, 0, "not a level, upright gradient")
+        // `to` lies on the right edge: x + 110 at its own height.
+        XCTAssertEqual(strip.to.x, 100 + 110 - lean * strip.to.y, accuracy: 0.0001)
+    }
 }

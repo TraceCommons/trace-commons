@@ -35,11 +35,16 @@ extension GlassBrandMark {
     }
 
     /// The light band that crosses the mark, in the tile's coordinates: a
-    /// 110-wide strip from y 60 to 340, leaning 18 degrees, its left edge at
-    /// `x`. It rests fully clear of the mark (x 83 to 317) at both ends of
-    /// its travel, -240 and 470.
+    /// 110-wide strip from y 60 to 340, leaning forward 18 degrees, its left
+    /// edge at `x`. It rests fully clear of the mark (x 83 to 317) at both
+    /// ends of its travel, -240 and 470.
+    ///
+    /// `from` and `to` run across the band square to its lean, so the light
+    /// inside it leans with it, as the canvas's skewed gradient does (Ron,
+    /// 2026-10-22: the shimmer read upright).
     static func shineBand(at x: CGFloat) -> (band: Path, from: CGPoint, to: CGPoint) {
-        let lean = tan(18 * CGFloat.pi / 180)
+        let angle = 18 * CGFloat.pi / 180
+        let lean = tan(angle)
         func skewed(_ px: CGFloat, _ py: CGFloat) -> CGPoint { CGPoint(x: px - lean * py, y: py) }
         var band = Path()
         band.move(to: skewed(x, 60))
@@ -47,7 +52,9 @@ extension GlassBrandMark {
         band.addLine(to: skewed(x + 110, 340))
         band.addLine(to: skewed(x, 340))
         band.closeSubpath()
-        return (band, skewed(x, 200), skewed(x + 110, 200))
+        let from = skewed(x, 200)
+        let across = 110 * cos(angle)
+        return (band, from, CGPoint(x: from.x + across * cos(angle), y: from.y + across * sin(angle)))
     }
 
     /// Where the shine's band starts and ends.

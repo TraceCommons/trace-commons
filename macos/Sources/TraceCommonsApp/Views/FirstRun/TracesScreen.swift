@@ -190,7 +190,7 @@ struct TracesScreen: View {
                 path.move(to: curve.0)
                 path.addCurve(to: curve.3, control1: curve.1, control2: curve.2)
             }
-            .stroke(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 5]))
+            .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 5]))
             if flowing {
                 ForEach(0..<3, id: \.self) { orb in
                     let into = (elapsed - 0.5 - Double(orb) * 0.46 - Double(index) * 0.15) / 1.38
