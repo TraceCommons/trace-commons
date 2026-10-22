@@ -110,8 +110,16 @@ All dated 2026-10-21. The owner's words are quoted.
   and the app replay RTMR3 from the event log, require the replay to equal
   the verified model quote's RTMR3, and check every event against a signed
   allowlist (5.2, 5.4, 5.5). The register set never ships without the
-  replay. Which record's log replays the model quote's RTMR3 is confirmed
-  first (5.2); the rule is the replay, not the record.
+  replay. Which record's log replays the model quote's RTMR3 was confirmed
+  first, as promised, on 2026-10-22 (Verified on 2026-10-22: the RTMR3
+  replay): the model entry's own `event_log` and the compose-manager
+  record's copy of it both replay to the model quote's RTMR3, and the
+  replay uses the model entry's. The same capture showed that post-boot
+  compose actions do **not** extend RTMR3. They are carried in the
+  compose-manager record's `actions` list, bound to that record's own
+  quote through `actions_hash`, so the compose-action half of the owner's
+  option is checked from that list and its quote, not from the replay
+  (5.2). The rule is still the replay, not the record.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -278,8 +286,9 @@ whether it changed, is still to be done.
   `compose_manager_attestation` was **not** verified, and the probe did not
   check whether it binds the nonce.
 - **Each model entry carries a `compose_manager_attestation`**: runtime
-  compose actions with their own quote. Runtime compose actions extend
-  RTMR3.
+  compose actions with their own quote. Those actions do **not** extend
+  RTMR3; the record binds them through its own quote's `report_data`
+  instead (Verified on 2026-10-22: the RTMR3 replay, below).
 - **MRCONFIGID is the v1 layout.** The model entry quote's MRCONFIGID was
   `01`, then the 32-byte compose hash, then zero padding (fifteen bytes).
   That is config-id v1 as `measurements.rs` describes it and as `quote.rs`
@@ -294,6 +303,55 @@ whether it changed, is still to be done.
   follow-up work, not done here.
 - **Still unknown:** whether an API key minted before a redeploy survives the
   JWT rotation.
+
+### Verified on 2026-10-22: the RTMR3 replay
+
+Plan Task 6b step 1, from a second live capture of the same endpoint, model
+`Qwen/Qwen3.8-27B`, a fresh 32-byte nonce and `signing_algo=ecdsa`. The
+capture is kept out of the repo, and no register, digest or payload value
+is recorded here.
+
+- **The model entry carries its own log, and it replays.** Each
+  `model_attestations[]` entry has a top-level `event_log` (a JSON list;
+  30 events in this capture), separate from `info`, which still has no
+  `tcb_info`. Replayed, its RTMR3 events reproduce the model entry quote's
+  RTMR3. The compose-manager record's own copy of the log replays to the
+  same value, and the gateway's log replays to the gateway quote's RTMR3.
+- **Ten RTMR3 events, in this order:** `system-preparing`, `app-id`,
+  `compose-hash`, `instance-id`, `boot-mr-done`, `mr-kms`,
+  `os-image-hash`, `key-provider`, `storage-fs`, `system-ready`. Each has
+  `imr` 3 and `event_type` 134217729 (`0x08000001`). The other twenty
+  events are for `imr` 0-2 and carry 96-hex-character digests; they are not
+  part of the RTMR3 replay (those registers are pinned directly).
+- **NEAR AI ships the RTMR3 events with an empty `digest`.** Each digest
+  has to be recomputed, as `SHA-384(event_type as 4 bytes little-endian ||
+  ":" || event name || ":" || payload bytes)`, the payload being the
+  hex-decoded `event_payload`. The replay then starts from 48 zero bytes
+  and sets `rtmr3 = SHA-384(rtmr3 || digest)` for each RTMR3 event in
+  order. With that rule all three replays above matched.
+- **Post-boot compose actions do not extend RTMR3.** The
+  `compose_manager_attestation` record has the fields `actions`,
+  `actions_hash`, `nonce`, `nonce_source` (`"client"`), `quote`,
+  `event_log`, `report_data` and `vm_config`. `actions` held eight
+  entries, each with the keys `action`, `container`, `image` and
+  `timestamp`; the action kinds seen were `compose_manager_started`,
+  `compose_up` and `compose_down`. None of them appears in the RTMR3 log.
+- **The compose-manager quote is the model's TD, and binds the actions.**
+  Its `mrtd`, `mrconfigid` and `rtmr0-3` are identical to the model entry
+  quote's. Its `report_data[32..64]` is our nonce. Its
+  `report_data[0..32]` equals `actions_hash`, which is SHA-256 of the
+  `actions` list serialised as JSON with sorted keys and compact
+  separators (Python's `json.dumps(actions, separators=(",", ":"),
+  sort_keys=True)`); the default and the unsorted serialisations do not
+  match. So its `report_data[20..32]` is not zero and is not a signing
+  address, unlike the model and gateway quotes, whose `report_data[20..32]`
+  is zero (so `signer_binding_default_mode` passes on the staging model
+  quote).
+- **Limits of this capture.** The probe read the registers from the quote
+  bytes at the TDX v4 offsets and cross-checked `mrtd` against the
+  Intel-verified value from the first probe. This capture's compose-manager
+  quote was **not** itself verified against Intel collateral; the design
+  below requires that verification.
 
 ## 1. Goal and non-goals
 
@@ -766,9 +824,10 @@ separately:
 **Why RTMR3 cannot be pinned statically.** dstack extends RTMR3 at boot
 with an `instance-id` seeded from `getrandom`, so two instances of
 identical code differ and any restart or redeploy is a mismatch
-(`crates/trace-commons-attestation/src/measurements.rs:68-70`). Runtime
-compose actions also extend it after boot. Neither has anything to do with
-whether the code changed.
+(`crates/trace-commons-attestation/src/measurements.rs:68-70`). That has
+nothing to do with whether the code changed. (Runtime compose actions do
+not extend it; they are recorded in the compose-manager record instead,
+below.)
 
 **Why dropping RTMR3 alone is not enough.** Staging's MRCONFIGID is the
 v1 layout: `01`, the 32-byte compose hash, fifteen zero bytes (Verified on
@@ -779,73 +838,113 @@ They do not say which KMS released the keys, and they say nothing about
 what ran after boot: a model CVM could boot from the pinned compose, then
 add or swap a container through a compose action (one that logs prompts,
 say), and still match the set, and its provider_tee key would still be
-accepted. RTMR3 is the only register that records those things, which is
-why S16 replays it.
+accepted. RTMR3 is the only register that records the app id and the key
+provider, which is why S16 replays it. No register records the compose
+actions after boot; the compose-manager record does, under its own quote,
+which is why S16 also checks that record (Post-boot compose actions,
+below).
 
-**The RTMR3 replay.** For a model entry, start from 48 zero bytes and, for
-each RTMR3 event in the log in order, set `rtmr3 = SHA-384(rtmr3 ||
-digest)`. The result must equal `rtmr[3]` of the **verified** model entry
-quote, byte for byte; otherwise the log is not the one that quote measured
-and the entry is refused. The digest of each event is recomputed from its
-name and payload the way dstack derives it, never taken from the log's
-digest field; an event whose recorded digest differs is refused, because
+**The RTMR3 replay.** The log is the model entry's own `event_log`, the
+top-level field of the `model_attestations[]` entry whose quote matched a
+set (Verified on 2026-10-22: the RTMR3 replay). Only its events with `imr`
+3 take part. For each one the digest is recomputed, never taken from the
+log, as
+
+```
+digest = SHA-384(event_type as 4 bytes little-endian || ":" || event name || ":" || payload bytes)
+```
+
+where the payload bytes are the hex-decoded `event_payload`. NEAR AI ships
+these events with an empty `digest` field; an event whose recorded digest
+is non-empty and differs from the recomputed one is refused, because
 otherwise a log could carry the right digests beside invented payloads.
-Only after the replay matches are the events read.
+Then, from 48 zero bytes, `rtmr3 = SHA-384(rtmr3 || digest)` for each
+RTMR3 event in log order. The result must equal `rtmr[3]` of the
+**verified** model entry quote, byte for byte; otherwise the log is not the
+one that quote measured and the entry is refused. Only after the replay
+matches are the events read.
 
-Which log: the one that, replayed, reproduces the verified model entry
-quote's RTMR3. There are two candidates, and the probe did not settle
-which it is:
+Why this log: on 2026-10-22 the model entry's `event_log` and the
+compose-manager record's copy of it both replayed to the model quote's
+RTMR3 (S16 asked that the record be confirmed first). The model entry's is
+used because it sits beside the quote that is checked against the pin set,
+so the replay needs nothing from a second record. The rule is still the
+replay: whatever log a report carries, one that does not replay to the
+verified model quote's RTMR3 is refused, and then `observe` emits nothing
+and the app pins nothing. (Production model-host reports carry their log
+at `info.tcb_info.event_log`,
+`crates/trace-commons-server/src/near_attestation/measurements.rs:376`;
+the staging model entry's `info` has no `tcb_info`.)
 
-- the model entry's own event log. Production model-host reports carry it
-  at `info.tcb_info.event_log`
-  (`crates/trace-commons-server/src/near_attestation/measurements.rs:376`;
-  the checked-in fixtures trim it, `receipt.rs:1808`), but the staging
-  model entry's `info` has no `tcb_info`, so the probe saw no log there;
-- the event log in the entry's `compose_manager_attestation`, the record
-  the owner's option named. It sits beside its own quote, which the probe
-  did not verify.
+**The RTMR3 allowlist.** A replayed log is accepted only if its RTMR3
+events are exactly these ten names, each once, in this order (the order
+seen on 2026-10-22): `system-preparing`, `app-id`, `compose-hash`,
+`instance-id`, `boot-mr-done`, `mr-kms`, `os-image-hash`, `key-provider`,
+`storage-fs`, `system-ready`, each with `event_type` `0x08000001`. An
+unknown name, an extra or repeated event, a missing event or a different
+order is refused. A missing event is refused too: a log without its
+`key-provider` event would otherwise skip the KMS check. Then each value:
 
-Plan Task 6b settles this first, from an untrimmed staging capture kept
-out of the repo: verify the compose-manager quote, compare its `mrtd` and
-`rtmr0-2` with the model entry quote's (equal registers indicate the same
-TD, and then its log is the model TD's log), and replay each candidate.
-Whatever the answer, the rule is the replay: a log that does not replay to
-the verified model quote's RTMR3 is refused, and if no candidate does,
-`observe` emits nothing and the app pins nothing.
-
-**The allowlist.** A replayed log is accepted only if every event in it is
-allowed:
-
-- the `instance-id` event, with any value: it is the per-boot random value
+- `app-id` must equal the staging app id in the allowlist;
+- `compose-hash` must equal the compose hash in the verified quote's
+  MRCONFIGID (the v1 layout: the 32 bytes after the leading `01`);
+- `mr-kms` must equal the allowlist's value;
+- `os-image-hash` must equal the allowlist's value;
+- `key-provider` must equal the staging KMS identity in the allowlist (from
+  `vars/cloud_api_stg.yaml`'s KMS, confirmed against a capture);
+- `instance-id` is accepted with any value: it is the per-boot random value
   the replay exists to absorb, so it is the one event whose value is not
   checked;
-- the compose-hash event, whose value must equal the compose hash in the
-  quote's MRCONFIGID;
-- the app-id event, whose value must equal the staging app id in the
-  allowlist;
-- the key-provider event, whose value must equal the staging KMS identity
-  in the allowlist (from `vars/cloud_api_stg.yaml`'s KMS, confirmed against
-  a capture);
-- every post-boot compose action, by event name and digest, each listed in
-  the allowlist;
-- the other boot events dstack writes, by name, with the values the
-  allowlist lists.
+- the four progress markers (`system-preparing`, `boot-mr-done`,
+  `storage-fs`, `system-ready`) must carry the payloads the allowlist
+  lists.
 
-An event whose name is not listed, or whose value is not the listed one, is
-refused. The allowlist is a list of what may appear, not of what must, so a
-log missing an event is not by itself a refusal, but the replay still has
-to match.
+**Post-boot compose actions.** These do not extend RTMR3, so the replay
+says nothing about them. They are checked from the model entry's
+`compose_manager_attestation` record, taken from the same report as the
+model quote:
 
-Where the allowlist comes from and how it is reviewed: `observe` prints the
-decoded RTMR3 events of each model entry (name and digest, and the payload
-for app id, key provider and compose actions; never the instance-id value).
-The operator reviews them and commits the allowlist as a file under
+1. Verify the record's `quote` against current Intel collateral, as the
+   model quote is verified. A quote that does not verify is refused.
+2. Require its `mrtd`, `mrconfigid` and `rtmr0-3` to equal the verified
+   model entry quote's, register for register. Equal registers, RTMR3
+   included, mean the same TD and the same boot; a compose-manager quote
+   from another TD is refused.
+3. Require our nonce at its `report_data[32..64]`.
+4. Recompute `actions_hash` as SHA-256 of the `actions` list serialised as
+   JSON with sorted keys and compact separators (the form Python's
+   `json.dumps(actions, separators=(",", ":"), sort_keys=True)` produces;
+   other serialisations do not match), and require it at the quote's
+   `report_data[0..32]`. The record's own `actions_hash` field is not
+   trusted; it must equal the recomputed value or the record is refused.
+5. Check every entry of `actions` against the allowlist by action kind,
+   container and image reference (the `timestamp` is not checked). An
+   action not in the allowlist refuses the entry.
+
+The compose-manager quote's `report_data[0..32]` is the actions hash, not
+a signing address, so the receipt signer binding
+(`signer_binding_default_mode`) is never applied to it; it applies to the
+model entry quote, whose `report_data[20..32]` is zero.
+
+Open: freshness. The record shows the actions up to the moment its quote
+was made. Whether a compose action can happen between that quote and the
+model's use of its provider_tee key is not known, and the design does not
+close it. To keep the window as small as the protocol allows, the app and
+`observe` take the model quote, its log and the compose-manager record from
+one report fetched with one nonce, and never combine records from two
+fetches.
+
+**Where the allowlist comes from and how it is reviewed.** `observe`
+prints, for each model entry, the decoded RTMR3 events (name, and the
+payload for every event except `instance-id`, whose value it never prints)
+and the compose-manager `actions` (kind, container, image). The operator
+reviews them and commits the allowlist as a file under
 `deploy/staging-gcp/`, so every change to it is a reviewed pull request. A
-new compose action that NEAR AI staging starts using therefore fails closed
-until someone has looked at it and merged it. `sign` reads that file and
-carries the allowlist **inside the signed payload**, next to `sets`, so the
-same key, sequence and expiry cover both and there is no second signature
-to check. Adding it bumps the payload format to
+new image or compose action that NEAR AI staging starts using therefore
+fails closed until someone has looked at it and merged it. `sign` reads
+that file and carries the allowlist **inside the signed payload**, next to
+`sets`, so the same key, sequence and expiry cover both and there is no
+second signature to check. Adding it bumps the payload format to
 `trace-commons-near-ai-pins/v2` (and the domain-separation prefix with it);
 a replay-aware build refuses a v1 document, so a document without an
 allowlist cannot pass as one with an empty allowlist. The v2 payload adds
@@ -855,11 +954,17 @@ one field:
 {
   "format": "trace-commons-near-ai-pins/v2",
   "...": "the v1 fields, unchanged",
-  "rtmr3_allowlist": {
-    "app_id": "<40 hex>",
-    "key_provider": "<the staging KMS identity, as the event carries it>",
-    "boot_events": [{"name": "<event name>", "payload": "<hex>"}],
-    "compose_actions": [{"name": "<event name>", "digest": "<96 hex>"}]
+  "allowlist": {
+    "rtmr3": {
+      "app_id": "<hex>",
+      "mr_kms": "<hex>",
+      "os_image_hash": "<hex>",
+      "key_provider": "<the staging KMS identity, as the event carries it>",
+      "markers": [{"name": "<event name>", "payload": "<hex>"}]
+    },
+    "compose_actions": [
+      {"action": "<action kind>", "container": "<container>", "image": "<image reference>"}
+    ]
   }
 }
 ```
@@ -889,8 +994,13 @@ operators run it, nothing ships it) with `required-features = ["near-ai-staging"
   only these quotes (`pin_observe::observe_model` calls
   `model_entry_quotes(&report, model)`); plan Task 6 pins it with a test.
   Once the replay lands (S16), `observe` also replays each model entry's
-  RTMR3 log, refuses the run on a mismatch, and prints the decoded events
-  for the allowlist review (5.2).
+  own `event_log` with recomputed digests and refuses the run on a
+  mismatch; verifies the entry's compose-manager quote, requires its
+  registers to equal the model quote's and our nonce at
+  `report_data[32..64]`, and recomputes `actions_hash` against its
+  `report_data[0..32]`, refusing the run if any of these fails; and prints
+  the decoded RTMR3 events and the compose actions for the allowlist
+  review (5.2).
 - `sign --sets <file> --sequence <n> --ttl-days <d>`: read the private key
   from stdin only (never argv, never a file it writes), build the payload,
   sign, and write `current.json`. It refuses a sequence not above the one in
@@ -916,9 +1026,11 @@ holds the procedure.
 
 What a staging pin then means, and no more (S16): *a real TDX enclave that
 booted the image and compose NEAR AI staging was serving when we observed
-it, whose RTMR3 log replays to its quote, names the staging app id and the
-staging KMS, and shows no compose action after boot that we have not
-reviewed; the set is signed by a key we hold*. It is not a review of that
+it, whose RTMR3 log replays to its quote and names the staging app id, KMS
+and OS image, and whose compose-manager record, quoted by the same TD for
+our nonce, shows no compose action after boot that we have not reviewed;
+the set is signed by a key we hold*. The compose-action half holds up to
+the moment of the compose-manager quote (the freshness question in 5.2). It is not a review of that
 image. Production's pins cover the same ground by a different mechanism: a
 static `rtmr3` fixes one instance's whole log, so a restart is a mismatch
 and a re-pin. Until the replay lands, a staging
@@ -950,13 +1062,21 @@ sets from the signed document instead of ingest's unsigned one:
    different payload bytes is refused; higher is accepted and recorded.
 5. Hand the sets to the existing checks.
 6. With the replay (S16, plan Task 6b): for the model entry whose quote
-   matched a set, replay the RTMR3 log taken from the same report as that
-   quote (5.2), require it to equal the verified quote's `rtmr[3]`, and
-   check every event against the payload's `rtmr3_allowlist`. A key is
-   earned only if the set, the replay and the allowlist all pass. Until
-   this step lands, a staging build pins with the tool's current default
-   (production's `mrtd` and `rtmr0-3`), never with the S16 register set
-   alone.
+   matched a set, replay that entry's `event_log` from the same report,
+   with recomputed digests (5.2), require it to equal the verified quote's
+   `rtmr[3]`, and check the RTMR3 events against the payload's
+   `allowlist.rtmr3`: the ten names in order, `app-id`, `mr-kms`,
+   `os-image-hash`, `key-provider` and the markers equal to the listed
+   values, `compose-hash` equal to MRCONFIGID's, `instance-id` any value.
+7. Then check the same entry's `compose_manager_attestation` from the same
+   report (5.2): its quote verifies against Intel collateral, its registers
+   equal the model quote's, our nonce is at `report_data[32..64]`, the
+   recomputed `actions_hash` is at `report_data[0..32]`, and every action
+   is in `allowlist.compose_actions`. A key is earned only if the set, the
+   replay, the RTMR3 allowlist and the compose-manager checks all pass.
+   Until steps 6 and 7 land, a staging build pins with the tool's current
+   default (production's `mrtd` and `rtmr0-3`), never with the S16
+   register set alone.
 
 The production unsigned path and the env override are not compiled into a
 staging build; the signed document is the only source.
@@ -978,7 +1098,10 @@ nothing".
 | A set that does not parse | pin nothing (the whole document) |
 | A v1 document in a replay-aware build | pin nothing |
 | RTMR3 log missing, or its replay differs from the verified quote's RTMR3 | earn no key for that entry |
-| An RTMR3 event not in the allowlist, or with a value other than the listed one | earn no key for that entry |
+| An RTMR3 event not in the allowlist, missing, repeated or out of order, or with a value other than the listed one | earn no key for that entry |
+| Compose-manager record missing, its quote does not verify, its registers differ from the model quote's, or our nonce is not at `report_data[32..64]` | earn no key for that entry |
+| Recomputed `actions_hash` not at the compose-manager quote's `report_data[0..32]` | earn no key for that entry |
+| A compose action (kind, container, image) not in the allowlist | earn no key for that entry |
 
 The daemon's status reports which of these applies, as a label (for
 example `pins_expired`), so a tester can say "proof marks stopped, status
@@ -1217,7 +1340,8 @@ profile is in `macos/` (#1545). Still open:
    `rtmr0-2` and `mrconfigid` with RTMR3 replayed from the event log and
    checked against a signed allowlist (5.2); it ships only with the replay.
    The gateway quote and the `Qwen/Qwen3.8-27B` model entry quote verify,
-   TCB UpToDate; the compose-manager quote was not verified. Staging's
+   TCB UpToDate; the compose-manager quote has not yet been verified
+   against Intel collateral. Staging's
    MRCONFIGID is the v1 layout. The gateway serves attestation and is the
    configured base. The measurements are not recorded here and are
    collected by the re-sign tool. The per-model receipt signers for
@@ -1225,8 +1349,14 @@ profile is in `macos/` (#1545). Still open:
    checked per request, not pinned. Still open:
    - whether staging has per-model completions hosts (the report cannot
      tell; ask NEAR AI or read the `cvm-ansible-playbooks` staging vars);
-   - which record's event log replays the model quote's RTMR3 (5.2; plan
-     Task 6b, step 1);
+   - which record's event log replays the model quote's RTMR3: answered
+     on 2026-10-22 (Verified on 2026-10-22: the RTMR3 replay; plan Task 6b
+     step 1). The model entry's own `event_log` replays, with digests
+     recomputed; post-boot compose actions do not extend RTMR3 and are
+     checked from the compose-manager record (5.2);
+   - freshness of the compose-manager record: whether a compose action can
+     happen between its quote and the model's use of its key (5.2). The
+     app fetches both from one report with one nonce;
    - a probe across a staging redeploy recording, per register, whether it
      changed;
    - whether an API key minted before a redeploy survives the JWT rotation
