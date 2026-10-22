@@ -734,9 +734,13 @@ The payload:
   "sequence": 42,
   "issued_at": "2026-10-21T18:00:00Z",
   "expires_at": "2026-10-28T18:00:00Z",
-  "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,mrconfigid=<96 hex>"]
+  "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,rtmr3=<96 hex>"]
 }
 ```
+
+A v1 document carries production's register form. The S16 set (`mrtd`,
+`rtmr0-2`, `mrconfigid`) appears only in a v2 document, beside its
+allowlist (below).
 
 The signature is over `b"trace-commons-near-ai-pins/v1\n" || payload bytes`,
 so the key signs nothing else usefully. Each set is `ExpectedMeasurements`
@@ -1187,9 +1191,9 @@ The plan breaks this into small PRs. In order:
 3. State directory override check (S11; it replaced a channel file).
 4. Signed pin format and verifier in the attestation crate (base: PR 1).
 5. Staging pin source in the daemon (needs 2 and 4).
-6. Re-sign tool.
-6b. RTMR3 replay and allowlist in the re-sign tool and the app (S16; needs
-   5 and 6). The S16 register set becomes the default here, not before.
+6. Re-sign tool. Then 6b: RTMR3 replay and allowlist in the re-sign tool
+   and the app (S16; needs 5 and 6). The S16 register set becomes the
+   default there, not before.
 7. Server boot guard and `/health` flag (base: #1542's branch).
 8. FFI channel call and Swift channel use.
 9. Bundle channel files and build scripts.
