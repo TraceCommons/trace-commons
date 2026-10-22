@@ -15,7 +15,7 @@
 //! [`JudgementModel::decide`] must put exactly those bytes on the wire. Two
 //! reasons:
 //!
-//! - the limiter reserves `ceil(request_bytes / 3) * input_price + ...`
+//! - the limiter reserves `(request_bytes + 512) * input_price + ...`
 //!   before the call (section 6), so the bytes have to exist before the call;
 //! - the receipt is then verified over bytes the caller holds, not bytes the
 //!   adapter reports having sent. An adapter that re-serialized its request
@@ -23,6 +23,20 @@
 //!
 //! This is the contract the NEAR AI drill's `AttestationClient::complete`
 //! already uses.
+//!
+//! # The answer comes from the receipted bytes
+//!
+//! [`RawDecision`] carries the response body and the receipt, and no answer
+//! and no usage. The wrapper verifies the receipt over `response_body`
+//! first, and only then reads the label out of those same bytes with the
+//! pure [`JudgementModel::parse_answer`]. An adapter therefore cannot pair a
+//! receipt for one response with an answer read from another (a retry that
+//! kept attempt 1's body with attempt 2's answer, or a wrong JSON path).
+//!
+//! `parse_answer` returns a [`ParsedAnswer`], not a `Result` as the spec's
+//! sketch has it: an answer that does not parse is
+//! [`ModelAnswer::Unparseable`], which the wrapper turns into the fallback
+//! label, and a body without `usage` has `usage: None`.
 //!
 //! [`RequestHashMismatch`]: trace_commons_attestation::receipt::ReceiptError::RequestHashMismatch
 
@@ -43,7 +57,8 @@ pub struct DecisionCall<'a> {
     /// digest's `events` array.
     pub event_index: Option<u32>,
     /// The completion-token ceiling the adapter must request. The limiter's
-    /// reservation assumes the model spends all of it.
+    /// reservation assumes the model spends all of it, and one input token
+    /// per request byte; it is an upper bound only under that assumption.
     pub max_tokens: u32,
 }
 
@@ -101,15 +116,11 @@ pub struct TokenUsage {
     pub completion_tokens: u64,
 }
 
-/// One completed call.
+/// One completed call: the bytes and the receipt, nothing read out of them.
 pub struct RawDecision {
     /// The response body exactly as received. The receipt hashes this, so
-    /// nothing may re-serialize it.
+    /// nothing may re-serialize it, and the answer is read from it.
     pub response_body: Vec<u8>,
-    pub answer: ModelAnswer,
-    /// `None` when the response carried no `usage`: the reservation then
-    /// stands as the charge.
-    pub usage: Option<TokenUsage>,
     /// The per-request receipt for this completion, as the provider returned
     /// it. `None` when none could be fetched; the wrapper refuses that.
     pub receipt: Option<ReceiptPayload>,
@@ -119,11 +130,18 @@ impl std::fmt::Debug for RawDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RawDecision")
             .field("response_bytes", &self.response_body.len())
-            .field("answer", &self.answer)
-            .field("usage", &self.usage)
             .field("receipt", &self.receipt.is_some())
             .finish()
     }
+}
+
+/// What [`JudgementModel::parse_answer`] reads out of a response body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedAnswer {
+    pub answer: ModelAnswer,
+    /// `None` when the body carried no `usage`: the reservation then stands
+    /// as the charge.
+    pub usage: Option<TokenUsage>,
 }
 
 /// Why a call produced no response. Carries nothing from the provider.
@@ -148,11 +166,16 @@ pub trait JudgementModel: Send + Sync {
     /// the same call gives the same bytes.
     fn request_body(&self, call: &DecisionCall<'_>) -> Vec<u8>;
 
-    /// Send `request_body` verbatim and read the answer. "Choices in, one
-    /// choice out, with probabilities if available."
+    /// Send `request_body` verbatim and return the response bytes and the
+    /// receipt. "Choices in, one choice out, with probabilities if
+    /// available." It returns no answer and no usage.
     async fn decide(
         &self,
         call: &DecisionCall<'_>,
         request_body: &[u8],
     ) -> Result<RawDecision, ModelError>;
+
+    /// Pure: the answer and the usage in `response_body`. The wrapper takes
+    /// a label from it only after the receipt over these bytes verified.
+    fn parse_answer(&self, call: &DecisionCall<'_>, response_body: &[u8]) -> ParsedAnswer;
 }

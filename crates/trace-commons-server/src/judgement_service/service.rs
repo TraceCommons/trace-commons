@@ -721,8 +721,15 @@ mod tests {
             })
         });
         let logs = String::from_utf8(capture.0.lock().expect("lock").clone()).expect("utf8");
-        // The line is there, with what it may carry.
-        assert_eq!(logs.matches(LOG_TARGET).count(), 2, "captured: {logs:?}");
+        // The request line is there twice, with what it may carry, and the
+        // wrong-model receipt latched the model, once.
+        assert_eq!(
+            logs.matches("judgement_request").count(),
+            2,
+            "captured: {logs:?}"
+        );
+        assert_eq!(logs.matches("judgement_model_latched").count(), 1);
+        assert_eq!(logs.matches(LOG_TARGET).count(), 3, "captured: {logs:?}");
         assert!(logs.contains(&request.digest_sha256()));
         assert!(logs.contains(MOCK_MODEL_ID));
         assert!(logs.contains("outcome=ok") || logs.contains("outcome=\"ok\""));

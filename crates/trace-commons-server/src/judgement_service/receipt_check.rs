@@ -6,19 +6,36 @@
 //!
 //! The order is the design:
 //!
-//! 1. the production check: allowlisted, pinned, callable in the catalog
-//!    now. A refusal here makes no call and charges nothing;
-//! 2. build the exact request bytes, and **reserve** the upper bound against
-//!    the account and the operator total. A cap refusal makes no call;
-//! 3. call the model, under a timeout;
-//! 4. **settle** to the reported usage. This happens before the receipt is
-//!    checked, because NEAR AI billed the call whether or not its receipt
-//!    verifies: a failed receipt check is still metered;
-//! 5. check the receipt ([`check_receipt`]). Any failure discards the label
-//!    and refuses with `judgement_model_unattested`;
-//! 6. only then turn the answer into a label. An answer that does not parse,
-//!    or names a value outside the choices, becomes `unclear` (`other` for
-//!    `task`) at `low` confidence; it was still receipt-checked and metered.
+//! 1. the production check: allowlisted, pinned, not latched, callable in
+//!    the catalog now. A refusal here makes no call and charges nothing;
+//! 2. build the exact request bytes, and **reserve** against the account
+//!    and the operator total. A cap refusal makes no call;
+//! 3. call the model, under a timeout. A call that fails or times out
+//!    leaves the reservation as the charge;
+//! 4. check the receipt ([`check_receipt`]) over the bytes held here and the
+//!    bytes received;
+//! 5. **settle**, only now that the receipt's outcome is known:
+//!    - verified: to the usage in the verified body. A usage above the
+//!      reservation is charged in full and latches the model, because the
+//!      reservation's bound did not hold for it;
+//!    - not verified: to `max(reservation, reported)`, because NEAR AI billed
+//!      the call whatever the body says, so a swapped response claiming
+//!      `usage {0, 0}` cannot lower spend. A rotation-shaped failure
+//!      ([`ReceiptRefusal::latches`]) latches the model first. The label is
+//!      discarded and the request refused with `judgement_model_unattested`;
+//!    - no usage reported: the reservation stands;
+//! 6. only then read the label out of the verified body
+//!    ([`JudgementModel::parse_answer`]). An answer that does not parse, or
+//!    names a value outside the choices, becomes the kind's fallback label
+//!    at the fallback confidence; it was still receipt-checked and metered.
+//!
+//! On the failed path the wrapper reads only `usage` from the unverified
+//! body, and only to raise the charge above the reservation, never to lower
+//! it. It never reads an answer from a body whose receipt failed.
+//!
+//! Two log lines, label and model id only: `judgement_model_latched` when a
+//! model is latched, and `judgement_usage_over_reservation` when a verified
+//! usage passed its reservation.
 //!
 //! # The receipt check
 //!
@@ -43,7 +60,9 @@ use trace_commons_protocol::insights_judgement::{
     JudgementLabel, JudgementReceipt, JudgementRefusal, JudgementResult,
 };
 
-use super::limiter::{AccountKey, ClaimTime, Limiter, charge_nanousd, reservation_nanousd};
+use super::limiter::{
+    AccountKey, ClaimTime, Limiter, Settled, charge_nanousd, reservation_nanousd,
+};
 use super::model::{DecisionCall, JudgementModel, ModelAnswer, ModelError};
 use super::production::ProductionCheck;
 use super::prompts::{bucket_for_probability, fallback_label, prompt_for};
@@ -53,6 +72,9 @@ use super::prompts::{bucket_for_probability, fallback_label, prompt_for};
 pub const JUDGEMENT_MAX_TOKENS: u32 = 64;
 /// How long one model call may take, receipt fetch included.
 pub const JUDGEMENT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// The tracing target of the latch and over-reservation lines: the
+/// service's one target.
+const LOG_TARGET: &str = "trace_commons_judgement";
 
 /// Why a receipt was refused. All map to `judgement_model_unattested`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -71,6 +93,38 @@ pub enum ReceiptRefusal {
     SignerUnpinned,
     #[error("judgement_receipt_unverified")]
     Unverified(ReceiptError),
+}
+
+impl ReceiptRefusal {
+    /// Whether this failure means the pins no longer match the model's
+    /// signer, so the model is latched: an unpinned signer, a receipt that
+    /// is not `provider_tee`, or a receipt for another model.
+    pub fn latches(&self) -> bool {
+        matches!(
+            self,
+            Self::SignerUnpinned | Self::NotProviderTee | Self::WrongModel
+        )
+    }
+}
+
+/// The charge a call settles to. `reported` is the usage's charge as the
+/// body states it, `None` when it states none.
+///
+/// - receipt verified: `reported`, or the reservation when absent;
+/// - receipt not verified: the larger of the reservation and `reported`.
+///
+/// Returns `None` when the reservation stands unchanged.
+pub fn settle_charge(
+    receipt_verified: bool,
+    reservation: u64,
+    reported: Option<u64>,
+) -> Option<u64> {
+    let reported = reported?;
+    if receipt_verified {
+        Some(reported)
+    } else {
+        Some(reported.max(reservation))
+    }
 }
 
 /// Check one receipt for `model_id` over the exact exchange bytes, against
@@ -227,6 +281,19 @@ impl JudgementCaller {
         &self.limiter
     }
 
+    /// Latch `model_id`, logging `judgement_model_latched` once, with the
+    /// cause's label.
+    fn latch(&self, model_id: &str, cause: &str) {
+        if self.check.latch(model_id) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                model_id = %model_id,
+                cause = %cause,
+                "judgement_model_latched"
+            );
+        }
+    }
+
     /// One judgement over `digest` for `account`, under the verified claim's
     /// `iat` and the service clock.
     pub async fn judge(
@@ -267,23 +334,43 @@ impl JudgementCaller {
             Ok(Err(ModelError::Failed)) => return Err(JudgementRefusal::ModelUnattested),
         };
 
-        // 4. Settle before the receipt check: a refused receipt was still
-        //    billed. An overflowing charge errs high.
-        let charge = raw
+        // 4. The receipt, over the bytes held here and the bytes received.
+        let verdict = match raw.receipt.as_ref() {
+            Some(receipt) => {
+                check_receipt(receipt, &request_body, &raw.response_body, model_id, pins)
+            }
+            None => Err(ReceiptRefusal::Absent),
+        };
+        let parsed = self.model.parse_answer(&call, &raw.response_body);
+        // An overflowing charge errs high.
+        let reported = parsed
             .usage
             .map(|usage| charge_nanousd(usage, prices).unwrap_or(u64::MAX));
-        self.limiter.settle(reservation, charge)?;
 
-        // 5. The receipt, over the bytes held here and the bytes received.
-        let receipt = raw
-            .receipt
-            .as_ref()
-            .ok_or(JudgementRefusal::ModelUnattested)?;
-        let evidence = check_receipt(receipt, &request_body, &raw.response_body, model_id, pins)
-            .map_err(|_| JudgementRefusal::ModelUnattested)?;
+        // 5. Settle, now that the receipt's outcome is known.
+        let evidence = match verdict {
+            Err(refusal) => {
+                if refusal.latches() {
+                    self.latch(model_id, &refusal.to_string());
+                }
+                let charge = settle_charge(false, reservation.amount_nanousd(), reported);
+                self.limiter.settle(reservation, charge)?;
+                return Err(JudgementRefusal::ModelUnattested);
+            }
+            Ok(evidence) => evidence,
+        };
+        let charge = settle_charge(true, reservation.amount_nanousd(), reported);
+        if self.limiter.settle(reservation, charge)? == Settled::OverReservation {
+            tracing::warn!(
+                target: LOG_TARGET,
+                model_id = %model_id,
+                "judgement_usage_over_reservation"
+            );
+            self.latch(model_id, "judgement_usage_over_reservation");
+        }
 
-        // 6. Only now, the label.
-        let (label, confidence) = label_from_answer(kind, &raw.answer);
+        // 6. Only now, the label, from the verified body.
+        let (label, confidence) = label_from_answer(kind, &parsed.answer);
         let judge_version = JudgeVersion::new(call.prompt.prompt_version(), model_id.to_string())
             .map_err(|_| JudgementRefusal::ModelUnattested)?;
         JudgementResult::judged(
@@ -308,6 +395,7 @@ mod tests {
     use crate::judgement_service::mock::{
         MOCK_MODEL_ID, MockFault, MockJudgementModel, MockReceiptSigner,
     };
+    use crate::judgement_service::model::TokenUsage;
     use std::collections::BTreeMap;
     use trace_commons_protocol::insights_judgement::JudgementReceiptKind;
 
@@ -466,6 +554,38 @@ mod tests {
                 ReceiptError::ResponseHashMismatch
             ))
         ));
+    }
+
+    #[test]
+    fn a_failed_receipt_can_raise_the_charge_but_never_lower_it() {
+        // Verified: the verified usage, up or down.
+        assert_eq!(settle_charge(true, 100, Some(30)), Some(30));
+        assert_eq!(settle_charge(true, 100, Some(300)), Some(300));
+        // Not verified: never below the reservation.
+        assert_eq!(settle_charge(false, 100, Some(0)), Some(100));
+        assert_eq!(settle_charge(false, 100, Some(30)), Some(100));
+        assert_eq!(settle_charge(false, 100, Some(300)), Some(300));
+        // No usage: the reservation stands either way.
+        assert_eq!(settle_charge(true, 100, None), None);
+        assert_eq!(settle_charge(false, 100, None), None);
+    }
+
+    #[test]
+    fn only_a_rotation_shaped_failure_latches() {
+        for (refusal, latches) in [
+            (ReceiptRefusal::SignerUnpinned, true),
+            (ReceiptRefusal::NotProviderTee, true),
+            (ReceiptRefusal::WrongModel, true),
+            (ReceiptRefusal::Absent, false),
+            (ReceiptRefusal::NotEd25519, false),
+            (ReceiptRefusal::BindsNoModel, false),
+            (
+                ReceiptRefusal::Unverified(ReceiptError::ResponseHashMismatch),
+                false,
+            ),
+        ] {
+            assert_eq!(refusal.latches(), latches, "{refusal:?}");
+        }
     }
 
     // -- answers ------------------------------------------------------------
@@ -731,7 +851,170 @@ mod tests {
                 .unwrap_err(),
             JudgementRefusal::ModelUnattested
         );
-        assert!(h.caller.limiter().account_spent_nanousd(&h.account, NOW) > 0);
+        let spent = h.caller.limiter().account_spent_nanousd(&h.account, NOW);
+        assert!(spent > 0);
+        assert_eq!(h.model.calls(), 1);
+        // The model is latched: the next request makes no call and is
+        // charged nothing.
+        assert_eq!(
+            h.caller
+                .judge(
+                    &h.account,
+                    DIGEST,
+                    JudgementKind::Task,
+                    None,
+                    ClaimTime::at(NOW)
+                )
+                .await
+                .unwrap_err(),
+            JudgementRefusal::ModelUnattested
+        );
+        assert_eq!(h.model.calls(), 1);
+        assert_eq!(
+            h.caller.limiter().account_spent_nanousd(&h.account, NOW),
+            spent
+        );
+    }
+
+    async fn judge_task(h: &Harness) -> Result<JudgementResult, JudgementRefusal> {
+        h.caller
+            .judge(
+                &h.account,
+                DIGEST,
+                JudgementKind::Task,
+                None,
+                ClaimTime::at(NOW),
+            )
+            .await
+    }
+
+    fn task_call() -> DecisionCall<'static> {
+        DecisionCall {
+            prompt: prompt_for(JudgementKind::Task),
+            digest: DIGEST,
+            event_index: None,
+            max_tokens: JUDGEMENT_MAX_TOKENS,
+        }
+    }
+
+    fn task_reservation(h: &Harness) -> u64 {
+        reservation_nanousd(
+            h.model.request_body(&task_call()).len(),
+            JUDGEMENT_MAX_TOKENS,
+            PRICES,
+        )
+        .expect("no overflow")
+    }
+
+    const PRICES: TokenPrices = TokenPrices {
+        input_nanousd: 40,
+        output_nanousd: 1350,
+    };
+
+    #[tokio::test]
+    async fn every_rotation_shaped_receipt_failure_latches_the_model() {
+        for fault in [MockFault::GatewayReceipt, MockFault::WrongModelReceipt] {
+            let h = harness();
+            h.model.set_fault(Some(fault));
+            assert_eq!(
+                judge_task(&h).await.unwrap_err(),
+                JudgementRefusal::ModelUnattested
+            );
+            h.model.set_fault(None);
+            // Even a good response is not asked for now.
+            assert_eq!(
+                judge_task(&h).await.unwrap_err(),
+                JudgementRefusal::ModelUnattested,
+                "{fault:?}"
+            );
+            assert_eq!(h.model.calls(), 1, "{fault:?}");
+        }
+        // A failure that does not mean the pins moved does not latch.
+        for fault in [
+            MockFault::NoReceipt,
+            MockFault::TwoPartReceipt,
+            MockFault::ResponseSwapped,
+        ] {
+            let h = harness();
+            h.model.set_fault(Some(fault));
+            judge_task(&h).await.unwrap_err();
+            h.model.set_fault(None);
+            judge_task(&h).await.expect("not latched");
+            assert_eq!(h.model.calls(), 2, "{fault:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_label_follows_the_receipted_body_not_the_adapters_answer() {
+        let h = harness();
+        h.model.set_fault(Some(MockFault::BodyLabelDiffers));
+        let result = judge_task(&h).await.expect("judged");
+        let call = task_call();
+        let (expected, _) = MockJudgementModel::expected_answer(&call);
+        let in_body = MockJudgementModel::other_choice(&call, expected);
+        assert_ne!(expected, in_body);
+        assert_eq!(result.label().as_wire(), in_body);
+    }
+
+    #[tokio::test]
+    async fn a_swapped_response_claiming_zero_usage_still_charges_the_reservation() {
+        let h = harness();
+        h.model.set_fault(Some(MockFault::ResponseSwappedZeroUsage));
+        assert_eq!(
+            judge_task(&h).await.unwrap_err(),
+            JudgementRefusal::ModelUnattested
+        );
+        assert_eq!(
+            h.caller.limiter().account_spent_nanousd(&h.account, NOW),
+            task_reservation(&h)
+        );
+        assert_eq!(
+            h.caller.limiter().operator_spent_nanousd(NOW),
+            task_reservation(&h)
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_usage_above_the_reservation_is_charged_and_latches_the_model() {
+        let h = harness_with(None, 100);
+        h.model.set_fault(Some(MockFault::UsageAboveReservation));
+        // The label stands: the receipt verified.
+        judge_task(&h).await.expect("judged");
+        let charged = charge_nanousd(
+            TokenUsage {
+                prompt_tokens: crate::judgement_service::mock::MOCK_OVER_RESERVATION_TOKENS,
+                completion_tokens: crate::judgement_service::mock::MOCK_COMPLETION_TOKENS,
+            },
+            PRICES,
+        )
+        .expect("no overflow");
+        assert!(charged > task_reservation(&h));
+        assert_eq!(
+            h.caller.limiter().account_spent_nanousd(&h.account, NOW),
+            charged
+        );
+        h.model.set_fault(None);
+        assert_eq!(
+            judge_task(&h).await.unwrap_err(),
+            JudgementRefusal::ModelUnattested
+        );
+        assert_eq!(h.model.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_call_timeout_ends_a_call_that_never_returns() {
+        let model = harness();
+        let h = Harness {
+            caller: model.caller.with_timeout(Duration::from_millis(20)),
+            ..model
+        };
+        h.model.set_fault(Some(MockFault::Hang));
+        assert_eq!(judge_task(&h).await.unwrap_err(), JudgementRefusal::Timeout);
+        // The reservation stands as the charge: NEAR AI may have billed it.
+        assert_eq!(
+            h.caller.limiter().account_spent_nanousd(&h.account, NOW),
+            task_reservation(&h)
+        );
     }
 
     #[tokio::test]

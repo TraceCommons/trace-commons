@@ -15,7 +15,29 @@
 //!    `model=key[,model=key...]` spelling and parser), and at boot every
 //!    pinned key is among the keys the gateway report's DCAP-verified quotes
 //!    bind ([`require_pins_attested`]);
-//! 4. per request, its receipt verifies ([`super::receipt_check`]).
+//! 4. per request, its receipt verifies ([`super::receipt_check`]);
+//! 5. it is not latched (below).
+//!
+//! # The rotation latch
+//!
+//! NEAR AI does not announce a new provider-TEE key in advance, so a
+//! rotation shows up as a receipt from an unpinned signer, after the call was
+//! made and billed. Without a latch every later request would make the same
+//! billed calls and fail the same way until a redeploy. So the first receipt
+//! for a model that fails as [`ReceiptRefusal::SignerUnpinned`],
+//! [`ReceiptRefusal::NotProviderTee`] or [`ReceiptRefusal::WrongModel`], or a
+//! verified usage above the reservation, latches that model
+//! ([`ProductionCheck::latch`]). [`ProductionCheck::call_check`] then refuses
+//! it before anything is reserved, so nothing more is sent or charged.
+//!
+//! The latch is in memory and clears only when the pins change: a boot
+//! whose pins the live gateway report attests builds a fresh check. There
+//! is no other way to clear it (a pin update without a release is open
+//! decision S1).
+//!
+//! [`ReceiptRefusal::SignerUnpinned`]: super::receipt_check::ReceiptRefusal::SignerUnpinned
+//! [`ReceiptRefusal::NotProviderTee`]: super::receipt_check::ReceiptRefusal::NotProviderTee
+//! [`ReceiptRefusal::WrongModel`]: super::receipt_check::ReceiptRefusal::WrongModel
 //!
 //! # The allowlist is empty
 //!
@@ -32,7 +54,7 @@
 //! it ends in, over keys `quote_bound_keys` already verified. The catalog
 //! fetch and its hourly refresh are slice 5 too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
 use trace_commons_protocol::insights_judgement::JudgementRefusal;
@@ -96,6 +118,8 @@ pub struct ProductionCheck {
     allowlist: Vec<String>,
     pins: BTreeMap<String, Vec<String>>,
     catalog: RwLock<CatalogState>,
+    /// Models latched since boot. See the module docs.
+    latched: RwLock<BTreeSet<String>>,
 }
 
 impl std::fmt::Debug for ProductionCheck {
@@ -125,7 +149,25 @@ impl ProductionCheck {
             allowlist: allowlist.iter().map(|m| (*m).to_string()).collect(),
             pins,
             catalog: RwLock::new(CatalogState::default()),
+            latched: RwLock::new(BTreeSet::new()),
         }
+    }
+
+    /// Stop calling `model_id` until the pins change. Returns whether this
+    /// call set it, so the caller logs the latch once.
+    pub fn latch(&self, model_id: &str) -> bool {
+        self.latched
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(model_id.to_string())
+    }
+
+    /// Whether `model_id` is latched.
+    pub fn is_latched(&self, model_id: &str) -> bool {
+        self.latched
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(model_id)
     }
 
     /// The catalog, for the binary's refresh loop.
@@ -156,14 +198,14 @@ impl ProductionCheck {
         Ok(())
     }
 
-    /// The per-call check: the model is allowlisted, pinned, and callable in
-    /// the catalog now. Returns the prices to meter with.
+    /// The per-call check: the model is allowlisted, pinned, not latched,
+    /// and callable in the catalog now. Returns the prices to meter with.
     pub fn call_check(&self, model_id: &str, now: i64) -> Result<TokenPrices, JudgementRefusal> {
         let allowlisted = self.allowlist.iter().any(|allowed| allowed == model_id);
         let pinned = self
             .model_pins(model_id)
             .is_some_and(|pins| !pins.is_empty());
-        if !allowlisted || !pinned {
+        if !allowlisted || !pinned || self.is_latched(model_id) {
             return Err(JudgementRefusal::ModelUnattested);
         }
         self.catalog
@@ -292,6 +334,24 @@ mod tests {
                 .unwrap_err(),
             JudgementRefusal::ModelUnattested
         );
+    }
+
+    #[test]
+    fn a_latched_model_is_refused_until_a_fresh_check_is_built() {
+        let check = with_live_catalog(ProductionCheck::for_tests(&[QWEN], pins(QWEN)));
+        assert!(!check.is_latched(QWEN));
+        assert!(check.latch(QWEN));
+        // Latching twice reports it was already set.
+        assert!(!check.latch(QWEN));
+        assert_eq!(
+            check.call_check(QWEN, NOW).unwrap_err(),
+            JudgementRefusal::ModelUnattested
+        );
+        // Another model is unaffected.
+        assert!(!check.is_latched("moonshotai/kimi-k2.6"));
+        // A boot with pins builds a fresh, unlatched check.
+        let rebooted = with_live_catalog(ProductionCheck::for_tests(&[QWEN], pins(QWEN)));
+        rebooted.call_check(QWEN, NOW).expect("callable");
     }
 
     #[test]

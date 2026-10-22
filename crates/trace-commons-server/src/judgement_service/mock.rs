@@ -30,13 +30,16 @@ use trace_commons_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSig
 use trace_commons_protocol::insights_judgement::ConfidenceBasis;
 
 use super::model::{
-    DecisionCall, JudgementModel, ModelAnswer, ModelError, RawDecision, TokenUsage,
+    DecisionCall, JudgementModel, ModelAnswer, ModelError, ParsedAnswer, RawDecision, TokenUsage,
 };
 
 /// The mock's model id.
 pub const MOCK_MODEL_ID: &str = "trace-commons/mock-judgement-model";
 /// Completion tokens the mock reports for every call.
 pub const MOCK_COMPLETION_TOKENS: u64 = 12;
+/// Prompt tokens the mock reports under [`MockFault::UsageAboveReservation`]:
+/// more than any judgement request's reservation allows.
+pub const MOCK_OVER_RESERVATION_TOKENS: u64 = 1_000_000;
 
 /// A test-only Ed25519 receipt signer. Generated per instance; never used by
 /// a deployment.
@@ -92,12 +95,24 @@ pub enum MockFault {
     ResponseSwapped,
     /// The response carries no `usage`.
     NoUsage,
-    /// The answer does not parse.
+    /// The body's answer does not parse. The receipt signs that body.
     Unparseable,
-    /// The answer names a label outside the choices.
+    /// The body's answer names a label outside the choices. The receipt
+    /// signs that body.
     LabelOutsideChoices,
-    /// The call times out.
+    /// The body names a different valid choice than [`MockJudgementModel::expected_answer`],
+    /// and the receipt signs that body.
+    BodyLabelDiffers,
+    /// The receipt verifies and the body reports usage far above any
+    /// reservation.
+    UsageAboveReservation,
+    /// The receipt is over a different response than the one returned, and
+    /// the returned body reports `usage {0, 0}`.
+    ResponseSwappedZeroUsage,
+    /// The adapter reports the call timed out.
     Timeout,
+    /// The call never returns: only the caller's timeout ends it.
+    Hang,
     /// The call fails.
     Failed,
 }
@@ -154,6 +169,16 @@ impl MockJudgementModel {
         let confidence = ["high", "medium", "low"][usize::from(hash[1]) % 3];
         (label, confidence)
     }
+
+    /// A valid choice for `call` other than `label`.
+    pub fn other_choice(call: &DecisionCall<'_>, label: &str) -> &'static str {
+        call.prompt
+            .choices()
+            .iter()
+            .map(|c| c.as_wire())
+            .find(|c| *c != label)
+            .expect("every prompt has at least two choices")
+    }
 }
 
 #[async_trait]
@@ -195,16 +220,21 @@ impl JudgementModel for MockJudgementModel {
         match fault {
             Some(MockFault::Timeout) => return Err(ModelError::Timeout),
             Some(MockFault::Failed) => return Err(ModelError::Failed),
+            Some(MockFault::Hang) => std::future::pending::<()>().await,
             _ => {}
         }
 
         let (label, confidence) = Self::expected_answer(call);
-        let label = if fault == Some(MockFault::LabelOutsideChoices) {
-            "definitely_not_a_choice"
-        } else {
-            label
+        let label = match fault {
+            Some(MockFault::LabelOutsideChoices) => "definitely_not_a_choice",
+            Some(MockFault::BodyLabelDiffers) => Self::other_choice(call, label),
+            _ => label,
         };
-        let content = serde_json::json!({"label": label, "confidence": confidence}).to_string();
+        let content = if fault == Some(MockFault::Unparseable) {
+            "I think it is probably a bug fix.".to_string()
+        } else {
+            serde_json::json!({"label": label, "confidence": confidence}).to_string()
+        };
         let prompt_tokens = (request_body.len() as u64).div_ceil(3);
         let mut response = serde_json::json!({
             "id": format!("mock-{}", &hex::encode(Sha256::digest(request_body))[..16]),
@@ -213,22 +243,27 @@ impl JudgementModel for MockJudgementModel {
             "choices": [{"index": 0, "finish_reason": "stop",
                          "message": {"role": "assistant", "content": content}}],
         });
-        let usage = if fault == Some(MockFault::NoUsage) {
-            None
-        } else {
+        let usage = match fault {
+            Some(MockFault::NoUsage) => None,
+            Some(MockFault::ResponseSwappedZeroUsage) => Some((0, 0)),
+            Some(MockFault::UsageAboveReservation) => {
+                Some((MOCK_OVER_RESERVATION_TOKENS, MOCK_COMPLETION_TOKENS))
+            }
+            _ => Some((prompt_tokens, MOCK_COMPLETION_TOKENS)),
+        };
+        if let Some((prompt_tokens, completion_tokens)) = usage {
             response["usage"] = serde_json::json!({
                 "prompt_tokens": prompt_tokens,
-                "completion_tokens": MOCK_COMPLETION_TOKENS,
+                "completion_tokens": completion_tokens,
             });
-            Some(TokenUsage {
-                prompt_tokens,
-                completion_tokens: MOCK_COMPLETION_TOKENS,
-            })
-        };
+        }
         let response_body = serde_json::to_vec(&response).expect("JSON serializable");
 
         let request_hash = hex::encode(Sha256::digest(request_body));
-        let signed_response = if fault == Some(MockFault::ResponseSwapped) {
+        let signed_response = if matches!(
+            fault,
+            Some(MockFault::ResponseSwapped | MockFault::ResponseSwappedZeroUsage)
+        ) {
             b"a different response".to_vec()
         } else {
             response_body.clone()
@@ -253,21 +288,40 @@ impl JudgementModel for MockJudgementModel {
                 ReceiptSignatureKind::ProviderTee,
             )),
         };
-        let answer = if fault == Some(MockFault::Unparseable) {
-            ModelAnswer::Unparseable {
-                basis: ConfidenceBasis::SelfReported,
-            }
-        } else {
-            ModelAnswer::SelfReported {
-                label: label.to_string(),
-                confidence: confidence.to_string(),
-            }
-        };
         Ok(RawDecision {
             response_body,
-            answer,
-            usage,
             receipt,
         })
+    }
+
+    /// Reads a Chat Completions body: `choices[0].message.content` as the
+    /// structured `{label, confidence}`, and `usage`.
+    fn parse_answer(&self, _call: &DecisionCall<'_>, response_body: &[u8]) -> ParsedAnswer {
+        let unparseable = ModelAnswer::Unparseable {
+            basis: ConfidenceBasis::SelfReported,
+        };
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(response_body) else {
+            return ParsedAnswer {
+                answer: unparseable,
+                usage: None,
+            };
+        };
+        let usage = body.get("usage").and_then(|usage| {
+            Some(TokenUsage {
+                prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
+                completion_tokens: usage.get("completion_tokens")?.as_u64()?,
+            })
+        });
+        let answer = body["choices"][0]["message"]["content"]
+            .as_str()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .and_then(|content| {
+                Some(ModelAnswer::SelfReported {
+                    label: content.get("label")?.as_str()?.to_string(),
+                    confidence: content.get("confidence")?.as_str()?.to_string(),
+                })
+            })
+            .unwrap_or(unparseable);
+        ParsedAnswer { answer, usage }
     }
 }
