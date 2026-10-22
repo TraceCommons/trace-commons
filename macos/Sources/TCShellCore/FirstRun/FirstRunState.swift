@@ -1,19 +1,18 @@
 import Foundation
 
-/// Ron's two tiers (#1030 `ftux-model.ts`). Quick is the default; "Custom
-/// setup instead" switches. There is no chooser screen.
-public enum FirstRunTier: String, Codable, Equatable, Sendable {
-    case quick
-    case custom
-}
-
-/// One #1030 screen. Which of them a tier shows is `FirstRunNavigation`'s.
+/// One screen of the animated first run (Ron's 2026-10-21 canvas, built
+/// natively on the owner's request of 2026-10-22). The order is
+/// `FirstRunNavigation.steps`: Welcome, then the tools to watch, how traces
+/// may be used, what they could earn, Private AI, and signing in last.
+/// Ron's #1030 Folders and Rules screens are gone: Tools asks what Folders
+/// did, and its Customize opens the per-repo rules in place.
 public enum FirstRunStep: String, Codable, Equatable, Sendable {
-    case join
-    case folders
+    case welcome
     case tools
-    case rules
     case uses
+    case traces
+    case privateAI
+    case join
 }
 
 /// What the person answered on Join about an account.
@@ -43,7 +42,7 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     case enrolled
 }
 
-/// The sharing decision on Uses.
+/// The sharing decision on Uses, granted at Start on Join.
 public enum SharingPath: String, Codable, Equatable, Sendable {
     case askMe
     case automatic
@@ -87,7 +86,6 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 /// `signedIn` and `nearAIEnrolled`. Those are facts the daemon holds, so navigation never
 /// clears them.
 public struct FirstRunState: Codable, Equatable, Sendable {
-    public var tier: FirstRunTier
     public var step: FirstRunStep
     /// The invite as pasted on Join. Kept through a failed start and a
     /// rejected lookup; only the person changes it.
@@ -101,9 +99,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Folders added on Tools, each its own row. Set through `add(_:)` and
     /// answered through `answerAdded(path:watched:)`.
     public var addedFolders: [AddedFolder]
-    /// Rule per `project_id` (Custom only).
+    /// Rule per `project_id`, set under Customize on Tools.
     public var rules: [String: ProjectMode]
-    /// Chosen past sessions per `project_id` (Custom only).
+    /// Chosen past sessions per `project_id`, set under Customize on Tools.
     public var pastSelections: [String: Set<String>]
     public var scopes: Set<String>
     /// Writing it, to any value, clears `grantReady`: a new choice needs a
@@ -111,7 +109,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var sharing: SharingPath {
         didSet { grantReady = false }
     }
-    /// The Private AI switch (Custom only).
+    /// The Private AI step's switch.
     public var privateAI: Bool
     /// The witness the disclosure showed, passed to `grant_automatic`.
     public var witnessSigningAddress: String?
@@ -149,8 +147,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var signedOutOfEnrolment: Bool
 
     public init(
-        tier: FirstRunTier = .quick,
-        step: FirstRunStep = .join,
+        step: FirstRunStep = .welcome,
         invite: String = "",
         issuerHost: String? = nil,
         account: AccountAnswer = .none,
@@ -171,7 +168,6 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         notFound: Set<SourceKind> = [],
         signedOutOfEnrolment: Bool = false
     ) {
-        self.tier = tier
         self.step = step
         self.invite = invite
         self.issuerHost = issuerHost
@@ -194,11 +190,30 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.signedOutOfEnrolment = signedOutOfEnrolment
     }
 
-    /// Record what discovery found. A tool not on this Mac is not asked,
-    /// and Continue counts only the tools found here (spec rule 1, the
-    /// owner's reversal in Ron's review of #1235).
+    /// Record what discovery found. A tool not on this Mac is not asked
+    /// (spec rule 1, the owner's reversal in Ron's review of #1235): it
+    /// leaves the Tools ring. A found tool nobody has answered reads Not
+    /// used, since Tools gives each one a single check that starts unticked
+    /// (Ron, 2026-10-22); ticking it is the only thing that watches it.
     public mutating func recordDiscovery(_ candidates: [SourceCandidate]) {
         notFound = Set(candidates.filter { !$0.exists }.map(\.source))
+        for candidate in candidates where candidate.exists && !rowAnswer(candidate.source).isAnswered {
+            toolAnswers[candidate.source] = .off
+        }
+    }
+
+    /// Whether anything is watched: a tool's row, an added folder or the
+    /// exported traces, as the daemon would be told (`sessionRoots`). Tools
+    /// goes on only once something is (Ron, 2026-10-22).
+    public var watchesAnything: Bool {
+        let roots = sessionRoots
+        let watchesTool = SourceKind.allCases.contains {
+            if case .watch = roots[$0] { return true }
+            return false
+        }
+        if watchesTool { return true }
+        if case .watch = roots.trajectory { return true }
+        return false
     }
 
     /// The state with the required data use (`consent_options`' `always_on`

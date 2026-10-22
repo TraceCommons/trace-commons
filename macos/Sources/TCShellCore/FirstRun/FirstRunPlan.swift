@@ -65,11 +65,17 @@ public enum CommitPoint: Equatable, Sendable {
     /// Join, so the daemon their ceremony completes with starts here when it
     /// is not running yet. The step does not move.
     case passkeyOnJoin
-    /// Leaving Folders (Quick) or Tools (Custom): the daemon starts, then
-    /// the invite deferred from Join is looked up and joined, and the
-    /// account chosen there is signed in or created.
-    case leaveRoots
-    /// Start on Uses.
+    /// Customize on Tools: the daemon starts with the tools ticked so far,
+    /// or takes the changed ones, so it can name the repos found in their
+    /// traces. Nothing else is sent, and the step does not move.
+    case declareRoots
+    /// Continue on Tools: what `declareRoots` sends, then the next step.
+    case leaveTools
+    /// Sign in on Join, the last step: any changed declaration, then the
+    /// invite Join holds is looked up and joined, and the near.ai account is
+    /// signed in or enrolled. The step does not move.
+    case signIn
+    /// Start sharing on Join.
     case start
 }
 
@@ -79,12 +85,13 @@ public enum FirstRunPlan {
     public static func calls(for state: FirstRunState, at commit: CommitPoint) -> [FirstRunCall] {
         switch commit {
         case .passkeyOnJoin: return passkeyOnJoin(state)
-        case .leaveRoots: return leaveRoots(state)
+        case .declareRoots, .leaveTools: return roots(state)
+        case .signIn: return signIn(state)
         case .start: return start(state)
         }
     }
 
-    /// The declaration a daemon started on Join holds until Folders or Tools
+    /// The declaration a daemon started for a passkey holds until Tools
     /// answers: Claude Code and Codex both `off`, so the start gate
     /// (`daemon::settings::roots_declared`) admits it and nothing is read.
     /// An undeclared root would read the tool's conventional folder unasked,
@@ -113,15 +120,21 @@ public enum FirstRunPlan {
         return [.startDaemon(settingsJSON: json), .openPasskeySheets]
     }
 
-    private static func leaveRoots(_ state: FirstRunState) -> [FirstRunCall] {
-        // No join call runs without a declaration the daemon would take.
+    /// Start the daemon with the declaration, or send what changed since it
+    /// started; nothing without a declaration the daemon would take.
+    private static func roots(_ state: FirstRunState) -> [FirstRunCall] {
         guard let json = state.sessionRoots.settingsJSON() else { return [] }
-        var calls: [FirstRunCall] = []
-        if !state.daemonStarted {
-            calls.append(.startDaemon(settingsJSON: json))
-        } else if let changed = changedDeclarations(from: state.startedSettingsJSON, to: json) {
-            calls.append(.setSourceSettings(settingsJSON: changed))
+        if !state.daemonStarted { return [.startDaemon(settingsJSON: json)] }
+        if let changed = changedDeclarations(from: state.startedSettingsJSON, to: json) {
+            return [.setSourceSettings(settingsJSON: changed)]
         }
+        return []
+    }
+
+    private static func signIn(_ state: FirstRunState) -> [FirstRunCall] {
+        // No join call runs without a declaration the daemon would take.
+        guard state.sessionRoots.settingsJSON() != nil else { return [] }
+        var calls = roots(state)
         let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
         let joinsInvite = state.account != .watchOnly && !invite.isEmpty
         if joinsInvite, state.enrolledInvite != invite {
@@ -181,8 +194,10 @@ public enum FirstRunPlan {
     /// Watch only holds no enrollment, so Start sends nothing that belongs
     /// to one: no consent scopes (the daemon keeps them in the enrollment's
     /// config and refuses them without it), no grant, and the watch-only
-    /// marker instead of the tenant's. Custom's folder rules, past sessions
-    /// and Private AI are local to the daemon and are sent either way: for
+    /// marker instead of the tenant's. The folder rules and past sessions
+    /// Customize set, and Private AI, are local to the daemon and are sent
+    /// either way, except a folder's Automatic, which arms under the
+    /// enrollment's terms and so is sent only with one: for
     /// watching only, picked past sessions are queued on this Mac as pending
     /// offers and none is sent, which the Rules card says
     /// (`rules.past_sessions_watch_only`).
@@ -207,22 +222,26 @@ public enum FirstRunPlan {
         if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
-        if state.tier == .custom {
-            for projectID in state.rules.keys.sorted() {
-                if let mode = state.rules[projectID] {
-                    calls.append(.setProjectMode(projectID: projectID, mode))
-                }
+        for projectID in state.rules.keys.sorted() {
+            // A folder's Automatic can be picked and confirmed before sign-in
+            // (Ron, 2026-10-22); it is armed here, after the scopes, once the
+            // enrollment it needs is held, and never for watching only.
+            if let mode = state.rules[projectID], mode != .autoUpload || FirstRunNavigation.canChooseAutomatic(state) {
+                calls.append(.setProjectMode(projectID: projectID, mode))
             }
-            for projectID in state.pastSelections.keys.sorted() {
-                // A Never folder contributes nothing, its past sessions
-                // included; the daemon would refuse the whole include.
-                guard state.rules[projectID] != .ignore,
-                    let sessions = state.pastSelections[projectID], !sessions.isEmpty
-                else { continue }
-                calls.append(.includePastSessions(projectID: projectID, sessions.sorted()))
-            }
-            calls.append(.setPrivateAI(state.privateAI))
         }
+        for projectID in state.pastSelections.keys.sorted() {
+            // A Never folder contributes nothing, its past sessions
+            // included; the daemon would refuse the whole include.
+            guard state.rules[projectID] != .ignore,
+                let sessions = state.pastSelections[projectID], !sessions.isEmpty
+            else { continue }
+            calls.append(.includePastSessions(projectID: projectID, sessions.sorted()))
+        }
+        // Every first run passes the Private AI step; the switch is sent
+        // once the person turned it on. Off is where it starts, and an
+        // untouched switch sends nothing that could stop Start.
+        if state.privateAI { calls.append(.setPrivateAI(true)) }
         // Automatic alone is not enough: only the core's ready answer after
         // both disclosures (`grantReady`) sends the grant.
         if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state) {
