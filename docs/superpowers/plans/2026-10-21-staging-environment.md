@@ -331,7 +331,7 @@ Tests first: `a_staging_channel_shows_the_label`, `a_production_channel_shows_no
 Spec: sections 6.1, 5.7.
 
 **Files:**
-- Modify: `.github/workflows/staging-macos.yml` (the real job: `workflow_dispatch` only, `environment: staging`, build with `TC_CHANNEL=staging`, `swift test`, sign, notarize, staple, channel agreement, staging appcast, upload to the staging bucket, GitHub pre-release `staging-<date>-<sha>`; `actions/checkout@v6`, `actions/cache@v5`, ends with `./.github/actions/trim-cargo-cache` if it caches `target`)
+- Modify: `.github/workflows/staging-macos.yml` (the real job: `workflow_dispatch` only, no GitHub environment (spec S14), build with `TC_CHANNEL=staging`, `swift test`, sign, notarize, staple, channel agreement, staging appcast, upload to the staging bucket, GitHub pre-release `staging-<date>-<sha>`; `actions/checkout@v6`, `actions/cache@v5`, ends with `./.github/actions/trim-cargo-cache` if it caches `target`)
 - Modify: `scripts/updates/generate-appcast.sh` (output path and key secret name as arguments; production defaults unchanged)
 - Create: `scripts/ci/assert-no-staging-markers.sh` (fails if a binary contains the staging pin key bytes, the pin URL path or the `trace-commons-near-ai-pins/v1` format string; staging host names are not markers, since production holds only their digests) and its self-test
 - Modify: `.github/workflows/release-apps.yml` (run the marker scan on the dylib and CLI after the macOS build)
