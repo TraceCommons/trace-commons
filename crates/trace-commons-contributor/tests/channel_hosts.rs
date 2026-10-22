@@ -300,6 +300,9 @@ fn source_files() -> Vec<(String, PathBuf)> {
                                 path.strip_prefix(crates).unwrap().to_string_lossy()
                             )
                         });
+                    // Name files with `/` on every platform, so the
+                    // module and allowance paths above match on Windows.
+                    let relative = relative.replace('\\', "/");
                     files.push((relative, path));
                 }
             }
