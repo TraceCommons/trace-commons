@@ -335,6 +335,35 @@ char*       tc_build_channel_json(void);
  */
 char*       tc_channel_mismatch_line(void);
 
+/* The state directory the core would pick, so a shell that chooses its own
+ * directory still gets the core's refusal of the other channel's.
+ *
+ * Precedence: explicit_dir, used as given; then override_dir, the value of
+ * this build's override variable (state_dir_env in tc_build_channel_json),
+ * refused when it resolves to the other channel's default directory or
+ * inside it; then the platform default. NULL or "" is unset. The shell
+ * passes the variable's value; this library does not read the environment.
+ *
+ * Returns the directory as an owned string; free it with tc_string_free.
+ * No store is opened and no directory is created (on Windows the platform
+ * default may still move a legacy enrollment, as ConfigStore::resolve
+ * does). On failure returns NULL and, when err is
+ * non-NULL, sets *err to an owned label that names no path (free it with
+ * tc_string_free):
+ *   "state-dir-other-channel"  the override names the other channel's
+ *                              directory
+ *   "state-dir-unresolved"     anything else, including non-UTF-8 input
+ *   "panic"                    a caught panic
+ */
+char*       tc_resolve_state_dir(const char* explicit_dir, const char* override_dir,
+                                 char** err);
+
+/* The sentence the app shows instead of starting when tc_resolve_state_dir
+ * refuses its override. It names no path. Returns an owned string; free it
+ * with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_state_dir_override_refused_line(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That

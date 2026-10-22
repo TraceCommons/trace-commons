@@ -51,7 +51,7 @@ Repo and process rules (every task):
 |---|---|---|---|
 | 1 | `staging-release-check` | `payout-rail-near-ai-client` | widen the release check for the staging files and manifest lines; self-test cases |
 | 2 | `staging-channel-module` | `payout-rail-staging-build` (or `staging-release-check`, see Dependencies) | `channel.rs` with every host and identity value; ratchet test; platform crate takes the access group as a parameter |
-| 3 | `staging-state-dir-channel` | `staging-channel-module` | state directory `channel` file; staging refuses a production directory |
+| 3 | `staging-state-dir-channel` | `staging-channel-module` | an override naming the other channel's default state directory is refused (S11; replaced the `channel` file) |
 | 4 | `staging-signed-pins-format` | `staging-release-check` | signed pin-set format and verifier in the attestation crate, behind its feature |
 | 5 | `staging-pin-source` | `staging-signed-pins-format` + `staging-channel-module` | daemon `PinProvider` reads only the signed set in a staging build; sequence file; status labels |
 | 6 | `staging-pins-tool` | `staging-signed-pins-format` | `trace-commons-staging-pins` observe / sign / verify |
@@ -66,7 +66,7 @@ Tasks 4, 6 and 7 touch no client code and can be reviewed in parallel with 2-3. 
 
 ## Review Focus
 
-1. **No production path ever reaches staging, or the reverse.** Tests: `a_staging_build_names_no_production_host` and `a_default_build_names_no_staging_host` (task 2), `a_staging_ingest_refuses_a_production_near_ai_host` (task 7), `a_staging_store_refuses_a_production_directory` (task 3).
+1. **No production path ever reaches staging, or the reverse.** Tests: `a_staging_build_names_no_production_host` and `a_default_build_names_no_staging_host` (task 2), `a_staging_ingest_refuses_a_production_near_ai_host` (task 7), `an_override_naming_the_other_channel_default_is_refused` (config.rs) and `an_override_to_the_other_channel_directory_is_refused_before_it_is_opened` (`channel_hosts`), plus `tc_resolve_state_dir`'s `an_override_naming_the_other_channel_directory_is_refused_without_a_path` and the macOS app's `testAnOverrideNamingTheOtherChannelDirectoryIsRefused` (task 8).
 2. **Pins fail closed on every path.** Bad signature, unknown key, wrong channel or gateway host, expired, future-issued, rollback, same sequence with other bytes, one bad set: each pins nothing. Tests in tasks 4 and 5.
 3. **Production carries nothing of the staging verifier.** `a_default_build_has_no_staging_pin_key` (task 5) and the marker scan (task 10).
 4. **The release check still fails when it should.** Every new allowance has a self-test case proving one more step past it is refused (task 1).
@@ -133,24 +133,29 @@ Spec: sections 4.1, 4.2; Verified, first two tables.
 
 ### Task 3: A state directory belongs to one channel (`staging-state-dir-channel`)
 
-Spec: section 4.4.
+Spec: section 4.4. The first version wrote a `channel` file into every state
+directory (#1547); owner decision S11 replaced it with the override check
+below.
 
 **Files:**
-- Modify: `crates/trace-commons-contributor/src/config.rs` (`ConfigStore::open` writes `channel` into a new directory; refuses the other channel's; a directory with `contributor.json` and no `channel` file is production)
-- Tests: `config.rs` tests
+- Modify: `crates/trace-commons-contributor/src/channel.rs` (`OTHER_STATE_DIR_NAME` for both channels)
+- Modify: `crates/trace-commons-contributor/src/config.rs` (`ConfigStore::resolve` refuses an override that resolves to the other channel's default state directory or inside it, as `state-dir-other-channel`)
+- Tests: `config.rs` tests, `tests/channel_hosts.rs`
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-#[test] fn a_new_directory_records_its_channel()
-#[test] fn a_staging_store_refuses_a_production_directory()       // cfg(feature)
-#[test] fn a_staging_store_refuses_an_unmarked_enrolled_directory() // cfg(feature)
-#[test] fn a_production_store_refuses_a_staging_directory()       // cfg(not(feature))
-#[test] fn a_production_store_adopts_an_unmarked_directory()      // existing installs keep working
+#[test] fn an_override_naming_the_other_channel_default_is_refused()
+#[test] fn an_override_inside_the_other_channel_default_is_refused()
+#[test] fn an_override_under_a_missing_child_of_the_other_channel_default_is_refused()
+#[test] fn an_override_symlinked_to_the_other_channel_default_is_refused() // cfg(unix)
+#[test] fn a_sibling_sharing_the_other_channel_name_prefix_is_allowed()
+#[test] fn the_other_channel_default_dirs_carry_the_other_channel_name()
+#[test] fn an_override_to_the_other_channel_directory_is_refused_before_it_is_opened() // channel_hosts.rs, cfg(unix)
 ```
 
-- [ ] **Steps 2-4** as in task 2, plus the Windows `adopt_state_dir` tests still pass.
-- [ ] **Step 5: Commit** — `Mark each state directory with its build channel`.
+- [ ] **Steps 2-4** as in task 2, in both builds.
+- [ ] **Step 5: Commit** — `Replace the state directory channel marker with an override check`.
 
 ---
 
@@ -265,15 +270,16 @@ Spec: sections 3.9, 3.11.
 
 ---
 
-### Task 7b: Allow-list admission (`staging-allowlist-admission`, base `staging-server-guard`)
+### Task 7b: Open sign-up, and the ingest under `near-ai-staging` in CI (`staging-allowlist-admission`, base `staging-server-guard`)
 
-Spec: S5, section 3.12.
+Spec: S12 (supersedes S5), section 3.12. The branch name predates S12.
 
-- A staging-only setting holding the allowed staging NEAR AI subjects (a file path or env value, operator-edited). Compiled and read only under `near-ai-staging`.
-- On a NEAR AI sign-in whose verified subject is on the list and has no account, admit it into a new tenant without an invite. Any other subject without an invite is refused with a safe label; no tenant or account row is written. An empty or missing list admits nobody.
-- Logs carry a subject hash only.
+- No staging admission code and no staging setting: a staging ingest provisions and binds a new NEAR AI login exactly as a default build does, with no invite and no list.
+- A staging build refuses the NEAR wallet ceremony by name (`staging_wallet_provisioning_closed`) before reading any configuration, and both capabilities endpoints report `ready: false` for it, so NEAR AI is the only way to make a staging account.
+- A staging build does not require the admission ledger (`near_provisioning_admission_ready`) for NEAR AI sign-in, compiled out under the feature (owner decision 2026-10-22, "Skip ledger on staging"). A default build still requires it.
+- CI checks, lints and runs the whole ingest lib under `near-ai-staging` (`trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL`, not a required check), and requires the two tests below to have run.
 
-Tests first: `an_allowed_subject_is_admitted_without_an_invite`, `an_unlisted_subject_is_refused_and_writes_nothing`, `an_empty_list_admits_nobody`, `a_default_build_ignores_the_list`, `an_invite_still_admits`.
+Tests first: `open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite` (no `cfg`; runs in both builds, red under the feature while S5's list was in place), `a_staging_build_never_offers_wallet_provisioning`, `open_sign_up::a_staging_build_signs_up_without_the_admission_ledger` and its default-build twin `a_default_build_refuses_sign_up_without_the_admission_ledger`.
 
 ### Task 8: The app reads its channel from the dylib (`staging-ffi-channel`)
 
@@ -284,6 +290,7 @@ Spec: sections 4.1 (last paragraph), 4.3.
 - Modify: both `trace_commons.h` copies
 - Modify: `macos/Sources/TCShellCore/StateDirectory.swift` (default directory and env name from the FFI), `macos/Sources/TCShellCore/NativePasskey.swift` (RP ID from the FFI), `macos/Sources/TraceCommonsApp/WindowBreadcrumb.swift` (subsystem from the bundle id), app startup (compare Info.plist `TCChannel` with the dylib's; refuse to start the daemon on a mismatch)
 - Tests: FFI tests; `macos/Tests/TCShellCoreTests/StateDirectoryTests.swift`, `NativePasskeyTests.swift`, a new `ChannelAgreementTests.swift`
+- Note (spec 4.4): the app opens its directory with `ConfigStore::open`, never `ConfigStore::resolve`, so the other-channel override refusal reaches it only through `tc_resolve_state_dir`. `StateDirectory` sends every directory taken from the override variable through it and refuses to start on `state-dir-other-channel`. Tests: FFI `an_override_naming_the_other_channel_directory_is_refused_without_a_path`; Swift `StateDirectoryTests` (the check is consulted for the override and only for it) and `TCBridgeTests/StateDirectoryBridgeTests` (the real dylib refuses the other channel's directory).
 
 - [ ] **Step 1: Write the failing tests** — Rust: `the_channel_json_matches_the_channel_module`, `the_channel_json_carries_no_key`. Swift: `testDefaultDirectoryComesFromTheDylib`, `testPasskeyRpComesFromTheDylib`, `testAChannelMismatchRefusesToStart`, `testAMissingPlistChannelRefusesToStart`.
 - [ ] **Step 2: Run** — `cargo build -p trace-commons-contributor-ffi && swift test --package-path macos --filter 'StateDirectoryTests|NativePasskeyTests|ChannelAgreementTests'`.
@@ -351,6 +358,15 @@ Spec: sections 3.1-3.8, 3.10, 3.12.
 - [ ] **Steps 2-4.** No `gcloud` command runs in this task.
 - [ ] **Step 5: Commit** — `Parameterise the pilot deploy for a staging server`.
 
+**NEAR AI sign-in (S12, spec 3.12).** `staging.env.template` leaves NEAR AI login provisioning open: there is no allow-list setting and no invite to configure, and it must not require tenant access grants for sign-in (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS` is not read by the sign-in path; keep the pilot template's value). What `near_ai_login_readiness_named` requires on a staging build, each of which the template or its secrets must supply:
+- `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true` (the literal `true`).
+- The account registry database (the PostgreSQL mirror).
+- `TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER` and `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` (secrets).
+- `TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL` (https) and `TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE`.
+- Leave the admission ledger off (`TRACE_COMMONS_ADMISSION_ENABLED=false` or unset) and set no `TRACE_COMMONS_WITNESS_*` bypass settings: a staging build creates NEAR AI accounts without the ledger (S12), and the ledger is what would require the witness. A default build still refuses sign-in without the ledger (`near_provisioning_admission_ready`).
+
+The wallet settings (`_WITNESS_JSON`, `_PUBLIC_ORIGIN`) are not needed: a staging build refuses the wallet ceremony.
+
 **Notes from Task 7's boot guard (#1548):**
 - `staging.env.template` must always set `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL`, even with no scorer configured. Unset, it resolves to the production gateway, and a staging ingest refuses to boot.
 - The guard accepts only the exact staging API host. If NEAR AI staging serves per-model completions hosts (spec open item 3), a staging scorer configured on one is refused at boot. Once that item is answered, either let the staging build accept those hosts, or add their digests to the default build's refusal so a production ingest cannot name them.
@@ -363,8 +379,8 @@ Spec: sections 3.1-3.8, 3.10, 3.12.
 Spec: sections 3, 5.4, 7.
 
 **Files:**
-- Create: `docs/operator/staging-environment.md` (provisioning order, Secret Manager names and IAM, DNS, first deploy, the pin re-sign procedure, the payout steps by reference to the payout design section 2, rollback, what to check after a NEAR AI staging redeploy)
-- Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`)
+- Create: `docs/operator/staging-environment.md` (provisioning order, Secret Manager names and IAM, DNS, first deploy, the pin re-sign procedure, the payout steps by reference to the payout design section 2, rollback, what to check after a NEAR AI staging redeploy, and that sign-up is open to any staging NEAR AI account (S12): there is no list to keep, and stopping the ingest service is how to shut staging to everyone)
+- Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`; no invite step: a tester makes a staging NEAR AI account and signs in)
 - Modify: `docs/operator/README.md` (index), `README.md` if its operator checklist lists environments
 
 - [ ] **Step 1:** Walk the runbook against the merged tasks; every command names a real script or flag (grep for each).
