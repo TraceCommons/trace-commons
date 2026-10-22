@@ -107,7 +107,7 @@ enum Command {
         invite: Option<String>,
         /// Print this device's key id for an instance operator to mint a
         /// grant against, and enroll nothing
-        #[arg(long, conflicts_with_all = ["grant", "invite", "allowed_hosts", "scopes", "default_consent"])]
+        #[arg(long, conflicts_with_all = ["grant", "invite", "allowed_hosts", "scopes", "default_consent", "no_browser"])]
         key_id: bool,
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
@@ -128,6 +128,11 @@ enum Command {
             conflicts_with = "scopes"
         )]
         default_consent: bool,
+        /// Print the sign-in address instead of opening a browser. Over SSH,
+        /// or with no display, this is automatic, and `login` also prints the
+        /// `ssh -L` command that forwards the sign-in to your own computer.
+        #[arg(long, conflicts_with_all = ["grant", "invite"])]
+        no_browser: bool,
     },
     /// List discoverable local sessions
     List {
@@ -602,6 +607,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             allowed_hosts,
             scopes,
             default_consent,
+            no_browser,
         } => {
             commands::refuse_json_sign_in(
                 cli.json,
@@ -616,6 +622,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 allowed_hosts.as_deref(),
                 scopes.as_deref(),
                 default_consent,
+                no_browser,
             )
             .await
         }
@@ -923,9 +930,39 @@ mod tests {
     }
 
     #[test]
-    fn key_id_does_not_combine_with_an_enrollment_flag() {
+    fn login_no_browser_parses_and_belongs_to_the_near_ai_route() {
+        assert!(matches!(
+            parse(&["login", "--no-browser"]).command,
+            Command::Login {
+                no_browser: true,
+                key_id: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["login"]).command,
+            Command::Login {
+                no_browser: false,
+                ..
+            }
+        ));
         for other in [
             &["--grant", "g"][..],
+            &["--invite", "https://i.example/onboard#C"],
+        ] {
+            let args: Vec<&str> = ["trace-commons-contributor", "login", "--no-browser"]
+                .into_iter()
+                .chain(other.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn key_id_does_not_combine_with_an_enrollment_flag() {
+        for other in [
+            &["--no-browser"][..],
+            &["--grant", "g"],
             &["--invite", "https://i.example/onboard#C"],
             &["--scopes", "model_training"],
             &["--default"],

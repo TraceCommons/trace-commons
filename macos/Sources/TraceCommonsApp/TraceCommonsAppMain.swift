@@ -419,6 +419,7 @@ private struct Launcher: View {
         ) { _ in
             Task { @MainActor in
                 model.refreshBalanceOnActivation()
+                model.refreshCredentialOnActivation()
                 await model.refreshReengageDeclaration()
             }
         }
