@@ -55,6 +55,26 @@
 //! lower sequence than one already accepted, or the same sequence with other
 //! bytes). The caller keeps the highest accepted sequence and compares it
 //! with [`VerifiedPins::sequence`] and [`VerifiedPins::payload_sha256`].
+//!
+//! [`verify`] is the only entry point: the types that decode the document
+//! and the payload are private to this crate, so nothing outside it can act
+//! on payload bytes whose signature has not verified.
+//!
+//! # What the caller owns
+//!
+//! [`verify`] sets no limit on the document's size. The caller caps the
+//! response body it reads before passing the bytes here.
+//!
+//! A JSON object that repeats a key is read with the last value winning, as
+//! `serde_json` does. That cannot be used to change what a payload says
+//! without the signing key, because the signature covers the exact bytes,
+//! but the signing tool must not emit a repeated key, or another parser of
+//! the same signed bytes could read a different value.
+//!
+//! Neither decoded type prints its bytes under `{:?}`: the outer document
+//! shows lengths and the payload's SHA-256, the payload shows its numbers
+//! and the number of sets, so formatting one into a log line keeps the
+//! hash-only rule.
 
 use std::fmt;
 
@@ -148,21 +168,36 @@ impl fmt::Display for PinRefusal {
 
 impl std::error::Error for PinRefusal {}
 
-/// The outer document, decoded but not yet verified.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedPinSet {
+/// The outer document, decoded but not yet verified. Private to the crate:
+/// [`verify`] is the only supported entry point.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SignedPinSet {
     /// The exact payload bytes the signature covers (after the prefix).
-    pub payload: Vec<u8>,
+    pub(crate) payload: Vec<u8>,
     /// The Ed25519 signature.
-    pub signature: Vec<u8>,
+    pub(crate) signature: Vec<u8>,
     /// The signing key's id, as the document states it.
-    pub key_id: String,
+    pub(crate) key_id: String,
+}
+
+impl fmt::Debug for SignedPinSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignedPinSet")
+            .field("payload_len", &self.payload.len())
+            .field(
+                "payload_sha256",
+                &hex::encode(Sha256::digest(&self.payload)),
+            )
+            .field("signature_len", &self.signature.len())
+            .field("key_id_len", &self.key_id.len())
+            .finish()
+    }
 }
 
 impl SignedPinSet {
     /// Decode the outer document. Every field is required and no other is
     /// allowed.
-    pub fn parse(document: &[u8]) -> Result<Self, PinRefusal> {
+    pub(crate) fn parse(document: &[u8]) -> Result<Self, PinRefusal> {
         let object = json_object(document)?;
         exact_fields(&object, &["payload", "signature", "key_id"])?;
         Ok(SignedPinSet {
@@ -174,24 +209,40 @@ impl SignedPinSet {
 }
 
 /// The signed payload, parsed but not yet checked against the build.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PinPayload {
-    pub format: String,
-    pub channel: String,
-    pub gateway_host: String,
-    pub sequence: u64,
+/// Private to the crate: it is only ever parsed from bytes whose signature
+/// [`verify`] has checked.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PinPayload {
+    pub(crate) format: String,
+    pub(crate) channel: String,
+    pub(crate) gateway_host: String,
+    pub(crate) sequence: u64,
     /// Seconds since the Unix epoch.
-    pub issued_at: u64,
+    pub(crate) issued_at: u64,
     /// Seconds since the Unix epoch.
-    pub expires_at: u64,
+    pub(crate) expires_at: u64,
     /// The sets as written, not yet parsed.
-    pub sets: Vec<String>,
+    pub(crate) sets: Vec<String>,
+}
+
+impl fmt::Debug for PinPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PinPayload")
+            .field("format_len", &self.format.len())
+            .field("channel_len", &self.channel.len())
+            .field("gateway_host_len", &self.gateway_host.len())
+            .field("sequence", &self.sequence)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .field("set_count", &self.sets.len())
+            .finish()
+    }
 }
 
 impl PinPayload {
     /// Parse the payload bytes. Every field is required and no other is
     /// allowed. Only call this on bytes whose signature has verified.
-    pub fn parse(payload: &[u8]) -> Result<Self, PinRefusal> {
+    pub(crate) fn parse(payload: &[u8]) -> Result<Self, PinRefusal> {
         let object = json_object(payload)?;
         exact_fields(
             &object,
@@ -271,8 +322,8 @@ pub fn signing_input(payload: &[u8]) -> Vec<u8> {
 ///
 /// Returns the sets only if the key id matches, the signature verifies, the
 /// payload is the v1 format for the staging channel and this gateway host,
-/// `issued_at <= now + 5 min`, `now < expires_at`, the lifetime is positive
-/// and at most 14 days, and every set parses. The sequence is not checked
+/// the lifetime is positive and at most 14 days, `issued_at <= now + 5 min`,
+/// `now < expires_at`, and every set parses, checked in that order. The sequence is not checked
 /// here; see the module documentation.
 pub fn verify(
     document: &[u8],
@@ -298,16 +349,18 @@ pub fn verify(
     if payload.gateway_host != gateway_host {
         return Err(PinRefusal::WrongGatewayHost);
     }
+    // The document's own lifetime first, so a document that could never be
+    // valid reports that, whatever the clock says.
+    if payload.expires_at <= payload.issued_at
+        || payload.expires_at - payload.issued_at > MAX_LIFETIME_SECS
+    {
+        return Err(PinRefusal::LifetimeInvalid);
+    }
     if payload.issued_at > now.saturating_add(ISSUE_SKEW_SECS) {
         return Err(PinRefusal::IssuedInFuture);
     }
     if now >= payload.expires_at {
         return Err(PinRefusal::Expired);
-    }
-    if payload.expires_at <= payload.issued_at
-        || payload.expires_at - payload.issued_at > MAX_LIFETIME_SECS
-    {
-        return Err(PinRefusal::LifetimeInvalid);
     }
     if payload.sets.is_empty() {
         return Err(PinRefusal::NoSets);
@@ -618,8 +671,17 @@ mod tests {
         let key = key_pair();
         let doc = signed(&key, &good_payload());
         let short = &key.public_key().as_ref()[..31];
+        // The id does not match the short key: refused before the signature.
         let refusal = verify(&doc, short, ISSUED, GATEWAY).unwrap_err();
         assert_eq!(refusal, PinRefusal::UnknownKey);
+        // The id is the short key's own, which anyone can compute for a key
+        // compiled into a public build: only the signature check stands in
+        // the way, and it must refuse a key that is not an Ed25519 key.
+        let payload = good_payload();
+        let signature = key.sign(&signing_input(&payload));
+        let doc = document(&payload, signature.as_ref(), &key_id(short));
+        let refusal = verify(&doc, short, ISSUED, GATEWAY).unwrap_err();
+        assert_eq!(refusal, PinRefusal::BadSignature);
     }
 
     #[test]
@@ -727,9 +789,53 @@ mod tests {
             "2026-10-21T17:59:00Z",
             &sets,
         );
+        // The lifetime is checked before the clock, so a backwards document
+        // reports its own label at any time, not `pins_expired`.
+        for now in [ISSUED - 120, ISSUED, ISSUED + DAY] {
+            assert_eq!(
+                check(&key, &signed(&key, &backwards), now).unwrap_err(),
+                PinRefusal::LifetimeInvalid,
+                "{now}"
+            );
+        }
+        // Expiring the instant it is issued is no lifetime either, even
+        // inside the issue skew window, where the clock checks would pass.
+        let zero = payload_json(
+            FORMAT,
+            CHANNEL,
+            GATEWAY,
+            "2026-10-21T18:00:00Z",
+            "2026-10-21T18:00:00Z",
+            &sets,
+        );
         assert_eq!(
-            check(&key, &signed(&key, &backwards), ISSUED - 120).unwrap_err(),
+            check(&key, &signed(&key, &zero), ISSUED - 60).unwrap_err(),
             PinRefusal::LifetimeInvalid
+        );
+    }
+
+    #[test]
+    fn debug_output_carries_no_document_bytes() {
+        let key = key_pair();
+        let payload = good_payload();
+        let doc = signed(&key, &payload);
+        let outer = SignedPinSet::parse(&doc).expect("parses");
+        let inner = PinPayload::parse(&payload).expect("parses");
+        let printed = format!("{outer:?} {inner:?}");
+        for secret in [
+            "a".repeat(96),
+            "b".repeat(96),
+            GATEWAY.to_string(),
+            hex::encode(&outer.signature),
+            format!("{:?}", outer.signature),
+            format!("{:?}", outer.payload),
+        ] {
+            assert!(!printed.contains(&secret), "{printed}");
+        }
+        // What it does print is lengths and the payload digest.
+        assert!(
+            printed.contains(&hex::encode(Sha256::digest(&payload))),
+            "{printed}"
         );
     }
 

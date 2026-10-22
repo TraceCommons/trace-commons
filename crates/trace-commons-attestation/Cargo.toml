@@ -69,6 +69,6 @@ receipt = []
 collateral-client = ["dcap-qvl/report"]
 # The signed NEAR AI pin-set format and its verifier (`staging_pins`), for
 # staging builds only. The contributor's and the server's own staging
-# features forward here. A default build compiles none of it, so a
+# features will forward here; until they do, CI turns it on directly. A default build compiles none of it, so a
 # production binary holds no code that reads a signed pin set.
 near-ai-staging = []
