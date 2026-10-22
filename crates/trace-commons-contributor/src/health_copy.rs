@@ -234,6 +234,19 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
 pub const READ_UNAVAILABLE: &str =
     "This couldn't be read just now. Nothing has changed. Try again in a moment.";
 
+/// What the app says instead of starting when its bundle and its core
+/// library come from different builds (staging design, section 4.3): a
+/// staging bundle around a production library, or the reverse, would show
+/// one channel while talking to the other, so the app starts nothing. It
+/// calls the copy damaged rather than naming builds. Approved 2026-10-22.
+pub const CHANNEL_MISMATCH: &str = concat!(
+    crate::app_name!(),
+    " can't start because this copy of the app is damaged. \
+     Nothing is being watched or sent. Install ",
+    crate::app_name!(),
+    " again to fix it."
+);
+
 /// The button beside [`core_down_copy`] in a shell that can ask its
 /// background service to start again, and the same button while it is
 /// asking. Not part of [`core_down_copy`] itself: nothing in the core
