@@ -324,10 +324,19 @@ fn literals_outside_the_channel_module() -> Vec<String> {
                 .enumerate()
                 .filter(|(_, line)| !line.trim_start().starts_with("//"))
                 .flat_map(|(n, line)| {
-                    line.split('"')
-                        .skip(1)
-                        .step_by(2)
-                        .map(move |literal| (n + 1, literal.to_string()))
+                    // Double-quoted, single-quoted and template literals. A
+                    // stray apostrophe in prose yields a span that is not a
+                    // literal, which can only add a finding, never hide one.
+                    ['"', '\'', '`']
+                        .into_iter()
+                        .flat_map(|quote| {
+                            line.split(quote)
+                                .skip(1)
+                                .step_by(2)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .map(move |literal| (n + 1, literal))
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -603,7 +612,9 @@ fn a_staging_build_refuses_a_production_ingest_origin() {
         "https://ingest.tracecommons.ai",
         "https://issuer.tracecommons.ai/onboard",
         "https://tracecommons.ai",
+        "https://www.tracecommons.ai",
         "https://cloud-api.near.ai/v1",
+        "https://cloud.near.ai",
     ] {
         assert!(
             channel::refuse_other_channel_origin(origin).is_err(),
