@@ -18,6 +18,9 @@ struct InsightsPatternsTab: View {
     let model: InsightsPatternsModel
     let comparisons: InsightsComparisonsModel
     let copy: [String: String]
+    /// The Models card's answers (spec 2026-10-20 section 8): drawn only
+    /// when the daemon gave some, otherwise hidden, never greyed.
+    var models: InsightsModelAnswersModel?
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
@@ -50,6 +53,11 @@ struct InsightsPatternsTab: View {
                     }
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
+                }
+                // Not tied to the week on screen: the answers cover the 13
+                // weeks the daemon counted, ending now.
+                if let answers = models?.answers {
+                    InsightsModelsCard(answers: answers, copy: copy)
                 }
                 if model.busy { GlassSpinner() }
             }

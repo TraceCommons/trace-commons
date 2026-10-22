@@ -1849,6 +1849,319 @@ mod tests {
         }
     }
 
+    /// The Patterns "Models" card (spec 2026-10-20 section 8, poldsam's
+    /// #1501 review point 10): each answer is a scoped fact about the
+    /// contributor's own traces, never a ranking. The words are pinned, the
+    /// ranking words are forbidden in the card copy and in the wire labels
+    /// it shows (as `cli/insights.rs` pins "better model"), every question,
+    /// basis and left-out reason has its words, and the sentences that
+    /// state a floor or the noise test say the engine's own numbers.
+    #[test]
+    fn the_models_card_words_are_scoped_facts() {
+        use super::super::analytics_constants::{
+            MODEL_ANSWER_LEAD_SHARE, MODEL_ANSWER_MIN_EDITS, MODEL_ANSWER_MIN_SESSIONS,
+        };
+        use super::super::model_answers::{AnswerState, LeftOut, ModelQuestion, RejectionBasis};
+        use super::super::session_facts::EditMode;
+        let copy = ui_copy();
+        let pinned = [
+            ("analytics_models_title", "Models"),
+            (
+                "analytics_models_scope",
+                "In your traces \u{b7} labels as recorded \u{b7} task type inferred",
+            ),
+            ("analytics_models_window", "Traces from {range}"),
+            (
+                "analytics_models_bug_fix_rejected",
+                "Fewest rejected edits in your bug-fix traces",
+            ),
+            (
+                "analytics_models_bug_fix_rejected_undone",
+                "Fewest undone edits in your bug-fix traces",
+            ),
+            (
+                "analytics_models_refactor_rejected",
+                "Fewest rejected edits in your refactoring traces",
+            ),
+            (
+                "analytics_models_refactor_rejected_undone",
+                "Fewest undone edits in your refactoring traces",
+            ),
+            (
+                "analytics_models_tests_rejected",
+                "Fewest rejected edits in your test-writing traces",
+            ),
+            (
+                "analytics_models_tests_rejected_undone",
+                "Fewest undone edits in your test-writing traces",
+            ),
+            (
+                "analytics_models_docs_cost",
+                "Lowest cost per documentation trace, at API prices",
+            ),
+            (
+                "analytics_models_rejected_across_tasks",
+                "Fewest rejected edits across your task types",
+            ),
+            (
+                "analytics_models_rejected_across_tasks_undone",
+                "Fewest undone edits across your task types",
+            ),
+            (
+                "analytics_models_finish_time",
+                "Least active time to finish a trace",
+            ),
+            ("analytics_models_leader", "{label} ({x}, {n} traces)"),
+            ("analytics_models_next", "Next: {label} ({x}, {n} traces)"),
+            ("analytics_models_rate_rejected", "{p}% rejected"),
+            ("analytics_models_rate_undone", "{p}% undone"),
+            ("analytics_models_cost", "{x} per trace at API prices"),
+            (
+                "analytics_models_finish",
+                "median {span} active, {q} prompts",
+            ),
+            ("analytics_models_interrupts", "{x} interrupts per trace"),
+            ("analytics_models_interrupts_one", "{x} interrupt per trace"),
+            ("analytics_models_not_enough", "Not enough traces yet"),
+            ("analytics_models_count_one", "{label}: {n} trace"),
+            ("analytics_models_count_other", "{label}: {n} traces"),
+            ("analytics_models_not_priced", "Not priced"),
+            (
+                "analytics_models_not_priced_line",
+                "Fewer than two of these models have API prices for enough traces, so costs aren't compared.",
+            ),
+            (
+                "analytics_models_no_clear_difference",
+                "No clear difference",
+            ),
+            (
+                "analytics_models_basis_rejected",
+                "Rejected: declined, or undone after you stepped in",
+            ),
+            (
+                "analytics_models_basis_undone",
+                "Declined edits weren't recorded, so this counts undone edits",
+            ),
+            (
+                "analytics_models_mode_prompting",
+                "Traces where you were asked before each edit",
+            ),
+            (
+                "analytics_models_mode_not_prompting",
+                "Traces where edits weren't put to you",
+            ),
+            (
+                "analytics_models_info_scope",
+                "Counted from traces in your watched folders on this Mac. Nothing here leaves it.",
+            ),
+            (
+                "analytics_models_info_task",
+                "Task types are inferred from the files edited and the commands run, not from what you asked for.",
+            ),
+            (
+                "analytics_models_info_floor",
+                "A model is compared once it has 5 traces of a task type, and 30 edits for edit figures. Each answer needs two models.",
+            ),
+            (
+                "analytics_models_info_majority",
+                "A trace counts for the model that ran most of its turns. A trace with no such model counts for none.",
+            ),
+            (
+                "analytics_models_info_noise",
+                "No clear difference: the gap didn't hold in 95% of resamples, so it could be chance.",
+            ),
+            (
+                "analytics_models_info_rejected",
+                "Rejected edits are edits you declined, plus edits undone after you spoke, declined or interrupted. Only undone edits we could see count: edits made through a shell or an editor aren't seen.",
+            ),
+            (
+                "analytics_models_info_codex",
+                "Codex traces don't record declined edits, so their rejections are unknown, never zero.",
+            ),
+            (
+                "analytics_models_info_interrupts",
+                "Interrupts are shown beside edits, not added to them: an interrupt isn't always a rejection.",
+            ),
+            (
+                "analytics_models_info_cost",
+                "At API prices: what the published API list prices would charge for these tokens, not what a subscription costs. Cache writes are priced at their 5-minute and 1-hour rates.",
+            ),
+            (
+                "analytics_models_near_ai_charge",
+                "{x} per trace, charged by NEAR AI ({n} traces)",
+            ),
+            (
+                "analytics_models_near_ai_charge_one",
+                "{x} per trace, charged by NEAR AI ({n} trace)",
+            ),
+            (
+                "analytics_models_near_ai_charge_unknown",
+                "Charge unknown: {n} traces",
+            ),
+            (
+                "analytics_models_near_ai_charge_unknown_one",
+                "Charge unknown: {n} trace",
+            ),
+            (
+                "analytics_models_near_ai_charge_all_unknown",
+                "Charged by NEAR AI, charge unknown: {n} traces",
+            ),
+            (
+                "analytics_models_near_ai_charge_all_unknown_one",
+                "Charged by NEAR AI, charge unknown: {n} trace",
+            ),
+            (
+                "analytics_models_info_near_ai_charge",
+                "Charged by NEAR AI: what NEAR AI charged for the documentation traces sent through it, as the proxy on this Mac recorded it. It's shown apart from API prices and never added to them, and these traces are left out of the API-price figures. A trace with a call that has no recorded charge counts as charge unknown, never zero.",
+            ),
+            (
+                "analytics_models_info_time",
+                "Active time runs from each prompt to the model's last action before the next one, less time waiting on your answers. Only finished traces count, compared within one approval mode.",
+            ),
+            (
+                "analytics_models_left_out_unknown_facts",
+                "Left out, facts couldn't be read: {n}",
+            ),
+            (
+                "analytics_models_left_out_automated",
+                "Left out, run by an agent, not you: {n}",
+            ),
+            (
+                "analytics_models_left_out_delegated",
+                "Left out, work by subagents isn't read: {n}",
+            ),
+            (
+                "analytics_models_left_out_capped",
+                "Left out, too long to read in full: {n}",
+            ),
+            (
+                "analytics_models_left_out_routed",
+                "Left out, routed so the label may not match: {n}",
+            ),
+            (
+                "analytics_models_left_out_reviewer",
+                "Left out, automatic code review: {n}",
+            ),
+            (
+                "analytics_models_left_out_no_majority",
+                "Left out, no model ran most turns: {n}",
+            ),
+            (
+                "analytics_models_left_out_unpriced",
+                "Left out, not priced: {n}",
+            ),
+            (
+                "analytics_models_left_out_too_few_sessions",
+                "Left out, too few traces of a task type to compare: {n}",
+            ),
+            (
+                "analytics_models_left_out_too_few_edits",
+                "Left out, too few edits: {n}",
+            ),
+            (
+                "analytics_models_left_out_mix_too_different",
+                "Left out, task mix too different to compare: {n}",
+            ),
+        ];
+        for (key, words) in pinned {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        // No Models word goes unpinned.
+        let pinned_keys: std::collections::BTreeSet<&str> =
+            pinned.iter().map(|(key, _)| *key).collect();
+        for key in copy.keys() {
+            if key.starts_with("analytics_models_") {
+                assert!(pinned_keys.contains(key.as_str()), "{key} is not pinned");
+            }
+        }
+
+        // Scoped facts, never a ranking: in the words, and in every wire
+        // label the card reads.
+        let forbidden = [
+            "best",
+            "better model",
+            "fastest model",
+            "benchmark",
+            "winner",
+        ];
+        let mut wire = Vec::new();
+        for question in ModelQuestion::ALL {
+            wire.push(serde_json::to_value(question).unwrap().to_string());
+        }
+        for state in [
+            AnswerState::NotEnoughSessions,
+            AnswerState::NotPriced,
+            AnswerState::NoClearDifference,
+            AnswerState::Answered,
+        ] {
+            wire.push(serde_json::to_value(state).unwrap().to_string());
+        }
+        for basis in [RejectionBasis::Rejected, RejectionBasis::Undone] {
+            wire.push(serde_json::to_value(basis).unwrap().to_string());
+        }
+        let left_out = serde_json::to_value(LeftOut::default()).unwrap();
+        let reasons: Vec<String> = left_out.as_object().unwrap().keys().cloned().collect();
+        wire.extend(reasons.iter().cloned());
+        for (key, words) in pinned {
+            for phrase in forbidden {
+                assert!(
+                    !words.to_lowercase().contains(phrase),
+                    "{key} says {phrase}"
+                );
+            }
+        }
+        for label in &wire {
+            for phrase in forbidden {
+                assert!(!label.contains(phrase), "wire label {label} says {phrase}");
+            }
+        }
+
+        // Every question has its words, and each rejection question its
+        // undone-basis words; every left-out reason and approval mode too.
+        for question in ModelQuestion::ALL {
+            let wire = serde_json::to_value(question).unwrap();
+            let key = format!("analytics_models_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "{key}");
+            if wire.as_str().unwrap().ends_with("_rejected")
+                || wire.as_str().unwrap() == "rejected_across_tasks"
+            {
+                assert!(copy.contains_key(&format!("{key}_undone")), "{key}_undone");
+            }
+        }
+        for reason in &reasons {
+            let key = format!("analytics_models_left_out_{reason}");
+            assert!(copy.contains_key(&key), "{key}");
+        }
+        for mode in [EditMode::Prompting, EditMode::NotPrompting] {
+            let wire = serde_json::to_value(mode).unwrap();
+            let key = format!("analytics_models_mode_{}", wire.as_str().unwrap());
+            assert!(copy.contains_key(&key), "{key}");
+        }
+
+        // The NEAR AI charge is its own figure: its words name NEAR AI and
+        // never call it an API price, and the API-price words never name
+        // NEAR AI, so the two are never read as one figure.
+        for (key, words) in pinned {
+            if key.starts_with("analytics_models_near_ai_charge") {
+                assert!(
+                    words.contains("NEAR AI") || words.starts_with("Charge unknown"),
+                    "{key}"
+                );
+                assert!(!words.contains("API"), "{key} says API");
+            }
+            if key == "analytics_models_cost" || key == "analytics_models_docs_cost" {
+                assert!(!words.contains("NEAR AI"), "{key} names NEAR AI");
+            }
+        }
+
+        // The floor and noise sentences say the engine's numbers.
+        let floor = &copy["analytics_models_info_floor"];
+        assert!(floor.contains(&format!("{MODEL_ANSWER_MIN_SESSIONS} traces")));
+        assert!(floor.contains(&format!("{MODEL_ANSWER_MIN_EDITS} edits")));
+        let lead = MODEL_ANSWER_LEAD_SHARE.num * 100 / MODEL_ANSWER_LEAD_SHARE.den;
+        assert!(copy["analytics_models_info_noise"].contains(&format!("{lead}%")));
+    }
+
     #[test]
     fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
         use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};

@@ -488,6 +488,13 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
     }
 
+    public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so Patterns shows no Models
+        // card, as against a daemon that predates the method.
+        throw DaemonDataError.notAvailableYet(method: "insights_model_answers")
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
         // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so

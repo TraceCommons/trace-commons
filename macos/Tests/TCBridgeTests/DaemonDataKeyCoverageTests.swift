@@ -251,6 +251,22 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
 
+        // The Models answers: off with counting off (its default), then with
+        // counting on before any pass has made the counter key, which a
+        // temp store answers as unreadable (`key_unavailable`), never as
+        // empty rows. The answered shape is pinned from the daemon's printed
+        // reply in `InsightsModelAnswersContractTests`.
+        let modelsOff = try result(daemon, "insights_model_answers")
+        XCTAssertEqual((modelsOff as? [String: Any])?["enabled"] as? Bool, false)
+        assertDeclared(DaemonData.InsightsModelAnswers.self, modelsOff, method: "insights_model_answers")
+        let counting = try result(daemon, "set_settings", ["insights_counter_pass": true])
+        XCTAssertEqual((counting as? [String: Any])?["insights_counter_pass"] as? Bool, true)
+        let models = try result(daemon, "insights_model_answers")
+        XCTAssertEqual((models as? [String: Any])?["enabled"] as? Bool, true)
+        XCTAssertEqual((models as? [String: Any])?["readable"] as? Bool, false)
+        XCTAssertEqual((models as? [String: Any])?["reason"] as? String, "key_unavailable")
+        assertDeclared(DaemonData.InsightsModelAnswers.self, models, method: "insights_model_answers")
+
         // Approve last: it moves the entry out of the queue when it acts.
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["entry_id": entryId]), method: "approve")
 

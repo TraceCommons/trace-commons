@@ -12,6 +12,8 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    /// The Patterns "Models" card's answers; `nil` answers hide the card.
+    @State private var modelAnswers: InsightsModelAnswersModel
     @State private var tab: InsightsTab
     /// "Turn off" on the weekly summary card: the daemon's setting, its only
     /// switch. `nil` without a daemon.
@@ -36,6 +38,9 @@ struct InsightsView: View {
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
+        var modelAnswersReader: InsightsModelAnswersModel.Reader? = daemon.map { client in
+            { try await client.insightsModelAnswers() }
+        }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
@@ -43,6 +48,7 @@ struct InsightsView: View {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
             watchedReader = nil
+            modelAnswersReader = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -54,6 +60,7 @@ struct InsightsView: View {
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
                                                        watchedDrill: watchedDrill),
+                  modelAnswers: InsightsModelAnswersModel(reader: modelAnswersReader),
                   turnOffRecapCard: turnOff)
     }
 
@@ -68,6 +75,7 @@ struct InsightsView: View {
                     overviewModel: InsightsOverviewModel? = nil,
                     sessionsModel: InsightsSessionsModel? = nil,
                     initialTab: InsightsTab = .overview,
+                    modelAnswers: InsightsModelAnswersModel? = nil,
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
@@ -78,6 +86,7 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _modelAnswers = State(initialValue: modelAnswers ?? InsightsModelAnswersModel(reader: nil))
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
     }
@@ -104,8 +113,9 @@ struct InsightsView: View {
     }
 
     /// The tab container. No Spend tab: a tab that cannot be used is
-    /// hidden, not drawn greyed, and Insights shows no money (owner
-    /// decision D5). The models open and close with the container, not with
+    /// hidden, not drawn greyed. The only money in Insights is the Models
+    /// card's documentation cost at API prices (owner decision D5, settled
+    /// 2026-10-20). The models open and close with the container, not with
     /// a tab.
     private var tabs: some View {
         // The page is in the main pane, whose insets it shares: no inset of
@@ -135,7 +145,7 @@ struct InsightsView: View {
                     showPatterns: { tab = .patterns })
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
-                                    selectWeek: selectWeek)
+                                    models: modelAnswers, selectWeek: selectWeek)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text))
@@ -147,6 +157,7 @@ struct InsightsView: View {
         .onAppear { specificationModel.open() }
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
+        .onAppear { modelAnswers.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
         .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
@@ -158,14 +169,14 @@ struct InsightsView: View {
             patternsModel.reload()
             sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id))
         }
-        .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
+        .onChange(of: model.counterWeek) { _, week in showCounterWeek(week); modelAnswers.open() }
         .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
             comparisonModel.upstreamEvidenceChanged()
             specificationModel.upstreamEvidenceChanged()
         }
         .onDisappear {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
-            patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
+            patternsModel.close(); sessionsModel.close(); comparisonsModel.clear(); modelAnswers.close()
         }
     }
 
