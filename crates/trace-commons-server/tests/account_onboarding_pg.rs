@@ -7,7 +7,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use trace_commons_server::account_onboarding::{
-    NativeProvisioningPending, PendingNearProvisioning, ProvisioningAssertion,
+    NativeProvisioningPending, NearAiNewAccount, PendingNearProvisioning, ProvisioningAssertion,
 };
 use trace_commons_server::account_trust::resolve_contribution_account;
 use trace_commons_server::config::{DatabaseConfig, NearConfig, SslMode};
@@ -895,7 +895,13 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
     let before = provisioning_snapshot(&admin, &device).await;
     let t = token("login-cross-tenant");
     let refused = db
-        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .provision_near_ai_login(
+            &login,
+            &bytes(&device),
+            native_session(&t),
+            &identity(),
+            NearAiNewAccount::Open,
+        )
         .await;
     let after = provisioning_snapshot(&admin, &device).await;
     assert_eq!(
@@ -917,6 +923,7 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
             &bytes(&fresh_device),
             native_session(&t),
             &identity(),
+            NearAiNewAccount::Open,
         )
         .await
         .expect("a device registered nowhere provisions");
@@ -927,6 +934,7 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
             &bytes(&fresh_device),
             native_session(&t),
             &identity(),
+            NearAiNewAccount::Open,
         )
         .await
         .expect("a retry from the same device and account is idempotent");
@@ -936,7 +944,13 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
     let before = provisioning_snapshot(&admin, &device).await;
     let t = token("login-cross-tenant-returning");
     let refused = db
-        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .provision_near_ai_login(
+            &login,
+            &bytes(&device),
+            native_session(&t),
+            &identity(),
+            NearAiNewAccount::Open,
+        )
         .await;
     assert_eq!(
         refusal_label(refused),

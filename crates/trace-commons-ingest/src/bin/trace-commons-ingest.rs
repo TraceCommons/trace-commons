@@ -21266,6 +21266,9 @@ mod step_up_page;
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
+#[cfg(feature = "near-ai-staging")]
+#[path = "trace_commons_ingest_internal/staging_admission.rs"]
+mod staging_admission;
 use near_provisioning::{
     near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
     near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,

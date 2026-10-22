@@ -3912,8 +3912,9 @@ impl Database for PgBackend {
         device_public_key: &[u8; 32],
         session: crate::db::NewSession<'_>,
         identity: &crate::near_account_identity::NearAccountIdentity,
+        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
-        self.near_ai_login_provision(login, device_public_key, session, identity)
+        self.near_ai_login_provision(login, device_public_key, session, identity, new_account)
             .await
     }
 
@@ -3942,6 +3943,7 @@ impl Database for PgBackend {
         device_public_key: &[u8; 32],
         session: crate::db::NewSession<'_>,
         identity: &crate::near_account_identity::NearAccountIdentity,
+        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         self.near_ai_login_bind(
             tenant_id,
@@ -3950,6 +3952,7 @@ impl Database for PgBackend {
             device_public_key,
             session,
             identity,
+            new_account,
         )
         .await
     }
