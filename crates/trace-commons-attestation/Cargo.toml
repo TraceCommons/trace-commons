@@ -67,3 +67,8 @@ receipt = []
 # async HTTP stack (reqwest 0.13) plus `futures` into the build, which is why
 # it is off by default.
 collateral-client = ["dcap-qvl/report"]
+# The signed NEAR AI pin-set format and its verifier (`staging_pins`), for
+# staging builds only. The contributor's and the server's own staging
+# features forward here. A default build compiles none of it, so a
+# production binary holds no code that reads a signed pin set.
+near-ai-staging = []
