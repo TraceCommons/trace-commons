@@ -885,7 +885,8 @@ The plan breaks this into small PRs. In order:
    its windows. A label is a new notice and needs approval for existence and
    wording.
 6. **NEAR AI facts still needed:** whether staging has per-model completions
-   hosts; staging's current measurements and the per-model receipt signers
+   hosts; which registers staging pins (5.2); staging's current
+   measurements and the per-model receipt signers
    for `Qwen/Qwen3.8-27B` (needs a staging key to fetch); whether an API key
    minted before a redeploy survives the JWT rotation or only sessions break;
    whether staging is reachable from a GCP VM without an allowlist.
