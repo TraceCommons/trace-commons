@@ -93,6 +93,12 @@ All dated 2026-10-21. The owner's words are quoted.
   staging environment right now" (2026-10-22), meaning the GitHub
   environment and its approval gate. The staging workflow runs on manual
   dispatch only, with staging-named repository secrets (6.1).
+- **(S15) A public bucket for staging updates.** "New public updates
+  bucket" (2026-10-22). The staging appcast and DMGs live in
+  `tc-staging-updates-20261022`, readable by anyone, like production's
+  updates bucket. The publisher can write only there. The artifacts bucket
+  stays private: it is the staging server's object store and holds its
+  database dumps.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -414,7 +420,6 @@ runtime SA and the owner. The first four exist (S9):
 | `tc-staging-nearai-reseller-key` | payout rail (payout design section 2, step 6) |
 | `tc-staging-db-app-password`, `tc-staging-db-login-resolver-password` | PostgreSQL roles |
 | `tc-staging-nearai-pin-signing-key` | the pin re-sign tool only; **not** readable by the runtime SA (5.5) |
-| `tc-staging-sparkle-signing-key` | the staging workflow only (6.1) |
 
 They load the way the pilot's do: rendered into
 `/etc/tracecommons/ingest.env` and `issuer.env`, root-owned, group
@@ -640,7 +645,9 @@ its origin is in the staging RP origin list (3.8).
 ### 4.7 Updates
 
 A separate appcast, `.../staging/appcast.xml` in the staging bucket, signed
-with a separate Sparkle EdDSA key, `tc-staging-sparkle-signing-key`. The staging
+with a separate Sparkle EdDSA key, held as the repository secret
+`TC_STAGING_SPARKLE_PRIVATE_ED_KEY` (S14; its public half is
+`TC_STAGING_SPARKLE_PUBLIC_ED_KEY`), not in Secret Manager. The staging
 app's Info.plist names only the staging feed and staging public key, so a
 production appcast can never update it and a staging appcast can never
 update production. `scripts/updates/generate-appcast.sh` takes the output
@@ -858,7 +865,7 @@ lists it explicitly instead (6.2).
   (`TC_CHANNEL=staging`); `swift test`; build, sign with
   `entitlements-staging.plist` and the staging profile, notarize and staple
   `Near.ai Staging.dmg`; check the channel agreement (4.3); generate the
-  staging appcast with `tc-staging-sparkle-signing-key`; upload DMG and appcast
+  staging appcast with the staging Sparkle key; upload DMG and appcast
   to the staging bucket; create a GitHub pre-release tagged
   `staging-<date>-<short sha>` marked pre-release, with the DMG attached.
   It never touches the Homebrew tap, the production bucket or a release that
