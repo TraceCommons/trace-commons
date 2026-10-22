@@ -106,12 +106,12 @@ final class JoinScreenTests: XCTestCase {
         // so a real invite shows its issuer's host before the daemon runs.
         XCTAssertNil(JoinScreen.defaultIssuerHost("not an invite"))
         let real = JoinScreenLayout.lookUp(
-            "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", in: FirstRunState(), failure: nil,
+            LinkedChannel.invite(), in: FirstRunState(), failure: nil,
             host: JoinScreen.defaultIssuerHost)
         XCTAssertEqual(real.outcome, .found)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(real.state, lookup: nil, failure: real.failure, copy: copy.join),
-            .host("issuer.tracecommons.ai"))
+            .host(LinkedChannel.inviteHost))
     }
 
     /// Review Focus 2: back on Join after a dead invite, with the daemon
@@ -161,12 +161,12 @@ final class JoinScreenTests: XCTestCase {
     func test_theRealBridgeReadsTheHost() throws {
         let copy = try coreCopy()
         let looked = JoinScreenLayout.lookUp(
-            "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6", in: FirstRunState(), failure: nil,
+            LinkedChannel.invite(), in: FirstRunState(), failure: nil,
             host: TCInvite.issuerHost)
         XCTAssertEqual(looked.outcome, .found)
         XCTAssertEqual(
             JoinScreenLayout.inviteLine(looked.state, lookup: nil, failure: looked.failure, copy: copy.join),
-            .host("issuer.tracecommons.ai"))
+            .host(LinkedChannel.inviteHost))
     }
 
     /// Review Focus 2, carried through: the daemon refused the invite after
