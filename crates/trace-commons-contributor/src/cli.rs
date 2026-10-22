@@ -8,12 +8,26 @@ mod insights_cli;
 #[path = "cli/mission_draft.rs"]
 mod mission_draft_cli;
 
+/// The `--version` line: the build identity, then the channel
+/// (`channel::VERSION_CHANNEL_SUFFIX`), last, where the macOS bundle scripts
+/// read it to check the bundled CLI against the bundle (staging design 4.3).
+fn version_line() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| {
+        format!(
+            "{}{}",
+            trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")),
+            crate::channel::VERSION_CHANNEL_SUFFIX
+        )
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "trace-commons-contributor",
     // The semver does not move when a deploy does, so --version carries the
-    // commit the binary was built from as well.
-    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")),
+    // commit the binary was built from as well, and then the channel.
+    version = version_line(),
     about = "Submit local coding-agent traces to Trace Commons"
 )]
 struct Cli {

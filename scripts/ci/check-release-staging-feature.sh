@@ -58,6 +58,8 @@ BUILD_FILES=(
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   macos/scripts/info-plist.sh                 # reads the bundle channel (spec 4.1)
+  macos/scripts/channel.sh                    # loads the bundle channel file
+  macos/channels/production.env               # the production bundle channel
   windows/scripts/make-msix.ps1
   windows/scripts/make-appinstaller.ps1
   windows/src/TraceCommons.App/TraceCommons.App.csproj
@@ -672,9 +674,13 @@ self_test() {
     "the staging workflow reading the production WIF provider|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_WIF_PROVIDER }}\"\\n/"
     "the staging workflow creating a full release|.github/workflows/staging-macos.yml|s/\\z/      - run: gh release create staging-x dist\\/a.dmg\\n/"
     # The bundle's declared channel (spec 4.3).
-    "the bundle plist without TCChannel|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n//m"
-    "the bundle plist naming the staging channel|macos/scripts/info-plist.sh|s/<key>TCChannel<\\/key><string>production</<key>TCChannel<\\/key><string>staging</"
-    "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n/\$&\$&/m"
+    "the bundle plist without TCChannel|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}<\\/string>\\n//m"
+    "the bundle plist naming the staging channel|macos/scripts/info-plist.sh|s/<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}</<key>TCChannel<\\/key><string>staging</"
+    "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}<\\/string>\\n/\$&\$&/m"
+    # The bundle channel files (spec 4.1): production's file is a release
+    # file, and the loader's default is production.
+    "the production channel file naming the feature|macos/channels/production.env|s/^TC_CARGO_FEATURES=\\n/TC_CARGO_FEATURES=trace-commons-contributor\\/near-ai-staging\\n/m"
+    "the channel loader defaulting to staging|macos/scripts/channel.sh|s/TC_CHANNEL:-production/TC_CHANNEL:-staging/"
     # A TOML escape spells the feature without its literal name.
     "the FFI enabling it through a TOML escape|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"near-ai-\\\\u0073taging\"] }#m"
   )

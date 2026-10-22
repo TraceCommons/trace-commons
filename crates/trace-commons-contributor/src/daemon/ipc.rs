@@ -1485,7 +1485,7 @@ impl DaemonShared {
             // on -- a daemon that has never been asked hosts nothing.
             private_inference: Arc::new(tokio::sync::Mutex::new(
                 super::private_inference::ironwire_home()
-                    .map(super::private_inference::PrivateInference::new),
+                    .map(super::private_inference::PrivateInference::for_channel),
             )),
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
@@ -18344,6 +18344,26 @@ mod tests {
         dir
     }
 
+    /// A staging build never reads the `ironwire` CLI's pointer, which is
+    /// production's (staging design 4.2, S10): discovery finds nothing, so
+    /// the staging app cannot be pointed at production's proxy or token.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_discovers_nothing_from_the_production_pointer() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let result = handle_discover_routing(&discover_request())
+            .result
+            .expect("discovery answers with a result, never an IPC error");
+
+        assert_eq!(result, serde_json::json!({ "found": false }));
+    }
+
+    // Production only: a staging build never reads the pointer.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn discovery_reports_what_a_running_proxy_published() {
         let dir = pointer_dir(9143, "a-secret-token");

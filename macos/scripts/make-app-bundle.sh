@@ -12,17 +12,24 @@
 # doing that only for one architecture and shipping it as if it covered both
 # would sail through signing, notarization and Gatekeeper, then simply fail
 # to launch on whichever architecture got left out.
+#
+# TC_CHANNEL (unset means production) picks macos/channels/<channel>.env: the
+# bundle's name, identity and icon, and the cargo features the dylib and the
+# bundled CLI are built with. See channel.sh.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
 REPO_ROOT="$(cd .. && pwd)"
+# shellcheck source=channel.sh
+. ./scripts/channel.sh
+load_channel
 CONFIG="${1:-debug}"
 # A dev bundle gets an obviously-not-a-release version. The release path
 # passes the tag's version explicitly; see release-apps.yml.
 SHORT_VERSION="${2:-0.0.0-dev}"
 BUILD_VERSION="${3:-1}"
-APP="$PACKAGE_DIR/.build/Near.ai.app"
+APP="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.app"
 DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
 
 RUST_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -35,6 +42,10 @@ CARGO_BUILD_ARGS=()
 if [ "$CONFIG" = "release" ]; then
   CARGO_PROFILE_DIR="release"
   CARGO_BUILD_ARGS+=(--release)
+fi
+# The channel's features, opaque here: production adds none.
+if [ -n "$TC_CARGO_FEATURES" ]; then
+  CARGO_BUILD_ARGS+=(--features "$TC_CARGO_FEATURES")
 fi
 
 # A staging directory for the lipo'd universal dylib. TC_FFI_LIB_DIR already
@@ -134,7 +145,7 @@ done
 # because it produces the full ten-representation ladder that iconutil wants
 # and this one produces four, so it is the thing to fall back to if the .icon
 # route ever has to be backed out. It is not wired into this build.
-./scripts/make-icon-document.sh "$REPO_ROOT/assets/mark" \
+./scripts/make-icon-document.sh "$REPO_ROOT/$TC_ICON_SOURCE" \
   "$APP/Contents/Resources"
 
 # cargo stamps the dylib with an absolute install name under target/. Repoint
@@ -221,5 +232,8 @@ fi
 echo "--- verifying the final bundle is universal"
 verify_universal "app executable" "$APP/Contents/MacOS/TraceCommonsApp"
 verify_universal "embedded dylib" "$APP/Contents/Frameworks/$DYLIB_NAME"
+
+echo "--- verifying the bundle's channel"
+assert_bundle_channel "$APP"
 
 echo "built $APP"

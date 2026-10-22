@@ -5765,8 +5765,11 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     );
     assert!(err.is_null());
 
-    let enroll =
-        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    // In the build channel's own scheme (staging design 4.5).
+    let enroll = cstr_str(&format!(
+        "{}enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        trace_commons_contributor::channel::DEEP_LINK_PREFIX
+    ));
     let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
     assert_eq!(
         value,
@@ -5782,7 +5785,10 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     for garbage in [
         cstr_str("not-a-deep-link"),
         cstr_str("javascript:alert(1)"),
-        cstr_str("tracecommons://review@evil.example"),
+        cstr_str(&format!(
+            "{}review@evil.example",
+            trace_commons_contributor::channel::DEEP_LINK_PREFIX
+        )),
     ] {
         let mut err: *mut c_char = std::ptr::null_mut();
         assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());

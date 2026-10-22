@@ -45,7 +45,18 @@
 #                                   generate_keys. Without it the bundle ships
 #                                   no feed URL, and the released app could
 #                                   never receive an update -- a failure that
-#                                   is invisible in the DMG itself.
+#                                   is invisible in the DMG itself. That is
+#                                   production's variable; the channel file
+#                                   names each channel's (TC_SPARKLE_KEY_VAR).
+#
+# # Channel
+#
+# TC_CHANNEL (unset means production) picks macos/channels/<channel>.env: the
+# app and DMG name, the bundle id the profile is checked against, the
+# entitlements file, the provisioning profile and the variable that may
+# override its path. See channel.sh. Before signing, the bundle's
+# Info.plist TCChannel and its near-ai --version channel must both name the
+# chosen channel.
 #
 # notarytool takes an API key rather than an Apple ID and app-specific
 # password. This removes two secrets, and closes the window where the old
@@ -68,17 +79,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
+# shellcheck source=channel.sh
+. ./scripts/channel.sh
+load_channel
 # Every native release requests webcredentials and must embed a matching
 # Apple-issued profile. An override is explicit local input, never a download.
 # Refuse invalid/expired grants before build or signing credential import.
-SIGNING_PROFILE="${TC_MACOS_PROVISION_PROFILE:-$PACKAGE_DIR/TraceCommons-DeveloperID.provisionprofile}"
-SIGNING_ENTITLEMENTS="$PACKAGE_DIR/entitlements.plist"
+SIGNING_PROFILE="${!TC_PROFILE_VAR:-$PACKAGE_DIR/$TC_PROFILE}"
+SIGNING_ENTITLEMENTS="$PACKAGE_DIR/$TC_ENTITLEMENTS"
 python3 "$PACKAGE_DIR/../scripts/ci/native-passkey-entitlements.py" \
   --entitlements "$SIGNING_ENTITLEMENTS" --profile-cms "$SIGNING_PROFILE" \
-  --bundle-id ai.tracecommons.shell --require-passkeys
+  --bundle-id "$TC_BUNDLE_ID" --require-passkeys
 CONFIG=release
-APP="$PACKAGE_DIR/.build/Near.ai.app"
-DMG="$PACKAGE_DIR/.build/Near.ai.dmg"
+APP="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.app"
+DMG="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.dmg"
 
 require_env() {
   local name="$1"
@@ -94,7 +108,7 @@ require_env() {
 for var in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
            MACOS_SIGNING_IDENTITY MACOS_NOTARY_ASC_KEY_P8_BASE64 \
            MACOS_NOTARY_ASC_KEY_ID MACOS_NOTARY_ASC_ISSUER_ID \
-           TC_SPARKLE_PUBLIC_ED_KEY; do
+           "$TC_SPARKLE_KEY_VAR"; do
   require_env "$var"
 done
 
@@ -104,6 +118,10 @@ BUILD_VERSION="${2:?refusing to build a release without a build number -- the ca
 echo "--- building the release bundle"
 TC_SKIP_ADHOC_SIGN=1 ./scripts/make-app-bundle.sh \
   "$CONFIG" "$SHORT_VERSION" "$BUILD_VERSION"
+
+# make-app-bundle.sh checked this too; checked again here, on the bundle
+# about to be signed, because a signature is what makes it shippable.
+assert_bundle_channel "$APP"
 
 # A private scratch directory. RUNNER_TEMP exists only under GitHub Actions,
 # and the header advertises this as runnable for a one-off developer release
@@ -236,7 +254,7 @@ rm -f "$DMG"
 # costs nothing in the shipped DMG.
 APP_MB=$(du -sm "$APP" | awk '{print $1}')
 DMG_MB=$(( APP_MB + APP_MB / 4 + 64 ))
-hdiutil create -volname Near.ai -srcfolder "$APP" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
+hdiutil create -volname "$TC_BUNDLE_NAME" -srcfolder "$APP" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"

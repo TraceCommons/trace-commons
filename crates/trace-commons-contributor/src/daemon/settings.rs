@@ -1129,9 +1129,10 @@ pub(crate) fn ironwire_token_path_with(
 /// sentence cannot name one folder while this function reads another.
 #[must_use]
 pub fn ironwire_default_token_dir() -> Option<PathBuf> {
-    std::env::var_os("IRONWIRE_HOME")
+    // The channel's home: a staging build never names production's folder.
+    std::env::var_os(crate::channel::IRONWIRE_HOME_ENV)
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(super::ironwire_pointer::POINTER_DIR)))
+        .or_else(|| dirs::home_dir().map(|h| h.join(crate::channel::IRONWIRE_HOME_DIR)))
 }
 
 /// Build a routing ledger for a declaration, or nothing.

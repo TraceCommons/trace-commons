@@ -80,6 +80,11 @@ jobs:
         run: |
           scripts/ci/check-release-staging-feature.sh check
           scripts/ci/check-release-staging-feature.sh self-test
+      # Seconds, no build. The macOS Info.plist per bundle channel: a
+      # production plist byte-identical to the one before the channel files,
+      # a staging plist with only staging identity and feed.
+      - name: macOS Info.plist per bundle channel
+        run: scripts/ci/test-macos-channel-plist.sh
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
@@ -1418,14 +1423,15 @@ jobs:
       # identity scan, the production deny-list digests, its refusals of
       # production hosts, its entitlements, its IronWire key gate and its
       # state directory channel mark (`config::tests::`, with the preflight
-      # fixture that marks an enrolled directory). None of them is compiled
+      # fixture that marks an enrolled directory), its URL scheme, its own
+      # IronWire home with no production pointer, and its --version channel. None of them is compiled
       # into the default build above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests::
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover
           '
       - name: Verify real Secret Service storage
         run: |

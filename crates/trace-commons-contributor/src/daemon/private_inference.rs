@@ -153,19 +153,21 @@ impl PrivateInferenceState {
 }
 
 /// The IronWire home this daemon would use: `$IRONWIRE_HOME`, else
-/// `~/.ironwire`.
+/// `~/.ironwire`. A staging build reads `$IRONWIRE_STAGING_HOME`, else
+/// `~/.ironwire-staging`, and never production's variable
+/// ([`crate::channel::IRONWIRE_HOME_ENV`], staging design 4.2).
 ///
 /// `None` when neither can be resolved, which is the one case where private
 /// inference cannot be offered at all.
 #[must_use]
 pub fn ironwire_home() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("IRONWIRE_HOME") {
+    if let Some(home) = std::env::var_os(crate::channel::IRONWIRE_HOME_ENV) {
         let home = PathBuf::from(home);
         if !home.as_os_str().is_empty() {
             return Some(home);
         }
     }
-    dirs::home_dir().map(|h| h.join(".ironwire"))
+    dirs::home_dir().map(|h| h.join(crate::channel::IRONWIRE_HOME_DIR))
 }
 
 /// What an unrequested exit means, whatever the outcome carried.
@@ -616,6 +618,17 @@ impl PrivateInference {
         }
     }
 
+    /// Host IronWire out of `home` on the build channel's port: IronWire's
+    /// own configuration in production, a fixed port apart from it in
+    /// staging ([`crate::channel::IRONWIRE_CONTROL_PORT`]).
+    #[must_use]
+    pub fn for_channel(home: PathBuf) -> Self {
+        match crate::channel::IRONWIRE_CONTROL_PORT {
+            Some(port) => Self::with_port(home, port),
+            None => Self::new(home),
+        }
+    }
+
     /// Host IronWire out of `home` on an explicit port. `0` asks the OS for
     /// an ephemeral one, which is what tests use so they cannot collide with
     /// a developer's own IronWire.
@@ -1050,6 +1063,104 @@ impl PrivateInference {
 
 #[cfg(test)]
 mod tests {
+
+    /// An environment variable set for the life of a guard and restored on
+    /// drop, for the variable the channel does NOT read. The caller holds
+    /// `IronWireAt`, which serialises every IronWire environment change.
+    #[cfg(feature = "near-ai-staging")]
+    struct EnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    impl EnvVar {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(name);
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => unsafe { std::env::set_var(self.name, v) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
+    }
+
+    /// The staging app's IronWire lives apart from production's (staging
+    /// design 4.2, S10): its own home, `~/.ironwire-staging` unless
+    /// `IRONWIRE_STAGING_HOME` moves it; production's `IRONWIRE_HOME` is
+    /// ignored; the settings screen's token folder is the same home; and the
+    /// embedded proxy binds its own fixed port, never IronWire's default.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_uses_its_own_ironwire_home() {
+        use crate::daemon::ironwire_pointer::test_support::IronWireAt;
+        let production = tempfile::tempdir().expect("tempdir");
+        let staging = tempfile::tempdir().expect("tempdir");
+
+        let _at = IronWireAt::none();
+        let _production = EnvVar::set("IRONWIRE_HOME", production.path());
+        let default_home = dirs::home_dir().map(|h| h.join(".ironwire-staging"));
+        assert!(default_home.is_some());
+        assert_eq!(ironwire_home(), default_home);
+        assert_eq!(
+            crate::daemon::settings::ironwire_default_token_dir(),
+            default_home
+        );
+        drop(_at);
+
+        let _at = IronWireAt::home(staging.path());
+        assert_eq!(ironwire_home().as_deref(), Some(staging.path()));
+        assert_eq!(
+            crate::daemon::settings::ironwire_default_token_dir().as_deref(),
+            Some(staging.path())
+        );
+
+        let host = PrivateInference::for_channel(staging.path().to_path_buf());
+        assert_eq!(host.port, Some(8464));
+        assert_ne!(host.port, Some(8463), "production's default port");
+    }
+
+    /// Production's IronWire is where it always was: `$IRONWIRE_HOME`, else
+    /// `~/.ironwire`, the CLI's pointer read, and IronWire's own port.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_build_keeps_its_ironwire_home_pointer_and_port() {
+        use crate::daemon::ironwire_pointer::test_support::IronWireAt;
+        assert_eq!(crate::channel::IRONWIRE_HOME_ENV, "IRONWIRE_HOME");
+        assert_eq!(crate::channel::IRONWIRE_HOME_DIR, ".ironwire");
+        assert_eq!(crate::channel::IRONWIRE_CONTROL_PORT, None);
+        assert!(crate::channel::IRONWIRE_READS_POINTER);
+
+        let _at = IronWireAt::none();
+        let default_home = dirs::home_dir().map(|h| h.join(".ironwire"));
+        assert_eq!(ironwire_home(), default_home);
+        assert_eq!(
+            crate::daemon::settings::ironwire_default_token_dir(),
+            default_home
+        );
+        drop(_at);
+
+        let moved = tempfile::tempdir().expect("tempdir");
+        let _at = IronWireAt::home(moved.path());
+        assert_eq!(ironwire_home().as_deref(), Some(moved.path()));
+        assert_eq!(
+            crate::daemon::ironwire_pointer::pointer_path_in(std::path::Path::new("/home/x")),
+            std::path::PathBuf::from("/home/x/.ironwire/endpoint.json"),
+        );
+        let host = PrivateInference::for_channel(moved.path().to_path_buf());
+        assert_eq!(
+            host.port, None,
+            "IronWire's own configuration picks the port"
+        );
+    }
+
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
