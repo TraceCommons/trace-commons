@@ -166,6 +166,12 @@ pub(super) fn wallet_readiness_refusal(state: &AppState) -> Option<&'static str>
     published_witness_named(state).err()
 }
 
+/// The control the v2 NEAR AI login readiness check declines on, if any.
+#[cfg(test)]
+pub(super) fn near_ai_login_v2_readiness_refusal(state: &AppState) -> Option<&'static str> {
+    near_ai_login_readiness_named(state, ProvisionContract::ExplicitSelection).err()
+}
+
 /// The published witness, with **no ceremony-specific preconditions**.
 ///
 /// Factored out of [`published_witness_named`] rather than duplicated: the

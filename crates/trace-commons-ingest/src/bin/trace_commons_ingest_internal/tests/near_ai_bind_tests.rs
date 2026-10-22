@@ -166,6 +166,11 @@ impl Harness {
 }
 
 async fn harness() -> Option<Harness> {
+    harness_with_admission(true).await
+}
+
+/// [`harness`], with the admission ledger configured or not.
+async fn harness_with_admission(admission_ready: bool) -> Option<Harness> {
     let backend = postgres_backend_for_ingest_test().await?;
     let env = ProvisioningEnv::publish();
     let subject = fresh_subject();
@@ -175,7 +180,7 @@ async fn harness() -> Option<Harness> {
     let mut state = test_state(temp.path().to_path_buf());
     let settings = Arc::get_mut(&mut state).expect("fresh state is uniquely owned");
     settings.near_provisioning_enabled = true;
-    settings.near_provisioning_admission_ready = true;
+    settings.near_provisioning_admission_ready = admission_ready;
     settings.near_account_identity = Some(Arc::new(identity()));
     settings.db_mirror = Some(backend.clone() as Arc<dyn Database>);
     settings.near_ai_introspection_base_url = Some(near_ai_base.clone());
@@ -3066,5 +3071,94 @@ mod open_sign_up {
         assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
         assert_eq!(reply.json()["outcome"], "bound");
         drop_tenants(&admin, &[&tenant, &account.tenant]).await;
+    }
+
+    /// The sign-in with no admission ledger and no witness: what a staging
+    /// server runs (staging spec S12).
+    #[cfg(feature = "near-ai-staging")]
+    async fn sign_in_without_the_ledger(h: &Harness, subject: &str) -> Reply {
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        assert!(h.state.witness_bypass.is_none(), "no witness");
+        h.sign_in_to_near_ai_as(subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await
+    }
+
+    /// A staging build creates accounts without the admission ledger or the
+    /// witness. Production is unchanged; see the default-build twin below.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_build_signs_up_without_the_admission_ledger() {
+        let Some(h) = harness_with_admission(false).await else {
+            return;
+        };
+        let admin = h.admin().await;
+        assert_eq!(
+            near_provisioning::near_ai_login_v2_readiness_refusal(&h.state),
+            None
+        );
+        let subject = unseen_subject();
+        let reply = sign_in_without_the_ledger(&h, &subject).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let tenant = reply.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
+        assert_eq!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .len(),
+            1
+        );
+        drop_tenants(&admin, &[&tenant]).await;
+    }
+
+    /// A default build still requires the admission ledger before it creates
+    /// an account for a NEAR AI login, and refuses by that control's name.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_default_build_refuses_sign_up_without_the_admission_ledger() {
+        let Some(h) = harness_with_admission(false).await else {
+            return;
+        };
+        let admin = h.admin().await;
+        assert_eq!(
+            near_provisioning::near_ai_login_v2_readiness_refusal(&h.state),
+            Some("near_provisioning_admission_ready")
+        );
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let (_, challenge) = pkce();
+        let reply = send(
+            &h.state,
+            "POST",
+            PROVISION_START,
+            Some(&serde_json::json!({
+                "device_public_key": Device::new().public_b64(),
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })),
+            None,
+        )
+        .await;
+        assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .is_empty(),
+            "nothing written"
+        );
     }
 }
