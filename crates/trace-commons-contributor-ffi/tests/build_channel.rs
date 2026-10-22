@@ -11,7 +11,8 @@ use std::ffi::{CStr, c_char};
 
 use trace_commons_contributor::{channel, health_copy};
 use trace_commons_contributor_ffi::{
-    tc_build_channel_json, tc_channel_mismatch_line, tc_resolve_state_dir, tc_string_free,
+    tc_build_channel_json, tc_channel_mismatch_line, tc_resolve_state_dir,
+    tc_state_dir_override_refused_line, tc_string_free,
 };
 
 fn take_owned(out: *mut c_char) -> String {
@@ -192,4 +193,15 @@ fn a_non_utf8_state_dir_argument_is_refused_with_a_fixed_label() {
     let out = unsafe { tc_resolve_state_dir(std::ptr::null(), bytes.as_ptr().cast(), &mut err) };
     assert!(out.is_null());
     assert_eq!(take_owned(err), "state-dir-unresolved");
+}
+
+#[test]
+fn the_override_refused_line_is_the_core_sentence_and_names_no_path() {
+    let line = take_owned(tc_state_dir_override_refused_line());
+    assert_eq!(line, health_copy::STATE_DIR_OVERRIDE_REFUSED);
+    // Copy guide: say what is happening to the contributor's data.
+    assert!(line.contains("Nothing is being watched or sent"));
+    for name in [channel::STATE_DIR_NAME, channel::OTHER_STATE_DIR_NAME] {
+        assert!(!line.contains(name), "the sentence names no directory");
+    }
 }

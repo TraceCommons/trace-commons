@@ -247,6 +247,20 @@ pub const CHANNEL_MISMATCH: &str = concat!(
     " again to fix it."
 );
 
+/// What the app says instead of starting when its state directory comes
+/// from the override variable and the core refused it
+/// (`config::resolve_state_dir`, staging design 4.4): the override names
+/// the other channel's state directory, or it could not be checked. It
+/// names no path and no channel, so it is the same sentence in both builds.
+pub const STATE_DIR_OVERRIDE_REFUSED: &str = concat!(
+    crate::app_name!(),
+    " can't start because its folder override points to a folder this \
+     copy of the app can't use. Nothing is being watched or sent. Remove \
+     the override, then open ",
+    crate::app_name!(),
+    " again."
+);
+
 /// The button beside [`core_down_copy`] in a shell that can ask its
 /// background service to start again, and the same button while it is
 /// asking. Not part of [`core_down_copy`] itself: nothing in the core

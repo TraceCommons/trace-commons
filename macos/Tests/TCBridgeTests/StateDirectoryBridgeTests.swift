@@ -21,7 +21,11 @@ final class StateDirectoryBridgeTests: XCTestCase {
         return NSHomeDirectory() + "/Library/Application Support/" + other
     }
 
-    private let check = StateDirectory.OverrideCheck { TCBuildChannel.overrideRefusal($0) }
+    private let check = StateDirectory.OverrideCheck { dir in
+        TCBuildChannel.overrideRefusal(dir).map {
+            .init(label: $0, sentence: TCBuildChannel.overrideRefusedLine() ?? $0)
+        }
+    }
 
     func test_anOverrideNamingTheOtherChannelDirectoryIsRefused() throws {
         let channel = try channel()
@@ -43,6 +47,7 @@ final class StateDirectoryBridgeTests: XCTestCase {
                 guard case StateDirectory.Refusal.otherChannel = error else {
                     return XCTFail("expected otherChannel, got \(error)")
                 }
+                XCTAssertFalse("\(error)".contains(other), "the sentence names no path")
             }
         }
     }
@@ -58,5 +63,11 @@ final class StateDirectoryBridgeTests: XCTestCase {
             channel: channel, explicit: nil, environment: [channel.stateDirEnv: own],
             probe: .init { _ in .absent }, overrideCheck: check)
         XCTAssertEqual(resolved.path, own)
+    }
+
+    func test_theOverrideRefusedLineIsASentence() throws {
+        let line = try XCTUnwrap(TCBuildChannel.overrideRefusedLine())
+        XCTAssertTrue(line.hasSuffix("."))
+        XCTAssertTrue(line.contains("Nothing is being watched or sent"))
     }
 }

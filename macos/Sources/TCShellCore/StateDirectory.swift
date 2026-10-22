@@ -34,11 +34,11 @@ public enum StateDirectory {
         case notADirectory
         /// The override variable names the other channel's state directory
         /// or a folder inside it (`state-dir-other-channel`, staging design
-        /// 4.4).
-        case otherChannel
+        /// 4.4). Carries the core's sentence.
+        case otherChannel(sentence: String)
         /// The dylib could not check the override (any other label). The
-        /// override is not used unchecked.
-        case overrideUnchecked
+        /// override is not used unchecked. Carries the core's sentence.
+        case overrideUnchecked(sentence: String)
 
         public var description: String {
             switch self {
@@ -53,17 +53,8 @@ public enum StateDirectory {
                     The state directory path is a file, not a folder. Nothing is being \
                     watched.
                     """
-            case .otherChannel:
-                return """
-                    The state directory override points to the other build's folder. \
-                    Production and staging keep separate folders. Nothing is being \
-                    watched.
-                    """
-            case .overrideUnchecked:
-                return """
-                    The state directory override could not be checked. Nothing is being \
-                    watched.
-                    """
+            case .otherChannel(let sentence), .overrideUnchecked(let sentence):
+                return sentence
             }
         }
     }
@@ -94,7 +85,8 @@ public enum StateDirectory {
 
     /// Asks the dylib whether a directory taken from the override variable
     /// may be used: nil to allow it, or the refusal label
-    /// `tc_resolve_state_dir` reported. Injected because this target never
+    /// `tc_resolve_state_dir` reported with the core's sentence for it
+    /// (`tc_state_dir_override_refused_line`). Injected because this target never
     /// links the dylib; the app passes the real one (`DaemonHost`), and
     /// there is deliberately no default, so a build cannot ship without it.
     ///
@@ -102,9 +94,19 @@ public enum StateDirectory {
     /// nothing, so this is the only place the other-channel refusal reaches
     /// the macOS app (staging design 4.4).
     public struct OverrideCheck: Sendable {
-        let refusal: @Sendable (String) -> String?
+        public struct Refused: Equatable, Sendable {
+            public let label: String
+            public let sentence: String
 
-        public init(_ refusal: @escaping @Sendable (String) -> String?) {
+            public init(label: String, sentence: String) {
+                self.label = label
+                self.sentence = sentence
+            }
+        }
+
+        let refusal: @Sendable (String) -> Refused?
+
+        public init(_ refusal: @escaping @Sendable (String) -> Refused?) {
             self.refusal = refusal
         }
     }
@@ -185,11 +187,13 @@ public enum StateDirectory {
         if let fromEnvironment = environment[channel.stateDirEnv],
             !fromEnvironment.isEmpty
         {
-            switch overrideCheck.refusal(fromEnvironment) {
-            case nil: return fromEnvironment
-            case otherChannelLabel?: throw Refusal.otherChannel
-            case _?: throw Refusal.overrideUnchecked
+            guard let refused = overrideCheck.refusal(fromEnvironment) else {
+                return fromEnvironment
             }
+            if refused.label == otherChannelLabel {
+                throw Refusal.otherChannel(sentence: refused.sentence)
+            }
+            throw Refusal.overrideUnchecked(sentence: refused.sentence)
         }
         // For production, the Homebrew cask's `zap` stanza already treats
         // this as the state directory, and it is where a contributor's

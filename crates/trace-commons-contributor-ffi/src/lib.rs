@@ -887,6 +887,21 @@ pub unsafe extern "C" fn tc_resolve_state_dir(
     })
 }
 
+/// The sentence the app shows instead of starting when
+/// [`tc_resolve_state_dir`] refuses its override:
+/// `health_copy::STATE_DIR_OVERRIDE_REFUSED`. It names no path.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_state_dir_override_refused_line() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::STATE_DIR_OVERRIDE_REFUSED,
+        ))
+    })
+}
+
 /// `config::OtherChannelStateDir`'s label: fixed, and names no path.
 const ERR_STATE_DIR_OTHER_CHANNEL: &str = "state-dir-other-channel";
 const ERR_STATE_DIR_UNRESOLVED: &str = "state-dir-unresolved";

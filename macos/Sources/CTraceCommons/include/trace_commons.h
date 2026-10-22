@@ -356,6 +356,12 @@ char*       tc_channel_mismatch_line(void);
 char*       tc_resolve_state_dir(const char* explicit_dir, const char* override_dir,
                                  char** err);
 
+/* The sentence the app shows instead of starting when tc_resolve_state_dir
+ * refuses its override. It names no path. Returns an owned string; free it
+ * with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_state_dir_override_refused_line(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That

@@ -18,11 +18,12 @@ final class StateDirectoryTests: XCTestCase {
     private final class RecordingCheck: @unchecked Sendable {
         var asked: [String] = []
         let label: String?
+        static let sentence = "The core's sentence."
         init(refusing label: String?) { self.label = label }
         var check: StateDirectory.OverrideCheck {
             StateDirectory.OverrideCheck { dir in
                 self.asked.append(dir)
-                return self.label
+                return self.label.map { .init(label: $0, sentence: Self.sentence) }
             }
         }
     }
@@ -218,8 +219,8 @@ final class StateDirectoryTests: XCTestCase {
                 guard case StateDirectory.Refusal.otherChannel = error else {
                     return XCTFail("expected otherChannel, got \(error)")
                 }
-                XCTAssertFalse(
-                    "\(error)".contains(other), "the refusal names no path")
+                XCTAssertEqual(
+                    "\(error)", RecordingCheck.sentence, "the startup refusal shows the core's sentence")
             }
         }
         XCTAssertEqual(check.asked, [other, other])
@@ -272,6 +273,7 @@ final class StateDirectoryTests: XCTestCase {
                 guard case StateDirectory.Refusal.overrideUnchecked = error else {
                     return XCTFail("expected overrideUnchecked for \(label), got \(error)")
                 }
+                XCTAssertEqual("\(error)", RecordingCheck.sentence)
             }
         }
     }

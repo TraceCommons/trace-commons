@@ -27,4 +27,9 @@ public enum TCBuildChannel {
         if take(tc_resolve_state_dir(nil, dir, &err)) != nil { return nil }
         return take(err) ?? "null-response"
     }
+
+    /// `tc_state_dir_override_refused_line`. Nil only on a caught panic.
+    public static func overrideRefusedLine() -> String? {
+        take(tc_state_dir_override_refused_line())
+    }
 }
