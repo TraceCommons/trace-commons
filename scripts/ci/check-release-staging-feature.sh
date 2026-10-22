@@ -7,8 +7,9 @@
 # operator test run against staging, which needs an optimized build with the
 # feature on, so a `compile_error!` on `--release` is not an option. Nothing
 # but this check stops a later edit from shipping it: a `--features` flag on
-# a release or deploy build line, an `--all-features` build, a crate turning
-# it on in its `[dependencies]`, or the feature entering `default`.
+# a release or deploy build line, an `--all-features` or `--workspace` build,
+# a crate turning it on in its `[dependencies]`, or the feature entering
+# `default`.
 #
 # Modelled on scripts/ci/check-release-credential-store.sh, with a wider scan:
 # this feature reaches the hosted server's build path too (cloudbuild.yaml,
@@ -95,13 +96,15 @@ check() {
   done
 
   # 2. No build command in those files uses --all-features, which would
-  #    enable it. Continuation lines (trailing \ or PowerShell `) are joined
+  #    enable it, or --workspace (--all), which unifies features across every
+  #    member, so any member that enables the feature -- not only the shipped
+  #    crates scanned in 3 -- would reach the build. Continuation lines (trailing \ or PowerShell `) are joined
   #    first so a flag on the next line of the same command is still seen.
   #    Only build commands count: cargo-deny's `--all-features` is an audit.
   for file in "${files[@]}"; do
     [[ -f "$file" ]] || continue
     while IFS= read -r hit; do
-      echo "REFUSING: $file: a build command uses --all-features, which enables '$FEATURE': $hit" >&2
+      echo "REFUSING: $file: a build command uses --all-features or --workspace, which can enable '$FEATURE': $hit" >&2
       failures=$((failures + 1))
     done < <(
       awk '{
@@ -109,7 +112,7 @@ check() {
           if (sub(/[\\`][ \t]*$/, "", line)) { buf = buf line " "; next }
           print buf line; buf = ""
         } END { if (buf != "") print buf }' "$file" |
-        grep -E -- '--all-features' |
+        grep -E -- '--all-features|--(workspace|all)([[:space:]]|$)' |
         grep -E '(cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?(build|rustc|install|tauri)|tauri[^[:space:]]*[[:space:]]+build)' || true
     )
   done
@@ -176,6 +179,7 @@ self_test() {
     "the pilot deploy notes requiring it|deploy/pilot-gcp/deploy.sh|s/#   --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral/\$&,$FEATURE/"
     "--features on the contributor release build|.github/workflows/release-contributor.yml|s/cargo build --locked --release --bin trace-commons-contributor/\$& --features trace-commons-contributor\/$FEATURE/"
     "--all-features on the FFI dylib build|.github/workflows/release-apps.yml|s/cargo build --locked -p trace-commons-contributor-ffi --release/\$& --all-features/"
+    "--workspace on the FFI dylib build|.github/workflows/release-apps.yml|s/cargo build --locked -p trace-commons-contributor-ffi --release/\$& --workspace/"
     "--all-features on a continuation line of the ingest build|cloudbuild.yaml|s/cargo build --release -p trace-commons-ingest --bin trace-commons-ingest/\$& \\\\\n          --all-features/"
     "the feature entering the server's default|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
     "the feature entering the ingest default|crates/trace-commons-ingest/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
