@@ -702,6 +702,29 @@ fn nothing_logs_a_key_or_a_measurement() {
             );
         }
     }
+    // The document's own bytes: the measurements sit base64url-encoded in
+    // `payload`, so the raw-hex search above cannot see a leaked document.
+    // Neither the payload nor the signature, nor any 16-character piece of
+    // either, reaches stderr or a stdout.
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("current.json")).unwrap()).unwrap();
+    let encoded: Vec<String> = ["payload", "signature"]
+        .iter()
+        .map(|field| document[field].as_str().unwrap().to_string())
+        .collect();
+    for out in &outputs {
+        for stream in [text(&out.stderr), text(&out.stdout)] {
+            for value in &encoded {
+                for start in 0..=value.len() - 16 {
+                    let piece = &value[start..start + 16];
+                    assert!(
+                        !stream.contains(piece),
+                        "a document byte reaches the output: {piece}"
+                    );
+                }
+            }
+        }
+    }
     for out in &outputs[1..] {
         let stdout = text(&out.stdout);
         assert!(!stdout.contains(&seed));
