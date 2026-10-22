@@ -836,3 +836,32 @@ fn the_default_insights_store_is_the_channel_s() {
         channel::STATE_DIR_NAME
     );
 }
+
+/// The production identity values, exactly. Every installed production app
+/// holds its keychain items under these service names and access group and
+/// its state under this directory name and override variable, so changing
+/// one strands every existing install: its enrollment, credentials and
+/// Insights key are still there, under names the new build no longer reads.
+/// Change them only with a migration.
+#[cfg(not(feature = "near-ai-staging"))]
+#[test]
+fn the_production_identity_values_never_change() {
+    assert_eq!(channel::STATE_DIR_NAME, "trace-commons");
+    assert_eq!(channel::STATE_DIR_ENV, "TRACE_COMMONS_CONTRIBUTOR_DIR");
+    assert_eq!(channel::URL_SCHEME, "tracecommons");
+    assert_eq!(
+        channel::KEYCHAIN,
+        trace_commons_contributor_platform::os_secret_store::KeychainIdentity {
+            access_group: "KXSWJN7WY8.ai.tracecommons.shell",
+            cloud_service: "trace-commons.near-ai.credentials",
+            account_service: "trace-commons.account.credentials",
+            insights_digest_key_service: "trace-commons.insights.digest-key",
+        }
+    );
+    assert_eq!(
+        channel::KEYCHAIN_ACCESS_GROUP,
+        channel::KEYCHAIN.access_group
+    );
+    assert_eq!(channel::PASSKEY_RP_ID, "tracecommons.ai");
+    assert_eq!(channel::NEAR_AI_WALLET_RECIPIENT, "cloud.near.ai");
+}
