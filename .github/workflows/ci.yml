@@ -1545,15 +1545,17 @@ jobs:
       # (`config::tests::` and `channel_hosts`), with the preflight suite run
       # as staging; its URL scheme, its own IronWire home with no production
       # pointer and no declared production folder or port, its --version
-      # channel, the FFI suite as staging, and the attestation crate's signed
-      # pin-set verifier, whose unit tests no other crate's run reaches. None
-      # of them is compiled into the default build above.
+      # channel, the FFI suite as staging, the daemon's signed pin source
+      # (`proof_attestor`, the status pin label and its reconcile twin), and
+      # the attestation crate's signed pin-set verifier, whose unit tests no
+      # other crate's run reaches. None of them is compiled into the default
+      # build above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of proof_attestor near_ai_pins pin_refusal reconcile_never_fetches_the_signed_pins
             cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
           '

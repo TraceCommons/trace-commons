@@ -1046,9 +1046,10 @@ pub struct DaemonShared {
     /// started a daemon has none, and falls back to the ambient runtime --
     /// which for those callers is the only one there is.
     proxy_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
-    /// The NEAR AI measurement pins in force: the operator override when
-    /// `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` was set at daemon start,
-    /// else what ingest publishes, cached with a bounded TTL
+    /// The NEAR AI measurement pins in force: in a default build the
+    /// operator override when `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS`
+    /// was set at daemon start, else what ingest publishes; in a staging
+    /// build only the signed staging pin set. Cached with a bounded TTL
     /// (`crate::routing::proof_attestor`). One instance for the daemon's
     /// life, shared with every attestor it builds, so the cache survives
     /// reconcile passes and proxy restarts.
@@ -1499,17 +1500,11 @@ impl DaemonShared {
             upload_due_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
             proxy_runtime: std::sync::OnceLock::new(),
-            near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::new(
-                crate::routing::proof_attestor::pins_from_env(),
-                // Tests never reach ingest from here; a test that needs pins
-                // installs its own provider.
-                if cfg!(test) {
-                    None
-                } else {
-                    Some(Box::new(
-                        crate::routing::proof_attestor::IngestPinSource::new(pin_store),
-                    ))
-                },
+            near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
+                // Tests never reach ingest or the staging pin URL from here;
+                // a test that needs pins installs its own provider.
+                if cfg!(test) { None } else { Some(pin_store) },
+                &|name| std::env::var(name).ok(),
             )),
             private_inference_state: Arc::new(Mutex::new(
                 super::private_inference::PrivateInferenceState::Off,
@@ -2868,6 +2863,15 @@ impl DaemonShared {
         #[cfg(debug_assertions)]
         {
             status["dev_dry_run"] = serde_json::Value::Bool(self.dev_dry_run);
+        }
+        // Staging builds only (spec 5.6): where the signed NEAR AI pin set
+        // stands, as a label -- `pinned`, `pins_not_fetched`,
+        // `pins_unavailable`, or the refusal that pinned nothing, such as
+        // `pins_expired`. A label and nothing else: no key, host or
+        // measurement. A default build never names the field.
+        #[cfg(feature = "near-ai-staging")]
+        {
+            status["near_ai_pins"] = self.near_ai_pins.status_label().into();
         }
         status
     }
@@ -16104,12 +16108,50 @@ mod tests {
         assert!(!absent_home.exists());
     }
 
+    /// A staging build's status names why nothing is pinned, as the label
+    /// the pin provider last reached, so a tester can read "pins expired"
+    /// instead of guessing why proof marks stopped.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn status_names_the_pin_refusal() {
+        let mut s = shared();
+        let dir = tempfile::tempdir().unwrap();
+        struct Garbage;
+        #[async_trait::async_trait]
+        impl crate::routing::proof_attestor::SignedPinSource for Garbage {
+            async fn fetch(
+                &self,
+            ) -> Result<Vec<u8>, crate::routing::proof_attestor::SourceUnavailable> {
+                Ok(b"not a signed document".to_vec())
+            }
+        }
+        let provider = Arc::new(
+            crate::routing::proof_attestor::PinProvider::signed_for_test(
+                Box::new(Garbage),
+                &[7u8; 32],
+                dir.path(),
+            ),
+        );
+        s.near_ai_pins = Arc::clone(&provider);
+        assert_eq!(s.status_value()["near_ai_pins"], "pins_not_fetched");
+        assert!(provider.current(1_800_000_000).await.sets.is_empty());
+        assert_eq!(s.status_value()["near_ai_pins"], "pins_malformed");
+    }
+
+    /// A default build's status carries no pin label: production's pins are
+    /// ingest's, and the field belongs to the staging verifier.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_default_build_status_has_no_pin_label() {
+        assert!(shared().status_value().get("near_ai_pins").is_none());
+    }
+
     /// The attestor needs a key and an enrollment, and nothing else: with no
     /// pins in force it is still built, because it reads the pins on every
     /// question and answers `Unavailable` until some arrive.
     #[test]
     fn an_attestor_is_built_with_a_key_and_an_enrollment_pinned_or_not() {
-        let unpinned = || Arc::new(crate::routing::proof_attestor::PinProvider::new(None, None));
+        let unpinned = || Arc::new(crate::routing::proof_attestor::PinProvider::unpinned());
         let bare = shared();
         let enrolled = enrolled_shared();
         let key = || Some("sk-minted".to_string());
@@ -16118,9 +16160,68 @@ mod tests {
         assert!(signer_attestor_for(&enrolled.store, key(), unpinned()).is_some());
     }
 
+    /// The staging twin of `reconcile_never_asks_ingest_for_pins`: reconcile
+    /// never fetches the signed pin set either, with private inference off
+    /// or on.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn reconcile_never_fetches_the_signed_pins() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        struct Counting(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl crate::routing::proof_attestor::SignedPinSource for Counting {
+            async fn fetch(
+                &self,
+            ) -> Result<Vec<u8>, crate::routing::proof_attestor::SourceUnavailable> {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(crate::routing::proof_attestor::SourceUnavailable)
+            }
+        }
+        let asked = Arc::new(AtomicUsize::new(0));
+        let pins_dir = tempfile::tempdir().unwrap();
+        let mut s = enrolled_shared();
+        s.near_ai_pins = Arc::new(
+            crate::routing::proof_attestor::PinProvider::signed_for_test(
+                Box::new(Counting(Arc::clone(&asked))),
+                &[7u8; 32],
+                pins_dir.path(),
+            ),
+        );
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked with it off");
+
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.reconcile_private_inference().await;
+        assert!(
+            s.private_inference
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .holds_signer_attestor()
+        );
+        assert_eq!(asked.load(AtomicOrdering::SeqCst), 0, "asked on reconcile");
+    }
+
     /// Reconcile never asks for the pins: the attestor reads them itself on
     /// every question. So reconcile costs no ingest round trip, pinned or
     /// not, and private inference being off costs none either.
+    #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
     async fn reconcile_never_asks_ingest_for_pins() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -16183,6 +16284,7 @@ mod tests {
     /// `Unavailable` and no row can become `verified`.
     #[tokio::test]
     async fn reconcile_hands_ironwire_the_attestor_without_pins() {
+        #[cfg(not(feature = "near-ai-staging"))]
         assert!(
             std::env::var_os(crate::routing::proof_attestor::NEAR_AI_EXPECTED_MEASUREMENTS_ENV)
                 .is_none(),
