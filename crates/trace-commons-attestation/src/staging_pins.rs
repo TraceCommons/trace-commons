@@ -28,19 +28,31 @@
 //!
 //! ```json
 //! {
-//!   "format": "trace-commons-near-ai-pins/v1",
+//!   "format": "trace-commons-near-ai-pins/v2",
 //!   "channel": "staging",
 //!   "gateway_host": "<the staging gateway host>",
 //!   "sequence": 42,
 //!   "issued_at": "2026-10-21T18:00:00Z",
 //!   "expires_at": "2026-10-28T18:00:00Z",
-//!   "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,..."]
+//!   "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,mrconfigid=<96 hex>"],
+//!   "allowlist": {"rtmr3": {...}, "compose_actions": [...]}
 //! }
 //! ```
 //!
 //! Each set is [`ExpectedMeasurements`] syntax, and any one of them matching
-//! a quote is a pass, as with the unsigned document. Timestamps are exactly
-//! `YYYY-MM-DDTHH:MM:SSZ`.
+//! a quote is a pass, as with the unsigned document. Every set must name at
+//! least [`REQUIRED_REGISTERS`] (owner decision S16): RTMR3 is not pinned but
+//! replayed, and the replay checks the `compose-hash` event against
+//! MRCONFIGID, which only means something when MRCONFIGID is pinned.
+//! Timestamps are exactly `YYYY-MM-DDTHH:MM:SSZ`.
+//!
+//! `allowlist` is what the RTMR3 replay and the compose-manager record are
+//! checked against ([`crate::staging_replay::Allowlist`]). It is inside the
+//! signed payload, so the same key, sequence and expiry cover it and the
+//! sets. It is why this is format v2, with its own signing prefix: a v1
+//! document carries no allowlist, and this verifier refuses one
+//! ([`PinRefusal::V1Document`]) rather than read it as a document with an
+//! empty allowlist.
 //!
 //! # Failing closed
 //!
@@ -82,14 +94,33 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::measurements::ExpectedMeasurements;
+use crate::measurements::{ExpectedMeasurements, MeasurementField};
+use crate::staging_replay::Allowlist;
 
-/// The payload's `format` value this verifier reads.
-pub const FORMAT: &str = "trace-commons-near-ai-pins/v1";
+/// The payload's `format` value this verifier reads: v2, which carries the
+/// RTMR3 and compose-action allowlist.
+pub const FORMAT: &str = "trace-commons-near-ai-pins/v2";
 
 /// The domain-separation prefix the signature covers ahead of the payload
-/// bytes.
-pub const SIGNING_PREFIX: &[u8] = b"trace-commons-near-ai-pins/v1\n";
+/// bytes. Its own, per format, so a v1 signature never verifies as v2.
+pub const SIGNING_PREFIX: &[u8] = b"trace-commons-near-ai-pins/v2\n";
+
+/// The v1 format, which carried no allowlist. Never accepted; named only so
+/// a v1 document is refused with its own label ([`PinRefusal::V1Document`]).
+pub const FORMAT_V1: &str = "trace-commons-near-ai-pins/v1";
+
+/// The v1 signing prefix. Only ever used to recognise a v1 document after
+/// the v2 signature check failed; nothing signed under it is read.
+pub const SIGNING_PREFIX_V1: &[u8] = b"trace-commons-near-ai-pins/v1\n";
+
+/// The registers every v2 set must name (S16). More are allowed.
+pub const REQUIRED_REGISTERS: [MeasurementField; 5] = [
+    MeasurementField::Mrtd,
+    MeasurementField::Rtmr0,
+    MeasurementField::Rtmr1,
+    MeasurementField::Rtmr2,
+    MeasurementField::MrConfigId,
+];
 
 /// The payload's `channel` value this verifier accepts.
 pub const CHANNEL: &str = "staging";
@@ -112,7 +143,7 @@ const KEY_ID_HEX_LEN: usize = 16;
 /// log line as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinRefusal {
-    /// The document or the signed payload is not the v1 shape: not JSON, a
+    /// The document or the signed payload is not the v2 shape: not JSON, a
     /// field missing, extra or of the wrong type, bad base64url, or a
     /// timestamp not in the one accepted form.
     Malformed,
@@ -138,6 +169,11 @@ pub enum PinRefusal {
     SetUnparseable,
     /// The payload lists no sets.
     NoSets,
+    /// A v1 document, signed by the compiled-in key under the v1 prefix. A
+    /// replay-aware build refuses it: it carries no allowlist.
+    V1Document,
+    /// A set does not name every one of [`REQUIRED_REGISTERS`].
+    SetMissingRegister,
 }
 
 impl PinRefusal {
@@ -156,6 +192,8 @@ impl PinRefusal {
             PinRefusal::LifetimeInvalid => "pins_lifetime_invalid",
             PinRefusal::SetUnparseable => "pins_set_unparseable",
             PinRefusal::NoSets => "pins_no_sets",
+            PinRefusal::V1Document => "pins_v1_document",
+            PinRefusal::SetMissingRegister => "pins_set_missing_register",
         }
     }
 }
@@ -223,6 +261,8 @@ pub(crate) struct PinPayload {
     pub(crate) expires_at: u64,
     /// The sets as written, not yet parsed.
     pub(crate) sets: Vec<String>,
+    /// The allowlist, parsed.
+    pub(crate) allowlist: Allowlist,
 }
 
 impl fmt::Debug for PinPayload {
@@ -235,6 +275,10 @@ impl fmt::Debug for PinPayload {
             .field("issued_at", &self.issued_at)
             .field("expires_at", &self.expires_at)
             .field("set_count", &self.sets.len())
+            .field(
+                "compose_action_count",
+                &self.allowlist.compose_actions.len(),
+            )
             .finish()
     }
 }
@@ -254,6 +298,7 @@ impl PinPayload {
                 "issued_at",
                 "expires_at",
                 "sets",
+                "allowlist",
             ],
         )?;
         let sequence = object
@@ -267,6 +312,8 @@ impl PinPayload {
             .iter()
             .map(|set| set.as_str().map(str::to_owned).ok_or(PinRefusal::Malformed))
             .collect::<Result<Vec<_>, _>>()?;
+        let allowlist = Allowlist::from_json(object.get("allowlist").ok_or(PinRefusal::Malformed)?)
+            .map_err(|_| PinRefusal::Malformed)?;
         Ok(PinPayload {
             format: string_field(&object, "format")?.to_owned(),
             channel: string_field(&object, "channel")?.to_owned(),
@@ -277,6 +324,7 @@ impl PinPayload {
             expires_at: parse_utc(string_field(&object, "expires_at")?)
                 .ok_or(PinRefusal::Malformed)?,
             sets,
+            allowlist,
         })
     }
 }
@@ -291,8 +339,12 @@ pub struct VerifiedPins {
     /// Seconds since the Unix epoch. The sets must not be used at or after
     /// this instant, however recently they were fetched.
     pub expires_at: u64,
-    /// The measurement sets, every one parsed. Never empty.
+    /// The measurement sets, every one parsed. Never empty. Each names at
+    /// least [`REQUIRED_REGISTERS`].
     pub sets: Vec<ExpectedMeasurements>,
+    /// What every model entry's RTMR3 replay and compose-manager record are
+    /// checked against before its key is trusted.
+    pub allowlist: Allowlist,
     /// SHA-256 of the exact payload bytes, so the caller can refuse the same
     /// sequence carrying other bytes without keeping the document.
     pub payload_sha256: [u8; 32],
@@ -320,11 +372,16 @@ pub fn signing_input(payload: &[u8]) -> Vec<u8> {
 /// Verify a signed pin-set document against the build's public key, gateway
 /// host and the current time (seconds since the Unix epoch).
 ///
-/// Returns the sets only if the key id matches, the signature verifies, the
-/// payload is the v1 format for the staging channel and this gateway host,
-/// the lifetime is positive and at most 14 days, `issued_at <= now + 5 min`,
-/// `now < expires_at`, and every set parses, checked in that order. The sequence is not checked
-/// here; see the module documentation.
+/// Returns the sets and the allowlist only if the key id matches, the
+/// signature verifies, the payload is the v2 format for the staging channel
+/// and this gateway host, the lifetime is positive and at most 14 days,
+/// `issued_at <= now + 5 min`, `now < expires_at`, and every set parses and
+/// names [`REQUIRED_REGISTERS`], checked in that order. The sequence is not
+/// checked here; see the module documentation.
+///
+/// A document whose v2 signature does not verify, but whose signature does
+/// verify under [`SIGNING_PREFIX_V1`], is a v1 document from the compiled-in
+/// key and is refused as [`PinRefusal::V1Document`]; its payload is not read.
 pub fn verify(
     document: &[u8],
     public_key: &[u8],
@@ -335,9 +392,19 @@ pub fn verify(
     if signed.key_id != key_id(public_key) {
         return Err(PinRefusal::UnknownKey);
     }
-    UnparsedPublicKey::new(&ED25519, public_key)
+    let key = UnparsedPublicKey::new(&ED25519, public_key);
+    if key
         .verify(&signing_input(&signed.payload), &signed.signature)
-        .map_err(|_| PinRefusal::BadSignature)?;
+        .is_err()
+    {
+        let mut v1 = SIGNING_PREFIX_V1.to_vec();
+        v1.extend_from_slice(&signed.payload);
+        return Err(if key.verify(&v1, &signed.signature).is_ok() {
+            PinRefusal::V1Document
+        } else {
+            PinRefusal::BadSignature
+        });
+    }
 
     let payload = PinPayload::parse(&signed.payload)?;
     if payload.format != FORMAT {
@@ -375,12 +442,21 @@ pub fn verify(
             },
         )
         .collect::<Result<Vec<_>, _>>()?;
+    if sets.iter().any(|set| {
+        let named = set.pinned_fields();
+        REQUIRED_REGISTERS
+            .iter()
+            .any(|field| !named.contains(field))
+    }) {
+        return Err(PinRefusal::SetMissingRegister);
+    }
 
     Ok(VerifiedPins {
         sequence: payload.sequence,
         issued_at: payload.issued_at,
         expires_at: payload.expires_at,
         sets,
+        allowlist: payload.allowlist,
         payload_sha256: Sha256::digest(&signed.payload).into(),
     })
 }
@@ -508,6 +584,7 @@ fn parse_utc(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::staging_replay::Allowlist;
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
 
@@ -539,9 +616,26 @@ mod tests {
         out
     }
 
+    /// A set naming the S16 registers, as a v2 document must.
     fn set(fill: char) -> String {
         let v: String = std::iter::repeat_n(fill, 96).collect();
-        format!("mrtd={v},rtmr0={v},rtmr1={v},rtmr2={v},rtmr3={v}")
+        format!("mrtd={v},mrconfigid={v},rtmr0={v},rtmr1={v},rtmr2={v}")
+    }
+
+    /// A synthetic allowlist, as the v2 payload carries it.
+    fn allowlist_json() -> serde_json::Value {
+        serde_json::json!({
+            "rtmr3": {
+                "app_id": "a1".repeat(20),
+                "mr_kms": "3b".repeat(48),
+                "os_image_hash": "05".repeat(32),
+                "key_provider": "6b6d73",
+                "markers": [{"name": "system-ready", "payload": "00"}],
+            },
+            "compose_actions": [
+                {"action": "compose_up", "container": "app", "image": "registry.example/app"},
+            ],
+        })
     }
 
     fn payload_json(
@@ -560,6 +654,7 @@ mod tests {
             "issued_at": issued_at,
             "expires_at": expires_at,
             "sets": sets,
+            "allowlist": allowlist_json(),
         })
         .to_string()
         .into_bytes()
@@ -611,6 +706,138 @@ mod tests {
         assert_eq!(pins.sets[0].to_pin_string(), set('a'));
         let digest: [u8; 32] = Sha256::digest(&payload).into();
         assert_eq!(pins.payload_sha256, digest);
+        assert_eq!(
+            pins.allowlist,
+            Allowlist::from_json(&allowlist_json()).unwrap(),
+            "the signed allowlist comes back parsed"
+        );
+    }
+
+    /// A v1 document: the v1 format, the v1 prefix, no allowlist.
+    fn v1_document(key: &Ed25519KeyPair) -> Vec<u8> {
+        let v: String = std::iter::repeat_n('a', 96).collect();
+        let payload = serde_json::json!({
+            "format": FORMAT_V1,
+            "channel": CHANNEL,
+            "gateway_host": GATEWAY,
+            "sequence": 42,
+            "issued_at": "2026-10-21T18:00:00Z",
+            "expires_at": "2026-10-28T18:00:00Z",
+            "sets": [format!("mrtd={v},rtmr0={v},rtmr1={v},rtmr2={v},rtmr3={v}")],
+        })
+        .to_string()
+        .into_bytes();
+        let mut input = SIGNING_PREFIX_V1.to_vec();
+        input.extend_from_slice(&payload);
+        let signature = key.sign(&input);
+        document(
+            &payload,
+            signature.as_ref(),
+            &key_id(key.public_key().as_ref()),
+        )
+    }
+
+    #[test]
+    fn a_v1_document_is_refused_by_a_replay_aware_verifier() {
+        let key = key_pair();
+        // A genuine v1 document, signed by our key under the v1 prefix: it
+        // carries no allowlist, so it cannot pass as one with an empty
+        // allowlist. Refused with its own label, and nothing pinned.
+        assert_eq!(
+            check(&key, &v1_document(&key), ISSUED + DAY).unwrap_err(),
+            PinRefusal::V1Document
+        );
+        // The v1 format string under the v2 prefix is a wrong format.
+        let payload = payload_json(
+            FORMAT_V1,
+            CHANNEL,
+            GATEWAY,
+            "2026-10-21T18:00:00Z",
+            "2026-10-28T18:00:00Z",
+            &[set('a')],
+        );
+        assert_eq!(
+            check(&key, &signed(&key, &payload), ISSUED).unwrap_err(),
+            PinRefusal::WrongFormat
+        );
+        // A v1 document signed by another key is that key's problem first.
+        assert_eq!(
+            check(&key, &v1_document(&key_pair()), ISSUED).unwrap_err(),
+            PinRefusal::UnknownKey
+        );
+        assert_eq!(FORMAT, "trace-commons-near-ai-pins/v2");
+        assert_eq!(FORMAT_V1, "trace-commons-near-ai-pins/v1");
+        assert_eq!(SIGNING_PREFIX_V1, b"trace-commons-near-ai-pins/v1\n");
+    }
+
+    #[test]
+    fn the_payload_must_carry_a_well_formed_allowlist() {
+        let key = key_pair();
+        let mut missing: serde_json::Value = serde_json::from_slice(&good_payload()).unwrap();
+        missing.as_object_mut().unwrap().remove("allowlist");
+        let mut malformed = missing.clone();
+        malformed["allowlist"] = serde_json::json!({"rtmr3": {}, "compose_actions": []});
+        for value in [missing, malformed] {
+            assert_eq!(
+                check(&key, &signed(&key, value.to_string().as_bytes()), ISSUED).unwrap_err(),
+                PinRefusal::Malformed,
+                "{value}"
+            );
+        }
+        // The placeholder (empty values, empty lists) is well formed: it is
+        // the replay that refuses every entry checked against it.
+        let mut placeholder: serde_json::Value = serde_json::from_slice(&good_payload()).unwrap();
+        placeholder["allowlist"] = serde_json::json!({
+            "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
+            "compose_actions": [],
+        });
+        let pins = check(
+            &key,
+            &signed(&key, placeholder.to_string().as_bytes()),
+            ISSUED,
+        )
+        .expect("the placeholder verifies");
+        assert!(pins.allowlist.compose_actions.is_empty());
+    }
+
+    #[test]
+    fn a_set_without_the_s16_registers_is_refused() {
+        // The replay checks the compose-hash event against MRCONFIGID and
+        // trusts RTMR0-2 and MRTD as pinned: a set that leaves any of them
+        // out would make those checks vacuous.
+        let key = key_pair();
+        let v: String = std::iter::repeat_n('a', 96).collect();
+        for bad in [
+            format!("mrtd={v},rtmr0={v},rtmr1={v},rtmr2={v},rtmr3={v}"),
+            format!("mrtd={v},rtmr0={v},rtmr1={v},mrconfigid={v}"),
+            format!("rtmr0={v},rtmr1={v},rtmr2={v},mrconfigid={v}"),
+        ] {
+            let payload = payload_json(
+                FORMAT,
+                CHANNEL,
+                GATEWAY,
+                "2026-10-21T18:00:00Z",
+                "2026-10-28T18:00:00Z",
+                &[set('b'), bad.clone()],
+            );
+            assert_eq!(
+                check(&key, &signed(&key, &payload), ISSUED).unwrap_err(),
+                PinRefusal::SetMissingRegister,
+                "{bad}"
+            );
+        }
+        // More than the S16 registers is allowed: rtmr3 as well.
+        let payload = payload_json(
+            FORMAT,
+            CHANNEL,
+            GATEWAY,
+            "2026-10-21T18:00:00Z",
+            "2026-10-28T18:00:00Z",
+            &[format!(
+                "mrtd={v},rtmr0={v},rtmr1={v},rtmr2={v},rtmr3={v},mrconfigid={v}"
+            )],
+        );
+        assert!(check(&key, &signed(&key, &payload), ISSUED).is_ok());
     }
 
     #[test]
@@ -694,10 +921,10 @@ mod tests {
             check(&key, &doc, ISSUED).unwrap_err(),
             PinRefusal::BadSignature
         );
-        assert_eq!(SIGNING_PREFIX, b"trace-commons-near-ai-pins/v1\n");
+        assert_eq!(SIGNING_PREFIX, b"trace-commons-near-ai-pins/v2\n");
         assert_eq!(
             signing_input(b"xy"),
-            b"trace-commons-near-ai-pins/v1\nxy".to_vec()
+            b"trace-commons-near-ai-pins/v2\nxy".to_vec()
         );
     }
 
@@ -709,7 +936,7 @@ mod tests {
         let cases = [
             (
                 payload_json(
-                    "trace-commons-near-ai-pins/v2",
+                    "trace-commons-near-ai-pins/v3",
                     CHANNEL,
                     GATEWAY,
                     i,
@@ -971,6 +1198,8 @@ mod tests {
             (PinRefusal::LifetimeInvalid, "pins_lifetime_invalid"),
             (PinRefusal::SetUnparseable, "pins_set_unparseable"),
             (PinRefusal::NoSets, "pins_no_sets"),
+            (PinRefusal::V1Document, "pins_v1_document"),
+            (PinRefusal::SetMissingRegister, "pins_set_missing_register"),
         ];
         for (refusal, label) in all {
             assert_eq!(refusal.label(), label);
