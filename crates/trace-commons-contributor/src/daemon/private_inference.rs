@@ -760,7 +760,7 @@ impl PrivateInference {
             || self.cleanup_unconfirmed
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     pub(crate) async fn end_owned_for_test(&mut self) {
         // Finish the real listener, then install the same local outcome as
         // poll observing an unsolicited exit. Shared routing stays stale.
@@ -1113,6 +1113,18 @@ mod tests {
             crate::daemon::settings::ironwire_default_token_dir(),
             default_home
         );
+        // Restored while the lock is still held.
+        drop(_production);
+        drop(_at);
+
+        // An empty home variable is unset, for the token folder as for the
+        // proxy's home: never a relative path.
+        let _at = IronWireAt::home(std::path::Path::new(""));
+        assert_eq!(ironwire_home(), default_home);
+        assert_eq!(
+            crate::daemon::settings::ironwire_default_token_dir(),
+            default_home
+        );
         drop(_at);
 
         let _at = IronWireAt::home(staging.path());
@@ -1144,6 +1156,14 @@ mod tests {
         assert_eq!(
             crate::daemon::settings::ironwire_default_token_dir(),
             default_home
+        );
+        drop(_at);
+
+        let _at = IronWireAt::home(std::path::Path::new(""));
+        assert_eq!(
+            crate::daemon::settings::ironwire_default_token_dir(),
+            default_home,
+            "an empty IRONWIRE_HOME is unset, not a relative folder"
         );
         drop(_at);
 

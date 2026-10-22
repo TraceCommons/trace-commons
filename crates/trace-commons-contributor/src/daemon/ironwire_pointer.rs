@@ -252,7 +252,7 @@ fn allowed_token_dir() -> Option<PathBuf> {
 /// nothing logs the path, which is the contributor's home directory laid out
 /// in a log line.
 #[must_use]
-fn confine_token_path(candidate: &Path, allowed_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn confine_token_path(candidate: &Path, allowed_dir: &Path) -> Option<PathBuf> {
     let resolved = std::fs::canonicalize(candidate).ok()?;
     let allowed = std::fs::canonicalize(allowed_dir).ok()?;
     (resolved != allowed && resolved.starts_with(&allowed)).then_some(resolved)

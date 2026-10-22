@@ -2825,8 +2825,10 @@ mod tests {
     /// The verbatim request body the mock proxy captured. Awkward on
     /// purpose -- a re-serialiser would change it, and then the digest the
     /// row records would not match.
+    #[cfg(not(feature = "near-ai-staging"))]
     const CAPTURED_REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — the contributor's prompt\"}]}";
     /// The verbatim response body, as a stream comes back.
+    #[cfg(not(feature = "near-ai-staging"))]
     const CAPTURED_RESPONSE: &str =
         "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
 
@@ -2841,6 +2843,7 @@ mod tests {
     /// `SourceRoots::with_attested_bodies` here, which is the point: that
     /// function existed and was exercised by tests while the production
     /// path never reached it.
+    #[cfg(not(feature = "near-ai-staging"))]
     async fn transcript_from_a_declared_proxy(
         carry_bodies: bool,
     ) -> (crate::source::SessionTranscript, Vec<tempfile::TempDir>) {
@@ -2952,6 +2955,7 @@ mod tests {
     /// mock on loopback cannot be fetched from, and a receipt is only
     /// verifiable against a signer this test does not have. It is shaped like
     /// one and carried like one, which is what the wire assertion needs.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn admission_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3031,6 +3035,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn token_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3126,6 +3131,7 @@ mod tests {
     /// path; anything else keeps the old reading. The request never declares
     /// the background workload, even on a transport built with it: a person
     /// is waiting on this one.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_busy_witness_is_busy_on_the_token_review_route_too() {
         async fn token_attempt(
@@ -3222,6 +3228,7 @@ mod tests {
     /// whose `content` is the completion and whose structured payload is the
     /// prompt. The second half is what a blanket `true` would fail: the same
     /// projection offered without bodies must still declare `false`.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_offered_declaration_follows_the_appended_bodies() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3315,6 +3322,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_declared_bodies_directory_reaches_the_witness_through_the_daemon_source_roots() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3396,6 +3404,7 @@ mod tests {
     /// The receipt goes nowhere either, and not by a second check: the
     /// bundle is built from the call, so no call is no bundle. A receipt
     /// with no bodies to verify it against is unrepresentable.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn routing_declared_without_the_switch_carries_no_body_to_the_witness() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(false).await;

@@ -371,7 +371,7 @@ impl IronWireLedger {
     /// configuration, and weakening `Debug` to make it assertable would put
     /// it in every log line that ever formats a ledger. A `#[cfg(test)]`
     /// accessor is visible to the crate's own tests and to nothing shipped.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     #[must_use]
     pub(crate) fn token_for_test(&self) -> &str {
         &self.token
@@ -394,7 +394,7 @@ impl IronWireLedger {
     /// Test-only for the same reason as `token_for_test`: nothing shipped
     /// needs to read it back, and a test that asserts a ledger exists
     /// proves nothing about which proxy it will talk to.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     #[must_use]
     pub(crate) fn port_for_test(&self) -> u16 {
         self.port
