@@ -83,25 +83,22 @@ enum RulesScreenLayout {
         /// Automatic: nothing is written until the core's arming
         /// confirmation is accepted (`confirmArming`).
         case needsConfirmation
-        /// Not for this person or this folder; nothing is written.
+        /// Not for this folder; nothing is written.
         case refused
     }
 
-    /// The modes a folder's picker offers. Automatic needs an enrollment the
-    /// daemon holds (`FirstRunState.holdsEnrolment`), so a person without
-    /// one -- watching only, a passkey not yet bound -- is not offered it; a folder the daemon already
-    /// arms keeps it, so the picker can show what is in force, and picking
-    /// it again is not a change.
+    /// The modes a folder's picker offers: every mode the daemon would set
+    /// for it. Automatic is offered before sign-in, as on Uses (Ron,
+    /// 2026-10-22): it is confirmed when picked and armed at Start, once the
+    /// enrollment it needs is held (`FirstRunPlan`), and until then the row
+    /// says it turns on once the person signs in (`armsAfterSignIn`).
     static func offeredModes(_ project: ProjectRow, state: FirstRunState) -> [ProjectMode] {
-        let modes = project.offerableModes
-        guard !FirstRunNavigation.canChooseAutomatic(state), project.mode != .autoUpload else { return modes }
-        return modes.filter { $0 != .autoUpload }
+        project.offerableModes
     }
 
     /// A pick on a folder's picker. The daemon's own mode clears the
     /// folder's answer, so it is not sent again. Automatic is a grant, so
-    /// it is never silent: it waits for the arming confirmation, and a
-    /// person without an enrollment is refused it.
+    /// it is never silent: it waits for the arming confirmation.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
         if wanted == project.mode {
@@ -110,22 +107,26 @@ enum RulesScreenLayout {
             return .applied
         }
         guard project.offerableModes.contains(wanted) else { return .refused }
-        if wanted == .autoUpload {
-            return FirstRunNavigation.canChooseAutomatic(state) ? .needsConfirmation : .refused
-        }
+        if wanted == .autoUpload { return .needsConfirmation }
         setRule(&state, projectID: id, mode: wanted)
         return .applied
     }
 
     /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a person without an enrollment and for a folder the daemon will
-    /// not arm, whatever the view asked.
+    /// Refused for a folder the daemon will not arm, whatever the view
+    /// asked. Without an enrollment it is recorded, not sent: Start arms it
+    /// after sign-in.
     static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
-        guard FirstRunNavigation.canChooseAutomatic(state),
-            project.offerableModes.contains(.autoUpload)
-        else { return false }
+        guard project.offerableModes.contains(.autoUpload) else { return false }
         state.rules[project.projectId] = .autoUpload
         return true
+    }
+
+    /// A folder set to Automatic in this first run that cannot be armed yet,
+    /// for want of an enrollment: its row says it turns on once the person
+    /// signs in, as Uses' Automatic does.
+    static func armsAfterSignIn(_ state: FirstRunState, project: ProjectRow) -> Bool {
+        state.rules[project.projectId] == .autoUpload && !FirstRunNavigation.canChooseAutomatic(state)
     }
 
     /// Set a folder's rule other than Automatic, which only
@@ -266,14 +267,6 @@ enum RulesScreenLayout {
             return false
         }
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
-    }
-
-    /// The options a folder's rule control shows: every mode the daemon
-    /// would set for it, so Ask, Automatic and Never read side by side
-    /// before sign-in as after (Ron, 2026-10-22). Which of them can be
-    /// picked is `offeredModes`'s.
-    static func segments(_ project: ProjectRow) -> [ProjectMode] {
-        project.offerableModes
     }
 
     /// The retry beside `rules.unavailable`: Rules' own word, `rules.retry`

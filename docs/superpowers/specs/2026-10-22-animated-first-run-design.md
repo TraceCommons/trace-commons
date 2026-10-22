@@ -17,7 +17,7 @@ for everyone, full window, over one scene:
    and Customize wait for one tick. Customize grows the card up and opens
    the per-repo rules and past traces (Ron's Rules screen, in place): each
    repo's rule is the canvas's Ask / Automatic / Never control with no
-   status dot, Automatic inert until it can be armed, and each past trace's
+   status dot, Automatic pickable before sign-in, and each past trace's
    switch sits before its date (Ron, 2026-10-22). The repos come from
    `list_projects` with `include_found`, so they show before any session
    has queued.
@@ -53,6 +53,11 @@ keep their shape:
 - Uses offers Automatic before sign-in, with "Turns on once you sign in.";
   the grant is still sent only at Start, with an enrollment, after both
   disclosures. The disclosures moved from Uses to Join's Start sharing.
+- A repo's Automatic under Customize is offered before sign-in too (Ron,
+  2026-10-22): picking it shows the core's arming confirmation, which
+  records it; the row then reads "Turns on once you sign in." (Uses'
+  words), and Start arms it after the consent scopes, with the enrollment
+  held. Watching only holds none, so Start never arms it there.
 - An invite link fills Join's invite and leaves the step where it is.
 - Welcome back (P-7) is offered once the run reaches Join.
 
@@ -67,8 +72,8 @@ per-row "Choose a different folder" button (the add row still adds one).
 
 Kept over the canvas: Join has no Skip and offers near.ai alone, with the
 invite and passkey cards only for what is held (owner, 2026-10-12, sign-in
-required); per-repo Automatic needs an enrollment and the arming
-confirmation; past traces start unticked (a pick is the person's approval);
+required); per-repo Automatic still asks the arming confirmation, and is
+armed only once an enrollment is held; past traces start unticked (a pick is the person's approval);
 "required" is inline text in the on colour (Ron's review of #1235, item 15).
 
 ## Copy

@@ -405,14 +405,12 @@ struct FirstRunMarkerCheckShape: Shape {
 
 /// The canvas's small segmented control (`.seg.sm`, Ron 2026-10-22): a
 /// well holding one pill per option, the chosen one in the accent, with no
-/// status dot. An option that cannot be picked is dimmed and inert. The
-/// caller's label names the group to assistive tech; each option is a
-/// button that says whether it is chosen.
+/// status dot. The caller's label names the group to assistive tech; each
+/// option is a button that says whether it is chosen.
 struct FirstRunSegmented<Value: Hashable>: View {
     struct Option {
         let title: String
         let value: Value
-        var enabled = true
     }
 
     let label: String
@@ -436,13 +434,10 @@ struct FirstRunSegmented<Value: Hashable>: View {
                         .background(
                             Capsule().fill(
                                 chosen ? GlassTokens.Color.toggleOn.color
-                                    : hovered == option.value && option.enabled
-                                        ? GlassTokens.Color.firstRunControlHover.color : .clear))
+                                    : hovered == option.value ? GlassTokens.Color.firstRunControlHover.color : .clear))
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(!option.enabled)
-                .opacity(option.enabled ? 1 : GlassTokens.Opacity.disabled)
                 .onHover { hovered = $0 ? option.value : (hovered == option.value ? nil : hovered) }
                 .accessibilityAddTraits(chosen ? .isSelected : [])
                 .animation(GlassMotion.timed(reduceMotion, duration: 0.15), value: chosen)

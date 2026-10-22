@@ -115,25 +115,36 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertTrue(state.rules.isEmpty)
     }
 
-    /// Automatic needs an enrollment. A watch-only person is not offered it per
-    /// folder, and the layout refuses it however it is asked, so the plan
-    /// never sends an arming the daemon would refuse for want of terms.
-    func test_watchOnlyIsNotOfferedAutomaticPerFolder() {
+    /// Automatic is offered per folder before sign-in, as on Uses (Ron,
+    /// 2026-10-22): picking it still asks first, the confirmation records
+    /// it, and until an enrollment is held the row says it turns on once
+    /// the person signs in; Start arms it then (`FirstRunPlan`). A folder
+    /// the daemon will not arm is offered no Automatic at all.
+    func test_automaticIsOfferedPerFolderBeforeSignIn() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         let watching = FirstRunState(step: .tools, account: .watchOnly)
         let joined = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
-        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: FirstRunState(step: .tools)), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .autoUpload, .ignore])
         XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: joined), [.ask, .autoUpload, .ignore])
 
-        var state = FirstRunState(step: .tools, account: .watchOnly)
-        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .refused)
-        XCTAssertFalse(RulesScreenLayout.confirmArming(&state, project: project))
-        XCTAssertTrue(state.rules.isEmpty)
+        var state = FirstRunState(step: .tools)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
+        XCTAssertTrue(state.rules.isEmpty, "nothing is written before the confirmation")
+        XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(state, project: project))
+        XCTAssertTrue(RulesScreenLayout.confirmArming(&state, project: project))
+        XCTAssertEqual(state.rules["p1"], .autoUpload)
+        XCTAssertTrue(RulesScreenLayout.armsAfterSignIn(state, project: project))
 
-        // A folder the daemon already arms keeps its mode on the picker, so
-        // the picker never shows a mode it has no option for.
-        let armed = ProjectRow(projectId: "p2", projectLabel: "armed", mode: .autoUpload)
-        XCTAssertEqual(RulesScreenLayout.offeredModes(armed, state: watching), [.ask, .autoUpload, .ignore])
+        var signedIn = joined
+        XCTAssertTrue(RulesScreenLayout.confirmArming(&signedIn, project: project))
+        XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(signedIn, project: project), "armed at Start, no note")
+
+        let bucket = ProjectRow(projectId: "p9", projectLabel: "unresolved", mode: .ask, isUnresolvedBucket: true)
+        XCTAssertFalse(RulesScreenLayout.offeredModes(bucket, state: joined).contains(.autoUpload))
+        var other = FirstRunState(step: .tools)
+        XCTAssertEqual(RulesScreenLayout.pick(&other, project: bucket, wanted: .autoUpload), .refused)
+        XCTAssertFalse(RulesScreenLayout.confirmArming(&other, project: bucket))
     }
 
     /// Arming is a grant, so it is never silent: picking Automatic asks
@@ -277,19 +288,18 @@ final class RulesScreenTests: XCTestCase {
 
     /// Ron, 2026-10-22, over #1235's item 13 for Customize: a repo's rule is
     /// the canvas's Ask / Automatic / Never control with no status dot, and
-    /// Automatic stays in place, inert, until it can be armed. Settings'
-    /// picker keeps its dots.
+    /// before sign-in an Automatic repo says it turns on once the person
+    /// signs in. Settings' picker keeps its dots.
     func test_theRulesControlShowsEveryModeAndNoDots() throws {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         let watching = FirstRunState(step: .tools, account: .watchOnly)
-        XCTAssertEqual(RulesScreenLayout.segments(project), [.ask, .autoUpload, .ignore])
-        XCTAssertFalse(RulesScreenLayout.offeredModes(project, state: watching).contains(.autoUpload))
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .autoUpload, .ignore])
         let screen = try String(
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent(
                     "Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift"), encoding: .utf8)
-        XCTAssertTrue(screen.contains("options: RulesScreenLayout.segments(project).compactMap"))
-        XCTAssertTrue(screen.contains("enabled: offered.contains(mode)"))
+        XCTAssertTrue(screen.contains("options: RulesScreenLayout.offeredModes(project, state: runner.state).compactMap"))
+        XCTAssertTrue(screen.contains("Text(copy.uses.automaticAfterSignIn)"))
         XCTAssertFalse(screen.contains("GlassSegmentedTabs("))
         XCTAssertFalse(screen.contains("GlassSegment("), "no segment carries a status dot")
         // The past traces' switches sit before their words.

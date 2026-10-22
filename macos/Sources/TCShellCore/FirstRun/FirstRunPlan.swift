@@ -196,7 +196,8 @@ public enum FirstRunPlan {
     /// config and refuses them without it), no grant, and the watch-only
     /// marker instead of the tenant's. The folder rules and past sessions
     /// Customize set, and Private AI, are local to the daemon and are sent
-    /// either way: for
+    /// either way, except a folder's Automatic, which arms under the
+    /// enrollment's terms and so is sent only with one: for
     /// watching only, picked past sessions are queued on this Mac as pending
     /// offers and none is sent, which the Rules card says
     /// (`rules.past_sessions_watch_only`).
@@ -222,7 +223,10 @@ public enum FirstRunPlan {
         guard watchOnly || state.holdsEnrolment else { return [] }
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
         for projectID in state.rules.keys.sorted() {
-            if let mode = state.rules[projectID] {
+            // A folder's Automatic can be picked and confirmed before sign-in
+            // (Ron, 2026-10-22); it is armed here, after the scopes, once the
+            // enrollment it needs is held, and never for watching only.
+            if let mode = state.rules[projectID], mode != .autoUpload || FirstRunNavigation.canChooseAutomatic(state) {
                 calls.append(.setProjectMode(projectID: projectID, mode))
             }
         }

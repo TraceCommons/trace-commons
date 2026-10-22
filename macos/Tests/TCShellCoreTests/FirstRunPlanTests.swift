@@ -460,6 +460,31 @@ final class FirstRunPlanTests: XCTestCase {
         ])
     }
 
+    /// A folder's Automatic is picked and confirmed before sign-in (Ron,
+    /// 2026-10-22) and armed at Start after the scopes, once an enrollment
+    /// is held; watching only holds none, so its Automatic folder is not
+    /// armed while its other rules are still sent.
+    func test_aFoldersAutomaticIsArmedOnlyWithAnEnrolment() {
+        var state = signedIn()
+        state.scopes = ["research"]
+        state.rules = ["p1": .autoUpload, "p2": .ask]
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p1", .autoUpload),
+            .setProjectMode(projectID: "p2", .ask),
+            .markComplete,
+        ])
+
+        var watching = answered()
+        watching.account = .watchOnly
+        watching.rules = ["p1": .autoUpload, "p2": .ask]
+        XCTAssertFalse(watching.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .start), [
+            .setProjectMode(projectID: "p2", .ask),
+            .markWatchOnlyComplete,
+        ])
+    }
+
     func test_aNeverFolderIncludesNothing() {
         var state = signedIn()
         state.scopes = ["research"]

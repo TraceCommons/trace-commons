@@ -1006,6 +1006,15 @@ private struct ToolRepoList: View {
                 rulePicker(project)
             }
             .frame(height: 40)
+            // Automatic picked before sign-in is armed at Start, as Uses'
+            // Automatic is, and says so in Uses' words.
+            if RulesScreenLayout.armsAfterSignIn(runner.state, project: project) {
+                Text(copy.uses.automaticAfterSignIn)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .padding(.leading, 62)
+                    .padding(.bottom, GlassTokens.Space.s3)
+            }
             if isOpen {
                 pastTraces(project, rows: rows, never: never)
                     .padding(.leading, 30)
@@ -1027,11 +1036,10 @@ private struct ToolRepoList: View {
     }
 
     /// Ask, Automatic and Never side by side, as the canvas draws them (Ron,
-    /// 2026-10-22: no status dot). Automatic stays in place but inert until
-    /// it can be armed (`RulesScreenLayout.offeredModes`).
+    /// 2026-10-22: no status dot). Automatic can be picked before sign-in:
+    /// it is confirmed now and armed at Start.
     @ViewBuilder private func rulePicker(_ project: ProjectRow) -> some View {
         if let words = ProjectModeWords.table {
-            let offered = RulesScreenLayout.offeredModes(project, state: runner.state)
             FirstRunSegmented(
                 label: FirstRunCopy.fill(copy.rules.ruleFor, ["folder": project.displayLabel]),
                 selection: Binding(
@@ -1042,8 +1050,8 @@ private struct ToolRepoList: View {
                             armingCandidate = project
                         }
                     }),
-                options: RulesScreenLayout.segments(project).compactMap { mode in
-                    words.label(for: mode).map { .init(title: $0, value: mode, enabled: offered.contains(mode)) }
+                options: RulesScreenLayout.offeredModes(project, state: runner.state).compactMap { mode in
+                    words.label(for: mode).map { .init(title: $0, value: mode) }
                 })
         }
     }
