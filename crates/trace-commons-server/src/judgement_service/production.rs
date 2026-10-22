@@ -252,6 +252,59 @@ mod tests {
         );
     }
 
+    /// A development adapter's id is refused by a production check even
+    /// when everything else about it passes: pinned, and in the catalog
+    /// with both attestation flags and prices.
+    #[test]
+    fn a_production_check_refuses_every_development_model_that_otherwise_passes() {
+        use crate::judgement_service::catalog::CatalogEntry;
+        let passing = |id: &str| {
+            let mut entries = BTreeMap::new();
+            entries.insert(
+                id.to_string(),
+                CatalogEntry {
+                    model_id: id.to_string(),
+                    verifiable: true,
+                    attestation_supported: true,
+                    prices: Some(TokenPrices {
+                        input_nanousd: 40,
+                        output_nanousd: 1350,
+                    }),
+                },
+            );
+            entries
+        };
+        for id in DEVELOPMENT_ONLY_MODEL_IDS {
+            let check = ProductionCheck::production(pins(id));
+            check
+                .catalog()
+                .write()
+                .expect("lock")
+                .record_refresh(NOW, passing(id));
+            // The same pins and entry pass a check whose allowlist holds the
+            // id, so only the production allowlist refuses it.
+            let allowed = ProductionCheck::for_tests(&[id], pins(id));
+            allowed
+                .catalog()
+                .write()
+                .expect("lock")
+                .record_refresh(NOW, passing(id));
+            allowed
+                .call_check(id, NOW)
+                .expect("passes without the allowlist");
+            assert_eq!(
+                check.boot_check(id, NOW).unwrap_err(),
+                ProductionBootRefusal::NotAllowlisted,
+                "{id}"
+            );
+            assert_eq!(
+                check.call_check(id, NOW).unwrap_err(),
+                JudgementRefusal::ModelUnattested,
+                "{id}"
+            );
+        }
+    }
+
     /// Owner decision 1: no interim production model, so a production
     /// service refuses to start whatever it is configured with. When slice 9
     /// adds the decision model, this test changes with it, deliberately.

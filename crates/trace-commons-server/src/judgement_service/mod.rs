@@ -22,9 +22,11 @@
 //! - [`catalog`]: the NEAR AI catalog entry parser and the hourly-refresh
 //!   state with its 24-hour staleness rule.
 //! - [`production`]: the compiled-in production allowlist and the
-//!   production check (allowlist, catalog flags, signer pin).
-//! - [`receipt_check`]: the per-call wrapper: reserve, call, settle, verify
-//!   the receipt, and only then turn the answer into a label.
+//!   production check (allowlist, catalog flags, signer pin, rotation
+//!   latch).
+//! - [`receipt_check`]: the per-call wrapper: reserve, call, verify the
+//!   receipt, settle, and only then read the label out of the verified
+//!   body. A rotation-shaped receipt failure latches the model.
 //! - [`limiter`] and [`ledger`]: the account-bound spend limiter and its
 //!   sealed on-disk ledger, the service's only state.
 //! - [`claim`]: the offline verifier for the judgement claim.
