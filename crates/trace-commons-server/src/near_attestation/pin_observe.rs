@@ -27,11 +27,9 @@
 //! one, so a refusal can be printed as it is. The tests are in
 //! `tests/staging_pins_tool.rs`, against a mock gateway.
 
-use std::collections::BTreeSet;
-
 use trace_commons_attestation::measurements::{ExpectedMeasurements, MeasurementField};
 use trace_commons_attestation::quote::{
-    QuoteVerifyError, REQUIRED_TCB_STATUS, VerifiedQuote, verify_quote,
+    Collateral, QuoteVerifyError, REQUIRED_TCB_STATUS, VerifiedQuote,
 };
 use trace_commons_attestation::receipt::{
     AttestedKeyError, model_ed25519_keys, model_entry_quotes, quote_bound_keys,
@@ -81,17 +79,29 @@ pub fn parse_registers(text: &str) -> Result<Vec<MeasurementField>, String> {
     Ok(fields)
 }
 
-/// Observe every model's measurement sets: the distinct sets, canonical
-/// and sorted, across every enclave serving every model. Each model is
-/// asked with a fresh nonce from `nonce_source`.
+/// Observe every model's measurement sets: the distinct sets, canonical,
+/// across every enclave serving every model. Each model is asked with a
+/// fresh nonce from `nonce_source`.
+///
+/// The sets come back in the order first seen: model order as given, then
+/// quote order within a model. Not sorted, because `sign` pins the staging
+/// ingest to the first set, which must be a set of the first model's
+/// rather than whichever happens to sort lowest.
 ///
 /// `now_unix` is the clock the collateral is evaluated against; the tool
 /// passes wall-clock time, and only a test pins it.
+///
+/// `verify` is the quote verifier: the tool passes
+/// [`trace_commons_attestation::quote::verify_quote`]. It is a parameter, as
+/// in the contributor's `proof_attestor`, so a test can reach the checks
+/// that follow verification (the TCB verdict, the nonce in the verified
+/// quote), which no checked-in quote fails on its own.
 pub async fn observe_measurement_sets(
     clients: &[&dyn AttestedKeyReportClient],
     nonce_source: &dyn DrillNonceSource,
     now_unix: u64,
     registers: &[MeasurementField],
+    verify: &(dyn Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync),
 ) -> Result<Vec<String>, ObserveRefusal> {
     let refused = |model_position: usize, label: String| ObserveRefusal {
         model_position,
@@ -103,16 +113,19 @@ pub async fn observe_measurement_sets(
     if clients.is_empty() {
         return Err(refused(0, "no_models".to_string()));
     }
-    let mut sets = BTreeSet::new();
+    let mut sets: Vec<String> = Vec::new();
     for (index, client) in clients.iter().enumerate() {
-        let quotes = observe_model(*client, &nonce_source.nonce(), now_unix)
+        let quotes = observe_model(*client, &nonce_source.nonce(), now_unix, verify)
             .await
             .map_err(|label| refused(index + 1, label))?;
         for quote in &quotes {
-            sets.insert(set_of(quote, registers).map_err(|label| refused(index + 1, label))?);
+            let set = set_of(quote, registers).map_err(|label| refused(index + 1, label))?;
+            if !sets.contains(&set) {
+                sets.push(set);
+            }
         }
     }
-    Ok(sets.into_iter().collect())
+    Ok(sets)
 }
 
 /// Every verified quote for one model, or the label of the first check that
@@ -121,6 +134,7 @@ async fn observe_model(
     client: &dyn AttestedKeyReportClient,
     nonce: &str,
     now_unix: u64,
+    verify: &(dyn Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync),
 ) -> Result<Vec<VerifiedQuote>, String> {
     // A nonce that is not 32 bytes of hex binds nothing; refuse before the
     // network call.
@@ -143,7 +157,7 @@ async fn observe_model(
             .fetch_collateral_for(quote)
             .await
             .map_err(|error| client_label(&error))?;
-        let checked = verify_quote(quote, &collateral, now_unix).map_err(|error| {
+        let checked = verify(quote, &collateral, now_unix).map_err(|error| {
             match error {
                 QuoteVerifyError::CollateralMalformed { .. } => "collateral_malformed",
                 QuoteVerifyError::VerificationFailed { .. } => "quote_verification_failed",

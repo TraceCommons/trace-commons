@@ -75,6 +75,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use secrecy::SecretString;
 use serde::Serialize;
 use trace_commons_attestation::measurements::ExpectedMeasurements;
+use trace_commons_attestation::quote::verify_quote;
 use trace_commons_attestation::staging_pins::{self, CHANNEL, FORMAT, MAX_LIFETIME_SECS};
 use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
 use trace_commons_server::near_attestation::client::{
@@ -420,6 +421,7 @@ fn run_observe(models: &[String], registers: &str) -> Result<Vec<String>, String
             &RandomNonce,
             now_unix(),
             &registers,
+            &verify_quote,
         ))
         .map_err(|refusal| format!("model_{}:{}", refusal.model_position, refusal.label))
 }

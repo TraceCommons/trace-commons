@@ -25,7 +25,9 @@ use rand::RngCore as _;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use secrecy::SecretString;
 use trace_commons_attestation::measurements::ExpectedMeasurements;
-use trace_commons_attestation::quote::{Collateral, parse_collateral};
+use trace_commons_attestation::quote::{
+    Collateral, QuoteVerifyError, VerifiedQuote, parse_collateral, verify_quote,
+};
 use trace_commons_attestation::staging_pins;
 use trace_commons_server::near_attestation::client::{
     AttestationClientError, AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,
@@ -175,6 +177,7 @@ async fn observe_reads_the_registers_of_a_verified_quote() {
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
+        &verify_quote,
     )
     .await
     .expect("a verified, bound quote is observed");
@@ -203,6 +206,7 @@ async fn observe_refuses_a_set_from_a_quote_that_does_not_verify() {
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
+        &verify_quote,
     )
     .await
     .expect_err("an unverified quote yields no set");
@@ -224,6 +228,7 @@ async fn observe_refuses_a_report_not_bound_to_its_nonce() {
         &FixedNonce(ours.to_string()),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
+        &verify_quote,
     )
     .await
     .expect_err("a report for another nonce yields no set");
@@ -250,10 +255,102 @@ async fn one_refused_model_prints_nothing_for_any() {
         &nonces,
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
+        &verify_quote,
     )
     .await
     .expect_err("the second model's refusal refuses the run");
     assert_eq!(refusal.model_position, 2);
+}
+
+/// `verify_quote` over the real fixture, then `alter` applied to what it
+/// verified: how a test reaches the checks after verification, which no
+/// checked-in quote fails on its own. Same shape as the contributor's
+/// `proof_attestor` tests.
+fn verify_then(
+    alter: impl Fn(&mut VerifiedQuote),
+) -> impl Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> {
+    move |quote, collateral, now| {
+        let mut verified = verify_quote(quote, collateral, now)?;
+        alter(&mut verified);
+        Ok(verified)
+    }
+}
+
+#[tokio::test]
+async fn observe_refuses_a_quote_whose_tcb_is_not_up_to_date() {
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &verify_then(|quote| quote.tcb_status = "OutOfDate".to_string()),
+    )
+    .await
+    .expect_err("an out-of-date platform yields no set");
+
+    assert_eq!(refusal.model_position, 1);
+    assert_eq!(refusal.label, "quote_tcb_not_up_to_date");
+}
+
+#[tokio::test]
+async fn observe_refuses_a_verified_quote_bound_to_another_nonce() {
+    // The JSON binds our nonce, but the verified quote does not: what a
+    // gateway relabelling an old quote would serve. Refused at the check
+    // against the verified report data, not the JSON one.
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &verify_then(|quote| quote.report_data[32..64].fill(0x5a)),
+    )
+    .await
+    .expect_err("a quote bound to another nonce yields no set");
+
+    assert_eq!(refusal.model_position, 1);
+    assert_eq!(refusal.label, "quote_nonce_mismatch");
+}
+
+#[tokio::test]
+async fn observe_keeps_the_sets_in_model_order() {
+    // The staging ingest is pinned to the first set, so the first set must
+    // be the first model's, not whichever sorts lowest. The second model's
+    // set is altered to sort first.
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_first_server, first) = gateway_serving(&report, &nonce).await;
+    let (_second_server, second) = gateway_serving(&report, &nonce).await;
+
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let verify = |quote: &[u8], collateral: &Collateral, now: u64| {
+        let mut verified = verify_quote(quote, collateral, now)?;
+        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            verified.mrtd = "00".repeat(48);
+        }
+        Ok(verified)
+    };
+
+    let sets = observe_measurement_sets(
+        &[&first, &second],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &verify,
+    )
+    .await
+    .expect("both models observed");
+
+    assert_eq!(sets.len(), 2);
+    assert!(sets[1] < sets[0], "the second model's set sorts first");
+    assert!(
+        sets[1].starts_with(&format!("mrtd={}", "00".repeat(48))),
+        "and is listed second, after the first model's"
+    );
 }
 
 /// The live client, collateral and all, in a build without the collateral
@@ -270,6 +367,7 @@ async fn observe_without_the_collateral_client_names_the_missing_control() {
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
+        &verify_quote,
     )
     .await
     .expect_err("no collateral, no set");
