@@ -844,7 +844,9 @@ pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
 /// that decides what is set is the one asking.
 ///
 /// Returns the directory as an owned string; free it with
-/// [`tc_string_free`]. Nothing is opened or created. On failure returns NULL
+/// [`tc_string_free`]. No store is opened and no directory is created (on
+/// Windows the platform default may still move a legacy enrollment, as
+/// `ConfigStore::resolve` does). On failure returns NULL
 /// and, when `err` is non-null, sets `*err` to an owned label (free it with
 /// [`tc_string_free`]) that names no path:
 /// - `state-dir-other-channel`: the override names the other channel's

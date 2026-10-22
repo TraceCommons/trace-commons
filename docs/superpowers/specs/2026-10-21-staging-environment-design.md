@@ -546,9 +546,11 @@ calls. The macOS app chooses its directory in Swift and opens it with
 `ConfigStore::open`, so it would never reach `resolve`; it is covered
 through the C ABI's `tc_resolve_state_dir`, which runs the same function.
 `StateDirectory` passes every directory that came from the override variable
-to it, and on a refusal the app starts neither the daemon nor compute and
-shows the core's sentence (`health_copy::STATE_DIR_OVERRIDE_REFUSED`, read
-through `tc_state_dir_override_refused_line`). The macOS app is the only client with a staging build.
+to it, and on a refusal the app starts neither the daemon nor compute. The
+startup refusal shows the core's sentence
+(`health_copy::STATE_DIR_OVERRIDE_REFUSED`, read through
+`tc_state_dir_override_refused_line`); compute shows its existing
+`compute-unavailable` failure. The macOS app is the only client with a staging build.
 
 ### 4.5 URL scheme
 

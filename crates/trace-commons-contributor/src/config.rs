@@ -1082,12 +1082,13 @@ fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
 }
 
 /// The state directory [`ConfigStore::resolve`] would open, without opening
-/// or creating it. Precedence:
+/// or creating it (on Windows the platform default may still move a legacy
+/// enrollment, `adopt_state_dir`). Precedence:
 /// 1. `explicit`, used as given
 /// 2. `override_dir`, the value of the channel's override variable,
 ///    refused with [`OtherChannelStateDir`] when it resolves to the other
 ///    channel's default directory or inside it
-/// 3. the platform default, see [`platform_default_dir`]
+/// 3. the platform default, see `platform_default_dir`
 ///
 /// The C ABI's `tc_resolve_state_dir` calls this, so the macOS app, which picks its
 /// directory in Swift, gets the same refusal as the CLI.

@@ -345,7 +345,9 @@ char*       tc_channel_mismatch_line(void);
  * passes the variable's value; this library does not read the environment.
  *
  * Returns the directory as an owned string; free it with tc_string_free.
- * Nothing is opened or created. On failure returns NULL and, when err is
+ * No store is opened and no directory is created (on Windows the platform
+ * default may still move a legacy enrollment, as ConfigStore::resolve
+ * does). On failure returns NULL and, when err is
  * non-NULL, sets *err to an owned label that names no path (free it with
  * tc_string_free):
  *   "state-dir-other-channel"  the override names the other channel's
