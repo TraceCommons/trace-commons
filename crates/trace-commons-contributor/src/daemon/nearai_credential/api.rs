@@ -892,7 +892,11 @@ mod tests {
         let api = CloudApi::live().unwrap();
         assert_eq!(api.base.scheme(), "https");
         // `api.near.ai` is retired and answers 410. The host is a constant so
-        // that no environment can point a contributor's session at another.
+        // that no environment can point a contributor's session at another;
+        // only a `near-ai-staging` build compiles a different one.
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(api.base.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(api.base.host_str(), Some("cloud-api.near.ai"));
         for refused in [
             "http://cloud-api.near.ai",
@@ -909,6 +913,9 @@ mod tests {
         let api = CloudApi::live().unwrap();
         let url = api.authorize_url("github", 49721).unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(parsed.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(parsed.host_str(), Some("cloud-api.near.ai"));
         assert_eq!(parsed.path(), "/v1/auth/github");
         let callback = parsed
