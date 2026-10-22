@@ -427,7 +427,7 @@ final class InferenceParityTests: XCTestCase {
     func test_theMainPaneCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
-        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})", "case .refused(let",
+        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})", "case .refused(let",
                        "GlassHealthBanner(banner:", "model.refreshAll()"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
@@ -639,7 +639,7 @@ final class InferenceParityTests: XCTestCase {
     }
 
     /// The tab reads the daemon's startup as the legacy destination did:
-    /// the first run's Folders step when folders are owed (outside the ledger's scroll,
+    /// the first run's Tools step when folders are owed (outside the ledger's scroll,
     /// so it never nests one), a spinner while starting, the core's down
     /// title over the refusal's sentence, the ledger only while running;
     /// and the refresh sits on the always-present stack. The account, whose
@@ -649,10 +649,10 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
                            + "            switch model.startup {\n"
                            + "            case .needsRoots:\n"
-                           + "                // Ron's 450pt first-run pane, centred, not the window's width.\n"
-                           + "                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})\n"
-                           + "                    .frame(width: FirstRunProgress.paneWidth)\n"
-                           + "                    .frame(maxWidth: .infinity)\n"
+                           + "                // The first run's Tools step on its own stage, scaled down to\n"
+                           + "                // fit the tab (`FirstRunStageFit`).\n"
+                           + "                OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})\n"
+                           + "                    .frame(maxWidth: .infinity, maxHeight: .infinity)\n"
                            + "            case .starting:\n"
                            + "                SettingsAwaiting().frame(maxWidth: .infinity)\n"
                            + "            case .refused(let sentence):\n"

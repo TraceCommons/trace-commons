@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 import XCTest
 
 @testable import TCDesign
@@ -116,6 +117,40 @@ final class GlassBrandMarkTests: XCTestCase {
         for ink in [GlassMapMarks.ink, GlassMapMarks.litInk, GlassMapMarks.bloom, GlassMapMarks.shimmerInk] {
             XCTAssertLessThan(ink.alpha, 0.5)
             XCTAssertLessThan(ink.light.alpha, 0.5)
+        }
+    }
+
+    /// The first run's marker (Ron's 2026-10-21 canvas): one stroke from
+    /// inside the lower-left hook to the upper-right one, wide enough that,
+    /// drawn whole, it covers every point of the mark, and the shine's band
+    /// rests clear of the mark at both ends of its travel.
+    func test_theMarkerCoversTheMarkAndTheShineRestsClearOfIt() throws {
+        let line = GlassBrandMark.markerLine
+        XCTAssertEqual(line.first, CGPoint(x: 167.5, y: 234.6))
+        XCTAssertEqual(line.last, CGPoint(x: 226, y: 170))
+        XCTAssertEqual(GlassBrandMark.markerLength, 983.4, accuracy: 1)
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: 0), line[0])
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: 10_000), line[line.count - 1])
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: -5), line[0])
+
+        let mark = try XCTUnwrap(SVGPathData.parse(GlassBrandMark.data))
+        var stroke = Path()
+        stroke.addLines(line)
+        let covered = stroke.strokedPath(
+            StrokeStyle(lineWidth: GlassBrandMark.markerWidth, lineCap: .round, lineJoin: .round))
+        let box = GlassBrandMark.viewBox
+        var missed = 0
+        for x in stride(from: box.minX, through: box.maxX, by: 4) {
+            for y in stride(from: box.minY, through: box.maxY, by: 4) {
+                let point = CGPoint(x: x, y: y)
+                if mark.contains(point), !covered.contains(point) { missed += 1 }
+            }
+        }
+        XCTAssertEqual(missed, 0, "the marker leaves part of the mark uninked")
+
+        for end in [GlassBrandMark.shineTravel.lowerBound, GlassBrandMark.shineTravel.upperBound] {
+            let band = GlassBrandMark.shineBand(at: end).band.boundingRect
+            XCTAssertFalse(band.intersects(box), "the shine rests on the mark at \(end)")
         }
     }
 }

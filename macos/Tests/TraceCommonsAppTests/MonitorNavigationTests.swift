@@ -744,16 +744,16 @@ final class MonitorNavigationTests: XCTestCase {
         """), "the hand-off must follow requiresOnboarding turning false, on the always-present container")
     }
 
-    /// A tall step (Uses with many scopes) scrolls inside the first-run
-    /// window: the pane takes the window's height rather than its step's,
-    /// so the step's own ScrollView has a bound to scroll within.
-    func test_aTallFirstRunStepScrollsInsideTheWindow() throws {
+    /// The first run is bounded by the window: the stage takes the
+    /// window's size rather than its step's, scaled down to fit a smaller
+    /// one (`FirstRunStageFit`), and the window keeps a floor it lays out
+    /// in.
+    func test_aTallFirstRunStepStaysInsideTheWindow() throws {
         let firstRun = try Self.text("Views/Monitor/FirstRunViews.swift")
-        XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
-        XCTAssertTrue(firstRun.contains("""
-                        .frame(width: FirstRunProgress.paneWidth)
-                        .padding(.vertical, GlassTokens.Space.paneGap * 3)
-        """), "the pane is bounded by the window, less the scene's margin")
+        XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the stage past the window")
+        XCTAssertTrue(firstRun.contains(
+            ".frame(minWidth: FirstRunProgress.minimumSize.width, minHeight: FirstRunProgress.minimumSize.height)"))
+        XCTAssertTrue(try Self.text("Views/OnboardingCoordinatorView.swift").contains("FirstRunStageFit {"))
     }
 
     /// Whether onboarding is required is known only once the core has said

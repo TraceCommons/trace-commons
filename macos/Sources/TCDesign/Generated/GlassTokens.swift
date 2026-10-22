@@ -81,6 +81,16 @@ public enum GlassTokens {
         public static let mapOrbShared: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
         /// A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).
         public static let mapOrbKept: GlassRGBA = GlassRGBA(0xD95926, alpha: 1, light: GlassRGBA(0xCF5320, alpha: 1))
+        /// The animated first run's light (Ron, 2026-10-21): the corner glow on the scene, the glow behind the N, the travelled step thread and the trace orbs. Drawn at low alpha; never text.
+        public static let firstRunGlow: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
+        /// The soft beam from a watched tool into the N on the first run's Tools step: its halo and body. Blurred, never text.
+        public static let firstRunBeam: GlassRGBA = GlassRGBA(0x49C2FF, alpha: 1, light: GlassRGBA(0x0091FD, alpha: 1))
+        /// The beam's core and its pulses, and the lit end of the step thread's leading stretch. Blurred, never text.
+        public static let firstRunBeamCore: GlassRGBA = GlassRGBA(0xE2F6FF, alpha: 1, light: GlassRGBA(0x9FDCFF, alpha: 1))
+        /// The review gate on the first run's Uses step filling as a trace is approved: the fill's top (Ron, 2026-10-22: a muted green, under a white thumbs-up).
+        public static let firstRunApprove: GlassRGBA = GlassRGBA(0x2C9E57, alpha: 1)
+        /// The review gate's fill toward its rim, under firstRunApprove.
+        public static let firstRunApproveDeep: GlassRGBA = GlassRGBA(0x1D7A42, alpha: 1)
         /// The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).
         public static let chartSurface: GlassRGBA = GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF7F8FA, alpha: 1))
         /// Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).
@@ -250,6 +260,11 @@ public enum GlassTokens {
             "dataInference": dataInference,
             "mapOrbShared": mapOrbShared,
             "mapOrbKept": mapOrbKept,
+            "firstRunGlow": firstRunGlow,
+            "firstRunBeam": firstRunBeam,
+            "firstRunBeamCore": firstRunBeamCore,
+            "firstRunApprove": firstRunApprove,
+            "firstRunApproveDeep": firstRunApproveDeep,
             "chartSurface": chartSurface,
             "chartGrid": chartGrid,
             "chartSeries1": chartSeries1,

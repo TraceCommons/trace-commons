@@ -30,13 +30,9 @@ enum JoinLookUpOutcome: Equatable {
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinScreenLayout {
-    /// The extra space above the invite card (under the body), on top of the
-    /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
-    static let extraGap = GlassTokens.Space.s4
-
     /// The app needs a NEAR AI account (owner, 2026-10-12: sign-in
-    /// required), so Join goes on only with one: near.ai chosen (signed in
-    /// once the daemon starts, `FirstRunPlan`) or signed in; a passkey the
+    /// required), so Start sharing waits for one: near.ai chosen and signed
+    /// in (`canStart`); a passkey the
     /// daemon bound, which binding ties to this Mac's near.ai login
     /// (`account_bind`); or the enrollment near.ai made for this run, not
     /// signed out of. An invite alone, a passkey only chosen, or an earlier
@@ -51,11 +47,11 @@ enum JoinScreenLayout {
         }
     }
 
-    /// Always "Continue": Join has no Skip (owner, 2026-10-12: sign-in
-    /// required). It stays off until NEAR AI is chosen or signed in
-    /// (`canForward`).
+    /// Always "Start sharing": Join is the last step and has no Skip
+    /// (owner, 2026-10-12: sign-in required). It stays off until a NEAR AI
+    /// account is signed in (`canStart`).
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        copy.frame.continueButton
+        copy.uses.start
     }
 
     /// Whether Join shows an account as signed into: near.ai or a passkey
@@ -78,35 +74,49 @@ enum JoinScreenLayout {
         nil
     }
 
-    /// Whether the footer can move on: only with a NEAR AI account
-    /// (`hasNearAIAccount`).
+    /// Whether a NEAR AI account is signed in: one held, and near.ai's
+    /// sign-in finished when that is the account. near.ai chosen and still
+    /// signing in, or whose sign-in was cancelled, is not yet.
     static func canForward(_ state: FirstRunState) -> Bool {
-        hasNearAIAccount(state)
+        hasNearAIAccount(state) && (state.account != .nearAI || state.signedIn)
     }
 
-    /// The footer's action, Continue. A held near.ai enrollment with no
-    /// account answered goes on as that enrollment; with no NEAR AI account
-    /// it does nothing (`canForward`).
-    static func forward(_ state: FirstRunState) -> FirstRunState {
+    /// Start sharing: a NEAR AI account signed in (`canForward`), and what
+    /// Start itself needs (`UsesScreenLayout.canStart`): the required use
+    /// known, an enrollment to finish under, the sharing line present, and
+    /// nothing committing.
+    static func canStart(
+        _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
+        isCommitting: Bool
+    ) -> Bool {
+        canForward(state)
+            && UsesScreenLayout.canStart(
+                readyToStart(state), uses: uses, requiredScope: requiredScope, grant: grant, isCommitting: isCommitting)
+    }
+
+    /// The state Start commits: a held near.ai enrollment with no account
+    /// answered starts as that enrollment; with no NEAR AI account nothing
+    /// changes (`canForward`).
+    static func readyToStart(_ state: FirstRunState) -> FirstRunState {
         guard canForward(state) else { return state }
-        var forwarded = state
-        switch forwarded.account {
+        var ready = state
+        switch ready.account {
         case .nearAI, .passkey: break
-        case .none, .watchOnly, .passkeyChosen, .enrolled: forwarded.account = .enrolled
+        case .none, .watchOnly, .passkeyChosen, .enrolled: ready.account = .enrolled
         }
-        return FirstRunNavigation.next(forwarded)
+        return ready
     }
 
-    /// near.ai is chosen here and signed in after the daemon starts
-    /// (`FirstRunPlan`), so the button only chooses it, and pressed again
-    /// undoes the choice until the sign-in happened. A held account -- a
-    /// signed-in near.ai or a passkey the daemon bound -- is not replaced; a
-    /// passkey only chosen is.
-    static func toggleNearAI(_ state: FirstRunState) -> FirstRunState {
+    /// Sign in with near.ai on Join, the last step: the daemon is running
+    /// (Tools started it), so the button chooses near.ai and the sign-in runs
+    /// at once (`CommitPoint.signIn`). A held account -- a signed-in near.ai
+    /// or a passkey the daemon bound -- is not replaced; a passkey only
+    /// chosen is.
+    static func chooseNearAI(_ state: FirstRunState) -> FirstRunState {
         guard canToggleNearAI(state) else { return state }
-        var toggled = state
-        toggled.account = nearAIChosen(state) ? .none : .nearAI
-        return toggled
+        var chosen = state
+        chosen.account = .nearAI
+        return chosen
     }
 
     /// Signing in with near.ai needs no invite (owner, Ron's review of
@@ -130,9 +140,10 @@ enum JoinScreenLayout {
     }
 
     /// Nothing while a passkey is held: near.ai cannot be chosen over it.
+    /// The sign-in runs as soon as near.ai is chosen, so there is no "once
+    /// watching starts" to say (`near_ai_chosen` is unread).
     static func nearAILine(_ state: FirstRunState, copy: FirstRunCopy.Join) -> String? {
         if passkeyDone(state) { return nil }
-        if nearAIChosen(state) { return copy.nearAiChosen }
         return copy.nearAiText
     }
 
@@ -148,6 +159,22 @@ enum JoinScreenLayout {
         default:
             return nil
         }
+    }
+
+    /// The line under Join's cards for the runner's failure: Start's, then
+    /// the sign-in's -- the daemon not starting, a changed folder refused,
+    /// the invite not checked or not joined. A near.ai sign-in or
+    /// enrollment that cleared the choice is said under its card
+    /// (`nearAINotice`), and a dead invite on the invite card, so neither
+    /// is said twice.
+    static func notice(
+        for failure: FirstRunFailure?, in state: FirstRunState, copy: FirstRunCopy, onboarding: TCOnboardingCopy?,
+        privateAI: PrivateInferenceCopy?
+    ) -> String? {
+        if let start = UsesScreenLayout.notice(for: failure, uses: copy.uses, privateAI: privateAI) { return start }
+        if nearAINotice(state, failure: failure, copy: copy) != nil { return nil }
+        if case .inviteDead? = failure { return nil }
+        return FoldersScreenLayout.notice(for: failure, copy: copy, onboarding: onboarding)
     }
 
     /// Join offers near.ai alone (owner, 2026-10-12). The invite card is
@@ -169,7 +196,7 @@ enum JoinScreenLayout {
     }
 
     static func nearAIAction(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        nearAIChosen(state) ? copy.frame.undo : copy.join.nearAiSignIn
+        copy.join.nearAiSignIn
     }
 
     /// "Signed in" is the daemon's fact, never the choice.
@@ -177,9 +204,10 @@ enum JoinScreenLayout {
         state.signedIn
     }
 
-    /// "Look up": the host is read locally (`TCInvite.issuerHost`), since the
-    /// daemon that would look the invite up does not run yet. Something that
-    /// is not an invite is refused and not kept, so it can never be enrolled.
+    /// "Look up": the host is read locally (`TCInvite.issuerHost`); the
+    /// invite is looked up and joined by the daemon when the person signs in
+    /// (`CommitPoint.signIn`). Something that is not an invite is refused and
+    /// not kept, so it can never be enrolled.
     ///
     /// An empty field withdraws the kept invite. That is how a person whose
     /// invite the daemon refused goes on without one: the refusal
@@ -435,20 +463,20 @@ enum JoinScreenLayout {
     }
 }
 
-/// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,
-/// the passkey and near.ai cards, the no-sharing card, and Continue, which
-/// waits for a NEAR AI account (owner, 2026-10-12: no Skip).
+/// Join, the last step (Ron's 2026-10-21 canvas): the watched tools circling
+/// the N, the title and body, the near.ai sign-in (and an invite or a
+/// passkey already held), and Start sharing, which waits for a NEAR AI
+/// account (owner, 2026-10-12: no Skip).
 ///
-/// Join holds no daemon client: on a first pass the daemon is not running.
-/// The invite is looked up and enrolled, and a chosen near.ai signed in,
-/// when Folders or Tools commits (`FirstRunPlan`). Create passkey is the
-/// exception (#1030): its sheets open over Join, so when the daemon is not
-/// running it starts it first, declaring both roots `off` so nothing is read
-/// (`CommitPoint.passkeyOnJoin`), and the ceremony completes there through
-/// `passkeyAccount`. The sheets are presented by `firstRunPasskeySheets`,
-/// which the first-run host (`OnboardingCoordinatorView`) mounts once for
-/// every step.
+/// The daemon is running by now (Tools started it), so Sign in runs at once
+/// (`CommitPoint.signIn`): the invite Join holds is looked up and joined,
+/// then near.ai signs in to it, or without one enrolls this Mac through the
+/// near.ai login. Start sharing goes through the sharing disclosures when
+/// Automatic or Private AI asks for them, then commits `.start`. The passkey
+/// sheets are presented by `firstRunPasskeySheets`, which the first-run host
+/// mounts once for every step.
 struct JoinScreen: View {
+    @EnvironmentObject private var model: AppModel
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
     let passkeyAccount: (any PasskeyAccount)?
@@ -460,26 +488,48 @@ struct JoinScreen: View {
 
     @State private var draft: String?
     @State private var refused = false
+    @State private var disclosure: SharingDisclosureFlow?
+    @State private var grant: AutomaticGrantCopy?
+    @State private var grantRead = false
+    /// A refusal decided before a Start that then failed, shown after the
+    /// Start that succeeds.
+    @State private var pendingRefusal: FirstRunFailure?
+    @State private var starting = false
+    @State private var signedInAt: Date?
+    @State private var onboarding = TCOnboardingCopy.load()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var privateAI: PrivateInferenceCopy? { model.privateInferenceCopy }
 
     var body: some View {
+        let required = UsesScreenLayout.requiredScope(model.consentScopes)
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            // About taking the action, so directly above the action bar, not
-            // in the cards (owner ruling, 2026-10-08).
-            actionNote: copy.join.noSharing,
+            isCommitting: runner.isCommitting,
+            notice: JoinScreenLayout.notice(
+                for: runner.failure, in: runner.state, copy: copy, onboarding: onboarding, privateAI: privateAI),
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
-                isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state),
-                note: JoinScreenLayout.footerNote(runner.state, copy: copy),
-                action: { runner.state = JoinScreenLayout.forward(runner.state) })
+                isEnabled: JoinScreenLayout.canStart(
+                    runner.state, uses: copy.uses, requiredScope: required, grant: grant,
+                    isCommitting: runner.isCommitting),
+                // About taking the action, so directly above the action bar.
+                note: copy.join.noSharing,
+                busy: starting && runner.isCommitting,
+                action: start)
         ) {
-            title
+            orbit
+        } title: {
+            VStack(spacing: GlassTokens.Space.s3) {
+                FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
+                Text(copy.join.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
         } content: {
-            // Join promotes the near.ai sign-in alone (owner, 2026-10-12).
-            // The invite and passkey cards come back only to show what is
-            // already held, so a held account is never hidden.
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 nearAICard
                 if JoinScreenLayout.showsInviteCard(runner.state) {
                     inviteCard
@@ -487,52 +537,111 @@ struct JoinScreen: View {
                 if JoinScreenLayout.showsPasskeyCard(runner.state) {
                     passkeyCard
                 }
+                if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
+                    GlassAlert(notice)
+                }
+                if let notice = runner.passkeyOutcome?.joinNotice(copy) {
+                    GlassNotice(tone: .ask) { Text(notice) }
+                }
             }
-            .padding(.top, JoinScreenLayout.extraGap)
-            if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
-                GlassAlert(notice)
+            .frame(width: 460)
+        }
+        .onChange(of: runner.state.signedIn) { _, signedIn in
+            if signedIn { signedInAt = Date() }
+        }
+        .task {
+            // `enroll` re-reads the route, not status; the grant's
+            // `connected` is read from status, so it is refreshed here.
+            model.refreshStatus()
+            model.refreshConsentOptions()
+            model.refreshWitness()
+            if !grantRead {
+                grant = AutomaticGrantCopy.decode(
+                    fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
+                grantRead = true
             }
-            if let notice = runner.passkeyOutcome?.joinNotice(copy) {
-                GlassNotice(tone: .ask) { Text(notice) }
+        }
+        .glassModal(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
+            if let grant {
+                SharingDisclosureSheet(copy: copy, grant: grant, flow: $disclosure, onFinish: finish)
+                    .environmentObject(model)
             }
         }
     }
 
-    /// The title, then the body as one paragraph (owner, 2026-10-08).
-    private var title: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            Text(copy.join.body)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+    // MARK: - The graphic
+
+    /// The watched tools circling the N on a slowly turning dashed ring; a
+    /// sign-in sends a ring of light out from the N.
+    private var orbit: some View {
+        let watched = ToolsScreenLayout.watchedKinds(runner.state)
+        return GlassAnimationTimeline(minimumInterval: 1.0 / 30, paused: reduceMotion) { date in
+            let time = date.timeIntervalSinceReferenceDate
+            let pulse = signedInAt.map { date.timeIntervalSince($0) / 1.6 }
+            ZStack {
+                Circle()
+                    .strokeBorder(GlassTokens.Color.rule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .frame(width: 140, height: 140)
+                    .rotationEffect(.degrees(reduceMotion ? 0 : (time / 90).truncatingRemainder(dividingBy: 1) * 360))
+                if let pulse, pulse < 1, !reduceMotion {
+                    Circle()
+                        .fill(RadialGradient(
+                            stops: [
+                                .init(color: GlassTokens.Color.firstRunBeam.opacity(0).color, location: 0.26),
+                                .init(color: GlassTokens.Color.firstRunBeam.opacity(0.6).color, location: 0.44),
+                                .init(color: GlassTokens.Color.firstRunBeam.opacity(0).color, location: 0.64),
+                            ],
+                            center: .center, startRadius: 0, endRadius: 46))
+                        .frame(width: 92, height: 92)
+                        .blur(radius: 4)
+                        .scaleEffect(0.3 + 1.6 * pulse)
+                        .opacity(pulse < 0.18 ? pulse / 0.18 : (1 - pulse) / 0.82)
+                }
+                FirstRunHub()
+                    .firstRunActor(FirstRunStageLayout.hubActor)
+                    .frame(width: 56, height: 56)
+                ForEach(Array(watched.enumerated()), id: \.element) { index, kind in
+                    let point = FirstRunStageLayout.point(
+                        CGPoint(x: 83, y: 83), radius: 70, degrees: FirstRunStageLayout.joinAngle(index, of: watched.count))
+                    FirstRunToolFace(tool: kind.glassTool)
+                        .firstRunActor(FirstRunStageLayout.tileActor(kind))
+                        .frame(width: 26, height: 26)
+                        .position(point)
+                }
+            }
+            .frame(width: 166, height: 166)
         }
+        .frame(height: 166)
+        .frame(maxWidth: .infinity)
+        .accessibilityHidden(true)
     }
+
+    // MARK: - Cards
 
     private var inviteCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if JoinScreenLayout.showsInviteField(runner.state) {
-                    // The field as it always reads; closed while an
-                    // enrollment the daemon holds came with no invite, since
-                    // no second invite is joined over it.
-                    let editable = JoinScreenLayout.inviteIsEditable(runner.state)
-                    HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
-                        GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
-                            .onSubmit(lookUp)
-                            .disabled(!editable)
-                        Button(copy.join.lookUp, action: lookUp)
-                            .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(!editable || !JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
-                    }
-                } else {
-                    Text(copy.join.inviteEyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            if JoinScreenLayout.showsInviteField(runner.state) {
+                // The field as it always reads; closed while an enrollment
+                // the daemon holds came with no invite, since no second
+                // invite is joined over it.
+                let editable = JoinScreenLayout.inviteIsEditable(runner.state)
+                HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
+                    GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
+                        .onSubmit(lookUp)
+                        .disabled(!editable)
+                    Button(copy.join.lookUp, action: lookUp)
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(!editable || !JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
                 }
-                inviteLine
+            } else {
+                Text(copy.join.inviteEyebrow)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
             }
+            inviteLine
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .firstRunCard(padding: EdgeInsets(top: 14, leading: 18, bottom: 14, trailing: 18))
     }
 
     @ViewBuilder
@@ -557,21 +666,22 @@ struct JoinScreen: View {
 
     @ViewBuilder private var passkeyCard: some View {
         accountCard(
-            eyebrow: copy.join.passkeyEyebrow,
+            title: copy.join.passkeyEyebrow,
             text: JoinScreenLayout.passkeyLine(runner.state, copy: copy.join),
             done: JoinScreenLayout.passkeyDone(runner.state) ? copy.join.passkeyDone : nil,
+            chosen: JoinScreenLayout.passkeyDone(runner.state),
             showsAction: JoinScreenLayout.showsPasskeyAction(runner.state)
         ) {
             Button(action: passkeyAction) {
-                // Only the undo of a choice recorded for later carries a
-                // glyph, as on the near.ai card; starting the daemon for the
-                // sheets shows the spinner.
+                // Only the undo of a choice an earlier build recorded carries
+                // a glyph; starting the daemon for the sheets shows the
+                // spinner.
                 if JoinScreenLayout.passkeyChosen(runner.state) {
                     Label(JoinScreenLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
                     HStack(spacing: GlassTokens.Space.s3) {
-                        if runner.isCommitting { GlassSpinner() }
+                        if runner.isCommitting, !starting { GlassSpinner() }
                         Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
                     }
                 }
@@ -586,61 +696,64 @@ struct JoinScreen: View {
 
     private var nearAICard: some View {
         accountCard(
-            eyebrow: copy.join.nearAiEyebrow,
+            title: copy.join.nearAiEyebrow,
             text: JoinScreenLayout.nearAILine(runner.state, copy: copy.join),
             done: JoinScreenLayout.showsSignedIn(runner.state) ? copy.join.signedIn : nil,
+            chosen: JoinScreenLayout.showsSignedIn(runner.state),
             showsAction: JoinScreenLayout.showsNearAIAction(runner.state)
         ) {
-            Button {
-                runner.state = JoinScreenLayout.toggleNearAI(runner.state)
-            } label: {
-                // Choosing near.ai opens nothing (the sign-in comes after the
-                // daemon starts), so only the undo carries a glyph.
-                if JoinScreenLayout.nearAIChosen(runner.state) {
-                    Label(JoinScreenLayout.nearAIAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
-                        .labelStyle(.titleAndIcon)
-                } else {
-                    Text(JoinScreenLayout.nearAIAction(runner.state, copy: copy))
+            HStack(spacing: GlassTokens.Space.s3) {
+                if runner.signInWaiting {
+                    Button(copy.passkey.cancel) { Task { await runner.cancelSignIn() } }
+                        .buttonStyle(GlassButtonStyle(.secondary))
                 }
+                Button(action: signIn) {
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if runner.isCommitting, !starting, runner.state.account == .nearAI { GlassSpinner() }
+                        Text(JoinScreenLayout.nearAIAction(runner.state, copy: copy))
+                    }
+                }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(runner.isCommitting || !JoinScreenLayout.canToggleNearAI(runner.state))
             }
-            .buttonStyle(GlassButtonStyle(.glass))
-            .disabled(!JoinScreenLayout.canToggleNearAI(runner.state))
         }
     }
 
-    /// Ron's `AccountCard`: eyebrow and line on the left, the action on the
-    /// right until it is done, then its status. With the other account held
-    /// there is no action to offer, so none is shown.
+    /// An account card: its title and line on the left, the action on the
+    /// right until it is done, then its status; a held account is outlined
+    /// in the accent. With the other account held there is no action to
+    /// offer, so none is shown.
     private func accountCard<Action: View>(
-        eyebrow: String, text: String?, done: String?, showsAction: Bool, @ViewBuilder action: () -> Action
+        title: String, text: String?, done: String?, chosen: Bool, showsAction: Bool, @ViewBuilder action: () -> Action
     ) -> some View {
-        GlassCard {
-            HStack(spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(eyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
-                    if let text {
-                        Text(text)
-                            .glassType(GlassTokens.TypeScale.label)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                // #1030's `ftux-row--between`: the text takes the row and
-                // the action keeps its own width. The action is fixed at its
-                // ideal size so the text column can never squeeze it to zero
-                // width and wrap its label out of sight.
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if let done {
-                    GlassStatusLabel(done, status: .on)
-                        .fixedSize()
-                } else if showsAction {
-                    action()
-                        .fixedSize()
+        HStack(spacing: GlassTokens.Space.s8) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                if let text {
+                    Text(text)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            // The text takes the row and the action keeps its own width, so
+            // the text column can never squeeze it out of sight.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let done {
+                GlassStatusLabel(done, status: .on)
+                    .fixedSize()
+            } else if showsAction {
+                action()
+                    .fixedSize()
+            }
         }
+        .firstRunCard(padding: EdgeInsets(top: 14, leading: 18, bottom: 14, trailing: 18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(chosen ? GlassTokens.Color.toggleOn.color : .clear, lineWidth: 1.5))
+        .animation(GlassMotion.standard(reduceMotion), value: chosen)
     }
 
     private var currentDraft: String {
@@ -665,6 +778,12 @@ struct JoinScreen: View {
         if looked.outcome != .refused { draft = nil }
     }
 
+    /// near.ai chosen and signed in at once: the daemon is running.
+    private func signIn() {
+        runner.state = JoinScreenLayout.chooseNearAI(runner.state)
+        Task { await runner.commit(.signIn) }
+    }
+
     /// Open the sheets over Join: at once while the daemon runs, after
     /// starting it otherwise. A choice recorded for later is undone.
     private func passkeyAction() {
@@ -675,6 +794,53 @@ struct JoinScreen: View {
             Task { await runner.openPasskeyOnJoin() }
         } else {
             runner.state = JoinScreenLayout.togglePasskey(runner.state)
+        }
+    }
+
+    // MARK: - Start sharing
+
+    /// Put the required use in the state, once it is known.
+    private func includeRequired() {
+        let included = UsesScreenLayout.includingRequired(
+            runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
+        if included != runner.state { runner.state = included }
+    }
+
+    private func start() {
+        runner.state = JoinScreenLayout.readyToStart(runner.state)
+        // What Start sends matches what Uses showed: the required use
+        // included.
+        includeRequired()
+        switch UsesScreenLayout.startRoute(runner.state) {
+        case .disclose:
+            disclosure = SharingDisclosureFlow()
+        case .discloseWitness:
+            disclosure = SharingDisclosureFlow(witnessOnly: true)
+        case .commit:
+            run { await UsesStart.plainStart(runner: runner, pending: $0) }
+        }
+    }
+
+    /// Both disclosures seen: the core decides the grant, then Start runs.
+    /// A not-ready answer finishes on Ask; its failure is shown after the
+    /// commit, which clears failures when it begins.
+    private func finish(_ flow: SharingDisclosureFlow) {
+        // The Private AI path saw the witness disclosure and asks for no
+        // grant: Start as on Ask.
+        if flow.witnessOnly {
+            run { await UsesStart.plainStart(runner: runner, pending: $0) }
+            return
+        }
+        let request = SharingDisclosureFlow.grantRequest(
+            flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
+        run { await UsesStart.finish(runner: runner, request: request, pending: $0) }
+    }
+
+    private func run(_ commit: @escaping (FirstRunFailure?) async -> FirstRunFailure?) {
+        starting = true
+        Task {
+            pendingRefusal = await commit(pendingRefusal)
+            starting = false
         }
     }
 }

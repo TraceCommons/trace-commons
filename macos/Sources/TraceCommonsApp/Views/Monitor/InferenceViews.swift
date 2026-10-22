@@ -26,16 +26,16 @@ struct InferenceTabView: View {
     private static let insightsCopy = TCInsights.copy() ?? [:]
 
     var body: some View {
-        // The Folders step scrolls itself, so the switch sits outside the
+        // The Tools step lays itself out, so the switch sits outside the
         // ledger's scroll; the refresh sits on the stack, which is always
         // drawn.
         VStack(alignment: .leading, spacing: 0) {
             switch model.startup {
             case .needsRoots:
-                // Ron's 450pt first-run pane, centred, not the window's width.
-                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})
-                    .frame(width: FirstRunProgress.paneWidth)
-                    .frame(maxWidth: .infinity)
+                // The first run's Tools step on its own stage, scaled down to
+                // fit the tab (`FirstRunStageFit`).
+                OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .starting:
                 SettingsAwaiting().frame(maxWidth: .infinity)
             case .refused(let sentence):

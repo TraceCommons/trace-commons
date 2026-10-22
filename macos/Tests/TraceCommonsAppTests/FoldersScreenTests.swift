@@ -4,11 +4,11 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// Ron's Folders screen and tool row (#1030 `tool-screens.tsx`,
-/// `tool-row.tsx`): every offered tool needs an answer, a missing one
-/// included, and nothing is answered for the person. Read from the row's
-/// pure layout and the screens' sources, the house pattern for a SwiftUI
-/// view.
+/// The rules Ron's Folders screen and tool row (#1030 `tool-screens.tsx`,
+/// `tool-row.tsx`) set and Tools keeps: a tool not on this Mac is not
+/// asked, nothing is watched for the person, and a commit that stops says
+/// why in the core's words. Read from the pure layouts and the screens'
+/// sources, the house pattern for a SwiftUI view.
 final class FoldersScreenTests: XCTestCase {
     private static func source(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
@@ -35,60 +35,24 @@ final class FoldersScreenTests: XCTestCase {
     }
 
     /// Spec rule 1, as the owner reversed it in Ron's design review of
-    /// #1235: a tool not on this Mac is not asked. Its row reads only the
-    /// core's install line and, when there is an install page, "Get
-    /// {tool}"; no picker and no folder button. Continue counts only the
-    /// tools found here.
+    /// #1235: a tool not on this Mac is not asked. It leaves the Tools list
+    /// (Ron, 2026-10-21), nothing is written for it, and the found tool's
+    /// check starts unticked, Not used.
     func test_aMissingToolIsNotAsked() throws {
         let missing = Self.candidate(.codex, exists: false)
         let found = Self.candidate(.claudeCode, exists: true)
-
-        let state = FirstRunState(step: .folders)
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: found, in: state), [.watch, .dontUse])
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
-        XCTAssertFalse(ToolAnswerRowLayout.asks(missing, in: state))
-        XCTAssertTrue(ToolAnswerRowLayout.asks(found, in: state))
-        let url = URL(string: "https://example.com/codex")
-        XCTAssertTrue(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, in: state))
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(missing, installURL: nil, in: state))
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(found, installURL: url, in: state))
-        XCTAssertFalse(ToolAnswerRowLayout.offersFolderChoice(missing, in: state))
-        XCTAssertTrue(ToolAnswerRowLayout.offersFolderChoice(found, in: state))
-
-        // Opening the screen writes nothing, and only the found tool holds
-        // Continue.
-        var answered = state
-        answered.recordDiscovery([found, missing])
-        XCTAssertNil(answered.toolAnswers[.codex])
-        XCTAssertFalse(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
-        ToolAnswerRowLayout.select(.dontUse, for: found, in: &answered)
-        XCTAssertTrue(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
-
-        // The row's words are the core's: "Install", and no install line
-        // (owner, 2026-10-08). The button is the folder picker's neutral
-        // glass pill, not a coloured one.
-        let folders = try copy().folders
-        let row = try Self.source("ToolAnswerRow.swift")
-        XCTAssertFalse(row.contains("copy.notInstalled"))
-        XCTAssertTrue(row.contains("copy.getTool"))
-        let getTool = try XCTUnwrap(row.range(of: "ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source)"))
-        let getStyle = String(row[getTool.upperBound...].prefix(800))
-        XCTAssertTrue(getStyle.contains(".buttonStyle(GlassButtonStyle(.glass))"), getStyle)
-        XCTAssertFalse(row.contains("GlassButtonStyle(.secondary"))
-        // "Install", with the tool named for VoiceOver (Ron, 2026-10-15).
-        XCTAssertEqual(folders.getTool, "Install")
-        XCTAssertEqual(folders.downloadTool, "Install {tool}")
-        XCTAssertEqual(folders.chooseToolFolder, "Choose folder")
-        XCTAssertEqual(folders.chooseToolFolderAccessibility, "Choose {tool} folder")
-        XCTAssertTrue(getStyle.contains(".accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))"), getStyle)
-        XCTAssertTrue(row.contains("GlassToolTile("))
-        XCTAssertTrue(row.contains("large: true"))
-        XCTAssertTrue(row.contains("GlassPicker("))
-        XCTAssertTrue(row.contains("GlassFolderButton("))
-        // Both screens record discovery, which declares the missing tools.
-        for screen in ["FoldersScreen.swift", "ToolsScreen.swift"] {
-            XCTAssertTrue(try Self.source(screen).contains("recordDiscovery("), screen)
-        }
+        var state = FirstRunState(step: .tools)
+        state.recordDiscovery([found, missing])
+        XCTAssertEqual(ToolsScreenLayout.listed([found, missing], state: state).map(\.source), [.claudeCode])
+        XCTAssertNil(state.toolAnswers[.codex])
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: found), .dontUse)
+        XCTAssertFalse(ToolsScreenLayout.isWatched(found, in: state))
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [found, missing], requiredScope: nil))
+        ToolsScreenLayout.setWatched(true, found, in: &state)
+        XCTAssertEqual(state.toolAnswers[.claudeCode], .watch(path: found.path))
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [found, missing], requiredScope: nil))
+        // Tools records discovery, which declares the missing tools.
+        XCTAssertTrue(try Self.source("ToolsScreen.swift").contains("recordDiscovery("))
     }
 
     func test_nativeOpenCodeDatabaseRequiresExplicitWatchAndPreservesExactPath() throws {
@@ -99,16 +63,14 @@ final class FoldersScreenTests: XCTestCase {
         // them off without inventing a contributor answer.
         let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
                           Self.candidate(.codex, exists: false)]
-        var state = FirstRunState(step: .folders)
+        var state = FirstRunState(step: .tools)
         state.recordDiscovery(candidates)
 
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: candidate, in: state), [.watch, .dontUse])
-        XCTAssertNil(ToolAnswerRowLayout.answer(in: state, for: candidate))
-        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
-        XCTAssertNil(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .dontUse)
+        XCTAssertEqual(state.sessionRoots.opencode, .off)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
 
-        ToolAnswerRowLayout.select(.watch, for: candidate, in: &state)
+        ToolsScreenLayout.setWatched(true, candidate, in: &state)
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .watch)
         XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: candidate), "/synthetic/opencode/opencode.db")
         XCTAssertEqual(state.sessionRoots.opencode, .watch(path: "/synthetic/opencode/opencode.db"))
@@ -122,53 +84,40 @@ final class FoldersScreenTests: XCTestCase {
         let candidate = SourceCandidate(
             source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
             sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
-        // Discovery includes missing required tools so roots can declare
-        // them off without inventing a contributor answer.
         let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
                           Self.candidate(.codex, exists: false)]
-        var state = FirstRunState(step: .folders)
+        var state = FirstRunState(step: .tools)
         state.recordDiscovery(candidates)
-        ToolAnswerRowLayout.select(.dontUse, for: candidate, in: &state)
+        ToolsScreenLayout.setWatched(true, candidate, in: &state)
+        ToolsScreenLayout.setWatched(false, candidate, in: &state)
         state.recordDiscovery(candidates)
 
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .dontUse)
         XCTAssertEqual(state.sessionRoots.opencode, .off)
         let params = try XCTUnwrap(state.sessionRoots.opencode.settingsParams(for: .opencode))
         XCTAssertEqual(params["opencode_source"] as? [String: String], ["mode": "off"])
-        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
     }
 
-    func test_continueIsDisabledUntilEveryFoundRowIsAnswered() {
+    /// Continue waits for a ticked tool (Ron, 2026-10-22), and for the scan
+    /// to finish; it commits the roots and moves on.
+    func test_continueWaitsForATickedToolAndTheScan() throws {
         let claude = Self.candidate(.claudeCode, exists: true)
-        let codex = Self.candidate(.codex, exists: false)
         let cline = Self.candidate(.cline, exists: true)
-        let candidates = [claude, codex, cline]
-
-        var state = FirstRunState(step: .folders)
+        let candidates = [claude, Self.candidate(.codex, exists: false), cline]
+        var state = FirstRunState(step: .tools)
         state.recordDiscovery(candidates)
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+        XCTAssertFalse(ToolsScreenLayout.canContinue(discovered: candidates, state: state, pending: false, isCommitting: false))
+        ToolsScreenLayout.setWatched(true, cline, in: &state)
+        XCTAssertTrue(ToolsScreenLayout.canContinue(discovered: candidates, state: state, pending: false, isCommitting: false))
+        XCTAssertFalse(
+            ToolsScreenLayout.canContinue(discovered: candidates, state: state, pending: false, isCommitting: false, scanned: false))
+        XCTAssertFalse(ToolsScreenLayout.canContinue(discovered: candidates, state: state, pending: true, isCommitting: false))
+        XCTAssertFalse(ToolsScreenLayout.canContinue(discovered: candidates, state: state, pending: false, isCommitting: true))
+        XCTAssertFalse(ToolsScreenLayout.canContinue(discovered: nil, state: state, pending: false, isCommitting: false))
 
-        ToolAnswerRowLayout.select(.watch, for: claude, in: &state)
-        // Codex is not on this Mac and is not asked, but Cline is found and
-        // unanswered.
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
-        ToolAnswerRowLayout.select(.dontUse, for: cline, in: &state)
-        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
-
-        // Clearing an answer closes it again.
-        ToolAnswerRowLayout.select(nil, for: cline, in: &state)
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
-
-        // The screen's Continue is that rule, through the Tools rule that
-        // also counts added folders, and commits the roots.
-        XCTAssertTrue(
-            ToolsScreenLayout.canContinue(
-                discovered: candidates,
-                state: { var answered = state; ToolAnswerRowLayout.select(.dontUse, for: cline, in: &answered); return answered }(),
-                pending: false, isCommitting: false))
-        let screen = (try? Self.source("FoldersScreen.swift")) ?? ""
+        let screen = try Self.source("ToolsScreen.swift")
         XCTAssertTrue(screen.contains("ToolsScreenLayout.canContinue("))
-        XCTAssertTrue(screen.contains("runner.commit(.leaveRoots)"))
+        XCTAssertTrue(screen.contains("runner.commit(.leaveTools)"))
         XCTAssertTrue(screen.contains("TCDiscovery.sourcesJSON()"))
         XCTAssertTrue(screen.contains("FirstRunFrame("))
     }
@@ -183,6 +132,7 @@ final class FoldersScreenTests: XCTestCase {
             onboarding.watcherStartFailed)
         XCTAssertNil(FoldersScreenLayout.notice(for: nil, copy: firstRun, onboarding: onboarding))
         XCTAssertNil(FoldersScreenLayout.notice(for: .startFailed, copy: firstRun, onboarding: nil))
+        XCTAssertTrue(try Self.source("ToolsScreen.swift").contains("notice: FoldersScreenLayout.notice("))
     }
 
     /// Kristi's #1235 M3: a refused change of folders reads its own core
@@ -199,15 +149,14 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertNotEqual(firstRun.folders.settingsFailed, onboarding.watcherStartFailed)
     }
 
-    /// Every way `.leaveRoots` can stop while the person stays on Folders
-    /// shows a core line, so Continue never does nothing in silence. A
-    /// near.ai sign-in that did not finish reads the core's sign-in line;
-    /// an invite the issuer could not be asked about reads
-    /// `lookup_unavailable`. A failed enroll reads the core's `enroll_refused`:
-    /// the invite was already accepted by lookup, so Join's "not an invite
-    /// link" would be false.
+    /// Every way Sign in on Join can stop shows a core line, so the button
+    /// never does nothing in silence: under the cards, or under the near.ai
+    /// card when it cleared the choice, or on the invite card for a dead
+    /// invite. A failed enroll reads the core's `enroll_refused`: the invite
+    /// was already accepted by lookup, so Join's "not an invite link" would
+    /// be false.
     @MainActor
-    func test_everyFailureThatStaysOnFoldersShowsACoreLine() async throws {
+    func test_everyWaySignInStopsShowsACoreLine() async throws {
         let onboarding = try XCTUnwrap(TCOnboardingCopy.load())
         let firstRun: FirstRunCopy = try copy()
         XCTAssertEqual(
@@ -217,22 +166,15 @@ final class FoldersScreenTests: XCTestCase {
             FoldersScreenLayout.notice(for: .enrollFailed, copy: firstRun, onboarding: onboarding),
             firstRun.join.inviteError)
 
-        var state = FirstRunState(tier: .quick, step: .folders)
+        var state = FirstRunState(step: .join)
         state.invite = "INVITE-1"
         state.issuerHost = "issuer.example"
         state.account = .nearAI
         state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
         state.answer(.codex, .off)
-        let plan = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let plan = FirstRunPlan.calls(for: state, at: .signIn)
         XCTAssertTrue(plan.contains(.enroll("INVITE-1")))
         XCTAssertTrue(plan.contains(.signInNearAI))
-
-        XCTAssertEqual(
-            FoldersScreenLayout.notice(for: .signInFailed, copy: firstRun, onboarding: onboarding),
-            firstRun.folders.signInFailed)
-        XCTAssertEqual(
-            FoldersScreenLayout.notice(for: .lookupUnavailable, copy: firstRun, onboarding: onboarding),
-            firstRun.folders.lookupUnavailable)
 
         var seen: [FirstRunFailure] = []
         for failing in plan + [.lookupInvite("unavailable")] {
@@ -245,67 +187,63 @@ final class FoldersScreenTests: XCTestCase {
                 daemon.failing = { $0 == failing }
             }
             let runner = FirstRunRunner(state: state, daemon: daemon)
-            await runner.commit(.leaveRoots)
+            await runner.commit(.signIn)
             let failure = try XCTUnwrap(runner.failure, "\(failing)")
             seen.append(failure)
-            guard runner.state.step == .folders else { continue }
-            let notice = FoldersScreenLayout.notice(for: failure, copy: firstRun, onboarding: onboarding)
-            switch failure {
-            case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
-                .nearAIEnrollFailed, .scopesFailed, .rulesFailed, .privateAIFailed, .grantRefused:
-                XCTAssertNotNil(notice, "\(failure)")
-            // Leaving the roots never marks completion, and Join's own
-            // passkey start is never a Folders failure.
-            case .completeFailed, .passkeyUnavailable:
-                XCTFail("\(failure)")
-            }
+            XCTAssertEqual(runner.state.step, .join, "\(failure)")
+            let under = JoinScreenLayout.notice(
+                for: failure, in: runner.state, copy: firstRun, onboarding: onboarding, privateAI: nil)
+            let nearAI = JoinScreenLayout.nearAINotice(runner.state, failure: failure, copy: firstRun)
+            let invite = JoinScreenLayout.inviteLine(
+                runner.state, lookup: nil, failure: failure, copy: firstRun.join)
+            let said = under != nil || nearAI != nil || invite == .error(firstRun.join.inviteDead)
+            XCTAssertTrue(said, "\(failure)")
+            XCTAssertFalse(under != nil && nearAI != nil, "\(failure) said twice")
         }
         XCTAssertTrue(seen.contains(.lookupUnavailable))
         XCTAssertTrue(seen.contains(.startFailed))
         XCTAssertTrue(seen.contains(.enrollFailed))
         XCTAssertTrue(seen.contains(.signInFailed))
-
-        // The frame is handed that notice.
-        let screen = try Self.source("FoldersScreen.swift")
-        XCTAssertTrue(screen.contains("notice: FoldersScreenLayout.notice("))
+        XCTAssertTrue(seen.contains(.inviteDead(label: "invite-invalid")))
+        XCTAssertTrue(try Self.source("JoinScreen.swift").contains("notice: JoinScreenLayout.notice("))
     }
 
     /// A host whose runner does not last the whole first run (Private AI's)
-    /// starts on Folders, and no screen has a Back (Ron's review of #1235,
-    /// item 9), so it never reaches Join: what Join would take (an invite,
-    /// an account) is never committed there. Its commit is the start alone.
+    /// starts on Tools: its Continue is the start alone, and what Join would
+    /// take (an invite, an account) is never committed there.
     func test_aHostWithoutJoinCommitsOnlyTheStart() throws {
         let host = try Self.source("../Monitor/InferenceViews.swift")
-        XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .folders, takesInvites: false"))
+        XCTAssertTrue(host.contains("OnboardingCoordinatorView(startAt: .tools, takesInvites: false"))
 
-        var state = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: false, enrolled: false)
-        state.answer(.claudeCode, .off)
+        var state = OnboardingNavigation.initialState(startAt: .tools, daemonRunning: false, enrolled: false)
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
         state.answer(.codex, .off)
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.startDaemon(settingsJSON: json)])
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveTools), [.startDaemon(settingsJSON: json)])
     }
 
-    /// While a commit runs, nothing on the screen can change the plan being
-    /// committed: the rows are disabled and the frame offers no tier switch.
-    /// A row flipped mid-commit would otherwise show "Not used" while
-    /// the daemon keeps watching the folder (`.start` sends no roots).
-    func test_rowsAndTierSwitchAreHeldWhileCommitting() throws {
+    /// While a commit runs, nothing on Tools can change the plan being
+    /// committed: the rows, the add row and Customize are held.
+    @MainActor
+    func test_rowsAndCustomizeAreHeldWhileCommitting() throws {
         XCTAssertFalse(FoldersScreenLayout.rowsEnabled(isCommitting: true))
         XCTAssertTrue(FoldersScreenLayout.rowsEnabled(isCommitting: false))
+        var watching = FirstRunState(step: .tools)
+        watching.answer(.claudeCode, .watch(path: "/a"))
+        watching.answer(.codex, .off)
+        XCTAssertTrue(ToolsScreenLayout.customizeEnabled(state: watching, open: false, scanned: true, isCommitting: false))
+        XCTAssertFalse(ToolsScreenLayout.customizeEnabled(state: watching, open: false, scanned: true, isCommitting: true))
+        XCTAssertFalse(ToolsScreenLayout.customizeEnabled(state: watching, open: false, scanned: false, isCommitting: false))
+        XCTAssertFalse(
+            ToolsScreenLayout.customizeEnabled(state: FirstRunState(step: .tools), open: false, scanned: true, isCommitting: false),
+            "nothing watched, nothing to customize")
+        XCTAssertTrue(ToolsScreenLayout.customizeEnabled(state: FirstRunState(step: .tools), open: true, scanned: true, isCommitting: false),
+            "an open Customize can always close")
 
-        let quickFolders = FirstRunState(tier: .quick, step: .folders)
-        XCTAssertTrue(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: false))
-        XCTAssertFalse(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: true))
-
-        // The rows and the add tile are the shared tool list's, used by
-        // Folders and Tools alike.
-        let screen = try Self.source("FoldersScreen.swift")
-        XCTAssertTrue(screen.contains("ToolList("))
-        XCTAssertTrue(screen.contains("isCommitting: runner.isCommitting,"))
         let shared = try Self.source("ToolsScreen.swift")
         XCTAssertEqual(
             shared.components(separatedBy: ".disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))")
-                .count - 1, 2, "the cards and the add tile")
+                .count - 1, 2, "the rows and the add row")
     }
 
     /// Discovery that returns nothing readable is a failure with the core's
@@ -329,69 +267,42 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertEqual(DiscoveredRows.failed.failureLine(try copy().folders), try copy().folders.discoveryFailed)
 
         // Discovery runs again when the app comes back to the front, so an
-        // install made meanwhile is asked about, and on the failure's retry
-        // (the shared tool list's button, calling the screen's refresh).
-        let screen = try Self.source("FoldersScreen.swift")
+        // install made meanwhile is offered, and on the failure's retry.
+        let screen = try Self.source("ToolsScreen.swift")
         XCTAssertTrue(screen.contains("NSApplication.didBecomeActiveNotification"))
-        XCTAssertTrue(screen.contains("retry: refreshDiscovery"))
-        XCTAssertTrue(try Self.source("ToolsScreen.swift").contains("Button(copy.folders.retry, action: retry)"))
+        XCTAssertTrue(screen.contains("Button(copy.folders.retry, action: refreshDiscovery)"))
         XCTAssertTrue(screen.contains("FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)"))
     }
 
-    /// A missing tool the state already watches (restored, or added on
-    /// Custom's Tools) offers Watch, so the picker shows what Continue reads.
-    /// Ron's design review of #1235, item 7: an unanswered picker reads
-    /// the core's "Choose…", never its question; the question stays the
-    /// picker's accessible label. Every first-run picker draws its
-    /// placeholder from that one word.
+    /// Ron's design review of #1235, item 7: an unanswered picker reads the
+    /// core's "Choose…", never its question; the question stays the
+    /// picker's accessible label.
     func test_anUnansweredPickerReadsChoose() throws {
         XCTAssertEqual(try self.copy().frame.choose, "Choose…")
-        for file in ["ToolAnswerRow.swift", "ToolsScreen.swift", "RulesScreen.swift", "UsesScreen.swift"] {
-            let lines = try Self.source(file).split(separator: "\n").filter {
-                $0.contains("placeholder:") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///")
-            }
-            XCTAssertFalse(lines.isEmpty, file)
-            for line in lines {
-                XCTAssertTrue(line.contains("placeholder: choose") || line.contains("frame.choose"), "\(file): \(line)")
-            }
+        let lines = try Self.source("ToolsScreen.swift").split(separator: "\n").filter {
+            $0.contains("placeholder:") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///")
         }
-    }
-
-    func test_aWatchedMissingToolOffersWatch() {
-        let missing = Self.candidate(.codex, exists: false)
-        var state = FirstRunState(step: .folders)
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
-
-        // A restored state that watches it: the row asks, so the picker can
-        // show the answer Continue counts.
-        state.answer(.codex, .watch(path: "/Volumes/work/codex"))
-        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: missing), .watch)
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [.watch, .dontUse])
-        XCTAssertTrue(ToolAnswerRowLayout.asks(missing, in: state))
-        XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: missing), "/Volumes/work/codex")
-
-        let row = (try? Self.source("ToolAnswerRow.swift")) ?? ""
-        XCTAssertTrue(row.contains("ToolAnswerRowLayout.options(for: candidate, in: state)"))
+        XCTAssertFalse(lines.isEmpty)
+        for line in lines {
+            XCTAssertTrue(line.contains("frame.choose"), "\(line)")
+        }
     }
 
     /// A chosen folder survives "Not used" and back to Watch.
     func test_aChosenFolderSurvivesDontUseAndBack() {
         let claude = Self.candidate(.claudeCode, exists: true)
-        var state = FirstRunState(step: .folders)
+        var state = FirstRunState(step: .tools)
 
         ToolAnswerRowLayout.choose(folder: "/Volumes/work/claude", for: claude, in: &state)
         ToolAnswerRowLayout.select(.dontUse, for: claude, in: &state, chosenFolder: "/Volumes/work/claude")
         XCTAssertEqual(state.toolAnswers[.claudeCode], .off)
         ToolAnswerRowLayout.select(.watch, for: claude, in: &state, chosenFolder: "/Volumes/work/claude")
         XCTAssertEqual(state.toolAnswers[.claudeCode], .watch(path: "/Volumes/work/claude"))
-
-        let row = (try? Self.source("ToolAnswerRow.swift")) ?? ""
-        XCTAssertTrue(row.contains("chosenFolder: chosenFolder"))
     }
 
     func test_choosingAFolderWatchesThatPath() {
         let claude = Self.candidate(.claudeCode, exists: true)
-        var state = FirstRunState(step: .folders)
+        var state = FirstRunState(step: .tools)
 
         ToolAnswerRowLayout.choose(folder: "/Volumes/work/claude", for: claude, in: &state)
         XCTAssertEqual(state.toolAnswers[.claudeCode], .watch(path: "/Volumes/work/claude"))
@@ -399,32 +310,19 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: claude), .watch)
         XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: claude), "/Volumes/work/claude")
 
-        // Without a chosen folder, Watch adopts the discovered path.
-        var fresh = FirstRunState(step: .folders)
+        // Without a chosen folder, the tick adopts the discovered path.
+        var fresh = FirstRunState(step: .tools)
         XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: fresh, for: claude), claude.path)
-        ToolAnswerRowLayout.select(.watch, for: claude, in: &fresh)
+        ToolsScreenLayout.setWatched(true, claude, in: &fresh)
         XCTAssertEqual(fresh.toolAnswers[.claudeCode], .watch(path: claude.path))
     }
 
-    /// "Install" opens the tool's setup guide: every tool the Mac is asked
-    /// about has one, from the core's one table, over https.
+    /// Every tool has a setup guide in the core's one table, over https.
     func test_everyToolHasAnInstallLink() throws {
         let guides = InstallGuides(json: TCCoreCopy.installGuidesJSON())
         for kind in SourceKind.allCases {
             let url = try XCTUnwrap(guides.url(for: kind), "\(kind)")
             XCTAssertEqual(url.scheme, "https", "\(kind)")
         }
-    }
-
-    /// Both screens pass the core's one install table to the row, so the
-    /// button is live.
-    func test_bothScreensPassTheInstallLinks() throws {
-        let coordinator = try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift"),
-            encoding: .utf8)
-        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))"))
-        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))"))
     }
 }

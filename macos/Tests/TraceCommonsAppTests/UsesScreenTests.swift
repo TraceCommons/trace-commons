@@ -37,14 +37,17 @@ final class UsesScreenTests: XCTestCase {
         ConsentScope(name: "public_attribution", title: "public_attribution", description: "p", alwaysOn: false, grantsDataUse: false),
     ]
 
-    private static func source() throws -> String {
+    private static func source(_ file: String = "UsesScreen.swift") throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/UsesScreen.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/\(file)")
         return try String(contentsOf: url, encoding: .utf8)
     }
+
+    /// Start sharing is Join's, the last step.
+    private static func joinSource() throws -> String { try source("JoinScreen.swift") }
 
     func test_theRequiredUseIsTickedAndLockedAndNothingOptionalIs() throws {
         XCTAssertEqual(UsesScreenLayout.requiredScope(options)?.name, "debugging_evaluation")
@@ -55,7 +58,7 @@ final class UsesScreenTests: XCTestCase {
 
         // The required use is included in the state; nothing optional is
         // ticked for the person.
-        let fresh = FirstRunState(tier: .quick, step: .uses, account: .nearAI)
+        let fresh = FirstRunState(step: .join, account: .nearAI)
         XCTAssertTrue(fresh.scopes.isEmpty)
         let included = UsesScreenLayout.includingRequired(fresh, required: UsesScreenLayout.requiredScope(options))
         XCTAssertEqual(included.scopes, ["debugging_evaluation"])
@@ -83,22 +86,22 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
         XCTAssertFalse(source.contains("scopes = "))
         // The state takes the required use once it is known, and Start
-        // includes it before it routes, so what is sent is what is shown.
+        // sharing, on Join, includes it before it routes, so what is sent is
+        // what Uses showed.
         XCTAssertTrue(source.contains(".onChange(of: required?.name, initial: true) { _, _ in includeRequired() }"))
-        let start = try XCTUnwrap(source.range(of: "private func start() {"))
-        let startBody = String(source[start.upperBound...].prefix(300))
+        let join = try Self.joinSource()
+        let start = try XCTUnwrap(join.range(of: "private func start() {"))
+        let startBody = String(join[start.upperBound...].prefix(400))
         let include = try XCTUnwrap(startBody.range(of: "includeRequired()"))
         let route = try XCTUnwrap(startBody.range(of: "UsesScreenLayout.startRoute(runner.state)"))
         XCTAssertLessThan(include.lowerBound, route.lowerBound)
 
-        // The optional group reads Ron's summary, every placeholder filled.
-        let uses = try copy().uses
+        // The optional group's box reads mixed while some are on; there is
+        // no summary beside it (Ron, 2026-10-22: "3 optional uses, all off"
+        // removed).
         var some = fresh
         some.scopes = ["ranking_training"]
-        let summary = UsesScreenLayout.optionalSummary(uses, scopes: some.scopes, optional: UsesScreenLayout.optionalScopes(options))
-        XCTAssertFalse(summary.contains("{"), summary)
-        XCTAssertTrue(summary.contains("3"), summary)
-        XCTAssertTrue(summary.contains("1"), summary)
+        XCTAssertFalse(source.contains("optionalSummary"))
         XCTAssertEqual(UsesScreenLayout.group(some.scopes, optional: UsesScreenLayout.optionalScopes(options)), .some)
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
@@ -127,7 +130,7 @@ final class UsesScreenTests: XCTestCase {
     func test_startDoesNotWaitForATick() throws {
         let grant = try grant()
         let uses = try copy().uses
-        let state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
+        let state = FirstRunState(step: .join, account: .nearAI, enrolledInvite: "INVITE-1")
         let required = UsesScreenLayout.requiredScope(options)
         XCTAssertTrue(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
@@ -163,7 +166,7 @@ final class UsesScreenTests: XCTestCase {
         let uses = try copy().uses
         let required = UsesScreenLayout.requiredScope(options)
         var state = FirstRunState(
-            tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
+            step: .join, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
 
         let noAskFirst = try grant(without: "path_ask_first_title")
         XCTAssertEqual(
@@ -179,11 +182,10 @@ final class UsesScreenTests: XCTestCase {
         state.sharing = .automatic
         XCTAssertFalse(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
-        // Watching only reads Ask's line, so Automatic's absence does
-        // not hold it. (Watching only with nothing enrolled: beside an
-        // enrollment the daemon holds, Start is not offered at all.)
-        state.account = .watchOnly
-        state.enrolledInvite = nil
+        // Automatic's line is read for whoever chose it, now that Uses
+        // offers it before sign-in, so its absence holds Start on Ask's
+        // words only once Ask is chosen again.
+        state.sharing = .askMe
         XCTAssertTrue(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
     }
@@ -215,26 +217,33 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(source.contains("infoButton(title: copy.uses.sharing, text: detail)"))
 
         let modes = try modes()
-        let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
-        let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes)
-        // Ron's #1030 order: Automatic first, then Ask.
-        XCTAssertEqual(full.map(\.value), [.automatic, .askMe])
-        XCTAssertEqual(full.map(\.title), [modes.label(for: .autoUpload), modes.label(for: .ask)])
-        XCTAssertEqual(UsesScreenLayout.sharingOptions(for: FirstRunState(account: .watchOnly), modes: modes).map(\.value), [.askMe])
+        let joined = FirstRunState(step: .join, account: .nearAI, enrolledInvite: "INVITE-1")
+        let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes, grant: grant, uses: uses)
+        // The canvas's order: Ask, the default, then Automatic, each with
+        // the first line of the core's words for it.
+        XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
+        XCTAssertEqual(full.map(\.title), [modes.label(for: .ask), modes.label(for: .autoUpload)])
+        XCTAssertEqual(full.map(\.sub), [grant.pathAskFirstTitle, grant.pathAutomaticTitle])
+        // Before sign-in Automatic is offered too, and says it turns on once
+        // the person signs in, the last step.
+        let before = UsesScreenLayout.sharingOptions(for: FirstRunState(step: .uses), modes: modes, grant: grant, uses: uses)
+        XCTAssertEqual(before.map(\.value), [.askMe, .automatic])
+        XCTAssertEqual(
+            before.last?.sub, [try XCTUnwrap(grant.pathAutomaticTitle), uses.automaticAfterSignIn].joined(separator: "\n"))
+        XCTAssertEqual(UsesScreenLayout.effectiveSharing(FirstRunState(sharing: .automatic)), .automatic)
     }
 
-    func test_privateAIAppearsOnlyInCustom() throws {
-        XCTAssertFalse(UsesScreenLayout.showsPrivateAI(FirstRunState(tier: .quick, step: .uses)))
-        XCTAssertTrue(UsesScreenLayout.showsPrivateAI(FirstRunState(tier: .custom, step: .uses)))
-
-        // The card is behind that guard and worded by the Private AI copy;
-        // the switch stays disabled until the copy is there.
-        let source = try Self.source()
-        let guardRange = try XCTUnwrap(source.range(of: "UsesScreenLayout.showsPrivateAI("))
-        let cardRange = try XCTUnwrap(source.range(of: "privateAICard"))
-        XCTAssertLessThan(guardRange.lowerBound, cardRange.lowerBound)
+    /// Private AI is its own step (Ron, 2026-10-21), worded by the Private AI
+    /// copy; its switch stays disabled until the copy is there.
+    func test_privateAIIsItsOwnStep() throws {
+        XCTAssertFalse(try Self.source().contains("privateAICard"), "no Private AI card on Uses any more")
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/PrivateAIScreen.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("model.privateInferenceCopy"))
         XCTAssertTrue(source.contains(".disabled(privateAI == nil)"))
+        XCTAssertTrue(source.contains("copy.privateAi.offerLead"))
     }
 
     private func privateAI() throws -> PrivateInferenceCopy {
@@ -280,8 +289,8 @@ final class UsesScreenTests: XCTestCase {
         }
         XCTAssertNil(UsesScreenLayout.notice(for: nil, uses: uses, privateAI: privateAI))
 
-        let source = try Self.source()
-        XCTAssertTrue(source.contains("UsesScreenLayout.notice(for: runner.failure"))
+        let join = try Self.joinSource()
+        XCTAssertTrue(join.contains("UsesScreenLayout.notice(for: failure, uses: copy.uses, privateAI: privateAI)"))
     }
 
     /// Each failure that stops Start reads its own line; Private AI's is
@@ -336,23 +345,25 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source?.contains("?? pendingRefusal") ?? true)
     }
 
-    /// An account that cannot choose Automatic reads Ask's line and
-    /// selection, whatever `sharing` holds.
-    func test_watchingOnlyNeverReadsAutomatic() throws {
+    /// Uses offers Automatic before sign-in (Ron's 2026-10-21 canvas), so
+    /// the person's choice is what Uses shows and Start's line is read for;
+    /// only an enrollment the daemon holds is granted it, at Start.
+    func test_automaticIsShownAsChosenButOnlyAnEnrolmentIsGrantedIt() throws {
         let uses = try copy().uses
         let grant = try grant()
-        let watching = FirstRunState(tier: .quick, step: .uses, account: .watchOnly, sharing: .automatic)
-        XCTAssertEqual(UsesScreenLayout.effectiveSharing(watching), .askMe)
+        let watching = FirstRunState(step: .join, account: .watchOnly, sharing: .automatic)
+        XCTAssertEqual(UsesScreenLayout.effectiveSharing(watching), .automatic)
         XCTAssertEqual(
             UsesScreenLayout.sharingLine(uses, path: UsesScreenLayout.effectiveSharing(watching), grant: grant),
-            grant.pathAskFirstTitle)
+            grant.pathAutomaticTitle)
+        XCTAssertFalse(SharingDisclosureFlow.isNeeded(for: watching), "no grant to disclose without an enrolment")
+        var ready = watching
+        ready.grantReady = true
+        XCTAssertFalse(FirstRunPlan.calls(for: ready, at: .start).contains { if case .grantAutomatic = $0 { return true } else { return false } })
         let joined = FirstRunState(
-            tier: .quick, step: .uses, account: .nearAI, sharing: .automatic, enrolledInvite: "INVITE-1")
+            step: .join, account: .nearAI, sharing: .automatic, enrolledInvite: "INVITE-1")
         XCTAssertEqual(UsesScreenLayout.effectiveSharing(joined), .automatic)
-
-        let source = try Self.source()
-        XCTAssertFalse(source.contains("path: runner.state.sharing"))
-        XCTAssertFalse(source.contains("get: { runner.state.sharing }"))
+        XCTAssertTrue(SharingDisclosureFlow.isNeeded(for: joined))
     }
 
     /// Owner, 2026-10-08: each scope's description sits behind an info
@@ -375,26 +386,22 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertLessThan(toggle.lowerBound, info.lowerBound)
     }
 
-    /// Owner, 2026-10-08: the Private AI card shows the offer's first two
-    /// sentences (the core's, split once) and discloses the rest in place
-    /// behind the core's "Learn more"; nothing of the disclosure is dropped.
+    /// Owner, 2026-10-08: Private AI shows the offer's first two sentences
+    /// (the core's, split once) and discloses the rest in place behind the
+    /// core's "Learn more"; nothing of the disclosure is dropped. It is its
+    /// own step now (Ron, 2026-10-21).
     func test_thePrivateAICardLeadsWithTwoSentencesAndLearnMore() throws {
         let words: FirstRunCopy = try copy()
         XCTAssertTrue(words.privateAi.offerLead.hasPrefix("Lets your tools send AI requests through this app,"))
         XCTAssertEqual(words.privateAi.learnMore, "Learn more")
-        let source = try Self.source()
-        let lead = try XCTUnwrap(source.range(of: "cardBody(copy.privateAi.offerLead)"))
-        let more = try XCTUnwrap(source.range(of: "if privateAIMore {"))
+        let source = try Self.source("PrivateAIScreen.swift")
+        let lead = try XCTUnwrap(source.range(of: "Text(copy.privateAi.offerLead)"))
+        let more = try XCTUnwrap(source.range(of: "if more {"))
         XCTAssertLessThan(lead.lowerBound, more.lowerBound)
-        let rest = String(source[more.upperBound...].prefix(500))
-        for line in [
-            "cardBody(copy.privateAi.offerMore)", "cardBody(privateAI.offerExposure)",
-            "cardBody(privateAI.offerNoRepoint)", "Button(copy.privateAi.learnMore) { privateAIMore = true }",
-            "GlassButtonStyle(.link)",
-        ] {
-            XCTAssertTrue(rest.contains(line), line)
-        }
-        XCTAssertFalse(source.contains("cardBody(privateAI.offerWhat)"))
+        XCTAssertTrue(source.contains("[copy.privateAi.offerMore, privateAI.offerExposure, privateAI.offerNoRepoint]"))
+        XCTAssertTrue(source.contains("Button(copy.privateAi.learnMore) { more = true }"))
+        XCTAssertTrue(source.contains("GlassButtonStyle(.link)"))
+        XCTAssertFalse(source.contains("privateAI.offerWhat"))
     }
 
     /// The grant copy is read once; until then the line is the loading one
@@ -410,7 +417,7 @@ final class UsesScreenTests: XCTestCase {
 
     private func onUses(_ sharing: SharingPath) -> FirstRunState {
         FirstRunState(
-            tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], sharing: sharing,
+            step: .join, account: .nearAI, scopes: ["debugging_evaluation"], sharing: sharing,
             daemonStarted: true, enrolledInvite: "invite")
     }
 
@@ -433,8 +440,8 @@ final class UsesScreenTests: XCTestCase {
         watching.account = .watchOnly
         XCTAssertEqual(UsesScreenLayout.startRoute(watching), .commit)
 
-        // The screen's Start reads that route.
-        let source = try Self.source()
+        // Join's Start sharing reads that route.
+        let source = try Self.joinSource()
         XCTAssertTrue(source.contains("switch UsesScreenLayout.startRoute(runner.state)"))
         XCTAssertTrue(source.contains("UsesStart.finish(runner: runner"))
     }

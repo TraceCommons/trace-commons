@@ -16,6 +16,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let stepTools: String
         public let stepRules: String
         public let stepUses: String
+        /// The animated first run's Traces and Private AI steps.
+        public let stepTraces: String
+        public let stepPrivateAi: String
         public let customSetupInstead: String
         public let continueButton: String
         public let answerEveryTool: String
@@ -28,6 +31,13 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// The footer's Back on every step after Join, and the passkey
         /// popups' Back.
         public let back: String
+    }
+
+    /// Welcome, the animated first run's splash.
+    public struct Welcome: Decodable, Equatable, Sendable {
+        public let title: String
+        public let body: String
+        public let start: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -187,6 +197,27 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let privateAiFailed: String
         /// Every call succeeded but setup could not be marked finished.
         public let completeFailed: String
+        /// The Uses graphic's labels.
+        public let thisMac: String
+        public let youReview: String
+        public let theCommons: String
+        /// Under Automatic before sign-in.
+        public let automaticAfterSignIn: String
+    }
+
+    /// Traces: what the watched tools' traces could earn.
+    public struct Traces: Decodable, Equatable, Sendable {
+        public let titleLight: String
+        public let titleBold: String
+        public let onThisMac: String
+        /// `{min}`, `{max}`; then `{min}`.
+        public let points: String
+        public let pointsOne: String
+        /// `{min}`, `{max}`; then `{min}`.
+        public let rate: String
+        public let rateOne: String
+        /// No range is known before joining.
+        public let rateUnknown: String
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {
@@ -231,14 +262,21 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// The rest of the offer's first paragraph, disclosed by "Learn more".
         public let offerMore: String
         public let learnMore: String
+        public let titleLight: String
+        public let titleBold: String
+        /// `{total}`: after the figure of tools Private AI can route.
+        public let canConnect: String
+        public let canConnectOne: String
     }
 
     public let frame: Frame
+    public let welcome: Welcome
     public let join: Join
     public let folders: Folders
     public let tools: Tools
     public let rules: Rules
     public let uses: Uses
+    public let traces: Traces
     public let passkey: Passkey
     public let privateAi: PrivateAi
 
