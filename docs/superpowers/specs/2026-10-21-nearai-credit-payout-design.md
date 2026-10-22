@@ -856,7 +856,8 @@ concurrently and never wait on each other.
 4. Re-read this rail's kill switch. Call `send` for the line. For
    `near_ai`: `recipient_cumulative = target_total` with the link's
    program, memo empty, metadata
-   `{"tc": "<sha256 of 'nearai-payout-line-v1:' || line_id>"}`.
+   `{"tc": "<sha256 of 'nearai-payout-line-v1:' || line_ref_hash>"}`. The
+   rail contract hands a rail the line's reference hash, never its id.
 5. Record the outcome:
    - `Committed`: `confirmed`, `receipt_hash`, `delta` as the rail reports
      it. If the rail reports `total_after` and it is not the target, hold
@@ -898,10 +899,14 @@ line first, which the rail contract makes safe:
 | 409 `insufficient_posted_capacity`, `sender_not_reconciled` | `StopPass` | stays `pending` | operator: fund or reconcile the sender |
 | 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` | `HoldLine` | `held` | budget or recipient restriction; compare with `capacity` |
 | 409 `capacity_overflow` | `HoldLine` | `held` | the recipient's incoming total would overflow `i64`; operator review |
-| 404 `organization_unavailable` | `RecipientUnavailable` | `held`, link marked `recipient_unavailable` | contributor must relink |
+| 404 `organization_unavailable` on a send | `RecipientUnavailable` | `held`, link marked `recipient_unavailable` | contributor must relink; #1271 raises this code for the recipient only |
+| 404 with any other code, or no JSON body | `StopPass` (`near_ai_route_unavailable`) | unchanged | a wrong route, a proxy page or a host without #1271; never marks a link |
+| 2xx on a send whose body fails the shape check | `Retry` | stays `pending` | money may have moved; the resend answers `AlreadyAtOrAbove` and recovery finds the receipt |
 | 403 `credential_refused` | `StopPass` | unchanged | credential malformed, expired, revoked or wrong |
 | 403 `sender_not_enabled` | `StopPass` | unchanged | no policy row, or transfers disabled; ask NEAR AI |
 | 400 any | `Failed` | `failed` | a bug on our side; page the operator |
+| anything else on a send | `Failed` | `failed` | closed fallthrough, never a guess |
+| on a read (`capacity`, history) or the probe: anything the rows above do not map | `StopPass` | unchanged | there is no line to fail; also a `capacity` reply without the configured source, a history record from another sender, and a history cursor that does not move strictly older |
 
 A `StopPass` stops that rail's pass and changes no row. In particular a 403
 or 401 on **any** `near_ai` call, read or send, is a fault in our
@@ -987,10 +992,18 @@ grants nothing.
 5. Ingest sends a liveness probe: `recipient_cumulative: 0` on the fixed
    program `tcprobe-v1` (outside the `tc1-` namespace, so the drill never
    counts it; a zero target never writes a row). 200 `no_op` passes. 404
-   refuses as `near_ai_org_unavailable`. 409
+   `organization_unavailable` refuses as `near_ai_org_unavailable`. 409
    `credential_transfer_limit_exceeded` refuses as
    `near_ai_org_not_permitted` (expected on a closed pilot list). 403
-   refuses as `payout_unavailable`.
+   refuses as `payout_unavailable`. Any other reply is ours, not the
+   contributor's, and refuses as `payout_unavailable` without blaming the
+   org: 409 `organization_transfer_limit_exceeded` (our org's policy
+   refusing the source or the recipient), a 404 with another code, or a
+   reply we cannot place. #1271 runs its policy checks, source and
+   `allowed_recipient_ids` included, before the no-op return and checks no
+   budget at a zero target (cloud-api `check_send_policy`), so the probe
+   does see a closed list; an inactive recipient left off a closed list
+   answers 409, not 404, because activity is checked after policy.
 6. Ingest stores a `pending_confirmation` request: sealed org id, subject
    index, the account it belongs to, a 5-minute expiry, and an opaque
    ceremony handle returned to the daemon. **Nothing changes yet.**
@@ -1426,8 +1439,8 @@ each can change without reshaping the design.
 
 ### Still open
 
-None of these is an owner decision about the design; each is a value or a
-fact to get before build, or a later rail's design.
+None of these but item 9 is an owner decision about the design; each is
+a value or a fact to get before build, or a later rail's design.
 
 1. **Account ceiling** value, **retry tick** interval, and **credential
    expiry**.
@@ -1435,7 +1448,8 @@ fact to get before build, or a later rail's design.
 3. **Staging deployment flags** (`CREDIT_ALLOCATION_POLICY_VERSION`,
    `CREDIT_USAGE_ORDER`): unknown; ask NEAR AI.
 4. **History filter.** No `payout_program` filter; recovery and the drill
-   page all outgoing history. Fine at pilot scale; ask NEAR AI for a filter
+   page all outgoing history from the newest record, so the drill costs
+   links times history. Fine at pilot scale; ask NEAR AI for a filter
    before it is not.
 5. **Restriction vs budget.** One error code covers both; we infer from
    `capacity`.
@@ -1449,3 +1463,12 @@ fact to get before build, or a later rail's design.
 8. **Whether `trace_credit` moves onto the interface.** Today it is a rail
    in readiness only. Moving the NEP-141 outbox payout onto `PayoutRail`
    would be a separate change with its own migration of outbox state.
+9. **Staging inference (owner decision).** A `near-ai-staging` build
+   switches the daemon's sign-in host and the server's NEAR AI base, but
+   not the daemon's inference endpoint or the attestation gateway, which
+   stay on production. A staging sign-in therefore mints a key production
+   inference rejects. The staging plan (section 8) needs only the link
+   flow, so leaving inference on production is workable, but it should be
+   chosen, not inherited. Separately, the daemon does not yet report a
+   staging build in its status; that lands with the daemon IPC change
+   (PR 7).
