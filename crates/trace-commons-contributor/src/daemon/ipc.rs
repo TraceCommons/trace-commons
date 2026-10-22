@@ -434,6 +434,7 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "inference_activity",
     "insights_glance",
     "insights_week",
     "insights_sessions",
@@ -538,6 +539,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "route_disclosure",
     "tool_destinations",
     "inference_calls",
+    "inference_activity",
     "insights_glance",
     "insights_week",
     "insights_sessions",
@@ -3716,6 +3718,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
@@ -17871,7 +17874,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 89, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

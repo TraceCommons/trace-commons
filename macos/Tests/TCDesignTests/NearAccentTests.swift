@@ -81,11 +81,11 @@ final class NearAccentTests: XCTestCase {
     /// Purple is gone from the shipping theme (owner, 2026-10-20: "there
     /// are still remnants of the purple color in the app") except where it
     /// is allowed: the Shared/Kept graph (Shared and the Private AI series,
-    /// and the menu's Shared chip), the Trace mark's own colours, and a
-    /// tool's brand colour. Every colour, gradient stop and shadow is swept
-    /// in both flat appearances.
+    /// the menu's Shared chip, and the menu-bar item's shared bars), the
+    /// Trace mark's own colours, and a tool's brand colour. Every colour,
+    /// gradient stop and shadow is swept in both flat appearances.
     static let purpleAllowed: Set<String> = [
-        "dataShared", "dataInference", "menuChipShared",
+        "dataShared", "dataInference", "menuChipShared", "menuStripShared",
         "purple", "traceLiveStart", "traceLiveMid", "traceLiveEnd",
         "toolTheia",
     ]

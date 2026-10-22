@@ -43,6 +43,7 @@ final class LiveDaemonClientTests: XCTestCase {
             ("inference_calls", #"{"limit":25}"#, { _ = try await client.inferenceCalls(limit: 25, cursor: nil) }),
             ("inference_calls", #"{"cursor":"c2","limit":25}"#,
              { _ = try await client.inferenceCalls(limit: 25, cursor: "c2") }),
+            ("inference_activity", "{}", { _ = try await client.inferenceActivity() }),
         ]
         for (method, params, call) in expected {
             let before = transport.calls.count

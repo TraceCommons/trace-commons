@@ -289,6 +289,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
     }
 
+    public func inferenceActivity() async throws -> DaemonData.InferenceActivity {
+        try await call("inference_activity", as: DaemonData.InferenceActivity.self)
+    }
+
     // MARK: Insights
 
     public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {

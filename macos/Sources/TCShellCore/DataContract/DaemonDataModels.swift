@@ -1561,6 +1561,32 @@ extension DaemonData {
         }
     }
 
+    /// `inference_activity`: the window's listed calls, and the `verified`
+    /// ones among them, in `stepHours` steps, oldest first, the last ending
+    /// at the read. The menu-bar item's Private AI bars.
+    public struct InferenceActivity: Codable, Equatable, Sendable {
+        /// `false`: no ledger answered, with no steps. Not evidence of no
+        /// calls; never empty bars.
+        public let readable: Bool
+        public let windowHours: Int?
+        public let stepHours: Int?
+        public let steps: [InferenceActivityStep]
+
+        public enum CodingKeys: String, CodingKey {
+            case readable, steps
+            case windowHours = "window_hours"
+            case stepHours = "step_hours"
+        }
+    }
+
+    /// One step: when it begins, the calls `inference_calls` lists in it,
+    /// and how many of those carry the `verified` label.
+    public struct InferenceActivityStep: Codable, Equatable, Sendable {
+        public let start: Date
+        public let calls: Int
+        public let verified: Int
+    }
+
     public struct InferenceCall: Codable, Equatable, Sendable, Identifiable {
         public let id: Int64
         public let at: Date

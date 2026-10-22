@@ -90,6 +90,66 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertFalse(down.canChooseOverride)
     }
 
+    /// The menu-bar item's Private AI lines come from `inference_activity`
+    /// alone: a failed read, or an older daemon refusing it, draws none and
+    /// stales nothing else. A read that answers puts the trace lines on its
+    /// clock, step for step.
+    func test_aFailedActivityReadDrawsNoPrivateAILinesAndStalesNothing() async throws {
+        let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["inference_activity"])
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        XCTAssertFalse(store.stale)
+        XCTAssertTrue(store.columnsCurrent, "the trace lines are still current")
+        XCTAssertNil(store.stripPrivateAI)
+        XCTAssertEqual(store.stripTraces.count, 6)
+
+        transport.failing = []
+        await store.load()
+        let privateAI = try XCTUnwrap(store.stripPrivateAI)
+        XCTAssertEqual(privateAI.count, 6)
+        XCTAssertEqual(store.stripTraces.count, privateAI.count)
+        XCTAssertTrue(privateAI.allSatisfy { $0.up <= $0.down }, "verified calls are some of the calls")
+    }
+
+    /// The item's 24 hours move forward with no event: the daemon's steps
+    /// end at the moment of its read, so an idle daemon is re-read on a
+    /// timer, never only when something happens.
+    func test_theActivityIsReReadWithNoEvent() async throws {
+        let transport = ScriptedTransport(status: Self.mixedStatus)
+        let first = Date(timeIntervalSince1970: 1_800_000_000)
+        transport.activityEnd = first
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        store.activityRefresh = .milliseconds(20)
+        let running = Task { await store.run() }
+        defer { running.cancel() }
+
+        try await waitUntil { store.activity.flatMap(MenuPanelData.span)?.end == first }
+        let later = first.addingTimeInterval(5 * 3_600)
+        transport.activityEnd = later
+        try await waitUntil { store.activity.flatMap(MenuPanelData.span)?.end == later }
+        XCTAssertEqual(store.stripSpan.end, later, "the trace bars follow the Private AI steps' clock")
+    }
+
+    /// With no Private AI steps to follow (an older daemon, or a failed
+    /// read), the trace bars' span still ends at the store's clock, and the
+    /// clock moves on the same timer, so the bars move forward and the
+    /// label is redrawn.
+    func test_withoutActivityTheTraceSpanStillMovesForward() async throws {
+        let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["inference_activity"])
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        store.clock = { now }
+        store.activityRefresh = .milliseconds(20)
+        let running = Task { await store.run() }
+        defer { running.cancel() }
+
+        try await waitUntil { !store.stale }
+        XCTAssertNil(store.stripPrivateAI)
+        XCTAssertEqual(store.stripSpan.end, now)
+        now = now.addingTimeInterval(5 * 3_600)
+        try await waitUntil { store.stripSpan.end == now }
+    }
+
     /// A read that recovers clears its own unknown.
     func test_aReadThatRecoversDrawsAgain() async throws {
         let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["list_history"])
@@ -155,6 +215,7 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     private var _failing: Set<String>
     private var _unreachable = false
     private var _statusCalls = 0
+    private var _activityEnd: Date?
 
     init(status: String, failing: Set<String> = []) {
         self.status = status
@@ -173,6 +234,13 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
 
     var statusCalls: Int { lock.withLock { _statusCalls } }
 
+    /// When set, `inference_activity` answers with steps ending here, as the
+    /// daemon's end at the moment of its read.
+    var activityEnd: Date? {
+        get { lock.withLock { _activityEnd } }
+        set { lock.withLock { _activityEnd = newValue } }
+    }
+
     func call(_ method: String, params paramsJSON: String) -> String {
         let (down, refused) = lock.withLock { () -> (Bool, Bool) in
             if method == "status" { _statusCalls += 1 }
@@ -181,6 +249,9 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
         if down { return #"{"id":0,"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
         if refused { return #"{"id":0,"error":{"code":"unavailable","message":"history-read-failed"}}"# }
         if method == "status" { return #"{"id":0,"result":\#(status)}"# }
+        if method == "inference_activity", let end = activityEnd {
+            return #"{"id":0,"result":\#(SampleDaemonData.inferenceActivity(.normalDay, now: end))}"#
+        }
         guard let reply = SampleDaemonData.reply(method, in: .normalDay) else {
             return #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#
         }
