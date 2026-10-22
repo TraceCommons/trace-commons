@@ -117,7 +117,9 @@ enum Call {
 }
 
 /// The spec's refusal table, closed. Status first, then code; anything the
-/// table does not name is `Failed`, never a guess.
+/// table does not name is never a guess: `Failed` on a send (the line's
+/// request was refused for a reason we cannot place), `StopPass` on a read
+/// or a probe, which have no line to fail.
 fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
     use NearAiErrorCode as Code;
     match error {
@@ -126,7 +128,15 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
         // A 2xx we could not read may have moved money; the line stays
         // pending and recovery resolves it by reads.
         NearAiTransferError::ReplyUnreadable => RailRefusal::Retry("near_ai_reply_unreadable"),
-        NearAiTransferError::ReplyUnexpected => RailRefusal::Failed("near_ai_reply_unexpected"),
+        // `ReplyUnexpected` only ever follows a 2xx (the client turns every
+        // other status into `Refused`). On a send a 2xx may have moved money
+        // whatever its shape, so the line stays pending: the resend answers
+        // `AlreadyAtOrAbove` and recovery finds the receipt. On a read or a
+        // probe it says our model of #1271 is wrong: stop, change no row.
+        NearAiTransferError::ReplyUnexpected => match call {
+            Call::Send => RailRefusal::Retry("near_ai_reply_unexpected"),
+            Call::Probe | Call::Read => RailRefusal::StopPass("near_ai_reply_unexpected"),
+        },
         // The host is compiled in; a redirect from it is a fault in the
         // rail, not in a line. Stop and change no row.
         NearAiTransferError::Redirect => RailRefusal::StopPass("near_ai_redirect_refused"),
@@ -135,8 +145,16 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
             (401, _) => RailRefusal::StopPass("near_ai_credential_refused"),
             (403, Code::SenderNotEnabled) => RailRefusal::StopPass("near_ai_sender_not_enabled"),
             (403, _) => RailRefusal::StopPass("near_ai_credential_refused"),
-            (404, _) if call == Call::Read => RailRefusal::StopPass("near_ai_sender_unavailable"),
-            (404, _) => RailRefusal::RecipientUnavailable,
+            // Only `organization_unavailable` names an org. On a send or a
+            // probe it is the recipient (#1271 raises it for the recipient
+            // alone); on a read of our own org it is the sender. Any other
+            // 404 -- a wrong route, a proxy page, a host without #1271 -- is
+            // ours and must not mark a link.
+            (404, Code::OrganizationUnavailable) if call == Call::Read => {
+                RailRefusal::StopPass("near_ai_sender_unavailable")
+            }
+            (404, Code::OrganizationUnavailable) => RailRefusal::RecipientUnavailable,
+            (404, _) => RailRefusal::StopPass("near_ai_route_unavailable"),
             (429, _) => RailRefusal::Retry("near_ai_transfer_rate_limited"),
             (503, Code::AccountingBusy) => RailRefusal::Retry("near_ai_accounting_busy"),
             (500..=599, _) => RailRefusal::Retry("near_ai_transfer_unavailable"),
@@ -146,10 +164,18 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
             (409, Code::SenderNotReconciled) => {
                 RailRefusal::StopPass("near_ai_sender_not_reconciled")
             }
-            (
-                409,
-                Code::CredentialTransferLimitExceeded | Code::OrganizationTransferLimitExceeded,
-            ) if call == Call::Probe => RailRefusal::HoldLine("near_ai_org_not_permitted"),
+            // At the probe's zero target #1271 runs its policy checks
+            // (source and `allowed_recipient_ids`, org then credential)
+            // before the no-op return and checks no budget. The credential
+            // code is the credential's closed recipient list (spec section
+            // 2 puts the list there); the org code is our org's policy
+            // refusing the source or the recipient, ours to fix.
+            (409, Code::CredentialTransferLimitExceeded) if call == Call::Probe => {
+                RailRefusal::HoldLine("near_ai_org_not_permitted")
+            }
+            (409, Code::OrganizationTransferLimitExceeded) if call == Call::Probe => {
+                RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
+            }
             (409, Code::CredentialTransferLimitExceeded) => {
                 RailRefusal::HoldLine("near_ai_credential_transfer_limit_exceeded")
             }
@@ -157,6 +183,7 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
                 RailRefusal::HoldLine("near_ai_organization_transfer_limit_exceeded")
             }
             (409, Code::CapacityOverflow) => RailRefusal::HoldLine("near_ai_capacity_overflow"),
+            (_, _) if call != Call::Send => RailRefusal::StopPass("near_ai_reply_unexpected"),
             (400, _) => RailRefusal::Failed("near_ai_request_refused"),
             _ => RailRefusal::Failed("near_ai_reply_unexpected"),
         },
@@ -202,9 +229,10 @@ impl NearAiRail {
             CumulativeReply::NoOp {
                 recipient_cumulative,
             } => Ok(recipient_cumulative),
-            // A zero target can never send; a 201 here is not #1271.
+            // A zero target can never send; a 201 here is not #1271. Stop
+            // and change no row: there is no line at fault.
             CumulativeReply::Committed { .. } => {
-                Err(RailRefusal::Failed("near_ai_reply_unexpected"))
+                Err(RailRefusal::StopPass("near_ai_reply_unexpected"))
             }
         }
     }
@@ -212,7 +240,16 @@ impl NearAiRail {
     /// Walks outgoing history newest first and returns the records to
     /// `org` on `program`, stopping early when `stop` matches one. Ends on
     /// an empty or short page even though a cursor is returned on the last
-    /// page.
+    /// page. The client refuses a page holding another sender's record, so
+    /// a short page is short on the wire. #1271 orders by `(created_at,
+    /// id)` descending and its cursor is the last row's, so each cursor
+    /// must be strictly older than the one before; one that is not stops
+    /// the pass rather than re-reading a page to the page cap.
+    ///
+    /// Every `find_receipt` and `history` call walks the org's whole
+    /// outgoing history from the newest record (no program filter on the
+    /// wire), so the drill costs links times history. Spec section 12,
+    /// open item 4.
     async fn walk(
         &self,
         org: Uuid,
@@ -220,6 +257,9 @@ impl NearAiRail {
         mut stop: impl FnMut(&NearAiTransferRecord) -> bool,
     ) -> Result<(Vec<NearAiTransferRecord>, bool), RailRefusal> {
         let mut cursor: Option<NearAiHistoryCursor> = None;
+        let older = |next: &NearAiHistoryCursor, previous: &NearAiHistoryCursor| {
+            (next.before_time, next.before_id) < (previous.before_time, previous.before_id)
+        };
         let mut matched = Vec::new();
         for _ in 0..NEAR_AI_MAX_HISTORY_PAGES {
             let page = self
@@ -240,7 +280,12 @@ impl NearAiRail {
                 }
             }
             match page.next_cursor {
-                Some(next) if !short => cursor = Some(next),
+                Some(next) if !short => {
+                    if cursor.is_some_and(|previous| !older(&next, &previous)) {
+                        return Err(RailRefusal::StopPass("near_ai_history_cursor_stalled"));
+                    }
+                    cursor = Some(next);
+                }
                 _ => return Ok((matched, false)),
             }
         }
@@ -262,6 +307,14 @@ impl PayoutRail for NearAiRail {
         near_ai_program_for_link(link_id)
     }
 
+    /// `capacity`, settled into the generic shape. #1271 reports every
+    /// source's maximum as 0 when no sends are left in the current minute,
+    /// so a zero `per_send_max` beside `sends_remaining: Some(0)` means
+    /// "wait for the window", not "nothing can be sent"; the pass waits on
+    /// `sends_remaining`. A zero maximum with sends left (source not
+    /// allowed, nothing available, or a budget spent) is not told apart
+    /// from the reply; the pass sends nothing that round either way. A
+    /// reply without the configured source is refused by the client.
     async fn preflight(&self) -> Result<RailCapacity, RailRefusal> {
         let capacity = self
             .client

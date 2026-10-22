@@ -388,6 +388,9 @@ pub struct RailCapacity {
     pub sending_enabled: bool,
     /// A safe label saying why sending is off, when it is.
     pub stop_label: Option<&'static str>,
+    /// The most one send may carry. Meaningless when `sends_remaining` is
+    /// `Some(0)`: a rail may report 0 then, and the pass waits for the
+    /// window rather than reading it as a stop.
     pub per_send_max: AtomicUnits,
     /// Sends left in the rail's current window, when the rail has one.
     pub sends_remaining: Option<u32>,

@@ -212,8 +212,8 @@ pub struct NearAiCapacity {
     pub sending_enabled: bool,
     pub sender_reconciled: bool,
     pub credential_can_transfer: bool,
-    /// `sources[].max_amount_per_transfer` for the configured source; zero
-    /// when the source is absent.
+    /// `sources[].max_amount_per_transfer` for the configured source. A
+    /// reply without that source is `ReplyUnexpected`.
     pub per_send_max: i64,
     pub sends_remaining_in_window: i64,
 }
@@ -261,8 +261,9 @@ impl fmt::Debug for NearAiTransferClient {
     }
 }
 
-/// True when `base` is TLS, or plain HTTP to a loopback IP literal or
-/// `localhost`, with no userinfo, query or fragment. Parsed, not matched as
+/// True when `base` is TLS, or plain HTTP to a loopback IP literal (never
+/// a name such as `localhost`, which resolves through hosts and DNS), with
+/// no userinfo, query or fragment. Parsed, not matched as
 /// a string, so `http://127.0.0.1@elsewhere/` is refused.
 fn base_is_tls_or_loopback(base: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base) else {
@@ -287,9 +288,6 @@ fn is_loopback_host(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    if host == "localhost" {
-        return true;
-    }
     let literal = host
         .strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
@@ -305,9 +303,11 @@ impl NearAiTransferClient {
         Self::build(NEAR_AI_API_BASE_URL, credentials, NEAR_AI_TRANSFER_TIMEOUT)
     }
 
-    /// A client against a plain-HTTP loopback base, for a local mock. Any
-    /// other base, TLS included, is refused: the only TLS host this client
-    /// talks to is the compiled-in one.
+    /// A client against a plain-HTTP loopback IP literal, for a local mock.
+    /// Any other base, TLS or a host name included, is refused: the only
+    /// TLS host this client talks to is the compiled-in one. Public only
+    /// because the mock suite sits outside the crate; not for production.
+    #[doc(hidden)]
     pub fn at_loopback(
         base: &str,
         credentials: NearAiTransferCredentials,
@@ -430,11 +430,14 @@ impl NearAiTransferClient {
             }
             let reply: CapacityReply =
                 serde_json::from_slice(&bytes).map_err(|_| NearAiTransferError::ReplyUnreadable)?;
+            // #1271 lists every source, a disallowed one at 0, so a reply
+            // without ours is not #1271.
             let per_send_max = reply
                 .sources
                 .iter()
                 .find(|source| source.source_credit_type == self.credentials.source.as_str())
-                .map_or(0, |source| source.max_amount_per_transfer);
+                .ok_or(NearAiTransferError::ReplyUnexpected)?
+                .max_amount_per_transfer;
             if per_send_max < 0 || reply.sends_remaining_in_window < 0 {
                 return Err(NearAiTransferError::ReplyUnexpected);
             }
@@ -482,10 +485,11 @@ impl NearAiTransferClient {
                 if record.amount < 0 || record.recipient_cumulative.is_some_and(|total| total < 0) {
                     return Err(NearAiTransferError::ReplyUnexpected);
                 }
-                // `direction=outgoing` already limits the page to our sends;
-                // a record from elsewhere is dropped, never counted.
+                // `direction=outgoing` limits the page to our sends. A record
+                // from elsewhere is not #1271; dropping it would make a full
+                // page look short and end a walk early, so refuse the page.
                 if record.sender_organization_id != sender {
-                    continue;
+                    return Err(NearAiTransferError::ReplyUnexpected);
                 }
                 transfers.push(NearAiTransferRecord {
                     id: record.id,
@@ -663,13 +667,15 @@ mod tests {
         for accepted in [
             "https://cloud-api.near.ai/v1",
             "http://127.0.0.1:8080/v1",
-            "http://localhost:1/v1",
             "http://[::1]:9/v1",
         ] {
             assert!(base_is_tls_or_loopback(accepted), "{accepted}");
         }
         for refused in [
             "http://cloud-api.near.ai/v1",
+            // A name goes through hosts and DNS; only an IP literal is
+            // loopback by construction.
+            "http://localhost:1/v1",
             "http://127.0.0.1@evil.example/v1",
             "https://user:pass@cloud-api.near.ai/v1",
             "http://10.0.0.1/v1",
@@ -693,6 +699,7 @@ mod tests {
             "https://cloud-api.near.ai/v1",
             "https://127.0.0.1/v1",
             "http://example.invalid/v1",
+            "http://localhost:1/v1",
             "http://127.0.0.1@example.invalid/v1",
         ] {
             assert_eq!(

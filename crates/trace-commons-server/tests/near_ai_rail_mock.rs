@@ -82,6 +82,8 @@ struct Transfer {
 enum Scripted {
     Error(u16, &'static str),
     Raw(u16, Value),
+    /// A reply whose body is not JSON (empty, or a proxy's HTML page).
+    Text(u16, &'static str),
     Redirect(&'static str),
     Delay(Duration),
 }
@@ -146,6 +148,9 @@ async fn scripted(state: &Shared) -> Option<Response> {
         Scripted::Error(status, code) => Some(error_reply(status, code)),
         Scripted::Raw(status, body) => {
             Some((StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response())
+        }
+        Scripted::Text(status, body) => {
+            Some((StatusCode::from_u16(status).unwrap(), body).into_response())
         }
         Scripted::Redirect(location) => Some(
             Response::builder()
@@ -738,9 +743,11 @@ async fn each_reply_maps_to_its_refusal() {
             Scripted::Error(418, "teapot"),
             RailRefusal::Failed("near_ai_reply_unexpected"),
         ),
+        // A 2xx on a send may have moved money, whatever its shape: the
+        // line stays pending and the resend or recovery resolves it.
         (
             Scripted::Raw(200, json!({"amount": 0, "recipient_cumulative": 3})),
-            RailRefusal::Failed("near_ai_reply_unexpected"),
+            RailRefusal::Retry("near_ai_reply_unexpected"),
         ),
         (
             Scripted::Raw(201, json!({"id": "not-a-uuid", "amount": 10})),
@@ -751,7 +758,30 @@ async fn each_reply_maps_to_its_refusal() {
                 201,
                 json!({"id": Uuid::from_u128(9), "amount": -1, "recipient_cumulative": 10}),
             ),
-            RailRefusal::Failed("near_ai_reply_unexpected"),
+            RailRefusal::Retry("near_ai_reply_unexpected"),
+        ),
+        (
+            Scripted::Raw(201, json!({"id": Uuid::from_u128(9), "amount": 10})),
+            RailRefusal::Retry("near_ai_reply_unexpected"),
+        ),
+        // Only `organization_unavailable` names the recipient. Any other
+        // 404 (a wrong route, a proxy, a host without #1271) is ours, and
+        // must not mark a link.
+        (
+            Scripted::Error(404, "not_found"),
+            RailRefusal::StopPass("near_ai_route_unavailable"),
+        ),
+        (
+            Scripted::Error(404, "credential_not_found"),
+            RailRefusal::StopPass("near_ai_route_unavailable"),
+        ),
+        (
+            Scripted::Text(404, ""),
+            RailRefusal::StopPass("near_ai_route_unavailable"),
+        ),
+        (
+            Scripted::Text(404, "<html><body>Not Found</body></html>"),
+            RailRefusal::StopPass("near_ai_route_unavailable"),
         ),
     ];
     for (reply, expected) in cases {
@@ -772,6 +802,43 @@ async fn each_reply_maps_to_its_refusal() {
     assert_eq!(
         rail.find_receipt(&line, &[]).await.unwrap_err(),
         RailRefusal::StopPass("near_ai_sender_unavailable")
+    );
+    // Any other 404 on a read is a route fault, not a missing sender.
+    mock.script(Scripted::Text(404, ""));
+    assert_eq!(
+        rail.preflight().await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_route_unavailable")
+    );
+    // A read has no line to fail: a reply we cannot place stops the pass.
+    mock.script(Scripted::Error(418, "teapot"));
+    assert_eq!(
+        rail.preflight().await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    mock.script(Scripted::Raw(202, json!({})));
+    assert_eq!(
+        rail.preflight().await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    mock.script(Scripted::Error(409, "idempotency_conflict"));
+    assert_eq!(
+        rail.history(&to, &program).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    mock.script(Scripted::Raw(
+        200,
+        json!({"transfers": [{
+            "id": Uuid::from_u128(11),
+            "sender_organization_id": sender(),
+            "recipient_organization_id": recipient_org(5),
+            "payout_program": program,
+            "amount": -1,
+            "recipient_cumulative": 10,
+        }], "next_cursor": null}),
+    ));
+    assert_eq!(
+        rail.find_receipt(&line, &[]).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
     );
     // A credential fault on a read stops the pass too.
     mock.script(Scripted::Error(403, "credential_refused"));
@@ -794,6 +861,45 @@ async fn each_reply_maps_to_its_refusal() {
     assert_eq!(
         rail.probe_recipient(&to).await.unwrap_err(),
         RailRefusal::RecipientUnavailable
+    );
+    // At a zero target #1271 checks no budget, so the org-level code means
+    // our org's policy refused the source or the recipient: ours to fix.
+    mock.script(Scripted::Error(409, "organization_transfer_limit_exceeded"));
+    assert_eq!(
+        rail.probe_recipient(&to).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
+    );
+    // A 404 that does not name the org is not the contributor's fault.
+    mock.script(Scripted::Text(404, ""));
+    assert_eq!(
+        rail.probe_recipient(&to).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_route_unavailable")
+    );
+    // A probe reply we cannot place, or a send at a zero target, says our
+    // model of #1271 is wrong: stop, and blame no one's org.
+    mock.script(Scripted::Raw(
+        200,
+        json!({"amount": 0, "recipient_cumulative": 3}),
+    ));
+    assert_eq!(
+        rail.probe_recipient(&to).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    mock.script(Scripted::Raw(
+        201,
+        json!({"id": Uuid::from_u128(9), "amount": 1, "recipient_cumulative": 1}),
+    ));
+    assert_eq!(
+        rail.probe_recipient(&to).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    mock.script(Scripted::Raw(
+        201,
+        json!({"id": Uuid::from_u128(9), "amount": 1, "recipient_cumulative": 1}),
+    ));
+    assert_eq!(
+        rail.read_total(&to, &program).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
     );
 
     // A recipient that is not an org id never reaches the wire.
@@ -1076,4 +1182,139 @@ async fn history_reports_each_record_with_its_receipt_and_total() {
         assert!(!capacity.sending_enabled, "{field}");
         assert_eq!(capacity.stop_label, Some(label));
     }
+}
+
+/// #1271's capacity lists every source, a disallowed one at 0, so a reply
+/// without the configured source is not #1271: the pass stops. And when no
+/// sends are left in the minute, every source's maximum reads 0; the rail
+/// reports `sends_remaining: Some(0)` and the pass waits on that, never on
+/// the zero maximum.
+#[tokio::test]
+async fn capacity_quirks_are_settled_inside_the_rail() {
+    let mock = Mock::start().await;
+    let rail = mock.rail();
+
+    mock.state.lock().unwrap().capacity = Some(json!({
+        "sender_reconciled": true,
+        "sending_enabled": true,
+        "credential_can_transfer": true,
+        "sends_remaining_in_window": 3,
+        "sources": [{"source_credit_type": "payment", "max_amount_per_transfer": 9}],
+    }));
+    assert_eq!(
+        rail.preflight().await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+
+    mock.state.lock().unwrap().capacity = Some(json!({
+        "sender_reconciled": true,
+        "sending_enabled": true,
+        "credential_can_transfer": true,
+        "sends_remaining_in_window": 0,
+        "sources": [
+            {"source_credit_type": "payment", "max_amount_per_transfer": 0},
+            {"source_credit_type": "staking_farm", "max_amount_per_transfer": 0},
+            {"source_credit_type": "grant", "max_amount_per_transfer": 0},
+        ],
+    }));
+    let capacity = rail.preflight().await.unwrap();
+    assert!(capacity.sending_enabled);
+    assert_eq!(capacity.stop_label, None);
+    assert_eq!(capacity.sends_remaining, Some(0));
+}
+
+fn history_item(id: Uuid, sender: Uuid, recipient: Uuid, program: &str) -> Value {
+    json!({
+        "id": id,
+        "sender_organization_id": sender,
+        "recipient_organization_id": recipient,
+        "payout_program": program,
+        "amount": 1,
+        "recipient_cumulative": 1,
+    })
+}
+
+/// `direction=outgoing` returns only our sends. A record from another
+/// sender is not #1271; dropping it would make a full page look short and
+/// end the walk early, so the walk stops instead.
+#[tokio::test]
+async fn a_foreign_sender_in_outgoing_history_stops_the_walk() {
+    let mock = Mock::start().await;
+    let rail = mock.rail();
+    let org = recipient_org(8);
+    let to = recipient(org);
+    let program = near_ai_program_for_link(Uuid::from_u128(8));
+    let mut items: Vec<Value> = (0..99_u128)
+        .map(|n| {
+            history_item(
+                Uuid::from_u128(1_000 + n),
+                sender(),
+                recipient_org(200),
+                "tc1-x",
+            )
+        })
+        .collect();
+    items.push(history_item(
+        Uuid::from_u128(999),
+        recipient_org(300),
+        org,
+        &program,
+    ));
+    mock.script(Scripted::Raw(
+        200,
+        json!({"transfers": items, "next_cursor": {
+            "before_time": Utc::now(), "before_id": Uuid::from_u128(999)}}),
+    ));
+    let reference = line_ref(9);
+    let line = RailLine::new(&reference, &to, &program, units(1), units(0)).unwrap();
+    assert_eq!(
+        rail.find_receipt(&line, &[]).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_reply_unexpected")
+    );
+    assert_eq!(mock.requests().len(), 1);
+}
+
+/// A cursor that does not move strictly older stops the walk, rather than
+/// asking for the same page until the page cap.
+#[tokio::test]
+async fn a_stalled_history_cursor_stops_the_walk() {
+    let mock = Mock::start().await;
+    let rail = mock.rail();
+    let org = recipient_org(9);
+    let to = recipient(org);
+    let program = near_ai_program_for_link(Uuid::from_u128(9));
+    let at = Utc::now();
+    let page = |cursor_id: u128| {
+        let items: Vec<Value> = (0..100_u128)
+            .map(|n| {
+                history_item(
+                    Uuid::from_u128(5_000 + n),
+                    sender(),
+                    recipient_org(200),
+                    "tc1-x",
+                )
+            })
+            .collect();
+        json!({"transfers": items, "next_cursor": {
+            "before_time": at, "before_id": Uuid::from_u128(cursor_id)}})
+    };
+    // The same cursor twice.
+    mock.script(Scripted::Raw(200, page(77)));
+    mock.script(Scripted::Raw(200, page(77)));
+    assert_eq!(
+        rail.history(&to, &program).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_history_cursor_stalled")
+    );
+    assert_eq!(mock.requests().len(), 2);
+
+    // A cursor that moves newer is no better.
+    mock.script(Scripted::Raw(200, page(77)));
+    mock.script(Scripted::Raw(200, page(78)));
+    let reference = line_ref(10);
+    let line = RailLine::new(&reference, &to, &program, units(1), units(0)).unwrap();
+    assert_eq!(
+        rail.find_receipt(&line, &[]).await.unwrap_err(),
+        RailRefusal::StopPass("near_ai_history_cursor_stalled")
+    );
+    assert_eq!(mock.requests().len(), 4);
 }
