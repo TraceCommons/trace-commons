@@ -51,7 +51,8 @@
 //!   500 the picker lists.
 //! - The animated first run (Ron's 2026-10-21 canvas, owner request
 //!   2026-10-22) adds `welcome`, the splash before Tools; `traces`, what the
-//!   watched tools' traces could earn; `frame.step_traces` and
+//!   watched tools' traces could earn, with `traces.estimate`, the owner's
+//!   default range before an invite gives one; `frame.step_traces` and
 //!   `frame.step_private_ai` for the two new steps; the Uses graphic's three
 //!   labels and `automatic_after_sign_in`; and the Private AI screen's title
 //!   and tool count. Sign-in moves last, so Join's words are unchanged.
@@ -225,12 +226,23 @@ pub struct TracesCopy {
     pub points: &'static str,
     /// `{min}`: the same, when the range is a single figure.
     pub points_one: &'static str,
-    /// `{min}`, `{max}`: the invite's range per trace, an estimate.
+    /// `{min}`, `{max}`: the range per trace, an estimate: the invite's, or
+    /// `estimate` before one.
     pub rate: &'static str,
     /// `{min}`: the same, when the range is a single figure.
     pub rate_one: &'static str,
-    /// No range is known before joining: only an invite's lookup gives one.
-    pub rate_unknown: &'static str,
+    /// The estimate Traces shows before an invite's lookup gives a range,
+    /// in points per accepted trace (owner, 2026-10-22: 3 to 8, marked as
+    /// an estimate). An invite's own range replaces it. The owner's figure,
+    /// so the DRAFT note above covers this struct's strings only.
+    pub estimate: EstimateRange,
+}
+
+/// A range of points per accepted trace, the one unit the daemon accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EstimateRange {
+    pub min: u32,
+    pub max: u32,
 }
 
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
@@ -647,7 +659,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             points_one: "{min} points",
             rate: "An estimated {min}–{max} points per accepted trace, not yet settled.",
             rate_one: "An estimated {min} points per accepted trace, not yet settled.",
-            rate_unknown: "Accepted traces earn points once you join.",
+            estimate: EstimateRange { min: 3, max: 8 },
         },
         passkey: PasskeyCopy {
             close: "Close",
@@ -1098,7 +1110,10 @@ mod tests {
         }
         assert!(copy.traces.rate.contains("{max}"));
         assert!(copy.traces.points.contains("{max}"));
-        assert!(!copy.traces.rate_unknown.contains('{'));
+        // The owner's default before an invite (2026-10-22), worded by the
+        // same estimated, not-yet-settled line as an invite's range.
+        assert_eq!(copy.traces.estimate, EstimateRange { min: 3, max: 8 });
+        assert!(copy.traces.estimate.min <= copy.traces.estimate.max);
         for line in [copy.private_ai.can_connect, copy.private_ai.can_connect_one] {
             assert!(line.contains("{total}"), "{line}");
         }

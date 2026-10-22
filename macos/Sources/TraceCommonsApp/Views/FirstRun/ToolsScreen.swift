@@ -1026,11 +1026,14 @@ private struct ToolRepoList: View {
             ["selected": rows.filter { chosen.contains($0.id) }.count.formatted(), "total": rows.count.formatted()])
     }
 
+    /// Ask, Automatic and Never side by side, as the canvas draws them (Ron,
+    /// 2026-10-22: no status dot). Automatic stays in place but inert until
+    /// it can be armed (`RulesScreenLayout.offeredModes`).
     @ViewBuilder private func rulePicker(_ project: ProjectRow) -> some View {
         if let words = ProjectModeWords.table {
-            let modes = RulesScreenLayout.offeredModes(project, state: runner.state)
-            GlassSegmentedTabs(
-                FirstRunCopy.fill(copy.rules.ruleFor, ["folder": project.displayLabel]),
+            let offered = RulesScreenLayout.offeredModes(project, state: runner.state)
+            FirstRunSegmented(
+                label: FirstRunCopy.fill(copy.rules.ruleFor, ["folder": project.displayLabel]),
                 selection: Binding(
                     get: { RulesScreenLayout.rule(runner.state, for: project) },
                     set: { wanted in
@@ -1039,10 +1042,9 @@ private struct ToolRepoList: View {
                             armingCandidate = project
                         }
                     }),
-                segments: modes.compactMap { mode in
-                    words.label(for: mode).map { GlassSegment($0, value: mode, dot: RulesScreenLayout.dot(for: mode)) }
+                options: RulesScreenLayout.segments(project).compactMap { mode in
+                    words.label(for: mode).map { .init(title: $0, value: mode, enabled: offered.contains(mode)) }
                 })
-            .fixedSize()
         }
     }
 
@@ -1054,23 +1056,39 @@ private struct ToolRepoList: View {
                 .foregroundStyle(GlassColor.textTertiary)
         } else {
             let tickable = rows.filter(RulesScreenLayout.isTickable)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Toggle(
-                    FirstRunCopy.fill(copy.rules.includeEvery, ["folder": project.displayLabel]),
-                    isOn: Binding(
-                        get: { RulesScreenLayout.groupState(runner.state, projectID: id, sessions: rows) == .all },
-                        set: { RulesScreenLayout.includeEvery(&runner.state, projectID: id, sessions: rows, on: $0) }))
-                    .toggleStyle(GlassToggleStyle(.standard))
-                    .disabled(never || tickable.isEmpty)
+            // The canvas's rows (Ron, 2026-10-22): the switch first, then
+            // the words; a trace's date, then the rest in the quieter ink.
+            VStack(alignment: .leading, spacing: 0) {
+                Toggle(isOn: Binding(
+                    get: { RulesScreenLayout.groupState(runner.state, projectID: id, sessions: rows) == .all },
+                    set: { RulesScreenLayout.includeEvery(&runner.state, projectID: id, sessions: rows, on: $0) })
+                ) {
+                    Text(FirstRunCopy.fill(copy.rules.includeEvery, ["folder": project.displayLabel]))
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+                .toggleStyle(FirstRunSwitchStyle())
+                .disabled(never || tickable.isEmpty)
+                .frame(height: 28)
                 ForEach(rows) { session in
+                    let parts = RulesScreenLayout.labelParts(session, copy: copy.rules)
                     Toggle(isOn: Binding(
                         get: { runner.state.pastSelections[id]?.contains(session.id) == true },
                         set: { RulesScreenLayout.setTicked(&runner.state, projectID: id, session: session, on: $0) })
                     ) {
-                        Text(RulesScreenLayout.labelParts(session, copy: copy.rules).joined(separator: " · "))
+                        HStack(spacing: 10) {
+                            Text(parts.first ?? "")
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .monospacedDigit()
+                                .frame(minWidth: 84, alignment: .leading)
+                            Text(parts.dropFirst().joined(separator: " · "))
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .monospacedDigit()
+                        }
+                        .accessibilityElement(children: .combine)
                     }
-                    .toggleStyle(GlassToggleStyle(.standard))
+                    .toggleStyle(FirstRunSwitchStyle())
                     .disabled(never || !RulesScreenLayout.isTickable(session))
+                    .frame(height: 28)
                 }
                 if let note = RulesScreenLayout.notListedNote(repos.notListed[id] ?? 0, copy: copy.rules) {
                     Text(note)
@@ -1078,6 +1096,7 @@ private struct ToolRepoList: View {
                         .foregroundStyle(GlassColor.textTertiary)
                 }
             }
+            .glassType(GlassTokens.TypeScale.label.weight(.regular))
         }
     }
 }

@@ -93,10 +93,11 @@ final class AnimatedFirstRunTests: XCTestCase {
 
     // MARK: Traces
 
-    /// The watched tools' traces are counted; points need a per-trace range
-    /// in the one unit the daemon accepts, which only an invite's lookup
-    /// gives, so without one the card makes up no figure.
-    func test_tracesCountsTheWatchedToolsAndMakesUpNoRate() throws {
+    /// The watched tools' traces are counted, and points are the count
+    /// times a per-trace range: the core's 3 to 8 estimate before an invite
+    /// (owner, 2026-10-22), an invite's own range once its lookup gives one
+    /// in the unit the daemon accepts. Both read as an estimate.
+    func test_tracesEstimatesFromTheDefaultUntilAnInviteGivesARange() throws {
         let copy = try words()
         let discovered = [
             Self.candidate(.claudeCode, exists: true, sessions: 953), Self.candidate(.codex, exists: true, sessions: 412),
@@ -110,9 +111,28 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual(rows.map(\.kind), [.claudeCode, .codex], "only watched tools count")
         XCTAssertEqual(TracesScreenLayout.total(rows), 1365)
 
-        XCTAssertNil(TracesScreenLayout.points(total: 1365, lookup: nil, copy: copy.traces))
-        XCTAssertEqual(TracesScreenLayout.rate(lookup: nil, copy: copy.traces), copy.traces.rateUnknown)
-        XCTAssertFalse(copy.traces.rateUnknown.contains { $0.isNumber })
+        XCTAssertEqual([copy.traces.estimate.min, copy.traces.estimate.max], [3, 8])
+        XCTAssertEqual(
+            TracesScreenLayout.points(total: 1365, lookup: nil, copy: copy.traces),
+            FirstRunCopy.fill(copy.traces.points, ["min": 4095.formatted(), "max": 10920.formatted()]))
+        let before = TracesScreenLayout.rate(lookup: nil, copy: copy.traces)
+        XCTAssertEqual(before, "An estimated 3–8 points per accepted trace, not yet settled.")
+
+        let decode = { (json: String) in try JSONDecoder().decode(DaemonData.InviteLookup.self, from: Data(json.utf8)) }
+        let invite = try decode(#"{"valid":true,"credit_range":{"min":2,"max":6,"unit":"points_per_accepted_trace"}}"#)
+        XCTAssertEqual(
+            TracesScreenLayout.points(total: 1365, lookup: invite, copy: copy.traces),
+            FirstRunCopy.fill(copy.traces.points, ["min": 2730.formatted(), "max": 8190.formatted()]))
+        XCTAssertEqual(
+            TracesScreenLayout.rate(lookup: invite, copy: copy.traces),
+            "An estimated 2–6 points per accepted trace, not yet settled.")
+        let single = try decode(#"{"valid":true,"credit_range":{"min":4,"max":4,"unit":"points_per_accepted_trace"}}"#)
+        XCTAssertEqual(
+            TracesScreenLayout.points(total: 10, lookup: single, copy: copy.traces),
+            FirstRunCopy.fill(copy.traces.pointsOne, ["min": "40"]))
+        // A range in any other unit is not points: the estimate stands.
+        let foreign = try decode(#"{"valid":true,"credit_range":{"min":1,"max":2,"unit":"dollars"}}"#)
+        XCTAssertEqual(TracesScreenLayout.rate(lookup: foreign, copy: copy.traces), before)
 
         XCTAssertEqual(TracesScreenLayout.counted(after: 0, reduceMotion: false), 0)
         XCTAssertEqual(TracesScreenLayout.counted(after: 3, reduceMotion: false), 1)

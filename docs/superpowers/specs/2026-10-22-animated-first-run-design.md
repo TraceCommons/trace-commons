@@ -15,11 +15,18 @@ for everyone, full window, over one scene:
    dismisses the tools not on this Mac, the rest re-space. One marker-drawn
    check per found tool (unticked is Not used, none start ticked); Continue
    and Customize wait for one tick. Customize grows the card up and opens
-   the per-repo rules and past traces (Ron's Rules screen, in place).
+   the per-repo rules and past traces (Ron's Rules screen, in place): each
+   repo's rule is the canvas's Ask / Automatic / Never control with no
+   status dot, Automatic inert until it can be armed, and each past trace's
+   switch sits before its date (Ron, 2026-10-22). The repos come from
+   `list_projects` with `include_found`, so they show before any session
+   has queued.
 3. **Uses**: This Mac, the review gate and the commons, a soft orb
    travelling between them; the uses list and Ask / Automatic.
 4. **Traces**: the watched tools' trace count filling a ring, and what the
-   traces could earn.
+   traces could earn: the count times an invite's range, or before one the
+   core's default estimate of 3 to 8 points per accepted trace (owner,
+   2026-10-22), under the same "An estimated ... not yet settled." line.
 5. **Private AI**: the tools Private AI can route, the N as the hub, the
    switch.
 6. **Join**: sign in with NEAR AI, last. Start sharing finishes the run.
@@ -70,7 +77,8 @@ New keys in `first_run_copy.rs`, all DRAFT unless marked Ron's:
 `welcome.{title (Ron's), body (Ron's), start}`, `frame.step_traces`,
 `frame.step_private_ai`, `uses.{this_mac, you_review, the_commons,
 automatic_after_sign_in}`, `traces.{title_light, title_bold, on_this_mac,
-points, points_one, rate, rate_one, rate_unknown}`,
+points, points_one, rate, rate_one}` and the figure `traces.estimate`
+(`{min: 3, max: 8}`, the owner's),
 `private_ai.{title_light, title_bold, can_connect, can_connect_one}`.
 Changed: `tools.title_bold` is "tools" (Ron's), `uses.title_bold` drops its
 period. Keys the macOS shell no longer reads are kept so the wire table is
@@ -78,6 +86,4 @@ unchanged.
 
 ## Open
 
-- A per-trace points rate before joining: only an invite's lookup gives
-  one, so Traces shows `traces.rate_unknown` without a figure.
 - GTK, Windows and Tauri still run #1030's flow; they follow macOS later.

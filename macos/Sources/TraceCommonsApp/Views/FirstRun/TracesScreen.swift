@@ -5,9 +5,9 @@ import TCShellCore
 
 /// What Traces shows, apart from the view so it can be tested: the watched
 /// tools' traces counted, and what they could earn, an estimate in the core's
-/// words. A per-trace range is known only from an invite's lookup, so before
-/// joining the card says that points come once the person joins, and no
-/// figure is made up.
+/// words. The per-trace range is an invite's lookup's when it has one, and
+/// the core's default estimate before (owner, 2026-10-22: 3 to 8 points),
+/// worded as an estimate either way.
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {
@@ -26,22 +26,28 @@ enum TracesScreenLayout {
         rows.reduce(0) { $0 + $1.traces }
     }
 
-    /// The headline estimate, or nil without a range in the one unit the
-    /// daemon accepts.
-    static func points(total: UInt64, lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> String? {
-        guard let range = lookup?.creditRange, range.unit == JoinScreenLayout.pointsPerAcceptedTrace else { return nil }
-        let low = (total * UInt64(max(0, range.min))).formatted()
-        let high = (total * UInt64(max(0, range.max))).formatted()
+    /// The range per accepted trace: the invite's, in the one unit the
+    /// daemon accepts, or the core's estimate without one.
+    static func range(lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> (min: Int, max: Int) {
+        if let range = lookup?.creditRange, range.unit == JoinScreenLayout.pointsPerAcceptedTrace {
+            return (max(0, range.min), max(0, range.max))
+        }
+        return (copy.estimate.min, copy.estimate.max)
+    }
+
+    /// The headline estimate: the count times the range.
+    static func points(total: UInt64, lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> String {
+        let range = range(lookup: lookup, copy: copy)
+        let low = (total * UInt64(range.min)).formatted()
+        let high = (total * UInt64(range.max)).formatted()
         if range.min == range.max { return FirstRunCopy.fill(copy.pointsOne, ["min": low]) }
         return FirstRunCopy.fill(copy.points, ["min": low, "max": high])
     }
 
-    /// The line under it: the range per trace, or that points come once the
-    /// person joins.
+    /// The line under it, which marks the figure as an estimate: the range
+    /// per trace, not yet settled.
     static func rate(lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> String {
-        guard let range = lookup?.creditRange, range.unit == JoinScreenLayout.pointsPerAcceptedTrace else {
-            return copy.rateUnknown
-        }
+        let range = range(lookup: lookup, copy: copy)
         if range.min == range.max { return FirstRunCopy.fill(copy.rateOne, ["min": "\(range.min)"]) }
         return FirstRunCopy.fill(copy.rate, ["min": "\(range.min)", "max": "\(range.max)"])
     }
@@ -210,11 +216,9 @@ struct TracesScreen: View {
     private func estimate(total: UInt64) -> some View {
         let done = memory.tracesCounted || reduceMotion
         return VStack(spacing: GlassTokens.Space.s1) {
-            if let points = TracesScreenLayout.points(total: total, lookup: runner.lookup, copy: copy.traces) {
-                Text(points)
-                    .glassType(GlassTokens.TypeScale.heading)
-                    .foregroundStyle(GlassColor.textPrimary)
-            }
+            Text(TracesScreenLayout.points(total: total, lookup: runner.lookup, copy: copy.traces))
+                .glassType(GlassTokens.TypeScale.heading)
+                .foregroundStyle(GlassColor.textPrimary)
             Text(TracesScreenLayout.rate(lookup: runner.lookup, copy: copy.traces))
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)

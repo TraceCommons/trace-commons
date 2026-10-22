@@ -268,14 +268,12 @@ enum RulesScreenLayout {
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
     }
 
-    /// Ron's #1030 `RULE_DOTS`: Ask on the ask colour, Automatic on the
-    /// on colour, Never on the off colour.
-    static func dot(for mode: ProjectMode) -> GlassStatus? {
-        switch mode {
-        case .ask: return .ask
-        case .autoUpload: return .on
-        case .ignore: return .off
-        }
+    /// The options a folder's rule control shows: every mode the daemon
+    /// would set for it, so Ask, Automatic and Never read side by side
+    /// before sign-in as after (Ron, 2026-10-22). Which of them can be
+    /// picked is `offeredModes`'s.
+    static func segments(_ project: ProjectRow) -> [ProjectMode] {
+        project.offerableModes
     }
 
     /// The retry beside `rules.unavailable`: Rules' own word, `rules.retry`

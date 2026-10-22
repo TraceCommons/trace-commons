@@ -275,23 +275,26 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(RulesScreenLayout.offered([exported], state: state).map(\.projectId), ["p5"])
     }
 
-    /// Ron's review of #1235, item 13: a repo's rule shows its status dots,
-    /// in Ron's order -- Ask on the ask colour, Automatic on the on colour,
-    /// Never on the off colour -- now under Customize on Tools. Settings'
-    /// picker is unchanged.
-    func test_theRulesPickerShowsItsStatusDots() throws {
-        let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
-        let options = ProjectModeChoices.options(
-            for: [.ask, .autoUpload, .ignore], copy: modes, dot: RulesScreenLayout.dot(for:))
-        XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
-        XCTAssertEqual(options.map(\.dot), [.ask, .on, .off])
-        XCTAssertEqual(
-            ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes).map(\.dot), [nil, nil, nil])
+    /// Ron, 2026-10-22, over #1235's item 13 for Customize: a repo's rule is
+    /// the canvas's Ask / Automatic / Never control with no status dot, and
+    /// Automatic stays in place, inert, until it can be armed. Settings'
+    /// picker keeps its dots.
+    func test_theRulesControlShowsEveryModeAndNoDots() throws {
+        let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
+        let watching = FirstRunState(step: .tools, account: .watchOnly)
+        XCTAssertEqual(RulesScreenLayout.segments(project), [.ask, .autoUpload, .ignore])
+        XCTAssertFalse(RulesScreenLayout.offeredModes(project, state: watching).contains(.autoUpload))
         let screen = try String(
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent(
                     "Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift"), encoding: .utf8)
-        XCTAssertTrue(screen.contains("dot: RulesScreenLayout.dot(for: mode)"))
+        XCTAssertTrue(screen.contains("options: RulesScreenLayout.segments(project).compactMap"))
+        XCTAssertTrue(screen.contains("enabled: offered.contains(mode)"))
+        XCTAssertFalse(screen.contains("GlassSegmentedTabs("))
+        XCTAssertFalse(screen.contains("GlassSegment("), "no segment carries a status dot")
+        // The past traces' switches sit before their words.
+        XCTAssertFalse(screen.contains("GlassToggleStyle(.standard)"))
+        XCTAssertTrue(screen.contains(".toggleStyle(FirstRunSwitchStyle())"))
     }
 
     /// "{selected} of {total} selected" counts folders that are not Never.

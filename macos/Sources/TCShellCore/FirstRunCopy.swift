@@ -216,8 +216,14 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// `{min}`, `{max}`; then `{min}`.
         public let rate: String
         public let rateOne: String
-        /// No range is known before joining.
-        public let rateUnknown: String
+        /// The owner's estimate before an invite gives a range, in points
+        /// per accepted trace.
+        public let estimate: Estimate
+
+        public struct Estimate: Decodable, Equatable, Sendable {
+            public let min: Int
+            public let max: Int
+        }
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {

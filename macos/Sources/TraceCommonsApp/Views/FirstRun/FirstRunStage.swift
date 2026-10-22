@@ -403,6 +403,99 @@ struct FirstRunMarkerCheckShape: Shape {
     }
 }
 
+/// The canvas's small segmented control (`.seg.sm`, Ron 2026-10-22): a
+/// well holding one pill per option, the chosen one in the accent, with no
+/// status dot. An option that cannot be picked is dimmed and inert. The
+/// caller's label names the group to assistive tech; each option is a
+/// button that says whether it is chosen.
+struct FirstRunSegmented<Value: Hashable>: View {
+    struct Option {
+        let title: String
+        let value: Value
+        var enabled = true
+    }
+
+    let label: String
+    @Binding var selection: Value
+    let options: [Option]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovered: Value?
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.value) { option in
+                let chosen = option.value == selection
+                Button {
+                    selection = option.value
+                } label: {
+                    Text(option.title)
+                        .glassType(GlassTokens.TypeScale.caption.weight(.medium))
+                        .foregroundStyle(chosen ? GlassTokens.Color.textOnAccent.color : GlassColor.textPrimary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 22)
+                        .background(
+                            Capsule().fill(
+                                chosen ? GlassTokens.Color.toggleOn.color
+                                    : hovered == option.value && option.enabled
+                                        ? GlassTokens.Color.firstRunControlHover.color : .clear))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(!option.enabled)
+                .opacity(option.enabled ? 1 : GlassTokens.Opacity.disabled)
+                .onHover { hovered = $0 ? option.value : (hovered == option.value ? nil : hovered) }
+                .accessibilityAddTraits(chosen ? .isSelected : [])
+                .animation(GlassMotion.timed(reduceMotion, duration: 0.15), value: chosen)
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(GlassTokens.Color.wellFill.color))
+        .fixedSize()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+    }
+}
+
+/// The canvas's small switch (`.switch.sm`, 30 by 18) with its label after
+/// it, as Customize's past traces read (Ron, 2026-10-22: toggles on the
+/// left). It is a switch to assistive tech, named by the label.
+struct FirstRunSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        FirstRunSwitch(configuration: configuration)
+    }
+}
+
+private struct FirstRunSwitch: View {
+    let configuration: ToggleStyleConfiguration
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        let on = configuration.isOn
+        HStack(spacing: 10) {
+            Button {
+                withAnimation(GlassMotion.timed(reduceMotion, duration: 0.2)) { configuration.isOn.toggle() }
+            } label: {
+                ZStack(alignment: on ? .trailing : .leading) {
+                    Capsule()
+                        .fill(on ? GlassTokens.Color.toggleOn.color : GlassTokens.Color.toggleOff.color)
+                    Circle()
+                        .fill((on ? GlassTokens.Color.textOnAccent : GlassTokens.Color.toggleKnobOff).color)
+                        .frame(width: 14, height: 14)
+                        .padding(2)
+                }
+                .frame(width: 30, height: 18)
+            }
+            .buttonStyle(.plain)
+            configuration.label
+        }
+        .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }
+        }
+    }
+}
+
 // MARK: - Actors
 
 extension EnvironmentValues {
