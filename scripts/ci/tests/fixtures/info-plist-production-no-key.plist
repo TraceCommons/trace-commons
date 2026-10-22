@@ -19,8 +19,8 @@
 
          This app was a menu-bar-only utility until a contributor could not
          find it: on a display with a notch, once the menu bar fills up, the
-         status item is still assigned a frame -- the accessibility API
-         answers with a plausible 18x24 rectangle -- but it is placed past
+         status item is still assigned a frame (the accessibility API
+         answers with a plausible 18x24 rectangle), but it is placed past
          the notch in a band that never draws. Nothing renders, nothing
          reports an error, and the app has no other way in. A menu-bar-only
          app is one crowded menu bar away from being unreachable.

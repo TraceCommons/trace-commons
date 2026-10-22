@@ -640,7 +640,6 @@ self_test() {
   # staging allowances that the tree does not carry yet. Without these, a
   # refusal case below could pass with its allowance missing altogether.
   local accepted=(
-    "the contributor forwarding to the attestation crate|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\"]/m"
     "the server forwarding to the attestation crate|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\"]/m"
     "the attestation crate's own empty definition|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\n/m"
     "the re-sign tool requiring it|crates/trace-commons-server/Cargo.toml|s/^\\[dev-dependencies\\]/[[bin]]\\nname = \"trace-commons-staging-pins\"\\npath = \"src\/bin\/trace-commons-staging-pins.rs\"\\nrequired-features = [\"$FEATURE\"]\\n\\n\$&/m"
@@ -698,9 +697,9 @@ self_test() {
     "a release push trigger with no tag filter|.github/workflows/release-contributor.yml|s/    tags:\\n      - \"contributor-v\\*\"\\n//"
     "a release push trigger ignoring tags instead|.github/workflows/release-apps.yml|s/    tags:\\n      - \"app-v\\*\"\\n/    tags-ignore:\\n      - \"app-v*\"\\n/"
     "a release workflow with an inline push trigger|.github/workflows/release-contributor.yml|s/^on:\\n  push:\\n    tags:\\n      - \"contributor-v\\*\"\\n/on: [push, workflow_dispatch]\\nx:\\n/m"
-    "the contributor forward widened by one more crate|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-protocol\/$FEATURE\"]/m"
+    "the contributor forward widened by one more crate|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\"trace-commons-attestation\/$FEATURE\"\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-protocol\/$FEATURE\"]/m"
     "the server forward widened by one more crate|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-gate-enclave\/near-ai-scorer\"]/m"
-    "the contributor forwarding somewhere other than attestation|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-protocol\/$FEATURE\"]/m"
+    "the contributor forwarding somewhere other than attestation|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\"trace-commons-attestation\/$FEATURE\"\\]\$/$FEATURE = [\"trace-commons-protocol\/$FEATURE\"]/m"
     "the attestation definition forwarding anywhere|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = [\"collateral-client\"]\\n/m"
     "the attestation feature entering its default|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\ndefault = [\"$FEATURE\"]\\n/m"
     "the protocol crate defining it|crates/trace-commons-protocol/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\n/m"
