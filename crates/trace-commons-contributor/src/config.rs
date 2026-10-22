@@ -1000,34 +1000,58 @@ enum ChannelMark {
     Write,
 }
 
+/// The longest channel mark read: room for either channel name and a newline.
+const CHANNEL_MARK_MAX: u64 = 64;
+
+/// Read a directory's channel mark: `Ok(false)` when there is none,
+/// `Ok(true)` when it names this build's channel, and a refusal for anything
+/// else -- the other channel, a mark this build does not know, a mark that is
+/// not a regular file (a link included) or one longer than
+/// [`CHANNEL_MARK_MAX`]. Any error reading it refuses too.
+fn read_channel_mark(dir: &Path) -> Result<bool> {
+    use std::io::Read;
+    let path = dir.join(CHANNEL_FILE);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).context("reading the state directory channel"),
+    };
+    if !meta.file_type().is_file() {
+        return Err(StateDirChannelRefusal::Unrecognised.into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)
+        .and_then(|file| file.take(CHANNEL_MARK_MAX + 1).read_to_end(&mut bytes))
+        .context("reading the state directory channel")?;
+    if bytes.len() as u64 > CHANNEL_MARK_MAX {
+        return Err(StateDirChannelRefusal::Unrecognised.into());
+    }
+    let mark = std::str::from_utf8(&bytes)
+        .map(str::trim)
+        .map_err(|_| StateDirChannelRefusal::Unrecognised)?;
+    if mark == crate::channel::CHANNEL {
+        Ok(true)
+    } else if CHANNELS.contains(&mark) {
+        Err(StateDirChannelRefusal::OtherChannel.into())
+    } else {
+        Err(StateDirChannelRefusal::Unrecognised.into())
+    }
+}
+
 /// Decide whether this build may open an existing state directory. Any
 /// error reading the mark refuses the directory.
 fn existing_dir_channel(dir: &Path) -> Result<ChannelMark> {
-    match std::fs::read(dir.join(CHANNEL_FILE)) {
-        Ok(bytes) => {
-            let mark = std::str::from_utf8(&bytes)
-                .map(str::trim)
-                .map_err(|_| StateDirChannelRefusal::Unrecognised)?;
-            if mark == crate::channel::CHANNEL {
-                Ok(ChannelMark::Keep)
-            } else if CHANNELS.contains(&mark) {
-                Err(StateDirChannelRefusal::OtherChannel.into())
-            } else {
-                Err(StateDirChannelRefusal::Unrecognised.into())
-            }
+    if read_channel_mark(dir)? {
+        return Ok(ChannelMark::Keep);
+    }
+    // Present at all, even as a dangling link, counts as enrolled.
+    match std::fs::symlink_metadata(dir.join(CONFIG_FILE)) {
+        Ok(_) if crate::channel::near_ai_staging() => {
+            Err(StateDirChannelRefusal::OtherChannel.into())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Present at all, even as a dangling link, counts as enrolled.
-            match std::fs::symlink_metadata(dir.join(CONFIG_FILE)) {
-                Ok(_) if crate::channel::near_ai_staging() => {
-                    Err(StateDirChannelRefusal::OtherChannel.into())
-                }
-                Ok(_) => Ok(ChannelMark::Write),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChannelMark::Keep),
-                Err(e) => Err(e).context("reading the state directory"),
-            }
-        }
-        Err(e) => Err(e).context("reading the state directory channel"),
+        Ok(_) => Ok(ChannelMark::Write),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChannelMark::Keep),
+        Err(e) => Err(e).context("reading the state directory"),
     }
 }
 
@@ -1111,12 +1135,14 @@ impl ConfigStore {
 
     /// Mark the directory before its first enrollment is written, so a
     /// crash leaves it marked and unenrolled, never enrolled and unmarked
-    /// (which would read as production's).
+    /// (which would read as production's). A mark that is already there is
+    /// checked again: one re-written for the other channel since `open`, or
+    /// not a channel at all, refuses the enrollment before it is written.
     fn ensure_channel_mark(&self) -> Result<()> {
-        match std::fs::symlink_metadata(self.channel_path()) {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.write_channel_mark(),
-            Err(e) => Err(e).context("reading the state directory channel"),
+        if read_channel_mark(&self.dir)? {
+            Ok(())
+        } else {
+            self.write_channel_mark()
         }
     }
 
@@ -1813,6 +1839,70 @@ mod tests {
             StateDirChannelRefusal::OtherChannel
         );
         assert_eq!(channel_mark(root.path()).as_deref(), Some(other_channel()));
+    }
+
+    #[test]
+    fn enrolling_refuses_a_directory_re_marked_for_the_other_channel() {
+        // Re-marked between `open` and the first enrollment: the enrollment
+        // is not written into the other channel's directory.
+        let root = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(root.path().join("state")).unwrap();
+        std::fs::write(store.dir().join(CHANNEL_FILE), other_channel()).unwrap();
+
+        let err = store.save_config(&sample_config()).unwrap_err();
+
+        assert_eq!(
+            *err.downcast_ref::<StateDirChannelRefusal>().unwrap(),
+            StateDirChannelRefusal::OtherChannel
+        );
+        assert!(!store.dir().join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn enrolling_refuses_an_unrecognised_channel_mark() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(root.path().join("state")).unwrap();
+        std::fs::write(store.dir().join(CHANNEL_FILE), "beta\n").unwrap();
+
+        let err = store.save_config(&sample_config()).unwrap_err();
+
+        assert_eq!(
+            *err.downcast_ref::<StateDirChannelRefusal>().unwrap(),
+            StateDirChannelRefusal::Unrecognised
+        );
+        assert!(!store.dir().join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn a_store_refuses_an_oversized_channel_mark() {
+        // The mark is read with a cap: a huge file is not a channel name.
+        let root = tempfile::tempdir().unwrap();
+        let mut body = crate::channel::CHANNEL.to_string();
+        body.push_str(&" ".repeat(4096));
+        std::fs::write(root.path().join(CHANNEL_FILE), body).unwrap();
+
+        assert_eq!(
+            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
+            StateDirChannelRefusal::Unrecognised
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_refuses_a_channel_mark_that_is_not_a_regular_file() {
+        // A link to this build's own mark is still refused: the mark must be
+        // the directory's own file.
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("elsewhere");
+        std::fs::write(&target, format!("{}\n", crate::channel::CHANNEL)).unwrap();
+        let dir = root.path().join("state");
+        std::fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(CHANNEL_FILE)).unwrap();
+
+        assert_eq!(
+            channel_refusal(ConfigStore::open(dir)),
+            StateDirChannelRefusal::Unrecognised
+        );
     }
 
     #[test]
