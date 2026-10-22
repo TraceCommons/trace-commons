@@ -1541,10 +1541,137 @@ pub const JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION: &str =
 pub const JUDGEMENT_CLAIM_MAX_SKEW_SECONDS: i64 = 300;
 
 /// Issuer refusal: `issued_at` is outside [`JUDGEMENT_CLAIM_MAX_SKEW_SECONDS`].
-/// The other issuer refusals on this route are the device-key labels the
-/// upload-claim route already uses, and `judgement_account_ineligible` for a
-/// tenant that is not per-account.
+/// The label of [`JudgementClaimRefusal::Stale`]; every refusal on this route
+/// is a member of [`JudgementClaimRefusal`].
 pub const JUDGEMENT_CLAIM_REQUEST_STALE: &str = "insights_judgement_claim_request_stale";
+
+/// The `Retry-After` the issuer sends with a
+/// [`JudgementClaimRetry::AfterDelay`] refusal, in seconds.
+pub const JUDGEMENT_CLAIM_RETRY_AFTER_SECS: u64 = 30;
+
+/// What a daemon may do after a [`JudgementClaimRefusal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgementClaimRetry {
+    /// Do not retry. The device, its account or the request is refused, and
+    /// asking again changes nothing.
+    Never,
+    /// Retry once, with a fresh `issued_at`. If that is also stale, the
+    /// device's clock is wrong, so do not loop.
+    WithFreshTimestamp,
+    /// The issuer could not answer. Retry after
+    /// [`JUDGEMENT_CLAIM_RETRY_AFTER_SECS`], which the issuer also sends as
+    /// `Retry-After`.
+    AfterDelay,
+}
+
+/// The refusals `POST /v1/insights-judgement/claim` returns, as a closed set.
+///
+/// A refusal reaches the daemon as a status and a `{"error": "<label>"}`
+/// body, and the daemon's re-mint logic matches the label against this set,
+/// never prose. These labels are this route's own. The upload-claim route
+/// refuses the same conditions with different, space-separated text
+/// (`device key not registered`), which is not a member.
+///
+/// Two answers come from the issuer's shared router layers, not from this
+/// route, and are not members: `413` for a body over the issuer's request
+/// cap, and `408` when the request outlives the issuer's request timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgementClaimRefusal {
+    /// The body is not a closed v1 claim request, or the device-auth headers
+    /// are missing or malformed.
+    Malformed,
+    /// The `x-trace-device-key-id` header and the body's `device_key_id`
+    /// differ.
+    DeviceKeyMismatch,
+    /// `issued_at` is outside [`JUDGEMENT_CLAIM_MAX_SKEW_SECONDS`] of the
+    /// issuer's clock.
+    Stale,
+    /// The signature is not the registered device key's over these bytes.
+    SignatureInvalid,
+    /// No device key with this id is registered under the named tenant.
+    DeviceKeyNotRegistered,
+    /// The device key is revoked.
+    DeviceKeyRevoked,
+    /// The tenant is not a per-account tenant (v1 refuses pooled and legacy
+    /// invite tenants). The same label as the service's
+    /// [`JudgementRefusal::AccountIneligible`].
+    AccountIneligible,
+    /// The issuer requires tenant access grants, and this device holds no
+    /// active contributor grant, so it could not mint an upload claim
+    /// either.
+    GrantRequired,
+    /// The issuer has no device-key registry configured.
+    RegistryUnavailable,
+    /// The issuer failed to mint, for a reason that is its own.
+    IssueFailed,
+}
+
+impl JudgementClaimRefusal {
+    /// Every refusal, for tests and exhaustive mappings.
+    pub const ALL: [JudgementClaimRefusal; 10] = [
+        JudgementClaimRefusal::Malformed,
+        JudgementClaimRefusal::DeviceKeyMismatch,
+        JudgementClaimRefusal::Stale,
+        JudgementClaimRefusal::SignatureInvalid,
+        JudgementClaimRefusal::DeviceKeyNotRegistered,
+        JudgementClaimRefusal::DeviceKeyRevoked,
+        JudgementClaimRefusal::AccountIneligible,
+        JudgementClaimRefusal::GrantRequired,
+        JudgementClaimRefusal::RegistryUnavailable,
+        JudgementClaimRefusal::IssueFailed,
+    ];
+
+    /// The wire label, which is what the issuer puts in the `error` field.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Malformed => "judgement_claim_malformed",
+            Self::DeviceKeyMismatch => "judgement_claim_device_key_mismatch",
+            Self::Stale => JUDGEMENT_CLAIM_REQUEST_STALE,
+            Self::SignatureInvalid => "judgement_claim_signature_invalid",
+            Self::DeviceKeyNotRegistered => "device_key_not_registered",
+            Self::DeviceKeyRevoked => "device_key_revoked",
+            Self::AccountIneligible => JudgementRefusal::AccountIneligible.label(),
+            Self::GrantRequired => "judgement_claim_grant_required",
+            Self::RegistryUnavailable => "judgement_claim_registry_unavailable",
+            Self::IssueFailed => "judgement_claim_issue_failed",
+        }
+    }
+
+    /// The status this refusal is sent with.
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::Malformed | Self::DeviceKeyMismatch | Self::Stale => 400,
+            Self::SignatureInvalid
+            | Self::DeviceKeyNotRegistered
+            | Self::DeviceKeyRevoked
+            | Self::AccountIneligible
+            | Self::GrantRequired => 403,
+            Self::RegistryUnavailable => 503,
+            Self::IssueFailed => 500,
+        }
+    }
+
+    /// What the daemon may do next.
+    pub const fn retry(self) -> JudgementClaimRetry {
+        match self {
+            Self::Stale => JudgementClaimRetry::WithFreshTimestamp,
+            Self::RegistryUnavailable | Self::IssueFailed => JudgementClaimRetry::AfterDelay,
+            Self::Malformed
+            | Self::DeviceKeyMismatch
+            | Self::SignatureInvalid
+            | Self::DeviceKeyNotRegistered
+            | Self::DeviceKeyRevoked
+            | Self::AccountIneligible
+            | Self::GrantRequired => JudgementClaimRetry::Never,
+        }
+    }
+
+    /// Recognise a refusal from its label. `None` for anything else,
+    /// including the upload-claim route's prose.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.label() == label)
+    }
+}
 
 /// `POST /v1/insights-judgement/claim` body. Signed as sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1561,9 +1688,9 @@ pub struct JudgementClaimRequest {
 }
 
 /// The minted judgement claim. The token is an EdDSA JWT with
-/// `aud = "trace-commons-insights-judgement"` and an `account_ref` claim; the
-/// daemon presents it to the judgement service as `Authorization: Bearer`
-/// and never reads it.
+/// `aud = "trace-commons-insights-judgement"` and an `account_ref` claim. The
+/// daemon puts it in the sealed request plaintext's `claim` field (see
+/// [`JudgementRequest`]), never in a header, and never reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgementClaimResponse {
@@ -3073,6 +3200,96 @@ mod tests {
             JUDGEMENT_CLAIM_REQUEST_STALE,
             "insights_judgement_claim_request_stale"
         );
+    }
+
+    /// The claim route's refusals are a closed set, and these strings are the
+    /// wire: the daemon's re-mint logic matches them and nothing else.
+    #[test]
+    fn the_claim_refusal_labels_statuses_and_retry_classes_are_pinned() {
+        use JudgementClaimRefusal as R;
+        use JudgementClaimRetry as Retry;
+        let expected: [(R, &str, u16, Retry); 10] = [
+            (R::Malformed, "judgement_claim_malformed", 400, Retry::Never),
+            (
+                R::DeviceKeyMismatch,
+                "judgement_claim_device_key_mismatch",
+                400,
+                Retry::Never,
+            ),
+            (
+                R::Stale,
+                "insights_judgement_claim_request_stale",
+                400,
+                Retry::WithFreshTimestamp,
+            ),
+            (
+                R::SignatureInvalid,
+                "judgement_claim_signature_invalid",
+                403,
+                Retry::Never,
+            ),
+            (
+                R::DeviceKeyNotRegistered,
+                "device_key_not_registered",
+                403,
+                Retry::Never,
+            ),
+            (R::DeviceKeyRevoked, "device_key_revoked", 403, Retry::Never),
+            (
+                R::AccountIneligible,
+                "judgement_account_ineligible",
+                403,
+                Retry::Never,
+            ),
+            (
+                R::GrantRequired,
+                "judgement_claim_grant_required",
+                403,
+                Retry::Never,
+            ),
+            (
+                R::RegistryUnavailable,
+                "judgement_claim_registry_unavailable",
+                503,
+                Retry::AfterDelay,
+            ),
+            (
+                R::IssueFailed,
+                "judgement_claim_issue_failed",
+                500,
+                Retry::AfterDelay,
+            ),
+        ];
+        assert_eq!(R::ALL.len(), expected.len());
+        for (refusal, (want, label, status, retry)) in R::ALL.into_iter().zip(expected) {
+            assert_eq!(refusal, want);
+            assert_eq!(refusal.label(), label);
+            assert_eq!(refusal.status(), status, "{label}");
+            assert_eq!(refusal.retry(), retry, "{label}");
+            assert_eq!(R::from_label(label), Some(refusal));
+        }
+        assert_eq!(JUDGEMENT_CLAIM_RETRY_AFTER_SECS, 30);
+        assert_eq!(JUDGEMENT_CLAIM_REQUEST_STALE, R::Stale.label());
+        // The ineligible label is the service's own, so a daemon reads it the
+        // same way from either hop.
+        assert_eq!(
+            R::AccountIneligible.label(),
+            JudgementRefusal::AccountIneligible.label()
+        );
+        // The upload-claim route's prose is not a member.
+        for prose in [
+            "device key not registered",
+            "device key revoked",
+            "failed to issue upload claim",
+            "device key registry is not configured",
+            "invalid device key signature",
+        ] {
+            assert_eq!(R::from_label(prose), None, "{prose}");
+        }
+        let mut labels: Vec<&str> = R::ALL.iter().map(|r| r.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), R::ALL.len(), "labels are distinct");
     }
 
     #[test]
