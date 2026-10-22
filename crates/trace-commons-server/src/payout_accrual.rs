@@ -961,7 +961,11 @@ mod tests {
         let account = Uuid::new_v4();
         let (settled, events) = over_texted_line(account);
         // First run: only the first reversal has been written to the ledger.
-        let first_run = plan(&[settled.clone()], &events[..3], &HashMap::new());
+        let first_run = plan(
+            std::slice::from_ref(&settled),
+            &events[..3],
+            &HashMap::new(),
+        );
         assert_eq!(reversal_awards(&first_run), vec![800_000]);
         let existing: Vec<PayoutAccrual> = first_run.writes.iter().map(stored).collect();
         // Second run: the second reversal arrives.
@@ -973,7 +977,7 @@ mod tests {
     fn reversals_are_priced_in_ledger_order_whatever_order_they_are_read_in() {
         let account = Uuid::new_v4();
         let (settled, mut events) = over_texted_line(account);
-        let in_order = plan(&[settled.clone()], &events, &HashMap::new());
+        let in_order = plan(std::slice::from_ref(&settled), &events, &HashMap::new());
         events.reverse();
         let reversed_read = plan(&[settled], &events, &HashMap::new());
         let by_event = |plan: &AccrualPlan| -> BTreeMap<Option<Uuid>, u128> {
