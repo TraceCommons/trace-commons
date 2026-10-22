@@ -89,6 +89,10 @@ All dated 2026-10-21. The owner's words are quoted.
 - **(S13) Staging DMGs on public pre-releases.** "Github pre-relase for
   straging is fine" (2026-10-22), knowing the repository is public and
   sign-up is open, so anyone who finds a staging DMG can use staging (6.1).
+- **(S14) No GitHub environment for staging.** "I don't think we need a
+  staging environment right now" (2026-10-22), meaning the GitHub
+  environment and its approval gate. The staging workflow runs on manual
+  dispatch only, with staging-named repository secrets (6.1).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -808,11 +812,13 @@ lists it explicitly instead (6.2).
 - Trigger: `workflow_dispatch` only, with an optional ref input. Never
   `push`, never a tag, never `workflow_call`. Not in
   `release-contributor.yml` or `release-apps.yml`.
-- `environment: staging`, a GitHub environment with the owner as required
-  reviewer, so a run waits for approval. It carries the Developer ID and
-  notary secrets (the same team identity as production; Apple signing has no
-  separate staging identity) and its own WIF provider and publisher SA,
-  whose only bucket role is on the staging bucket.
+- No GitHub environment and no approval gate (S14). The Developer ID and
+  notary secrets are the repository's existing ones (the same team identity
+  as production; Apple signing has no separate staging identity). Its own
+  WIF provider and publisher SA, whose only bucket role is on the staging
+  bucket, and the staging Sparkle key are repository secrets with
+  staging-specific names; the release check refuses production names in
+  staging files.
 - Steps: build the FFI dylib and `near-ai` with the staging channel
   (`TC_CHANNEL=staging`); `swift test`; build, sign with
   `entitlements-staging.plist` and the staging profile, notarize and staple
