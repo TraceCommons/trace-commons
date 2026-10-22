@@ -182,6 +182,16 @@ jobs:
           cp "$BIN" "dist/$OUT"
           ( cd dist && shasum -a 256 "$OUT" > "$OUT.sha256" )
 
+      # The staging pin verifier -- the signed pin-set format, its public key
+      # and the pin URL -- is compiled only into the internal staging build.
+      # This checks the binary that ships, not only the build line.
+      - name: No staging pin verifier in the shipped binary (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: ./scripts/ci/assert-no-staging-markers.sh check "dist/trace-commons-contributor-$TARGET"
+
       # No checksum here: the exe gets signed next, and the checksum in
       # "Sign, verify and re-checksum (Windows)" below covers the bytes a
       # contributor actually downloads.

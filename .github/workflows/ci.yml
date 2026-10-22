@@ -85,6 +85,16 @@ jobs:
       # a staging plist with only staging identity and feed.
       - name: macOS Info.plist per bundle channel
         run: scripts/ci/test-macos-channel-plist.sh
+      # Seconds, no build. The release workflows scan the shipped dylib and
+      # CLI for the staging pin verifier; the self-test seeds each marker
+      # into a scratch binary and requires a refusal.
+      - name: No release binary carries the staging pin verifier
+        run: scripts/ci/assert-no-staging-markers.sh self-test
+      # Seconds. The Sparkle appcast generator for both channels, with a
+      # stub sign_update: production's appcast unchanged, staging's own
+      # title and pre-release version.
+      - name: Sparkle appcast for each channel
+        run: scripts/ci/test-generate-appcast.sh
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
