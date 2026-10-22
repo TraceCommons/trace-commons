@@ -1,0 +1,11 @@
+# Release build of the staging server binaries, with the `near-ai-staging`
+# feature, for the staging host only. Placeholder: the real steps land with
+# the staging deploy task
+# (docs/superpowers/plans/2026-10-21-staging-environment.md, Task 11).
+#
+# scripts/ci/check-release-staging-feature.sh requires this file to name the
+# feature and refuses it naming any production bucket or release path.
+steps:
+  - name: 'ubuntu:24.04'
+    entrypoint: 'bash'
+    args: ['-c', 'echo "the staging server build is not built yet"; exit 1']

@@ -17,6 +17,11 @@ crates/trace-commons-contributor-gtk/target/
 *.env
 !*.env.template
 !*.env.example
+# The macOS app's channel files: public bundle values (bundle id, display
+# name, feed URL), never a secret. Named exactly, so no other `.env` under
+# macos/ is let through.
+!/macos/channels/production.env
+!/macos/channels/staging.env
 
 # Local git worktrees for parallel feature work
 .worktrees/
