@@ -218,6 +218,175 @@ async fn health_endpoint_reports_build_identity_additively() {
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
 }
 
+/// Staging design 3.11: `/health` says whether this build talks to NEAR AI
+/// staging, so a deploy can refuse a binary built for the other channel.
+#[tokio::test]
+async fn health_reports_near_ai_staging() {
+    let Json(health) = health_handler().await;
+    let value = serde_json::to_value(&health).expect("health serialises");
+    assert_eq!(
+        value["near_ai_staging"],
+        serde_json::json!(cfg!(feature = "near-ai-staging"))
+    );
+}
+
+fn near_ai_host_lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map = pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    move |key: &str| map.get(key).cloned()
+}
+
+/// Every NEAR AI host setting the boot guard resolves.
+const NEAR_AI_HOST_SETTINGS: [&str; 4] = [
+    "TRACE_COMMONS_NEAR_AI_BASE_URL",
+    "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL",
+    "TRACE_NEAR_AI_PRIVACY_BASE_URL",
+    "TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT",
+];
+
+#[cfg(feature = "near-ai-staging")]
+fn staging_near_ai_env() -> Vec<(&'static str, &'static str)> {
+    let mut pairs: Vec<(&'static str, &'static str)> = NEAR_AI_HOST_SETTINGS
+        .iter()
+        .map(|setting| (*setting, "https://cloud-stg-api.near.ai/v1"))
+        .collect();
+    pairs.push(("TRACE_PRIVACY_FILTER_BACKEND", "near-ai"));
+    pairs
+}
+
+fn coherence_refusal(pairs: &[(&str, &str)]) -> Option<String> {
+    near_ai_host_coherence_from_lookup(&near_ai_host_lookup(pairs))
+        .err()
+        .map(|error| format!("{error:#}"))
+}
+
+/// Staging design 3.9: a staging ingest refuses to boot when any NEAR AI host
+/// it would call is not the staging host, setting by setting.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_boot_refuses_each_production_near_ai_setting() {
+    let base = staging_near_ai_env();
+    assert_eq!(coherence_refusal(&base), None);
+    for setting in NEAR_AI_HOST_SETTINGS {
+        let pairs = base
+            .iter()
+            .map(|(key, value)| {
+                if *key == setting {
+                    (*key, "https://cloud-api.near.ai/v1")
+                } else {
+                    (*key, *value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let refusal = coherence_refusal(&pairs).unwrap_or_else(|| panic!("{setting} refused"));
+        assert!(refusal.contains(setting), "{refusal}");
+    }
+}
+
+/// Unset, the attestation base defaults to the production gateway, so a
+/// staging ingest that leaves it unset is refused.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_refuses_an_unset_attestation_base() {
+    let pairs = staging_near_ai_env()
+        .into_iter()
+        .filter(|(key, _)| *key != "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL")
+        .collect::<Vec<_>>();
+    let refusal = coherence_refusal(&pairs).expect("unset attestation base refused");
+    assert!(
+        refusal.contains("TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL"),
+        "{refusal}"
+    );
+}
+
+/// Unset, the privacy-filter base defaults to production. That default is
+/// called only when the NEAR AI privacy backend is selected.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_refuses_an_unset_privacy_base_only_on_the_near_ai_backend() {
+    let without_base = staging_near_ai_env()
+        .into_iter()
+        .filter(|(key, _)| *key != "TRACE_NEAR_AI_PRIVACY_BASE_URL")
+        .collect::<Vec<_>>();
+    let refusal = coherence_refusal(&without_base).expect("defaulted privacy base refused");
+    assert!(
+        refusal.contains("TRACE_NEAR_AI_PRIVACY_BASE_URL"),
+        "{refusal}"
+    );
+
+    let self_hosted = without_base
+        .iter()
+        .map(|(key, value)| {
+            if *key == "TRACE_PRIVACY_FILTER_BACKEND" {
+                (*key, "self-hosted")
+            } else {
+                (*key, *value)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(coherence_refusal(&self_hosted), None);
+
+    // The scorer and the receipt endpoint have no default: unset, no host
+    // is called or published.
+    let minimal = [(
+        "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL",
+        "https://cloud-stg-api.near.ai/v1",
+    )];
+    assert_eq!(coherence_refusal(&minimal), None);
+}
+
+/// Staging design 3.9: a default ingest refuses a NEAR AI setting on the
+/// staging host, and boots with every default.
+#[cfg(not(feature = "near-ai-staging"))]
+#[test]
+fn a_default_ingest_boot_refuses_each_staging_near_ai_setting() {
+    assert_eq!(coherence_refusal(&[]), None);
+    assert_eq!(
+        coherence_refusal(&[("TRACE_PRIVACY_FILTER_BACKEND", "near-ai")]),
+        None
+    );
+    for setting in NEAR_AI_HOST_SETTINGS {
+        let pairs = [
+            (setting, "https://cloud-stg-api.near.ai/v1"),
+            ("TRACE_PRIVACY_FILTER_BACKEND", "near-ai"),
+        ];
+        let refusal = coherence_refusal(&pairs).unwrap_or_else(|| panic!("{setting} refused"));
+        assert!(refusal.contains(setting), "{refusal}");
+    }
+}
+
+/// The refusal names the control and the setting, never the value: a
+/// configured URL can carry a credential or an internal host name.
+#[test]
+fn the_refusal_names_the_setting_never_the_value() {
+    let value = if cfg!(feature = "near-ai-staging") {
+        "https://refusal-marker-7f3a.invalid/v1?marker=refusal-marker-91c2"
+    } else {
+        "https://cloud-stg-api.near.ai/v1?marker=refusal-marker-91c2"
+    };
+    let refusal = coherence_refusal(&[
+        ("TRACE_COMMONS_NEAR_AI_BASE_URL", value),
+        (
+            "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL",
+            "https://cloud-stg-api.near.ai/v1",
+        ),
+    ])
+    .expect("refused");
+    assert!(
+        refusal.contains("missing_control:near_ai_staging_host_coherence"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.contains("TRACE_COMMONS_NEAR_AI_BASE_URL"),
+        "{refusal}"
+    );
+    for fragment in ["refusal-marker", "cloud-stg-api", "near.ai", "https://"] {
+        assert!(!refusal.contains(fragment), "{fragment} in {refusal}");
+    }
+}
+
 /// AGPL-3.0 section 13: a user who interacts with this program over a network
 /// must be offered the Corresponding Source. Pilot contributors reach the
 /// ingest API and never see the repository, so the offer has to be on the wire

@@ -350,6 +350,11 @@ Spec: sections 3.1-3.8, 3.10, 3.12.
 - [ ] **Steps 2-4.** No `gcloud` command runs in this task.
 - [ ] **Step 5: Commit** — `Parameterise the pilot deploy for a staging server`.
 
+**Notes from Task 7's boot guard (#1548):**
+- `staging.env.template` must always set `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL`, even with no scorer configured. Unset, it resolves to the production gateway, and a staging ingest refuses to boot.
+- The guard accepts only the exact staging API host. If NEAR AI staging serves per-model completions hosts (spec open item 3), a staging scorer configured on one is refused at boot. Once that item is answered, either let the staging build accept those hosts, or add their digests to the default build's refusal so a production ingest cannot name them.
+- `TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL` is not checked. The self-hosted filter is not built for staging (spec open item 4); if it is, the staging build should refuse any NEAR AI host other than staging there too.
+
 ---
 
 ### Task 12: Runbook and tester guide (`staging-runbook`)
