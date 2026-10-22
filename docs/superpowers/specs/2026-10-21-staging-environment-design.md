@@ -99,6 +99,19 @@ All dated 2026-10-21. The owner's words are quoted.
   updates bucket. The publisher can write only there. The artifacts bucket
   stays private: it is the staging server's object store and holds its
   database dumps.
+- **(S16) Replay the RTMR3 event log.** Asked what a staging pin must
+  cover once `rtmr3` is not pinned, the owner chose "Replay rtmr3 log
+  (Recommended)" (2026-10-22), whose text was: "The re-sign tool and the
+  app replay the rtmr3 event log from the compose-manager record and check
+  the app ID, key provider and post-boot compose actions against an
+  allowlist. Same guarantee as production, survives restarts. More work,
+  and it delays a usable staging build." So a staging pin set pins `mrtd`,
+  `rtmr0`, `rtmr1`, `rtmr2` and `mrconfigid`, and both the re-sign tool
+  and the app replay RTMR3 from the event log, require the replay to equal
+  the verified model quote's RTMR3, and check every event against a signed
+  allowlist (5.2, 5.4, 5.5). The register set never ships without the
+  replay. Which record's log replays the model quote's RTMR3 is confirmed
+  first (5.2); the rule is the replay, not the record.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -232,6 +245,55 @@ Checked live and in NEAR AI's public repositories on 2026-10-21:
 - Staging attestation chains to a different dstack KMS than production, and
   measurements change when the image changes. (nearai/cvm-ansible-playbooks
   `vars/cloud_api_stg.yaml`, `docs/staging-on-plucky.md`.)
+
+### Verified on 2026-10-22: the staging attestation report
+
+Measured live against `https://cloud-stg-api.near.ai/v1`, model
+`Qwen/Qwen3.8-27B`, with
+`GET /v1/attestation/report?model=Qwen/Qwen3.8-27B&nonce=<fresh 32-byte hex>&signing_algo=ecdsa`.
+The method was a throwaway program, not committed, built at `main` commit
+`7d6c808af`: it passed each quote to
+`trace_commons_server::near_attestation::client::HttpAttestationClient::fetch_collateral`
+and then to `trace_commons_attestation::quote::verify_quote`. The register
+values are deliberately not recorded here. They may change when staging
+redeploys; a probe across a staging redeploy, recording for each register
+whether it changed, is still to be done.
+
+- **The gateway serves attestation, and is the configured base.**
+  `GET /v1/attestation/report?model=...&nonce=...` on the gateway returns
+  `gateway_attestation` and a `model_attestations` array, one entry per
+  requested model. Each entry has its own `intel_quote`, `signing_address`,
+  `signing_public_key`, `nvidia_payload` and an `info` object without
+  `tcb_info`. The gateway reports `app_name` `dstack-0.5.11`, the model
+  enclave `dstack-nvidia-0.5.12`. Whether staging also has per-model
+  completions hosts is **unconfirmed**: production's gateway returns the
+  same `gateway_attestation` + `model_attestations` shape
+  (`crates/trace-commons-contributor/src/routing/attestation_report.rs:197`),
+  and production does have per-model hosts that its report never lists, so
+  this report cannot tell the two apart.
+- **Two of the three quotes were verified.** The gateway quote and the
+  model entry quote for `Qwen/Qwen3.8-27B` both verify against Intel
+  collateral, TCB status UpToDate with no advisories, and both bind the
+  probe's nonce at `report_data[32..64]`. The quote inside
+  `compose_manager_attestation` was **not** verified, and the probe did not
+  check whether it binds the nonce.
+- **Each model entry carries a `compose_manager_attestation`**: runtime
+  compose actions with their own quote. Runtime compose actions extend
+  RTMR3.
+- **MRCONFIGID is the v1 layout.** The model entry quote's MRCONFIGID was
+  `01`, then the 32-byte compose hash, then zero padding (fifteen bytes).
+  That is config-id v1 as `measurements.rs` describes it and as `quote.rs`
+  (`mr_config_id_commits_to_the_reports_compose_hash`) asserts for
+  production's fixture. v1 commits to the compose hash only. It does not
+  commit to the app id or the key provider; only the v2 layout does
+  (`measurements.rs:61-62`).
+- **The server's drill does not parse this shape.** It reads only the
+  single-report shape that a production per-model completions host returns,
+  so against staging it fails `ReportFetched: malformed_response`. A server
+  change is in progress separately (branch `staging-gateway-quotes`). That is
+  follow-up work, not done here.
+- **Still unknown:** whether an API key minted before a redeploy survives the
+  JWT rotation.
 
 ## 1. Goal and non-goals
 
@@ -428,9 +490,10 @@ too.
 | `TRACE_COMMONS_COMMUNITY_*` | off; staging has no public community page |
 | `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME`, `_REMOTE_OBJECT_STORE_*` | the `tc-staging` key and staging bucket |
 
-Whether staging NEAR AI serves per-model completions hosts like the pilot's
-is unknown; the gateway base works for both the scorer and the filter, so
-staging uses it. Open item 6.
+The staging gateway serves attestation and is the configured base for both
+the scorer and the filter. Whether staging also has per-model completions
+hosts is unconfirmed (Verified on 2026-10-22); until it is, staging uses the
+gateway base. Open item 3.
 
 ### 3.9 Every server NEAR AI host is staging: a boot guard
 
@@ -671,21 +734,135 @@ The payload:
   "sequence": 42,
   "issued_at": "2026-10-21T18:00:00Z",
   "expires_at": "2026-10-28T18:00:00Z",
-  "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,mrconfigid=<96 hex>"]
+  "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,rtmr3=<96 hex>"]
 }
 ```
+
+A v1 document carries production's register form. The S16 set (`mrtd`,
+`rtmr0-2`, `mrconfigid`) appears only in a v2 document, beside its
+allowlist (below).
 
 The signature is over `b"trace-commons-near-ai-pins/v1\n" || payload bytes`,
 so the key signs nothing else usefully. Each set is `ExpectedMeasurements`
 syntax and must parse; any one set matching is a pass, as today. The
-re-sign tool records which registers each set names. Its default mirrors
-what production pins today, `mrtd` and `rtmr0-3`
-(`deploy/pilot-gcp/ingest.env.template:66`,
-`docs/operator/near-attestation-drill.md`). Whether staging should drop
-`rtmr3` (which may change per boot under dstack and would then force a
-re-sign on every restart) or add `mrconfigid` (which commits to the
-compose hash) is open item 6. Several sets cover a rolling deploy where
-two images serve at once.
+re-sign tool records which registers each set names. Several sets cover a
+rolling deploy where two images serve at once. The tool re-verifies the
+quote on every run and never copies `info.tcb_info` into a set.
+
+**Which registers.** Production and staging differ, and are stated
+separately:
+
+- Production pins `mrtd` and `rtmr0-3`
+  (`deploy/pilot-gcp/ingest.env.template:66`,
+  `docs/operator/near-attestation-drill.md`). Its `rtmr3` pin is a static
+  value, so it pins one instance of the image; production does not replay
+  any event log, and a restart of that instance is a mismatch.
+- The staging re-sign tool's default, by owner decision S16, is `mrtd`,
+  `rtmr0`, `rtmr1`, `rtmr2` and `mrconfigid`, with RTMR3 replayed and
+  checked against an allowlist (below) instead of pinned. That default
+  ships only together with the replay. Until the replay lands, the tool's
+  default stays production's `mrtd` and `rtmr0-3` (plan Task 6, Task 6b).
+
+**Why RTMR3 cannot be pinned statically.** dstack extends RTMR3 at boot
+with an `instance-id` seeded from `getrandom`, so two instances of
+identical code differ and any restart or redeploy is a mismatch
+(`crates/trace-commons-attestation/src/measurements.rs:68-70`). Runtime
+compose actions also extend it after boot. Neither has anything to do with
+whether the code changed.
+
+**Why dropping RTMR3 alone is not enough.** Staging's MRCONFIGID is the
+v1 layout: `01`, the 32-byte compose hash, fifteen zero bytes (Verified on
+2026-10-22). v1 commits to the compose hash and nothing else; app id and
+key provider are only in v2 (`measurements.rs:61-62`). So `mrtd`,
+`rtmr0-2` and `mrconfigid` say "booted from the pinned image and compose".
+They do not say which KMS released the keys, and they say nothing about
+what ran after boot: a model CVM could boot from the pinned compose, then
+add or swap a container through a compose action (one that logs prompts,
+say), and still match the set, and its provider_tee key would still be
+accepted. RTMR3 is the only register that records those things, which is
+why S16 replays it.
+
+**The RTMR3 replay.** For a model entry, start from 48 zero bytes and, for
+each RTMR3 event in the log in order, set `rtmr3 = SHA-384(rtmr3 ||
+digest)`. The result must equal `rtmr[3]` of the **verified** model entry
+quote, byte for byte; otherwise the log is not the one that quote measured
+and the entry is refused. The digest of each event is recomputed from its
+name and payload the way dstack derives it, never taken from the log's
+digest field; an event whose recorded digest differs is refused, because
+otherwise a log could carry the right digests beside invented payloads.
+Only after the replay matches are the events read.
+
+Which log: the one that, replayed, reproduces the verified model entry
+quote's RTMR3. There are two candidates, and the probe did not settle
+which it is:
+
+- the model entry's own event log. Production model-host reports carry it
+  at `info.tcb_info.event_log`
+  (`crates/trace-commons-server/src/near_attestation/measurements.rs:376`;
+  the checked-in fixtures trim it, `receipt.rs:1808`), but the staging
+  model entry's `info` has no `tcb_info`, so the probe saw no log there;
+- the event log in the entry's `compose_manager_attestation`, the record
+  the owner's option named. It sits beside its own quote, which the probe
+  did not verify.
+
+Plan Task 6b settles this first, from an untrimmed staging capture kept
+out of the repo: verify the compose-manager quote, compare its `mrtd` and
+`rtmr0-2` with the model entry quote's (equal registers indicate the same
+TD, and then its log is the model TD's log), and replay each candidate.
+Whatever the answer, the rule is the replay: a log that does not replay to
+the verified model quote's RTMR3 is refused, and if no candidate does,
+`observe` emits nothing and the app pins nothing.
+
+**The allowlist.** A replayed log is accepted only if every event in it is
+allowed:
+
+- the `instance-id` event, with any value: it is the per-boot random value
+  the replay exists to absorb, so it is the one event whose value is not
+  checked;
+- the compose-hash event, whose value must equal the compose hash in the
+  quote's MRCONFIGID;
+- the app-id event, whose value must equal the staging app id in the
+  allowlist;
+- the key-provider event, whose value must equal the staging KMS identity
+  in the allowlist (from `vars/cloud_api_stg.yaml`'s KMS, confirmed against
+  a capture);
+- every post-boot compose action, by event name and digest, each listed in
+  the allowlist;
+- the other boot events dstack writes, by name, with the values the
+  allowlist lists.
+
+An event whose name is not listed, or whose value is not the listed one, is
+refused. The allowlist is a list of what may appear, not of what must, so a
+log missing an event is not by itself a refusal, but the replay still has
+to match.
+
+Where the allowlist comes from and how it is reviewed: `observe` prints the
+decoded RTMR3 events of each model entry (name and digest, and the payload
+for app id, key provider and compose actions; never the instance-id value).
+The operator reviews them and commits the allowlist as a file under
+`deploy/staging-gcp/`, so every change to it is a reviewed pull request. A
+new compose action that NEAR AI staging starts using therefore fails closed
+until someone has looked at it and merged it. `sign` reads that file and
+carries the allowlist **inside the signed payload**, next to `sets`, so the
+same key, sequence and expiry cover both and there is no second signature
+to check. Adding it bumps the payload format to
+`trace-commons-near-ai-pins/v2` (and the domain-separation prefix with it);
+a replay-aware build refuses a v1 document, so a document without an
+allowlist cannot pass as one with an empty allowlist. The v2 payload adds
+one field:
+
+```json
+{
+  "format": "trace-commons-near-ai-pins/v2",
+  "...": "the v1 fields, unchanged",
+  "rtmr3_allowlist": {
+    "app_id": "<40 hex>",
+    "key_provider": "<the staging KMS identity, as the event carries it>",
+    "boot_events": [{"name": "<event name>", "payload": "<hex>"}],
+    "compose_actions": [{"name": "<event name>", "digest": "<96 hex>"}]
+  }
+}
+```
 
 ### 5.3 Serving
 
@@ -703,11 +880,23 @@ operators run it, nothing ships it) with `required-features = ["near-ai-staging"
   quote with `trace_commons_attestation::quote::verify_quote` against
   current Intel collateral, check the nonce binding, and print the distinct
   measurement sets. It refuses to print a set from a quote that does not
-  verify.
+  verify. It emits sets **only** from `model_attestations[].intel_quote`
+  for the requested model. The gateway quote and the compose-manager quote
+  are verified but never emitted as a pin set: since any one set matching
+  passes, a gateway-image set in `current.json` would let the app accept a
+  model entry whose quote comes from the gateway image, and take a
+  gateway-held key as the model's provider_tee signer. #1563 already reads
+  only these quotes (`pin_observe::observe_model` calls
+  `model_entry_quotes(&report, model)`); plan Task 6 pins it with a test.
+  Once the replay lands (S16), `observe` also replays each model entry's
+  RTMR3 log, refuses the run on a mismatch, and prints the decoded events
+  for the allowlist review (5.2).
 - `sign --sets <file> --sequence <n> --ttl-days <d>`: read the private key
   from stdin only (never argv, never a file it writes), build the payload,
   sign, and write `current.json`. It refuses a sequence not above the one in
-  the currently served file and a TTL above 14 days.
+  the currently served file and a TTL above 14 days. With the replay, it
+  also reads the reviewed allowlist file from `deploy/staging-gcp/` and
+  puts it in the payload (5.2).
 - `verify <file>`: what the app does, for the operator to check.
 
 The private key is `tc-staging-nearai-pin-signing-key` in Secret Manager,
@@ -725,13 +914,21 @@ then copies `current.json` to the VM's pin directory and updates the
 staging ingest's own pin (5.9). `docs/operator/staging-environment.md`
 holds the procedure.
 
-What a staging pin then means, and no more: *a real TDX enclave, running the
-image NEAR AI staging was serving when we observed it, under a key we hold*.
-It is not a review of that image. That is the same claim production's pins
-make about production.
+What a staging pin then means, and no more (S16): *a real TDX enclave that
+booted the image and compose NEAR AI staging was serving when we observed
+it, whose RTMR3 log replays to its quote, names the staging app id and the
+staging KMS, and shows no compose action after boot that we have not
+reviewed; the set is signed by a key we hold*. It is not a review of that
+image. Production's pins cover the same ground by a different mechanism: a
+static `rtmr3` fixes one instance's whole log, so a restart is a mismatch
+and a re-pin. Until the replay lands, a staging
+build must not pin `mrtd`, `rtmr0-2` and `mrconfigid` alone, because that
+set says only "booted from the pinned compose" (5.2).
 
-When to re-sign: after a NEAR AI staging redeploy changes the measurements,
-which `observe` shows. Staging redeploys after every cloud-api merge, so
+When to re-sign: after a NEAR AI staging redeploy that changes the
+measurements or the allowlisted events, which `observe` shows. Whether a
+redeploy changes each register is not yet measured (Verified on
+2026-10-22). Staging redeploys after every cloud-api merge, so
 this may be frequent. The default is a manual re-sign plus a weekly expiry.
 Automating it (a scheduled job holding the key) is open item 7.
 
@@ -752,6 +949,14 @@ sets from the signed document instead of ingest's unsigned one:
    accepted (a `near-ai-pins-sequence` file): lower is refused; equal with
    different payload bytes is refused; higher is accepted and recorded.
 5. Hand the sets to the existing checks.
+6. With the replay (S16, plan Task 6b): for the model entry whose quote
+   matched a set, replay the RTMR3 log taken from the same report as that
+   quote (5.2), require it to equal the verified quote's `rtmr[3]`, and
+   check every event against the payload's `rtmr3_allowlist`. A key is
+   earned only if the set, the replay and the allowlist all pass. Until
+   this step lands, a staging build pins with the tool's current default
+   (production's `mrtd` and `rtmr0-3`), never with the S16 register set
+   alone.
 
 The production unsigned path and the env override are not compiled into a
 staging build; the signed document is the only source.
@@ -771,6 +976,9 @@ nothing".
 | Expired, or issued in the future | pin nothing |
 | Sequence rollback, or same sequence with other bytes | pin nothing |
 | A set that does not parse | pin nothing (the whole document) |
+| A v1 document in a replay-aware build | pin nothing |
+| RTMR3 log missing, or its replay differs from the verified quote's RTMR3 | earn no key for that entry |
+| An RTMR3 event not in the allowlist, or with a value other than the listed one | earn no key for that entry |
 
 The daemon's status reports which of these applies, as a label (for
 example `pins_expired`), so a tester can say "proof marks stopped, status
@@ -805,6 +1013,9 @@ The staging ingest checks receipts too (the signer resolver and the
 attestation drills), from `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS`,
 which takes one set. `sign` also prints that variable's line for the first
 set; the operator puts it in the staging drop-in and restarts ingest. The
+ingest does not replay RTMR3, so that line keeps production's form (`mrtd`
+and `rtmr0-3`, from the same observation) and never the S16 register set
+without the replay; it goes stale when the model instance restarts. The
 ingest's unsigned `/v1/contributors/me/near-ai-measurements` keeps serving,
 and a staging device ignores it.
 
@@ -980,7 +1191,9 @@ The plan breaks this into small PRs. In order:
 3. State directory override check (S11; it replaced a channel file).
 4. Signed pin format and verifier in the attestation crate (base: PR 1).
 5. Staging pin source in the daemon (needs 2 and 4).
-6. Re-sign tool.
+6. Re-sign tool. Then 6b: RTMR3 replay and allowlist in the re-sign tool
+   and the app (S16; needs 5 and 6). The S16 register set becomes the
+   default there, not before.
 7. Server boot guard and `/health` flag (base: #1542's branch).
 8. FFI channel call and Swift channel use.
 9. Bundle channel files and build scripts.
@@ -999,11 +1212,25 @@ profile is in `macos/` (#1545). Still open:
 
 1. **Apple setup (owner).** Done (see above).
 2. **The staging icon.**
-3. **NEAR AI facts still needed:** whether staging has per-model completions
-   hosts; which registers staging pins (5.2); staging's current
-   measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
-   whether an API key minted before a redeploy survives the JWT rotation or
-   only sessions break.
+3. **NEAR AI facts.** Partly answered on 2026-10-22 (see Verified on
+   2026-10-22). The register set is decided: owner decision S16, `mrtd`,
+   `rtmr0-2` and `mrconfigid` with RTMR3 replayed from the event log and
+   checked against a signed allowlist (5.2); it ships only with the replay.
+   The gateway quote and the `Qwen/Qwen3.8-27B` model entry quote verify,
+   TCB UpToDate; the compose-manager quote was not verified. Staging's
+   MRCONFIGID is the v1 layout. The gateway serves attestation and is the
+   configured base. The measurements are not recorded here and are
+   collected by the re-sign tool. The per-model receipt signers for
+   `Qwen/Qwen3.8-27B` are in the report's `signing_address` and are
+   checked per request, not pinned. Still open:
+   - whether staging has per-model completions hosts (the report cannot
+     tell; ask NEAR AI or read the `cvm-ansible-playbooks` staging vars);
+   - which record's event log replays the model quote's RTMR3 (5.2; plan
+     Task 6b, step 1);
+   - a probe across a staging redeploy recording, per register, whether it
+     changed;
+   - whether an API key minted before a redeploy survives the JWT rotation
+     or only sessions break.
 4. **Witness and self-hosted filter in staging.** Not built now. That no
    longer blocks sign-in: resolved 2026-10-22, a staging build creates NEAR
    AI accounts without the admission ledger, which is what needed the
