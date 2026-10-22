@@ -1833,12 +1833,43 @@ mod tests {
     fn a_store_refuses_the_other_channels_directory() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join(CHANNEL_FILE), other_channel()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         assert_eq!(
             channel_refusal(ConfigStore::open(root.path().to_path_buf())),
             StateDirChannelRefusal::OtherChannel
         );
         assert_eq!(channel_mark(root.path()).as_deref(), Some(other_channel()));
+        // The refusal comes before the 0700 chmod: nothing in the directory
+        // changes, its mode included.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(root.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn logging_out_and_wiping_keep_the_channel_mark() {
+        // The mark describes the directory, not an enrollment.
+        let (d, store) = store();
+        store.save_config(&sample_config()).unwrap();
+        let marked = channel_mark(d.path());
+        assert!(marked.is_some());
+
+        store.remove_enrollment_files().unwrap();
+        assert!(store.load_config().unwrap().is_none());
+        assert_eq!(channel_mark(d.path()), marked, "unenroll removed the mark");
+
+        store.save_config(&sample_config()).unwrap();
+        store.wipe().unwrap();
+        assert!(store.load_config().unwrap().is_none());
+        assert_eq!(channel_mark(d.path()), marked, "wipe() removed the mark");
     }
 
     #[test]
