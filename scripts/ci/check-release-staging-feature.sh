@@ -326,9 +326,12 @@ check() {
     )
   fi
 
-  # 5b. Every job environment in the staging workflow is exactly `staging`,
-  #     inline or as a block's name:. The release environment carries the
-  #     production publishing identity (its WIF subject is bound to it).
+  # 5b. Any job environment in the staging workflow is exactly `staging`,
+  #     inline or as a block's name:. A job may name no environment at all
+  #     (owner decision 2026-10-22: no approval gate; the staging secrets are
+  #     repository secrets with staging names, which check 4 holds). The
+  #     release environment carries the production publishing identity (its
+  #     WIF subject is bound to it).
   if [[ -f "$STAGING_WORKFLOW" ]]; then
     while IFS= read -r hit; do
       echo "REFUSING: $STAGING_WORKFLOW: $hit" >&2
@@ -599,6 +602,7 @@ self_test() {
     "the staging workflow taking a dispatch input|.github/workflows/staging-macos.yml|s/^  workflow_dispatch:\\n/\$&    inputs:\\n      ref:\\n        type: string\\n        required: false\\n/m"
     "a build script defaulting the channel to production and reading its file|macos/scripts/make-app-bundle.sh|s/\\z/TC_CHANNEL=\"\\\${TC_CHANNEL:-production}\"\\nsource \"\\\$(dirname \"\\\$0\")\\/..\\/channels\\/\\\${TC_CHANNEL}.env\"\\nif [[ \"\\\$TC_CHANNEL\" == production ]]; then :; fi\\n/"
     "a release workflow pinning the production channel|.github/workflows/release-apps.yml|s/\\z/env:\\n  TC_CHANNEL: production\\n/"
+    "the staging macOS job declaring the staging environment|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment: staging\\n/m"
     "the staging workflow declaring the staging environment|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: staging\\n/m"
     "the staging workflow reading its own staging secrets|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.STAGING_SPARKLE_PUBLIC_ED_KEY }} \\\${{ secrets.GCP_WIF_PROVIDER_STAGING }}\"\\n/"
     "the staging workflow creating a pre-release over two lines|.github/workflows/staging-macos.yml|s/\\z/      - run: |\\n          gh release create staging-x dist\\/a.dmg \\\\\\n            --prerelease\\n/"
@@ -684,6 +688,8 @@ self_test() {
     "a release workflow with an inline release trigger|.github/workflows/release-contributor.yml|s/^on:\\n  push:\\n    tags:\\n      - \"contributor-v\\*\"\\n/on: release\\nx:\\n/m"
     # Production credentials the staging build must not borrow.
     "the staging workflow using the release environment|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment: release\\n/m"
+    "the staging macOS job using the release environment|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment: release\\n/m"
+    "the staging macOS job using an environment of another name|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment:\\n      name: production\\n/m"
     "the staging workflow using the release environment by name|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: 'release'\\n/m"
     "the staging workflow reading the tap token|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.HOMEBREW_TAP_TOKEN }}\"\\n/"
     "the staging workflow reading the flatpak publisher|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}\"\\n/"
