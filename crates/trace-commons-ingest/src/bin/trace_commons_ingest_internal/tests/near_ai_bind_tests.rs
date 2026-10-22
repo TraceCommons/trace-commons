@@ -3396,3 +3396,77 @@ mod staging_allow_list {
         drop_tenants(&admin, &[&tenant, &account.tenant]).await;
     }
 }
+
+// --- Open sign-up (staging S12) ----------------------------------------------
+
+/// Anyone with a NEAR AI account signs up (staging spec S12, section 3.12).
+///
+/// A staging build admits a new NEAR AI login exactly as a default build does:
+/// no invite and no list, through the sign-in and through binding a passkey
+/// account. This test has no `cfg`, so it runs in both builds and holds them
+/// to the same answer. The subjects are minted here, not by the fixtures, so
+/// nothing a fixture does on their behalf can be what lets them in.
+mod open_sign_up {
+    use super::*;
+
+    fn unseen_subject() -> String {
+        format!("auth0|open-sign-up-{}", Uuid::new_v4().simple())
+    }
+
+    #[tokio::test]
+    async fn a_new_near_ai_login_gets_an_account_with_no_invite() {
+        let Some(h) = harness().await else { return };
+        let admin = h.admin().await;
+
+        // Sign-in: a login nobody has seen gets a tenant, account and anchor.
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let reply = finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let tenant = reply.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
+        assert_eq!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .len(),
+            1,
+            "one anchor for the new login"
+        );
+        assert_eq!(
+            audit_metadata(&admin, &tenant, "near_ai_login_provisioned").await,
+            vec![serde_json::json!({"identity": "near_ai_login", "admission": "not_granted"})]
+        );
+        assert_eq!(
+            count(
+                &admin,
+                "SELECT count(*) FROM trace_account_invite_grants WHERE tenant_id = $1",
+                &[tenant.as_str()],
+            )
+            .await,
+            0,
+            "no invite was used"
+        );
+
+        // Bind: a passkey account binds a login nobody has seen.
+        h.sign_in_to_near_ai_as(&unseen_subject());
+        let account = unbound_account(&h.backend).await;
+        let reply = bind(&h, &account, &Device::new()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert_eq!(reply.json()["outcome"], "bound");
+        drop_tenants(&admin, &[&tenant, &account.tenant]).await;
+    }
+}
