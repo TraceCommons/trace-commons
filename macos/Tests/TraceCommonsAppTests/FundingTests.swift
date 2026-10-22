@@ -228,6 +228,21 @@ final class FundingTests: XCTestCase {
         XCTAssertEqual(status.destination?.browserURL?.absoluteString, ready()["browser_url"] as? String)
     }
 
+    /// Staging design 4.1: the dashboard origin is the dylib's, never a Swift
+    /// copy, so a staging build links to the staging dashboard.
+    func testTheDashboardOriginComesFromTheDylib() throws {
+        let dylib = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
+        let destination = try expected()
+        XCTAssertEqual(
+            destination.browserURL?.absoluteString,
+            "\(dylib.nearAiDashboardOrigin)/dashboard/organizations/\(organization)/credits")
+        XCTAssertEqual(
+            destination.browserURL(dashboardOrigin: "https://dashboard.example.invalid")?.absoluteString,
+            "https://dashboard.example.invalid/dashboard/organizations/\(organization)/credits")
+        XCTAssertNil(destination.browserURL(dashboardOrigin: nil), "no dylib answer, no link")
+        XCTAssertNil(destination.browserURL(dashboardOrigin: ""))
+    }
+
     func testMalformedOrganizationIDsCannotProduceDestinations() throws {
         for id in ["", ".", "..", "org/other", "org?other", "org#other", "org%2fother",
                    "org name", "org\nname", "é", String(repeating: "a", count: 129)] {

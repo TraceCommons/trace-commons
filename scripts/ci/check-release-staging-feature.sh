@@ -519,6 +519,26 @@ check() {
     )
   done
 
+  # 9. The bundle's Info.plist, rendered with no channel chosen, declares
+  #    exactly one TCChannel and it is `production`. The app refuses to start
+  #    when TCChannel is missing or disagrees with its dylib (spec 4.3), so a
+  #    plist that dropped the key would ship a bundle that never starts, and
+  #    one naming staging would refuse around a production dylib. When
+  #    info-plist.sh reads a channel file, that file must join the self-test
+  #    copy below or the self-test's clean tree stops rendering.
+  local plist channels
+  if plist="$(env -u TC_CHANNEL -u TC_SPARKLE_PUBLIC_ED_KEY bash macos/scripts/info-plist.sh 0.0.0 0 2>/dev/null)"; then
+    channels="$(grep -c '<key>TCChannel</key>' <<<"$plist" || true)"
+    if [[ "$channels" != 1 ]] \
+      || ! grep -q '<key>TCChannel</key><string>production</string>' <<<"$plist"; then
+      echo "REFUSING: macos/scripts/info-plist.sh: the rendered plist must declare TCChannel exactly once, as production (found $channels)" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    echo "REFUSING: macos/scripts/info-plist.sh did not render" >&2
+    failures=$((failures + 1))
+  fi
+
   if ((failures > 0)); then
     echo "$failures release staging-feature violation(s)." >&2
     return 1
@@ -651,6 +671,10 @@ self_test() {
     "the staging workflow reading the production Sparkle key|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.SPARKLE_PUBLIC_ED_KEY }}\"\\n/"
     "the staging workflow reading the production WIF provider|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_WIF_PROVIDER }}\"\\n/"
     "the staging workflow creating a full release|.github/workflows/staging-macos.yml|s/\\z/      - run: gh release create staging-x dist\\/a.dmg\\n/"
+    # The bundle's declared channel (spec 4.3).
+    "the bundle plist without TCChannel|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n//m"
+    "the bundle plist naming the staging channel|macos/scripts/info-plist.sh|s/<key>TCChannel<\\/key><string>production</<key>TCChannel<\\/key><string>staging</"
+    "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>production<\\/string>\\n/\$&\$&/m"
     # A TOML escape spells the feature without its literal name.
     "the FFI enabling it through a TOML escape|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"near-ai-\\\\u0073taging\"] }#m"
   )

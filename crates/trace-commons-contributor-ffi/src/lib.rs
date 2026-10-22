@@ -783,6 +783,54 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
     })
 }
 
+/// This build's channel identity: what the macOS app needs from
+/// `trace_commons_contributor::channel` so it never holds its own copy
+/// (staging design, sections 4.1 and 4.3).
+///
+/// ```json
+/// {"channel":"production","state_dir_name":"trace-commons",
+///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
+///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
+/// ```
+///
+/// `channel` is `production` or `staging`. The macOS app compares `channel`
+/// with its Info.plist `TCChannel` and starts nothing on a mismatch.
+/// `near_ai_dashboard_origin` is where the funding row's credits link points;
+/// it takes no part in that check. No key, secret
+/// or keychain name is in it. Reads nothing and writes nothing; the same
+/// object for every caller on this build. Returns an owned string; free it
+/// with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_build_channel_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::channel;
+        let json = serde_json::json!({
+            "channel": channel::CHANNEL,
+            "state_dir_name": channel::STATE_DIR_NAME,
+            "state_dir_env": channel::STATE_DIR_ENV,
+            "passkey_rp_id": channel::PASSKEY_RP_ID,
+            "url_scheme": channel::URL_SCHEME,
+            "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
+        });
+        Ok(to_owned_cstring(&serde_json::to_string(&json)?))
+    })
+}
+
+/// The sentence the app shows instead of starting when its bundle and this
+/// library disagree on the channel: `health_copy::CHANNEL_MISMATCH`.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::CHANNEL_MISMATCH,
+        ))
+    })
+}
+
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from
 /// `ERR_DAEMON_START_FAILED` (which stays opaque for the reason stated on

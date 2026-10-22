@@ -939,6 +939,13 @@ lives (S5-S9). Still open:
   `privacy_filter_near_ai.rs:19` are not in its file list, and
   `envelope.rs:113` is the privacy-filter default, not the receipt
   endpoint. IronWire does hold its own default host.
+- **The macOS app held two channel values in Swift.** The funding row's
+  credits link (`macos/Sources/TraceCommonsApp/Views/FundingRow.swift`) named
+  the production NEAR AI dashboard, and the invite deep link
+  (`macos/Sources/TraceCommonsApp/DeepLink.swift`) accepted only the
+  production URL scheme. Neither was in the 4.2 table or Task 7a. Both now
+  come from `tc_build_channel_json` (`near_ai_dashboard_origin`,
+  `url_scheme`).
 - **The release check refuses this design as it stands.** It refuses the
   feature name in `deploy/pilot-gcp/*` and the macOS build scripts, and
   refuses any forward of the feature. Section 6.2 is the widening.
