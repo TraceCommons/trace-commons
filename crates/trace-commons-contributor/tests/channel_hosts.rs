@@ -300,6 +300,9 @@ fn source_files() -> Vec<(String, PathBuf)> {
                                 path.strip_prefix(crates).unwrap().to_string_lossy()
                             )
                         });
+                    // The allow-lists name paths with `/`; Windows
+                    // yields `\`.
+                    let relative = relative.replace('\\', "/");
                     files.push((relative, path));
                 }
             }
