@@ -124,6 +124,24 @@ PRODUCTION_DESTINATIONS=(
 # secrets, readable from any workflow, so a staging run naming one could
 # publish to production with the destination held in a variable. Matched as
 # whole names: a staging secret of its own (STAGING_..., ..._STAGING) passes.
+# The only secrets the staging workflow may read: the Developer ID and
+# notary credentials it shares with production, and its own staging-named
+# ones. An allow-list, so a production secret added later is refused without
+# anyone remembering to list it above. The job token is `github.token`.
+STAGING_WORKFLOW_SECRETS=(
+  MACOS_CERTIFICATE_P12_BASE64
+  MACOS_CERTIFICATE_PASSWORD
+  MACOS_SIGNING_IDENTITY
+  MACOS_NOTARY_ASC_KEY_P8_BASE64
+  MACOS_NOTARY_ASC_KEY_ID
+  MACOS_NOTARY_ASC_ISSUER_ID
+  TC_STAGING_SPARKLE_PUBLIC_ED_KEY
+  TC_STAGING_SPARKLE_PRIVATE_ED_KEY
+  TC_STAGING_GCP_WIF_PROVIDER
+  TC_STAGING_GCP_PUBLISHER_SA
+  GITHUB_TOKEN
+)
+
 PRODUCTION_SECRETS=(
   HOMEBREW_TAP_TOKEN
   GCP_FLATPAK_PUBLISHER_SA
@@ -368,6 +386,33 @@ check() {
     )
   fi
 
+  # 5c. The staging workflow reads only the secrets on STAGING_WORKFLOW_SECRETS,
+  #     each by name. Any other use of `secrets` inside an expression (an
+  #     index, toJSON(secrets), an unlisted name) is refused, and so is an
+  #     expression that does not close on its own line, which this scan
+  #     could not read.
+  if [[ -f "$STAGING_WORKFLOW" ]]; then
+    while IFS= read -r hit; do
+      echo "REFUSING: $STAGING_WORKFLOW: $hit" >&2
+      failures=$((failures + 1))
+    done < <(
+      ALLOWED="${STAGING_WORKFLOW_SECRETS[*]}" perl -ne '
+        BEGIN { %ok = map { $_ => 1 } split / /, $ENV{ALLOWED} }
+        next if /^\s*#/;
+        my $line = $_;
+        while ($line =~ /\$\{\{(.*?)\}\}/g) {
+          my $expr = $1;
+          while ($expr =~ /(?<![A-Za-z0-9_.])secrets\b(\s*\.\s*([A-Za-z_][A-Za-z0-9_]*))?/g) {
+            if (!defined $2) { print "line $.: secrets read other than by name\n" }
+            elsif (!$ok{$2}) { print "line $.: the secret $2 is not on the staging list\n" }
+          }
+        }
+        (my $rest = $line) =~ s/\$\{\{.*?\}\}//g;
+        print "line $.: an expression that does not close on its line\n" if $rest =~ /\$\{\{/;
+      ' "$STAGING_WORKFLOW"
+    )
+  fi
+
   # 6. No other workflow or action, and no release, packaging or deploy file,
   #    calls the staging workflow or reads the staging channel file, so
   #    neither can be reached from a release.
@@ -604,7 +649,8 @@ self_test() {
     "a release workflow pinning the production channel|.github/workflows/release-apps.yml|s/\\z/env:\\n  TC_CHANNEL: production\\n/"
     "the staging macOS job declaring the staging environment|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment: staging\\n/m"
     "the staging workflow declaring the staging environment|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: staging\\n/m"
-    "the staging workflow reading its own staging secrets|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.STAGING_SPARKLE_PUBLIC_ED_KEY }} \\\${{ secrets.GCP_WIF_PROVIDER_STAGING }}\"\\n/"
+    "the staging workflow reading its own staging secrets|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.TC_STAGING_SPARKLE_PUBLIC_ED_KEY }} \\\${{ secrets.TC_STAGING_GCP_WIF_PROVIDER }}\"\\n/"
+    "the staging workflow reading the job token as a secret|.github/workflows/staging-macos.yml|s/\\z/      - run: gh api user\\n        env:\\n          GH_TOKEN: \\\${{ secrets.GITHUB_TOKEN }}\\n/"
     "the staging workflow creating a pre-release over two lines|.github/workflows/staging-macos.yml|s/\\z/      - run: |\\n          gh release create staging-x dist\\/a.dmg \\\\\\n            --prerelease\\n/"
   )
 
@@ -691,6 +737,10 @@ self_test() {
     "the staging macOS job using the release environment|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment: release\\n/m"
     "the staging macOS job using an environment of another name|.github/workflows/staging-macos.yml|s/^    runs-on: macos-26\\n/\$&    environment:\\n      name: production\\n/m"
     "the staging workflow using the release environment by name|.github/workflows/staging-macos.yml|s/^    runs-on: ubuntu-latest\\n/\$&    environment:\\n      name: 'release'\\n/m"
+    "the staging workflow reading a secret not on its list|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.AZURE_CLIENT_ID }}\"\\n/"
+    "the staging workflow reading an unlisted secret with a staging name|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.STAGING_SPARKLE_PUBLIC_ED_KEY }}\"\\n/"
+    "the staging workflow reading an unlisted secret by index|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets['AZURE_CLIENT_ID'] }}\"\\n/"
+    "the staging workflow passing every secret on|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ toJSON(secrets) }}\"\\n/"
     "the staging workflow reading the tap token|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.HOMEBREW_TAP_TOKEN }}\"\\n/"
     "the staging workflow reading the flatpak publisher|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}\"\\n/"
     "the staging workflow reading the winget token|.github/workflows/staging-macos.yml|s/\\z/      - run: echo \"\\\${{ secrets['WINGET_PKGS_TOKEN'] }}\"\\n/"
