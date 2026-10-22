@@ -608,9 +608,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -4483,8 +4484,12 @@ It is not tied to whether a session was offered, sent, kept or
 declined. A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
-out of every answer at once. Claude Code rows are per turn; Codex rows are the change
-between the first and last counter only (owner decision D11, open). A Claude
+out of every answer at once. Claude Code rows are per turn; Codex rows hold the change
+between the first and last counter, which every weekly figure reads, and a
+per-turn series beside it, which the Sessions list and drill read (owner
+decision D11, settled 2026-10-20). Each row also stores the session's facts
+(per-model counts and fixed labels, never a path, text or price) for the
+Models answers; a row made before them is read once more. A Claude
 Code session with delegated transcripts is counted from its main file and
 marked `truncated` (partial coverage), never as complete. Each file is read
 line by line, never held whole, so no file is skipped for its size, and
@@ -4498,13 +4503,60 @@ its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks, so it keeps the newest sessions. A
-session the caps evict is marked by its keyed digest and the size and last
-write its row was made from; the marks age out with the rows and are capped
-at 2048, oldest first, so the newest mark stays while any does. A session
-with no row is not read when its last write is no later than the newest
-mark, or, with the store at 2048 sessions, earlier than every row kept: the
-caps would evict it again. An evicted file is read again once it changes,
+sessions written in the last 13 weeks, so it keeps the newest sessions. The
+turn and tool-call caps count Claude Code's per-turn series only. Codex
+per-turn series have their own allowance (owner decision, 2026-10-20):
+196608 turns and 196608 tool calls across every Codex row. Past either,
+Codex rows lose their per-turn series and nothing else, automated sessions'
+first (nothing draws them), then the person's, each oldest first (last
+write, then the order they were counted): the row, its observed change, its dates
+and its facts stay, so the session still counts in every weekly figure. A
+trimmed row is not evicted and gets no mark, and it is not read again while
+its file is unchanged. `insights_sessions` and `insights_session_drill`
+answer it as a Codex row read before the per-turn reader: `turns` and
+`sparkline` are `null`, `tokens` is its observed change, and the drill's
+`series_unavailable` is `not_recorded`. `insights_model_answers` counts it
+in `left_out.unknown_facts`, never as zero turns. The allowance fits about 13
+weeks of heavy Codex use (measured: about 167000 stored turns and 161000
+tool calls), at most about 99 MB of the store file.
+
+Automated sessions (owner decision, 2026-10-20, option (b)) are kept apart
+from the contributor's own. A Codex session is automated when the first
+`session_meta` record in its transcript names a `source` object holding a
+`subagent` key: Codex writes that shape when it starts the thread itself
+(its automatic approvals reviewer, or a thread an agent spawned), and a
+plain label (`cli`, `vscode`, `exec`, `mcp`) otherwise. Only that shape is
+read. A transcript with no `session_meta` or no `source`, `source:
+"unknown"`, a spawned thread that carries a later `session_meta` not
+spawned too (a fork of the person's session), and every Claude Code
+session are unknown, and unknown counts as the person's: no guess sets the
+contributor's work aside. `exec` and `mcp` sessions count as the person's,
+since a person can start either. Automated rows do not count toward the
+2048 sessions or the shared turn and tool-call caps; at most 1024 are kept
+beside them, the oldest evicted first within that allowance, and their
+Codex series stay under the Codex allowance above. The weekly token figures
+count them; past the allowance the oldest are gone from those figures (1024
+keeps two busy weeks of a heavy Codex user's automated sessions, so the
+current week and the one before stay whole). `insights_model_answers` leaves
+them out (`left_out.automated`), and `insights_week`'s `patterns` and
+`insights_sessions` leave them out with no switch to bring them back. A
+Codex row stored before the classification is read once more, within the
+per-poll limits, even when its file is unchanged.
+
+A session the caps evict is marked by its keyed digest and the size and last
+write its row was made from, and by which allowance evicted it; the marks
+age out with the rows and are capped, oldest first, at 2048 for the shared
+caps and 8192 for the automated allowance, so the newest mark stays while
+any does. A session with no row is not read when its last write is no later
+than the newest mark of the shared caps, or, with 2048 of the person's
+sessions stored, earlier than every one of them: the caps would evict it
+again. Automated marks do not bound other sessions, since a late-arriving
+session of the person's would otherwise be skipped; an automated session is
+not read again while its own mark matches its unchanged file. Marks written
+before the automated allowance bound nothing and are dropped at the next
+write, and while a row the pass finds still awaits its classification
+neither bound applies and an eviction of the person's is not marked, so a
+session of the person's that automated rows pushed out is read again. An evicted file is read again once it changes,
 since a write moves its last write past the mark. The limit: a session older
 than the newest mark is not read even when rows leave for another reason,
 such as a Never folder, until that mark ages out of the 13 weeks. Rows are
@@ -4524,7 +4576,20 @@ still finds is read once more for its session digest, even when its file is
 unchanged, within the same per-poll limits; a row whose session is no longer
 found keeps its counters and carries no session digest until it ages out.
 Any other schema reads as
-`store_unreadable` and the pass starts the store again. The digest key is the
+`store_unreadable` and the pass starts the store again.
+
+Downgrade: a row's `facts`, `facts_version`, `automation` and
+`automation_read`, an eviction mark's `automated`, and a route tally's
+`charge` are left out of the file while they hold their defaults (no facts,
+version 0, automation unknown and not looked for, no allowance, no NEAR AI
+call), so a row with none of them is written as a daemon before them wrote
+it. Every row this build reads sets `facts_version` and `automation_read`,
+though, and an older daemon refuses fields it does not know: a store this
+build has written reads as `store_unreadable` there, and that daemon starts
+the store again. Its rows are re-derived from the sessions still on disk;
+eviction marks, route tallies and their NEAR AI charges are gone, and a
+charge cannot be read again once the proxy ledger's 24 hours have passed.
+The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.
@@ -4547,14 +4612,50 @@ hold the highest id and leave the window first; the start time keeps the
 calls left in that window from counting twice, and keeps the calls of a
 proxy ledger that started over from being lost, whether their ids are below
 the old highest or have climbed past it. Only Claude Code and Codex calls are
-folded, the two tools the counter pass counts. `cost_usd`, backend and model names
-are never read into it (owner decision D5, open), and no session ID is
-stored. Calls whose tokens are unknown are kept per bucket, so the answer
+folded, the two tools the counter pass counts. Backend names are never read
+into it, and no session ID is stored.
+
+The tally also keeps the session's **NEAR AI charge** (owner decision D5,
+settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
+charge is taken as the call is folded or not at all. For each call through
+the NEAR AI route (`verified`; `gateway_only`, `unattested`, `pending` or
+`unavailable`; `failed`), the ledger's `cost_usd` is added to the
+session's one charge: `{usd_micros, charged_calls, calls_without_charge}`,
+integer USD micros rounded to the nearest, with `overflowed: true` written
+only when the sum overflowed, and `served_model` written only while every
+call counted named the same served model, normalized as the Models answers
+normalize labels (lower case, a date stamp or `-latest` removed). A call
+that names no served model, or another one, leaves the charge with no
+`served_model` for good; the requested model is never read, since it is not
+who served the call. The served model is the one model name a tally keeps,
+and it is what the Models answers attribute a charge to a model by. With
+`LEDGER_MONEY_IN_INSIGHTS` held (owner decision D5) no charge is taken. A call with no `cost_usd`, or
+one that is not a finite, non-negative amount, is counted in
+`calls_without_charge` and makes that session's charge unknown, never zero;
+so does an overflow. `outside` calls add no charge (the proxy prices those
+whether or not anyone was billed), and neither do calls with no proof label
+(their route is unknown). A tally with no NEAR AI call writes no `charge`,
+and a tally written before charges loads with none. The store holds no list
+price: list prices are applied to stored tokens when an answer is built.
+The charge is the store's one money figure, and only
+`insights_model_answers` reads it. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
-settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
-for a Never folder, or, once no stored row matches it, when its last call is
-more than 13 weeks old; at most 2048 are kept, oldest last call first.
+settled 2026-10-09) and `insights_counter_pass` are on. A session in a Never
+folder keeps no tally (owner decision D4): it is never read, so it has no
+row, and the counter pass names it from its file name instead (a Claude Code
+session file's stem; the UUID a Codex `rollout-<timestamp>-<uuid>` name ends
+with), without opening the file. The pass resolves the folder of every
+session whose tally no row matches, a session still being written included,
+and drops the tally of each one in a Never folder; under a global Never
+override it drops every tally. The daemon then keeps those sessions in
+memory, never on disk, and each fold drops their tallies before it writes.
+Calls folded before the first pass that sees the session (after a restart,
+or in the poll interval after it starts) are written until that pass, and
+gone after it. A tally also goes when its session is dropped for a Never
+folder, or, once no stored row matches it, when its last call is more than
+13 weeks old; at most 3072 are kept (one per stored session, the
+person's and the automated), oldest last call first.
 `unenroll` removes them with the store. The answer joins each row to its
 session's tally by that digest, at answer time and inside the daemon; see
 `routing` below.
@@ -4595,6 +4696,7 @@ sessions on disk. Otherwise:
   "readable": true,
   "updated_at": "2026-10-08T09:59:12+00:00",
   "sessions_stored": 214,
+  "automated_stored": 31,
   "iso_week": "2026-W41",
   "week_start": "2026-10-05",
   "comparable": false,
@@ -4635,8 +4737,12 @@ sessions on disk. Otherwise:
 ```
 
 - `updated_at` is when a pass last finished in this daemon process, `null`
-  before the first one; `sessions_stored` is the rows held, outside Never
-  folders, in any week.
+  before the first one; `sessions_stored` is the person's rows held,
+  outside Never folders, in any week, the same count `insights_sessions`
+  answers, and `automated_stored` how many automated sessions are held
+  beside them (see "The store" above); together they are every row held. The token figures (`rollup`,
+  `overview`, `history[]`) count automated sessions, since they cost
+  tokens; `patterns` leaves them out.
 - `rollup` is the week's figures exactly as the shared engine computes them
   for feed T: Claude Code and Codex are separate lines in `sources` and are
   **never summed**; `tokens`, `cache_share` and `by_day` are `null` when no
@@ -4731,7 +4837,8 @@ for a failed read:
   `patterns` operation returns (six weekly bars), with `feed:
   "counter_pass"`: `change` per card is filled only when both weeks are
   comparable, and a week below the floor draws a gap. Re-read files are
-  letters and extensions only.
+  letters and extensions only. Automated sessions are left out of it, with
+  no switch to bring them back.
 - `history[]` is one entry per kept week (13), oldest first, always ending at
   the week holding now whatever `iso_week` asked for. Each is
   `{"week_start", "comparable", "sessions", "tokens": {source: n},
@@ -4787,7 +4894,9 @@ Both are checked before the gate, so a bad param is refused whether counting
 is on or off.
 
 While enabled and readable it answers `updated_at`, `sessions_stored` (every
-row outside Never folders, never page-relative), `revision` (a whole number
+row outside Never folders, never page-relative; automated sessions are not
+listed, not counted here, and not found by `insights_session_drill`, with no
+switch to bring them back), `revision` (a whole number
 that moves only when a row is made; a pass that stores nothing leaves it,
 though `updated_at` moves on every pass), `truncated` (more rows
 follow this page), `next` (the cursor for the following page, or `null` at
@@ -4839,14 +4948,18 @@ Each row is exactly
   its row is made again, so a shell lists again rather than keeping it.
 - `source` is `claude_code` or `codex`.
 - `started_at` is the earliest recorded event, RFC 3339, or `null`.
-- `turns` is the Claude Code turn count; `null` for Codex, which records no
-  per-turn series (owner decision D11, open), and for an unreadable session.
+- `turns` is the turn count of the session's per-turn series; `null` for a
+  Codex row made before the per-turn reader (owner decision D11, settled
+  2026-10-20) and for an unreadable session.
 - `tokens` is the session's tokens as its drill's header counts them: for
   Claude Code the known turns' tokens together (uncached input, cache read,
-  cache write and output), for Codex the change between its first and last
-  token count. `null` when no counter is known, never 0.
+  cache write and output); for Codex always the change between its first
+  and last running token total, with or without a per-turn series, so a row
+  whose series the Codex allowance trims keeps the same figure and a series
+  with no known turn still shows it. `null` when no counter is known, never
+  0.
 - `sparkline` is the session's tokens per turn, folded for a row, or `null`
-  for Codex (no per-turn series) and for a session with no known turn:
+  for a Codex row with no per-turn series and for a session with no known turn:
   `{"points", "peak_tokens", "peak_turn"}`. `points` is at most 32 whole
   numbers, oldest first: one per turn when there are 32 turns or fewer;
   otherwise the turns are cut into 32 consecutive runs, as even as integer
@@ -4873,7 +4986,12 @@ computed by the same engine from the stored counters, with `feed:
 "counter_pass"` and `session_ref` echoed: the date and the span are the
 transcript's earliest and latest recorded events, by the rule a saved
 snapshot's time evidence uses, so the same bytes give the same drill. A
-Codex session has `series: null` and `series_unavailable: "not_recorded"`.
+Codex session read turn by turn draws its series as a Claude Code one does;
+one with no per-turn series (a saved snapshot, a row made before the
+per-turn reader, or one the Codex allowance trimmed) has `series: null` and
+`series_unavailable: "not_recorded"`. A Codex drill's `tokens` is the
+observed change either way (see `tokens` above); a series with unknown turns
+adds `some_turns_unknown` for the chart only.
 A missing or non-string `session_ref` is `bad_params` /
 `insights-session-ref-invalid`; one that names no listed row (never stored,
 made again since, or in a Never folder) is `bad_params` /
@@ -4884,6 +5002,102 @@ Each stored row keeps the earliest and latest recorded event for this. A row
 stored before they were kept is read once more, within the per-poll limits,
 even when its file is unchanged; until then its drill's date and span are
 `null`, never guessed.
+
+### `insights_model_answers`
+
+Takes no params. The Models card's six answers over the stored sessions
+(feed T), computed by `insights::model_answers` at answer time from the
+facts and tokens each counter row holds. It is gated as `insights_week` and
+`insights_sessions` are: with `insights_counter_pass` off it answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; on, an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason (`store_unreadable`,
+`key_unavailable` or `policy_unreadable`), never empty rows.
+Sessions in a Never folder enter no answer. Read-only, no network, local in
+a dry-run daemon.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, window_start, window_end, pricing, rows}`:
+
+- `window_start`, `window_end`: RFC 3339. The window is the 13 weeks ending
+  now, whatever week another screen shows; a session older than that is not
+  counted even when its row is still stored.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`. Cost is
+  priced at published API list prices when the answer is built; the store
+  holds tokens and facts, never a list price. `table_id` is the content
+  digest of a shipped price table, the one digest on this wire. The NEAR AI
+  charge is apart from this: see `near_ai_charge`.
+- `rows`: always six, in this order, each
+  `{question, state, basis, edit_mode, leader, next, sessions_by_model,
+  left_out, near_ai_charge}`:
+  - `question`: `bug_fix_rejected`, `refactor_rejected`, `tests_rejected`,
+    `docs_cost`, `rejected_across_tasks`, `finish_time`.
+  - `state`: `not_enough_sessions`, `not_priced`, `no_clear_difference` or
+    `answered`. With `no_clear_difference` both figures are present.
+  - `basis`: `rejected` or `undone` on the rejection questions, else `null`.
+  - `edit_mode`: `prompting` or `not_prompting` on `finish_time`, else
+    `null`. `unknown` is never compared.
+  - `leader`, `next`: `null`, or `{label, sessions, edits,
+    figure, interrupts_per_session_permille, near_ai_charge}`. `label` is a
+    model label the session declared, not a verified serving identity.
+    `figure` is `{kind: "rate_permille", value}`, `{kind: "usd_micros",
+    value}` or `{kind: "finish_time", median_active_secs,
+    median_user_turns}`. On `docs_cost`, `figure` is at API list prices and
+    takes only sessions with no route tally. `near_ai_charge` is as on the
+    row, over only that model's Docs sessions whose route is
+    `routed_verified` and whose calls all named the model as served (with
+    it as the majority label); `null` on every other figure. A transcript
+    label may not name the model NEAR AI served, so a session declared as
+    one model and served another, or not verified, or whose calls named no
+    one served model, is counted on the row's `near_ai_charge` only, never
+    on a model's.
+  - `sessions_by_model`: `[[label, sessions], ...]`.
+  - `left_out`: counts of sessions left out of that question, per reason:
+    `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
+    `reviewer`, `no_majority`, `unpriced`, `too_few_sessions`,
+    `too_few_edits`, `mix_too_different`. `automated` counts the automated
+    sessions in the window (see "The store" above): compared on no row, and
+    counted on every row whatever their facts. A fact
+    that could not be read is left out and counted here, never read as zero.
+    `too_few_sessions` counts the sessions of a model's task-type cells
+    under the five-session floor (for `finish_time`, every session of a
+    cell with fewer than five finished; for `docs_cost`, the priced
+    sessions of a cell with fewer than five priced). Across task types two
+    models are compared over the types both qualify in; `mix_too_different`
+    counts the sessions of the qualifying cells of a model that can be
+    compared with no other, and those of `leader` and `next` outside the
+    types they share. Every session of `leader` and `next` is in their
+    figure or in one count here.
+  - `near_ai_charge`: on `docs_cost` only, what NEAR AI charged, from the
+    route tallies (see "Route tallies" above): `{basis: "near_ai_ledger",
+    median, routed_sessions, charge_unknown}`. `routed_sessions` counts the
+    Docs sessions in the window with at least one call through NEAR AI;
+    `charge_unknown` how many of them have an unknown charge. `median` is
+    `{kind: "usd_micros", value}`, the median charge per session over those
+    with a known charge (a session's charge is every NEAR AI call in it),
+    or `null` when fewer than five are known, the session floor every
+    figure is held to, so one session's exact charge never crosses as a
+    median: never zero for unknown. The row's figure counts every Docs
+    session sent through NEAR AI, whichever model served it. The whole field is
+    `null` on every other row, and on `docs_cost` when no session in the
+    window was sent through NEAR AI. It is never added to `figure`: a
+    session's charge and its list-price estimate never meet in one figure.
+
+While `LEDGER_MONEY_IN_INSIGHTS` is held (owner decision D5), `docs_cost`
+is `not_priced` with `leader`, `next` and `near_ai_charge` `null` and
+`pricing.tables` empty, and no stored charge is read.
+
+Money crosses only on the `docs_cost` row, as `{kind: "usd_micros", value}`:
+in `figure` at API list prices, and in `near_ai_charge.median` as the NEAR
+AI charge, labelled by `basis: "near_ai_ledger"`. No other key or value
+carries money, and no session
+reference, path, folder name, backend or commit hash crosses. With the
+ledger feed off, or no proxy ledger declared, every session is treated as
+unobserved and no stored route tally is read. No label or field name is a
+ranking word.
+
+`insights_week` keeps its contract: it carries no price, whatever facts the
+rows store.
 
 ### `set_settings`
 

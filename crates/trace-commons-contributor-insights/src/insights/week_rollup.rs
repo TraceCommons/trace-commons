@@ -15,6 +15,8 @@ use super::analytics_constants::{
     COMPARABLE_COVERAGE, COMPARABLE_MIN_SESSIONS, DEDUPE_TURNS_BY_MSG_KEY,
 };
 use super::cache_share::CacheShare;
+use super::codex_series::CodexTurnSeriesEvidence;
+use super::session_facts::SessionFacts;
 
 /// Which counter rows a figure was computed from. Feeds are never blended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -135,6 +137,10 @@ pub enum SessionBody {
     },
     Codex {
         observed: Option<CodexObserved>,
+        /// The per-turn series, when the transcript was read turn by turn.
+        /// Weekly figures, goals, glance and Patterns read `observed` only;
+        /// the drill and the Models answers read this.
+        series: Option<CodexTurnSeriesEvidence>,
     },
     Unknown {
         source: Option<AnalyticsSource>,
@@ -156,7 +162,19 @@ pub struct SessionInput {
     /// digest key; `None` when unknown or made under another key. Two
     /// snapshots that both carry one overlap only when it is the same.
     pub harness_session: Option<KeyedDigest>,
+    /// Whether the session is known to be automated: started by a tool,
+    /// not by the person (a Codex session its harness spawned itself, such
+    /// as the automatic approvals reviewer or a delegated thread). `false`
+    /// when it is not, or when that cannot be told: a guess never takes the
+    /// contributor's own work out. Weekly token figures count it; the
+    /// Models answers and the Patterns cards leave it out. Always `false`
+    /// for a saved snapshot.
+    pub automated: bool,
     pub body: SessionBody,
+    /// The session's facts beyond its tokens, for the Models answers.
+    /// `None` for a saved snapshot and for a counter row stored without
+    /// them. No weekly figure, goal, glance or Patterns view reads it.
+    pub facts: Option<SessionFacts>,
 }
 
 impl SessionInput {
@@ -178,7 +196,7 @@ impl SessionInput {
                     (low.min(at), high.max(at))
                 }))
             }
-            SessionBody::Codex { observed } => observed.map(|o| (o.first_at, o.last_at)),
+            SessionBody::Codex { observed, .. } => observed.map(|o| (o.first_at, o.last_at)),
             SessionBody::Unknown { .. } => None,
         }
     }
@@ -493,7 +511,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     true
                 }
             }
-            SessionBody::Codex { observed } => match observed {
+            SessionBody::Codex { observed, .. } => match observed {
                 Some(observed) => {
                     let first = local_week_start(&observed.first_at, tz);
                     let last = local_week_start(&observed.last_at, tz);
@@ -793,6 +811,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -810,6 +830,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: first,
@@ -820,6 +842,7 @@ mod tests {
                     total: 1_200,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }
@@ -830,6 +853,8 @@ mod tests {
             import_seq: 0,
             placed_at: placed,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Unknown {
                 source: Some(AnalyticsSource::ClaudeCode),
                 reason,
@@ -907,6 +932,7 @@ mod tests {
         let mut input = codex("c", 1, at(6, 1), at(6, 2));
         if let SessionBody::Codex {
             observed: Some(observed),
+            ..
         } = &mut input.body
         {
             observed.baseline_excluded = true;

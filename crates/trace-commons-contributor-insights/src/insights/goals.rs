@@ -373,6 +373,8 @@ mod tests {
             import_seq: 1,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: at,
@@ -383,6 +385,7 @@ mod tests {
                     total: 1_010,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }];
         let rollup = week_rollup(Feed::CounterPass, &input, monday(0), &Utc);

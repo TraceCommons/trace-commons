@@ -202,7 +202,7 @@ pub(crate) fn select_page<T>(
 
 /// Whether the pass is on, and the Never folders while it is; `Err` is the
 /// answer to send instead (the folder rules could not be read).
-fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
+pub(crate) fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
     // A poisoned lock reads as off: fail closed, never a guess.
     let enabled = shared
         .settings
@@ -363,24 +363,33 @@ mod tests {
 
     /// One Codex session: two token counts a minute apart, after a nonzero
     /// baseline, with earlier records that are not counters.
+    /// Two turns: 100 input (60 cached) and 20 output, then 80 input (40
+    /// cached) and 30 output. The observed change between the first and
+    /// last counter is the second turn's 110; the per-turn series holds
+    /// both, 230.
     fn codex_bytes() -> Vec<u8> {
-        let usage = |at: &str, input: u64, cached: u64, output: u64| {
+        let usage = |at: &str, total: [u64; 3], last: [u64; 3]| {
             serde_json::json!({
                 "type": "event_msg",
                 "timestamp": at,
                 "payload": {"type": "token_count", "info": {"total_token_usage": {
-                    "input_tokens": input, "cached_input_tokens": cached,
-                    "output_tokens": output, "reasoning_output_tokens": 0,
-                    "total_tokens": input + output
+                    "input_tokens": total[0], "cached_input_tokens": total[1],
+                    "output_tokens": total[2], "reasoning_output_tokens": 0,
+                    "total_tokens": total[0] + total[2]
+                }, "last_token_usage": {
+                    "input_tokens": last[0], "cached_input_tokens": last[1],
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": last[2], "reasoning_output_tokens": 0,
+                    "total_tokens": last[0] + last[2]
                 }}}
             })
         };
         [
             serde_json::json!({"type": "session_meta", "timestamp": "2026-09-14T08:29:00Z", "payload": {"id": "PRIVATE-CODEX-ID", "model_provider": "openai"}}),
             serde_json::json!({"type": "turn_context", "timestamp": "2026-09-14T08:29:30Z", "payload": {"model": "gpt-6"}}),
-            usage("2026-09-14T08:30:00Z", 100, 60, 20),
+            usage("2026-09-14T08:30:00Z", [100, 60, 20], [100, 60, 20]),
             serde_json::json!({"type": "response_item", "timestamp": "2026-09-14T08:30:30Z", "payload": {"type": "message", "role": "assistant", "content": []}}),
-            usage("2026-09-14T08:31:00Z", 180, 100, 50),
+            usage("2026-09-14T08:31:00Z", [180, 100, 50], [80, 40, 30]),
         ]
         .iter()
         .map(|v| v.to_string())
@@ -413,6 +422,7 @@ mod tests {
     struct Fixture {
         dir: tempfile::TempDir,
         pass: CounterPass,
+        seed: u8,
     }
 
     impl Fixture {
@@ -426,7 +436,28 @@ mod tests {
                 dir.path().join(COUNTER_ROWS_FILE),
                 Box::new(InMemoryDigestKeyStore::with_seed([seed; 32])),
             );
-            Self { dir, pass }
+            Self { dir, pass, seed }
+        }
+
+        /// Rewrite every stored Codex row as made before the per-turn
+        /// reader, with no series, and open the store again.
+        fn without_codex_series(mut self) -> Self {
+            let path = self.dir.path().join(COUNTER_ROWS_FILE);
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for row in value["rows"].as_object_mut().unwrap().values_mut() {
+                let body = row["body"].as_object_mut().unwrap();
+                if body["kind"] == "codex" {
+                    assert!(body.remove("series").is_some());
+                }
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            self.pass = CounterPass::with_keys(
+                path,
+                Box::new(InMemoryDigestKeyStore::with_seed([self.seed; 32])),
+            );
+            self.pass.keys_load_or_create_for_test();
+            self
         }
 
         fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
@@ -625,10 +656,11 @@ mod tests {
             .map(|row| row["source"].as_str().unwrap())
             .collect();
         assert_eq!(sources, ["claude_code", "claude_code", "codex"]);
-        // Claude Code rows carry their turn count; Codex records none.
+        // Every row read turn by turn carries its turn count, Codex's
+        // included (owner decision D11, settled).
         assert!(listed[0]["turns"].as_u64().unwrap() > 0);
         assert_eq!(listed[0]["turns"], listed[1]["turns"]);
-        assert_eq!(listed[2]["turns"], serde_json::Value::Null);
+        assert_eq!(listed[2]["turns"], 2);
         let mut references = std::collections::BTreeSet::new();
         for row in &listed {
             let reference = row["session_ref"].as_str().unwrap();
@@ -868,6 +900,13 @@ mod tests {
             let f = Fixture::new();
             let path = f.write("watched.jsonl", &bytes);
             f.run(&[(source, &path, PROJECT)]);
+            // A saved snapshot holds no Codex per-turn series: compare
+            // with a row made before the per-turn reader.
+            let f = if source == SOURCE_CODEX {
+                f.without_codex_series()
+            } else {
+                f
+            };
             let listed = rows(&f.list(&[], &[]));
             assert_eq!(listed.len(), 1);
             let reference = listed[0]["session_ref"].as_str().unwrap().to_string();
@@ -890,10 +929,39 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_drill_draws_its_per_turn_series() {
+        let f = Fixture::new();
+        let path = f.write("codex.jsonl", &codex_bytes());
+        f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        let listed = rows(&f.list(&[], &[]));
+        let reference = listed[0]["session_ref"].as_str().unwrap().to_string();
+        let drill = f.drill(&reference, &[]).unwrap()["session"].clone();
+        assert_eq!(drill["source"], "codex");
+        assert_eq!(drill["series_unavailable"], serde_json::Value::Null);
+        assert_eq!(drill["series"].as_array().unwrap().len(), 2);
+        assert_eq!(drill["turns"], 2);
+        // The observed change, the one basis a Codex row's tokens have: the
+        // same figure once its series is trimmed (below).
+        assert_eq!(drill["tokens"], 110);
+        assert_eq!(drill["state"], "partial");
+        assert_eq!(
+            drill["reasons"],
+            serde_json::json!(["codex_baseline_excluded"])
+        );
+        // The listed row counts what the drill draws.
+        assert_eq!(listed[0]["tokens"], drill["tokens"]);
+        assert_eq!(listed[0]["turns"], 2);
+        assert!(listed[0]["sparkline"].is_object());
+        assert_nothing_identifying(&f, &drill);
+    }
+
+    #[test]
     fn a_codex_drill_says_per_turn_usage_is_not_recorded() {
         let f = Fixture::new();
         let path = f.write("codex.jsonl", &codex_bytes());
         f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        // Made before the per-turn reader.
+        let f = f.without_codex_series();
         let reference = rows(&f.list(&[], &[]))[0]["session_ref"]
             .as_str()
             .unwrap()
@@ -930,6 +998,7 @@ mod tests {
                 Box::new(InMemoryDigestKeyStore::with_seed([3; 32])),
             ),
             dir: f.dir,
+            seed: 3,
         };
         old.pass.keys_load_or_create_for_test();
         let reference = rows(&old.list(&[], &[]))[0]["session_ref"]
@@ -1423,7 +1492,8 @@ mod tests {
         assert_eq!(claude_row["tokens"], drill["session"]["tokens"]);
         let codex_row = &listed[1];
         assert_eq!(codex_row["source"], "codex");
-        assert_eq!(codex_row["sparkline"], serde_json::Value::Null);
+        // Drawn over its per-turn series, as a Claude row's is.
+        assert!(codex_row["sparkline"].is_object());
         let codex_drill = f
             .drill(codex_row["session_ref"].as_str().unwrap(), &[])
             .unwrap();
