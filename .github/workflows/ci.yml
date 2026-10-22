@@ -1420,9 +1420,11 @@ jobs:
       # them is compiled into the default build above.
       - name: Staging channel tests
         run: |
-          cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation
-          cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- \
-            other_channel the_config_dir_help the_default_inbox private_inference
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference
+          '
       - name: Verify real Secret Service storage
         run: |
           dbus-run-session -- sh -eu -c '
