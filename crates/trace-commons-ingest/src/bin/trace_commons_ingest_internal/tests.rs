@@ -256,50 +256,6 @@ fn staging_near_ai_env() -> Vec<(&'static str, &'static str)> {
     pairs
 }
 
-/// On a staging build, every NEAR AI subject a test fixture mints is one of
-/// the operator's testers: [`list_fixture_subject`] adds it to one
-/// process-wide allow-list file, and the fixtures that publish the
-/// provisioning environment point the setting at that file. Without this,
-/// every suite written for the default build would be refused at sign-in on
-/// a staging build. Tests of the allow-list itself replace the setting.
-#[cfg(feature = "near-ai-staging")]
-fn fixture_allow_list() -> &'static (tempfile::TempDir, std::sync::Mutex<()>) {
-    static LIST: std::sync::OnceLock<(tempfile::TempDir, std::sync::Mutex<()>)> =
-        std::sync::OnceLock::new();
-    LIST.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("fixture allow-list dir");
-        std::fs::write(dir.path().join("allowed-subjects"), "").expect("fixture allow-list");
-        (dir, std::sync::Mutex::new(()))
-    })
-}
-
-/// The fixture allow-list file, for a fixture to point the setting at.
-#[cfg(feature = "near-ai-staging")]
-fn fixture_allow_list_path() -> String {
-    fixture_allow_list()
-        .0
-        .path()
-        .join("allowed-subjects")
-        .to_str()
-        .expect("utf-8 temp path")
-        .to_string()
-}
-
-/// Add a fixture's subject to the fixture allow-list.
-#[cfg(feature = "near-ai-staging")]
-fn list_fixture_subject(subject: &str) {
-    use std::io::Write as _;
-    let _guard = fixture_allow_list()
-        .1
-        .lock()
-        .expect("fixture allow-list lock");
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(fixture_allow_list_path())
-        .expect("open fixture allow-list");
-    writeln!(file, "{subject}").expect("list fixture subject");
-}
-
 fn coherence_refusal(pairs: &[(&str, &str)]) -> Option<String> {
     near_ai_host_coherence_from_lookup(&near_ai_host_lookup(pairs))
         .err()
@@ -98945,11 +98901,10 @@ async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() 
     assert_eq!(body["ready"], false);
 }
 
-/// Everyone signs in to staging through NEAR AI, where the operator's
-/// allow-list decides who gets an account (staging spec S1/S5). The NEAR
-/// wallet ceremony creates an account with no invite and no list, so a
-/// staging build refuses it by name whatever the configuration says, rather
-/// than relying on the operator leaving it unconfigured.
+/// Everyone signs in to staging through NEAR AI (staging spec S1, S12). The
+/// NEAR wallet ceremony is a second way to make an account, so a staging
+/// build refuses it by name whatever the configuration says, rather than
+/// relying on the operator leaving it unconfigured.
 #[cfg(feature = "near-ai-staging")]
 #[tokio::test]
 async fn a_staging_build_never_offers_wallet_provisioning() {

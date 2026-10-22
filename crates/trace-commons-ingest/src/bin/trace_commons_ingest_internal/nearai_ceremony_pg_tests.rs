@@ -64,20 +64,14 @@ use trace_commons_contributor::identity::DeviceIdentity;
 /// the count stayed at one. That is the resolver pool working, not a defect,
 /// but a fixture that only holds on a pristine database is one that tests the
 /// database's history as much as the code.
-///
-/// On a staging build it is on the fixture allow-list, which
-/// `publish_provisioning_material` points the setting at.
 fn stub_subject() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let subject = format!(
+    format!(
         "auth0|nearai-ceremony-fixture-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    );
-    #[cfg(feature = "near-ai-staging")]
-    super::list_fixture_subject(&subject);
-    subject
+    )
 }
 
 /// Serialises this suite against itself.
@@ -175,14 +169,6 @@ async fn stub_near_ai(subject: String) -> String {
 /// its own step rather than alongside the parallel unit tests.
 fn publish_provisioning_material() {
     // SAFETY: single-threaded setup at the top of one serial, ignored test.
-    #[cfg(feature = "near-ai-staging")]
-    unsafe {
-        std::env::set_var(
-            "TRACE_COMMONS_STAGING_ALLOWED_NEAR_AI_SUBJECTS_PATH",
-            super::fixture_allow_list_path(),
-        );
-    }
-    // SAFETY: as above.
     unsafe {
         std::env::set_var(
             "TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON",

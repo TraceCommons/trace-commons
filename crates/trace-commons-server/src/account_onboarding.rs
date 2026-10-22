@@ -255,48 +255,6 @@ pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) ->
     matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
-/// Whether a NEAR AI login that has no account yet may get one.
-///
-/// Decided by the caller before provisioning or bind, and applied inside the
-/// transaction at the one point that knows whether the login already has an
-/// account. A login that has one signs in whatever this says: it only governs
-/// creating a new one. A shipped build always passes [`Self::Open`]; the other
-/// two are the staging allow-list's answer (staging spec S5, section 3.12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NearAiNewAccount {
-    /// Any verified login may get an account. Today's behaviour.
-    Open,
-    /// The login's subject is on the operator's list: it may get an account,
-    /// and the audit row says so.
-    AllowListed,
-    /// The login's subject is not on the list: a login with no account is
-    /// refused with [`NEAR_AI_SUBJECT_NOT_ADMITTED`], and nothing is written.
-    NotListed,
-}
-
-impl NearAiNewAccount {
-    /// The `admission` value of the provisioning audit row for an account
-    /// created under this answer.
-    pub fn audit_label(self) -> &'static str {
-        match self {
-            Self::AllowListed => "allow_list",
-            Self::Open | Self::NotListed => "not_granted",
-        }
-    }
-}
-
-/// A NEAR AI login with no account was refused because its subject is not on
-/// the staging allow-list. Label-only: it names the rule, never the subject.
-/// Carried as `DatabaseError::Pool(NEAR_AI_SUBJECT_NOT_ADMITTED)`; test it
-/// with [`is_near_ai_subject_not_admitted`].
-pub const NEAR_AI_SUBJECT_NOT_ADMITTED: &str = "near_ai_subject_not_admitted";
-
-/// Whether a provisioning or bind error is the named
-/// [`NEAR_AI_SUBJECT_NOT_ADMITTED`] refusal.
-pub fn is_near_ai_subject_not_admitted(error: &crate::error::DatabaseError) -> bool {
-    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_SUBJECT_NOT_ADMITTED)
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,

@@ -536,7 +536,6 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: NewSession<'_>,
         identity: &NearAccountIdentity,
-        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<ProvisionedNearAccount, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
@@ -560,7 +559,6 @@ impl PgBackend {
                     &sealed_json,
                     &pepper_ref,
                     &key_ref,
-                    new_account,
                 )
             },
         )
@@ -572,11 +570,6 @@ impl PgBackend {
     /// `Ok(None)` means the anchor was claimed by another tenant while this
     /// transaction waited on the advisory lock; everything written here,
     /// including the minted tenant, is rolled back by dropping the transaction.
-    ///
-    /// The same is how `NearAiNewAccount::NotListed` writes nothing: the
-    /// refusal is an error out of this transaction, decided where the
-    /// existing-account query answers, so the tenant row inserted above it is
-    /// rolled back with everything else.
     #[allow(clippy::too_many_arguments)]
     async fn near_ai_login_provision_in_tenant(
         &self,
@@ -588,7 +581,6 @@ impl PgBackend {
         sealed_json: &serde_json::Value,
         pepper_ref: &str,
         key_ref: &str,
-        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
         let provider = login.auth_provider().to_string();
         let mut client = self.trace_pool().get().await?;
@@ -604,15 +596,9 @@ impl PgBackend {
         )
         .await?;
         let existing = tx.query_opt("SELECT a.account_id FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
-        let created = existing.is_none();
         let account = if let Some(row) = existing {
             row.get::<_, Uuid>(0)
         } else {
-            if new_account == crate::account_onboarding::NearAiNewAccount::NotListed {
-                return Err(named_refusal(
-                    crate::account_onboarding::NEAR_AI_SUBJECT_NOT_ADMITTED,
-                ));
-            }
             let id = Uuid::new_v4();
             tx.execute(
                 "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
@@ -638,15 +624,9 @@ impl PgBackend {
         )
         .await?;
         // Hash-only, like its wallet sibling: the audit row names the identity
-        // system and how this account was admitted -- `not_granted` unless a
-        // staging allow-list admitted it just now. No subject, no provider
-        // label that could narrow who this is, no token.
-        let admission = if created {
-            new_account.audit_label()
-        } else {
-            crate::account_onboarding::NearAiNewAccount::Open.audit_label()
-        };
-        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_ai_login_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near_ai_login","admission":admission})]).await?;
+        // system and says admission was not granted here. No subject, no
+        // provider label that could narrow who this is, no token.
+        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_ai_login_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near_ai_login","admission":"not_granted"})]).await?;
         tx.commit().await?;
         Ok(Some(ProvisionedNearAccount {
             tenant_id: tenant,
@@ -695,7 +675,6 @@ impl PgBackend {
     ///   uses, in X's tenant only, and then this account is closed in its own
     ///   tenant only. No transaction touches both tenants, and nothing of this
     ///   account moves to X. (The cross-tenant fold is the deferred S6.)
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn near_ai_login_bind(
         &self,
         tenant: &str,
@@ -704,7 +683,6 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: NewSession<'_>,
         identity: &NearAccountIdentity,
-        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
@@ -724,7 +702,6 @@ impl PgBackend {
                         device_public_key,
                         session_ref,
                         material_ref,
-                        new_account,
                     )
                     .await
                 } else {
@@ -736,7 +713,6 @@ impl PgBackend {
                         device_public_key,
                         session_ref,
                         material_ref,
-                        new_account,
                     )
                     .await
                 }
@@ -751,11 +727,6 @@ impl PgBackend {
     /// transaction waited on the advisory lock; dropping the transaction rolls
     /// back the state flip and everything else, so the account is exactly as
     /// unbound as before.
-    ///
-    /// The login claims a fresh anchor here, so it is a login with no account
-    /// yet, and `NearAiNewAccount::NotListed` refuses it before anything is
-    /// written: the passkey account stays `unbound`.
-    #[allow(clippy::too_many_arguments)]
     async fn near_ai_bind_in_place(
         &self,
         tenant: &str,
@@ -764,13 +735,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: &NewSession<'_>,
         material: &NearAiAnchorMaterial,
-        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
-        if new_account == crate::account_onboarding::NearAiNewAccount::NotListed {
-            return Err(named_refusal(
-                crate::account_onboarding::NEAR_AI_SUBJECT_NOT_ADMITTED,
-            ));
-        }
         let provider = login.auth_provider().to_string();
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
@@ -933,7 +898,6 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: &NewSession<'_>,
         material: &NearAiAnchorMaterial,
-        new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
         if !self
             .near_ai_bind_account_still_unbound(own_tenant, account)
@@ -951,7 +915,6 @@ impl PgBackend {
                 &material.sealed_json,
                 &material.pepper_ref,
                 &material.key_ref,
-                new_account,
             )
             .await?
         else {

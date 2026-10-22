@@ -1189,16 +1189,12 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// implemented this has not configured login provisioning, and the
     /// fail-closed answer is the only safe one for a path that mints an
     /// admission anchor.
-    ///
-    /// `new_account` decides whether a login with no account may get one; a
-    /// login that has one signs in regardless.
     async fn provision_near_ai_login(
         &self,
         _login: &crate::near_ai_login::VerifiedNearAiLogin,
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
-        _new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool(
             "near_ai_login_provisioning_unconfigured".into(),
@@ -1229,9 +1225,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
     /// belongs to another account, provision that account exactly as
     /// [`Self::provision_near_ai_login`] would and close the passkey account.
-    /// `new_account` governs binding a login that has no account yet, exactly
-    /// as for provisioning. The default refuses.
-    #[allow(clippy::too_many_arguments)]
+    /// The default refuses.
     async fn bind_near_ai_login(
         &self,
         _tenant_id: &str,
@@ -1240,7 +1234,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
-        _new_account: crate::account_onboarding::NearAiNewAccount,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
     }

@@ -44,20 +44,13 @@ struct ProvisioningEnv {
 
 impl ProvisioningEnv {
     fn publish() -> Self {
-        #[allow(unused_mut)]
-        let mut vars: Vec<(&'static str, String)> = vec![
+        let vars = [
             (
                 "TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL",
-                "https://issuer.example".into(),
+                "https://issuer.example",
             ),
-            ("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload".into()),
+            ("TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE", "upload"),
         ];
-        // On a staging build the fixture's subjects are on the allow-list.
-        #[cfg(feature = "near-ai-staging")]
-        vars.push((
-            "TRACE_COMMONS_STAGING_ALLOWED_NEAR_AI_SUBJECTS_PATH",
-            super::fixture_allow_list_path(),
-        ));
         let previous = vars
             .iter()
             .map(|(name, _)| (*name, std::env::var(name).ok()))
@@ -102,13 +95,9 @@ fn identity() -> trace_commons_server::near_account_identity::NearAccountIdentit
     .expect("fixture identity")
 }
 
-/// A NEAR AI subject nobody has used, per call. On a staging build it is on
-/// the fixture allow-list.
+/// A NEAR AI subject nobody has used, per call.
 fn fresh_subject() -> String {
-    let subject = format!("auth0|z2-s3-bind-{}", Uuid::new_v4().simple());
-    #[cfg(feature = "near-ai-staging")]
-    super::list_fixture_subject(&subject);
-    subject
+    format!("auth0|z2-s3-bind-{}", Uuid::new_v4().simple())
 }
 
 /// A stand-in for NEAR AI's `GET /users/me` answering `subject` to any token,
@@ -876,7 +865,6 @@ async fn pg_a_bind_that_aborts_mid_transaction_leaves_the_account_unbound() {
                     expires_at: Utc::now() + Duration::hours(1),
                 },
                 &identity(),
-                trace_commons_server::account_onboarding::NearAiNewAccount::Open,
             )
             .await;
         assert!(result.is_err(), "{what}: the bind must fail");
@@ -1618,7 +1606,6 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[0]),
             &identity(),
-            trace_commons_server::account_onboarding::NearAiNewAccount::Open,
         )
         .await;
     let error = format!("{:?}", result.expect_err("no UPDATE on the binding table"));
@@ -1640,7 +1627,6 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[1]),
             &identity(),
-            trace_commons_server::account_onboarding::NearAiNewAccount::Open,
         )
         .await
         .expect("bind as the runtime role");
@@ -1662,7 +1648,6 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[2]),
             &identity(),
-            trace_commons_server::account_onboarding::NearAiNewAccount::Open,
         )
         .await
         .expect("refuse branch as the runtime role");
@@ -2269,7 +2254,6 @@ async fn pg_a_refuse_branch_that_lost_the_race_provisions_nothing_for_x() {
                 expires_at: Utc::now() + Duration::hours(1),
             },
             &identity(),
-            trace_commons_server::account_onboarding::NearAiNewAccount::Open,
         )
         .await;
     match refused {
@@ -3009,392 +2993,6 @@ async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
 
     reset_account_rate_limiter_for_test();
     drop_tenants(&admin, &[&tenant_a, &tenant_b]).await;
-}
-
-// --- Staging admission by allow-list (S5) ------------------------------------
-
-/// Who a staging build lets in (staging spec S5, section 3.12).
-///
-/// A staging NEAR AI account alone admits nobody, since anyone can make one.
-/// A staging ingest admits a NEAR AI login that has no account only when its
-/// subject is on the operator's list; any other new login is refused by name
-/// and writes nothing. A login that already has an account signs in as
-/// before, and an invite still elevates an admitted account.
-///
-/// The bind ceremony is covered as well as provisioning: without that, an
-/// unlisted subject would reach staging by creating a passkey account and
-/// binding a fresh near.ai login to it.
-///
-/// These run in the same PostgreSQL suite as the rest of this file. The
-/// staging tests compile only under `near-ai-staging`; the default-build test
-/// only without it, so each build is checked against its own rule.
-mod staging_allow_list {
-    use super::*;
-
-    /// Spelled out rather than imported: the default build has no module that
-    /// names it, which is part of what `a_default_build_ignores_the_list`
-    /// checks.
-    const ALLOW_LIST_PATH: &str = "TRACE_COMMONS_STAGING_ALLOWED_NEAR_AI_SUBJECTS_PATH";
-
-    /// The label a refused staging login answers with.
-    #[cfg(feature = "near-ai-staging")]
-    const NOT_ADMITTED: &str = "near_ai_subject_not_admitted";
-
-    /// The allow-list setting for one test, restored when it ends.
-    struct AllowList {
-        dir: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl AllowList {
-        fn file(&self) -> std::path::PathBuf {
-            self.dir.path().join("allowed-subjects")
-        }
-
-        /// The setting names a file holding `lines`.
-        fn with(lines: &[&str]) -> Self {
-            let list = Self::unset();
-            list.write(lines);
-            // SAFETY: the PostgreSQL suite runs single-threaded.
-            unsafe { std::env::set_var(ALLOW_LIST_PATH, list.file()) };
-            list
-        }
-
-        /// The setting names a file that does not exist.
-        #[cfg(feature = "near-ai-staging")]
-        fn missing() -> Self {
-            let list = Self::unset();
-            // SAFETY: as above.
-            unsafe { std::env::set_var(ALLOW_LIST_PATH, list.file()) };
-            list
-        }
-
-        /// No setting at all.
-        fn unset() -> Self {
-            let previous = std::env::var_os(ALLOW_LIST_PATH);
-            // SAFETY: as above.
-            unsafe { std::env::remove_var(ALLOW_LIST_PATH) };
-            Self {
-                dir: tempfile::tempdir().expect("allow-list dir"),
-                previous,
-            }
-        }
-
-        /// The operator edits the file; no restart.
-        fn write(&self, lines: &[&str]) {
-            std::fs::write(self.file(), lines.join("\n")).expect("write allow-list");
-        }
-    }
-
-    impl Drop for AllowList {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var(ALLOW_LIST_PATH, value),
-                    None => std::env::remove_var(ALLOW_LIST_PATH),
-                }
-            }
-        }
-    }
-
-    /// Every tenant, account and anchor in the database. A refused login must
-    /// leave all three where they were, not only the anchor.
-    #[cfg(feature = "near-ai-staging")]
-    async fn rows(admin: &deadpool_postgres::Object) -> [i64; 3] {
-        [
-            count(admin, "SELECT count(*) FROM trace_tenants", &[]).await,
-            count(admin, "SELECT count(*) FROM trace_accounts", &[]).await,
-            count(
-                admin,
-                "SELECT count(*) FROM trace_near_account_anchors",
-                &[],
-            )
-            .await,
-        ]
-    }
-
-    /// The unauthenticated NEAR AI sign-in, answering whatever it answers.
-    async fn sign_in(h: &Harness, device: &Device) -> Reply {
-        let started = start(&h.state, PROVISION_START, None, device).await;
-        let signature = device.sign(&started.signing_bytes);
-        finish(
-            &h.state,
-            PROVISION_FINISH,
-            None,
-            &started,
-            device,
-            &signature,
-        )
-        .await
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    fn assert_not_admitted(reply: &Reply, h: &Harness, what: &str) {
-        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{what}");
-        assert_eq!(reply.json()["error"], NOT_ADMITTED, "{what}");
-        let body = String::from_utf8_lossy(&reply.bytes);
-        assert!(
-            !body.contains(&h.subject) && !body.contains(&h.anchor_hash()),
-            "{what}: the refusal names nothing about the subject"
-        );
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_allowed_subject_is_admitted_without_an_invite() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        let _list = AllowList::with(&["# testers", "", &format!("  {}  ", h.subject)]);
-        let before = rows(&admin).await;
-
-        let reply = sign_in(&h, &Device::new()).await;
-        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
-        let tenant = reply.json()["tenant_id"]
-            .as_str()
-            .expect("tenant")
-            .to_string();
-        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
-        let after = rows(&admin).await;
-        assert_eq!(
-            after,
-            [before[0] + 1, before[1] + 1, before[2] + 1],
-            "one tenant, one account, one anchor"
-        );
-        assert_eq!(anchors_for(&admin, &h.anchor_hash()).await.len(), 1);
-        assert_eq!(
-            audit_metadata(&admin, &tenant, "near_ai_login_provisioned").await,
-            vec![serde_json::json!({"identity": "near_ai_login", "admission": "allow_list"})]
-        );
-
-        // Signing in again, still listed, finds the account: only the sign-in
-        // that created it says the list admitted it.
-        let again = sign_in(&h, &Device::new()).await;
-        assert_eq!(again.status, StatusCode::OK, "{:?}", again.json());
-        assert_eq!(again.json()["tenant_id"], tenant.as_str());
-        let mut admissions: Vec<String> =
-            audit_metadata(&admin, &tenant, "near_ai_login_provisioned")
-                .await
-                .iter()
-                .map(|row| row["admission"].as_str().expect("admission").to_string())
-                .collect();
-        admissions.sort();
-        assert_eq!(
-            admissions,
-            ["allow_list", "not_granted"],
-            "allow_list once, for the sign-in that created the account"
-        );
-        assert_eq!(
-            count(
-                &admin,
-                "SELECT count(*) FROM trace_account_invite_grants WHERE tenant_id = $1",
-                &[tenant.as_str()],
-            )
-            .await,
-            0,
-            "no invite was used"
-        );
-        drop_tenants(&admin, &[&tenant]).await;
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_unlisted_subject_is_refused_and_writes_nothing() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        // Someone else, the same subject in another case, and the subject as
-        // a prefix of a longer one: none of them is this subject.
-        let _list = AllowList::with(&[
-            &fresh_subject(),
-            &h.subject.to_uppercase(),
-            &format!("{}x", h.subject),
-        ]);
-        let before = rows(&admin).await;
-
-        let reply = sign_in(&h, &Device::new()).await;
-        assert_not_admitted(&reply, &h, "an unlisted subject");
-        assert_eq!(rows(&admin).await, before, "no tenant, account or anchor");
-        assert!(anchors_for(&admin, &h.anchor_hash()).await.is_empty());
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_empty_list_admits_nobody() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        // One setting at a time: each is made, used and restored in turn.
-        let settings: [(&str, fn() -> AllowList); 4] = [
-            ("an empty file", || AllowList::with(&[])),
-            ("comments and blank lines", || {
-                AllowList::with(&["# none yet", "", "   "])
-            }),
-            ("a missing file", AllowList::missing),
-            ("no setting", AllowList::unset),
-        ];
-        for (what, setting) in settings {
-            let list = setting();
-            let before = rows(&admin).await;
-            let reply = sign_in(&h, &Device::new()).await;
-            assert_not_admitted(&reply, &h, what);
-            assert_eq!(rows(&admin).await, before, "{what}: nothing written");
-            drop(list);
-        }
-        assert!(anchors_for(&admin, &h.anchor_hash()).await.is_empty());
-    }
-
-    /// The bind ceremony is gated the same way. Binding a fresh near.ai login
-    /// to a passkey account is the other way a new login becomes an account.
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_unlisted_subject_cannot_bind_a_passkey_account() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        let list = AllowList::with(&[&fresh_subject()]);
-        let account = unbound_account(&h.backend).await;
-
-        let reply = bind(&h, &account, &Device::new()).await;
-        assert_not_admitted(&reply, &h, "an unlisted bind");
-        assert_eq!(
-            binding_row(&admin, &account.tenant, account.account_id).await,
-            ("unbound".to_string(), false)
-        );
-        assert_eq!(linked_rows(&admin, &account.tenant).await, [0; 4]);
-        assert!(anchors_for(&admin, &h.anchor_hash()).await.is_empty());
-
-        // Listed, the same account binds.
-        list.write(&[&h.subject]);
-        let reply = bind(&h, &account, &Device::new()).await;
-        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
-        assert_eq!(reply.json()["outcome"], "bound");
-        drop_tenants(&admin, &[&account.tenant]).await;
-    }
-
-    /// The counterpart of a delisted subject still signing in: a subject off
-    /// the list that already has an account may still bind a passkey account
-    /// to it, since no new account is made for that login.
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_unlisted_subject_with_an_account_still_binds_to_it() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        let list = AllowList::with(&[&h.subject]);
-        let first = sign_in(&h, &Device::new()).await;
-        assert_eq!(first.status, StatusCode::OK, "{:?}", first.json());
-        let tenant = first.json()["tenant_id"]
-            .as_str()
-            .expect("tenant")
-            .to_string();
-
-        list.write(&[]);
-        let p = unbound_account(&h.backend).await;
-        let reply = bind(&h, &p, &Device::new()).await;
-        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
-        assert_eq!(reply.json()["outcome"], "existing_account");
-        assert_eq!(anchors_for(&admin, &h.anchor_hash()).await.len(), 1);
-        drop_tenants(&admin, &[&tenant, &p.tenant]).await;
-    }
-
-    /// The operator's invite still works on a staging build, and taking a
-    /// subject off the list does not lock out the account it already has.
-    #[cfg(feature = "near-ai-staging")]
-    #[tokio::test]
-    async fn an_invite_still_admits() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        let list = AllowList::with(&[&h.subject]);
-        let device = Device::new();
-        let first = sign_in(&h, &device).await;
-        assert_eq!(first.status, StatusCode::OK, "{:?}", first.json());
-        let first = first.json();
-        let tenant = first["tenant_id"].as_str().expect("tenant").to_string();
-
-        list.write(&[]);
-        let code: String = Uuid::new_v4().simple().to_string()[..16].to_uppercase();
-        admin
-            .execute(
-                "INSERT INTO onboarding_invite_grants (
-                    invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
-                    policy_version, allowed_consent_scopes, allowed_uses, max_uses,
-                    issuance_source
-                 ) VALUES ($1, 'staging-operator', 'fixed', $2, 'v1',
-                           ARRAY['model_training'], ARRAY['research'], 1, 'operator')",
-                &[
-                    &trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(&code),
-                    &tenant,
-                ],
-            )
-            .await
-            .expect("an operator invite");
-        let redeemed = send(
-            &h.state,
-            "POST",
-            "/v1/account/invites/redeem",
-            Some(&serde_json::json!({
-                "invite_code": code,
-                "idempotency_key": Uuid::new_v4(),
-            })),
-            Some(first["access_token"].as_str().expect("token")),
-        )
-        .await;
-        assert_eq!(redeemed.status, StatusCode::OK, "{:?}", redeemed.json());
-        assert_eq!(redeemed.json()["authority"], "invited");
-
-        // Off the list, the account it already has still signs in.
-        let again = sign_in(&h, &device).await;
-        assert_eq!(again.status, StatusCode::OK, "{:?}", again.json());
-        assert_eq!(again.json()["tenant_id"], first["tenant_id"]);
-        assert_eq!(again.json()["account_id"], first["account_id"]);
-
-        for table in [
-            "trace_account_invite_grants",
-            "trace_account_trust_events",
-            "trace_account_trust",
-        ] {
-            admin
-                .execute(
-                    &format!("DELETE FROM {table} WHERE tenant_id = $1"),
-                    &[&tenant],
-                )
-                .await
-                .unwrap_or_else(|error| panic!("cleanup {table}: {error:?}"));
-        }
-        admin
-            .execute(
-                "DELETE FROM onboarding_invite_grants WHERE fixed_tenant_id = $1",
-                &[&tenant],
-            )
-            .await
-            .expect("cleanup invite");
-        drop_tenants(&admin, &[&tenant]).await;
-    }
-
-    /// A production build never reads the list: the same setting that
-    /// refuses everyone on staging changes nothing here, for sign-in or bind.
-    #[cfg(not(feature = "near-ai-staging"))]
-    #[tokio::test]
-    async fn a_default_build_ignores_the_list() {
-        let Some(h) = harness().await else { return };
-        let admin = h.admin().await;
-        let _list = AllowList::with(&[]);
-
-        let reply = sign_in(&h, &Device::new()).await;
-        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
-        let tenant = reply.json()["tenant_id"]
-            .as_str()
-            .expect("tenant")
-            .to_string();
-        assert_eq!(
-            audit_metadata(&admin, &tenant, "near_ai_login_provisioned").await,
-            vec![serde_json::json!({"identity": "near_ai_login", "admission": "not_granted"})]
-        );
-
-        h.sign_in_to_near_ai_as(&fresh_subject());
-        let account = unbound_account(&h.backend).await;
-        let reply = bind(&h, &account, &Device::new()).await;
-        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
-        assert_eq!(reply.json()["outcome"], "bound");
-        drop_tenants(&admin, &[&tenant, &account.tenant]).await;
-    }
 }
 
 // --- Open sign-up (staging S12) ----------------------------------------------

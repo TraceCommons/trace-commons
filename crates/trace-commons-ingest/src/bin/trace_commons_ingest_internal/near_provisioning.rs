@@ -38,8 +38,8 @@ mod control {
     pub(super) const ISSUER: &str = "issuer";
     /// The index pepper and account-name KEK required by both enrollment paths.
     pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
-    /// A staging build never offers the NEAR wallet ceremony: staging admits
-    /// accounts only through NEAR AI and its allow-list (staging spec S1/S5).
+    /// A staging build never offers the NEAR wallet ceremony: everyone signs
+    /// in to staging through NEAR AI (staging spec S1, S12).
     pub(super) const STAGING_WALLET_CLOSED: &str = "staging_wallet_provisioning_closed";
 
     /// Every label, for the tests that hold the label-only rule.
@@ -122,8 +122,8 @@ fn wallet_readiness_named(
     state: &AppState,
     contract: ProvisionContract,
 ) -> Result<Option<PublishedWitness>, &'static str> {
-    // First, so no configuration can open it: the wallet ceremony creates an
-    // account with no invite and no allow-list, which staging must not do.
+    // First, so no configuration can open it: staging is reached through
+    // NEAR AI only, and the wallet ceremony is a second way in.
     if cfg!(feature = "near-ai-staging") {
         return Err(control::STAGING_WALLET_CLOSED);
     }
@@ -1289,50 +1289,6 @@ async fn near_ai_introspect(
     .ok()
 }
 
-/// The label a NEAR AI finish (provisioning or bind) answers with when a
-/// staging build's allow-list does not admit a login that has no account
-/// (staging spec S5). Shown by name rather than as the uniform deny: by then
-/// the caller has proven the device key and the NEAR AI token, and the fact is
-/// about its own login. It names the rule, never the subject; nothing was
-/// written. A default build never answers it.
-pub(super) const NEAR_AI_SUBJECT_NOT_ADMITTED: &str =
-    trace_commons_server::account_onboarding::NEAR_AI_SUBJECT_NOT_ADMITTED;
-
-/// Whether a verified login with no account may get one. A shipped build has
-/// one answer, and never reads the staging allow-list.
-#[cfg(not(feature = "near-ai-staging"))]
-async fn new_account_for(
-    _login: &trace_commons_server::near_ai_login::VerifiedNearAiLogin,
-) -> trace_commons_server::account_onboarding::NearAiNewAccount {
-    trace_commons_server::account_onboarding::NearAiNewAccount::Open
-}
-
-/// Whether a verified login with no account may get one: on a staging build,
-/// only when its subject is on the operator's list.
-#[cfg(feature = "near-ai-staging")]
-async fn new_account_for(
-    login: &trace_commons_server::near_ai_login::VerifiedNearAiLogin,
-) -> trace_commons_server::account_onboarding::NearAiNewAccount {
-    super::staging_admission::new_account_for(login.subject_id()).await
-}
-
-/// Log a staging admission decision by the anchor's blind index only.
-fn log_new_account_refusal(
-    identity: &trace_commons_server::near_account_identity::NearAccountIdentity,
-    login: &trace_commons_server::near_ai_login::VerifiedNearAiLogin,
-    error: &trace_commons_server::error::DatabaseError,
-) -> bool {
-    let refused = trace_commons_server::account_onboarding::is_near_ai_subject_not_admitted(error);
-    if refused {
-        tracing::info!(
-            label = NEAR_AI_SUBJECT_NOT_ADMITTED,
-            anchor_hash = %identity.login_index_label(login.subject_id()),
-            "near.ai login with no account refused by the allow-list"
-        );
-    }
-    refused
-}
-
 async fn near_ai_finish(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -1366,10 +1322,9 @@ async fn near_ai_finish(
     // spent.
     let login = near_ai_introspect(&state, body.access_token).await?;
     let identity = state.near_account_identity.as_ref()?;
-    let new_account = new_account_for(&login).await;
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let provisioned = match db
+    let provisioned = db
         .provision_near_ai_login(
             &login,
             &device,
@@ -1379,19 +1334,9 @@ async fn near_ai_finish(
                 expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
             },
             identity,
-            new_account,
         )
         .await
-    {
-        Ok(provisioned) => provisioned,
-        Err(error) if log_new_account_refusal(identity, &login, &error) => {
-            return Some(no_store(api_error(
-                StatusCode::FORBIDDEN,
-                NEAR_AI_SUBJECT_NOT_ADMITTED,
-            )));
-        }
-        Err(_) => return None,
-    };
+        .ok()?;
     Some(response(serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
@@ -1608,19 +1553,15 @@ pub(super) async fn near_ai_bind_finish_handler(
         Ok(response) => Some(response),
         Err(Some(stage)) => {
             bind_failed(&state, &ctx, stage).await;
-            // The finish refusals shown by name. Each is a fact about the
-            // caller's own device, account or login, and none names another
-            // tenant or account.
-            if stage == NEAR_AI_SUBJECT_NOT_ADMITTED {
-                Some(no_store(api_error(StatusCode::FORBIDDEN, stage)))
-            } else {
-                [
-                    BIND_DEVICE_KEY_REGISTERED_ELSEWHERE,
-                    NEAR_AI_ACCOUNT_MISMATCH,
-                ]
-                .contains(&stage)
-                .then(|| no_store(api_error(StatusCode::CONFLICT, stage)))
-            }
+            // The two finish refusals shown by name. Both are facts about the
+            // caller's own device or its own account, and neither names
+            // another tenant or account.
+            [
+                BIND_DEVICE_KEY_REGISTERED_ELSEWHERE,
+                NEAR_AI_ACCOUNT_MISMATCH,
+            ]
+            .contains(&stage)
+            .then(|| no_store(api_error(StatusCode::CONFLICT, stage)))
         }
         Err(None) => None,
     };
@@ -1729,7 +1670,6 @@ async fn near_ai_bind_finish(
             trace_commons_server::account_binding::AccountBindingState::Bound,
         ));
     }
-    let new_account = new_account_for(&login).await;
     let outcome = db
         .bind_near_ai_login(
             &ctx.tenant_id,
@@ -1742,19 +1682,15 @@ async fn near_ai_bind_finish(
                 expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
             },
             identity,
-            new_account,
         )
         .await
         .map_err(|error| {
-            // The database refusals shown to the caller: its own device,
-            // proven by the signature above, is held by another account; or
-            // its own near.ai login is not admitted by a staging allow-list.
+            // The one database refusal shown to the caller: its own device,
+            // proven by the signature above, is held by another account.
             // Nothing was committed, so the account stays unbound.
             if trace_commons_server::account_onboarding::is_device_key_registered_elsewhere(&error)
             {
                 Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
-            } else if log_new_account_refusal(identity, &login, &error) {
-                Some(NEAR_AI_SUBJECT_NOT_ADMITTED)
             } else {
                 Some("bind")
             }
