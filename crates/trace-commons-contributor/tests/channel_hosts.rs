@@ -53,10 +53,23 @@ fn is_identity_literal(literal: &str) -> bool {
     literal.contains("KXSWJN7WY8")
         || literal.contains("ai.tracecommons.shell")
         || literal.starts_with("trace-commons.")
+        || (literal.starts_with("trace-commons/") && !is_domain_separator(literal))
         || literal.starts_with("trace-commons-staging")
         || literal == "trace-commons"
         || literal.contains("TRACE_COMMONS_CONTRIBUTOR_DIR")
         || literal.contains("TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR")
+}
+
+/// A versioned hash or binding domain such as `trace-commons/device-key/v1`:
+/// a label inside a digest, not a path, and changing it would orphan every
+/// record it binds.
+fn is_domain_separator(literal: &str) -> bool {
+    literal
+        .trim_end_matches("\\0")
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.strip_prefix('v'))
+        .is_some_and(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The hosts named in `literal`: a domain above preceded by the start of the
@@ -351,6 +364,8 @@ mod tests {
     fn g() { let _ = "{"; }
 }
 const H: &str = "KXSWJN7WY8.ai.tracecommons.shell";
+const I: &str = "trace-commons/mission-drafts";
+const J: &[u8] = b"trace-commons/device-key/v1\0";
 "##;
     let literals = non_test_literals(source);
     let named: Vec<String> = literals
@@ -365,6 +380,7 @@ const H: &str = "KXSWJN7WY8.ai.tracecommons.shell";
             "cloud.near.ai",
             "https://ingest.tracecommons.ai",
             "KXSWJN7WY8.ai.tracecommons.shell",
+            "trace-commons/mission-drafts",
         ]
     );
     assert_eq!(
