@@ -37,6 +37,21 @@ macro_rules! staging_host {
 #[cfg(feature = "near-ai-staging")]
 pub const STAGING_HOST: &str = staging_host!();
 
+/// The channel's state directory override variable, as a literal so help
+/// text can be built from it with `concat!`.
+#[cfg(not(feature = "near-ai-staging"))]
+macro_rules! state_dir_env {
+    () => {
+        "TRACE_COMMONS_CONTRIBUTOR_DIR"
+    };
+}
+#[cfg(feature = "near-ai-staging")]
+macro_rules! state_dir_env {
+    () => {
+        "TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR"
+    };
+}
+
 /// Whether this build is the staging channel (`near-ai-staging`).
 pub const fn near_ai_staging() -> bool {
     cfg!(feature = "near-ai-staging")
@@ -47,7 +62,7 @@ mod values {
     pub const CHANNEL: &str = "production";
 
     pub const STATE_DIR_NAME: &str = "trace-commons";
-    pub const STATE_DIR_ENV: &str = "TRACE_COMMONS_CONTRIBUTOR_DIR";
+    pub const STATE_DIR_ENV: &str = state_dir_env!();
 
     pub const KEYCHAIN_ACCESS_GROUP: &str = "KXSWJN7WY8.ai.tracecommons.shell";
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons.near-ai.credentials";
@@ -73,7 +88,7 @@ mod values {
     pub const CHANNEL: &str = "staging";
 
     pub const STATE_DIR_NAME: &str = "trace-commons-staging";
-    pub const STATE_DIR_ENV: &str = "TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR";
+    pub const STATE_DIR_ENV: &str = state_dir_env!();
 
     pub const KEYCHAIN_ACCESS_GROUP: &str = "KXSWJN7WY8.ai.tracecommons.shell.staging";
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons-staging.near-ai.credentials";
@@ -106,6 +121,12 @@ pub const STATE_DIR_NAME: &str = values::STATE_DIR_NAME;
 /// build reads only its own, so a production override never points it at
 /// production's enrollment.
 pub const STATE_DIR_ENV: &str = values::STATE_DIR_ENV;
+/// The CLI's `--config-dir` help, which names [`STATE_DIR_ENV`].
+pub const CONFIG_DIR_HELP: &str = concat!(
+    "Override the config directory (default: $",
+    state_dir_env!(),
+    ", then OS config dir)"
+);
 
 /// The keychain team access group the channel's entitlement grants.
 pub const KEYCHAIN_ACCESS_GROUP: &str = values::KEYCHAIN_ACCESS_GROUP;

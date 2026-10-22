@@ -17,8 +17,8 @@ mod mission_draft_cli;
     about = "Submit local coding-agent traces to Trace Commons"
 )]
 struct Cli {
-    /// Override the config directory (default: $TRACE_COMMONS_CONTRIBUTOR_DIR, then OS config dir)
-    #[arg(long, global = true)]
+    // The help names the channel's override variable: `channel::CONFIG_DIR_HELP`.
+    #[arg(long, global = true, help = crate::channel::CONFIG_DIR_HELP)]
     config_dir: Option<PathBuf>,
     /// Emit machine-readable JSON instead of human-readable lines. For
     /// callers driving this CLI programmatically (MCP servers, CI).
@@ -790,6 +790,24 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--config-dir`'s help names the override variable this build reads,
+    /// so a staging build does not tell people to set production's.
+    #[test]
+    fn the_config_dir_help_names_the_channel_s_variable() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let help = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "config_dir")
+            .and_then(|arg| arg.get_help())
+            .expect("--config-dir has help")
+            .to_string();
+        assert!(
+            help.contains(&format!("${}", crate::channel::STATE_DIR_ENV)),
+            "{help}"
+        );
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(
