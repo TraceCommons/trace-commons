@@ -8,9 +8,11 @@
 //! TEE, meters the operator's spend per account, and returns labels with the
 //! receipt evidence the daemon shows. Design:
 //! `docs/superpowers/specs/2026-10-20-insights-judgement-service-design.md`
-//! (spec PR #1501). This module is delivery slice 3, "Service core (library
-//! only)". There is no binary, no HTTP surface, no enclave seam and no model
-//! HTTP adapter here; those are slices 5 and 6.
+//! (spec PR #1501). Slice 3 built the core library; slice 5 added the
+//! enclave seam, the HTTP surface and the boot sequence that the
+//! `trace-commons-judgement` binary runs. No model HTTP adapter is here
+//! yet: the production allowlist is empty until slice 9, and the Jev
+//! development adapter is slice 6.
 //!
 //! - [`model`]: the [`model::JudgementModel`] adapter trait, held as
 //!   `Arc<dyn JudgementModel>` so a different model substitutes at the seam.
@@ -34,15 +36,24 @@
 //!   number of marked events.
 //! - [`service`]: one request end to end, over the pieces above, with the
 //!   hash-only log line.
+//! - [`enclave`]: the one `GetKey` path (`judgement-limiter`), the
+//!   sealing and signing keys generated in memory at each boot, and the
+//!   `tcjudge1` quote that binds them.
+//! - [`http`]: the two routes, `GET /v1/attestation` and the sealed
+//!   `POST /v1/judgement`, and their bounds.
+//! - [`boot`]: the fail-closed boot order and its refusal labels.
 //!
 //! Logging is hash-only (spec section 6): a random request id,
 //! `digest_sha256`, the model id, the refusal label or `ok`, and a latency
 //! bucket. Never the account, a key derived from it, a label, a confidence,
 //! a prompt, the digest, the claim, or NEAR AI response text.
 
+pub mod boot;
 pub mod catalog;
 pub mod claim;
 pub mod digest;
+pub mod enclave;
+pub mod http;
 pub mod ledger;
 pub mod limiter;
 #[cfg(any(test, feature = "judgement-development-models"))]

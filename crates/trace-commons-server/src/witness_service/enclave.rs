@@ -210,12 +210,12 @@ const ADDRESS_LEN: usize = 20;
 /// specification. Used only to *construct* test quotes; the implementation
 /// parses with `dcap_qvl` rather than trusting these.
 #[cfg(test)]
-mod quote_offsets {
-    pub(super) const MR_TD: usize = 48 + 136;
-    pub(super) const MR_CONFIG_ID: usize = 48 + 184;
-    pub(super) const RT_MR0: usize = 48 + 328;
-    pub(super) const RT_MR3: usize = 48 + 472;
-    pub(super) const REPORT_DATA: usize = 48 + 520;
+pub(crate) mod quote_offsets {
+    pub(crate) const MR_TD: usize = 48 + 136;
+    pub(crate) const MR_CONFIG_ID: usize = 48 + 184;
+    pub(crate) const RT_MR0: usize = 48 + 328;
+    pub(crate) const RT_MR3: usize = 48 + 472;
+    pub(crate) const REPORT_DATA: usize = 48 + 520;
 }
 
 /// Why the enclave seam refused.
@@ -354,11 +354,15 @@ fn decode_address(signing_address: &str) -> Result<[u8; ADDRESS_LEN], EnclaveErr
 }
 
 /// The measurement fields this witness pins, read out of a signed quote.
+///
+/// Shared with the judgement service's enclave seam
+/// (`judgement_service::enclave`), which reads the same three fields out of
+/// its own quotes.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct QuoteFacts {
-    mr_td: [u8; 48],
-    mr_config_id: [u8; 48],
-    report_data: [u8; REPORT_DATA_LEN],
+pub(crate) struct QuoteFacts {
+    pub(crate) mr_td: [u8; 48],
+    pub(crate) mr_config_id: [u8; 48],
+    pub(crate) report_data: [u8; REPORT_DATA_LEN],
 }
 
 impl QuoteFacts {
@@ -374,7 +378,7 @@ impl QuoteFacts {
     /// checks built on these facts are "is this the report data I just asked
     /// for" and "is this still the MRTD I booted with", both of which catch a
     /// substituted quote regardless of whether its signature is good.
-    fn parse(quote: &[u8]) -> Result<Self, EnclaveError> {
+    pub(crate) fn parse(quote: &[u8]) -> Result<Self, EnclaveError> {
         let parsed =
             dcap_qvl::quote::Quote::parse(quote).map_err(|_| EnclaveError::QuoteUnparsable)?;
         let report = match parsed.report {
@@ -395,7 +399,7 @@ impl QuoteFacts {
     /// operator diffing two pins can see *which* half moved: MRTD alone means
     /// a new image, MRCONFIGID alone means the same image relaunched with a
     /// different compose.
-    fn measurement_label(&self) -> String {
+    pub(crate) fn measurement_label(&self) -> String {
         format!(
             "mrtd:{}+mrconfigid:{}",
             hex::encode(self.mr_td),
@@ -463,27 +467,36 @@ impl DstackEnclave {
 
 /// keccak256 of the uncompressed public key without its `0x04` tag, last 20
 /// bytes -- the derivation `recover_eip191_signer` inverts.
-fn address_of(signing_key: &SigningKey) -> String {
+pub(crate) fn address_of(signing_key: &SigningKey) -> String {
     let point = signing_key.verifying_key().to_encoded_point(false);
     let digest = Keccak256::digest(&point.as_bytes()[1..]);
     format!("0x{}", hex::encode(&digest[12..]))
 }
 
+/// An EIP-191 personal-message signature by `signing_key`, as `0x` and 130
+/// lowercase hex (`r || s || v`, `v` 27 or 28). Shared with the judgement
+/// service, which signs its responses the same way.
+pub(crate) fn sign_eip191_with(
+    signing_key: &SigningKey,
+    message: &[u8],
+) -> Result<String, SeamUnavailable> {
+    let mut hasher = Keccak256::new();
+    hasher.update(b"\x19Ethereum Signed Message:\n");
+    hasher.update(message.len().to_string().as_bytes());
+    hasher.update(message);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(&digest)
+        .map_err(|_| SeamUnavailable)?;
+    let mut raw = signature.to_bytes().to_vec();
+    // 27/28, not 0/1: the offset EIP-191 recovery expects.
+    raw.push(recovery_id.to_byte() + 27);
+    Ok(format!("0x{}", hex::encode(raw)))
+}
+
 impl Signer for DstackEnclave {
     fn sign_eip191(&self, message: &[u8]) -> Result<String, SeamUnavailable> {
-        let mut hasher = Keccak256::new();
-        hasher.update(b"\x19Ethereum Signed Message:\n");
-        hasher.update(message.len().to_string().as_bytes());
-        hasher.update(message);
-        let digest: [u8; 32] = hasher.finalize().into();
-        let (signature, recovery_id) = self
-            .signing_key
-            .sign_prehash_recoverable(&digest)
-            .map_err(|_| SeamUnavailable)?;
-        let mut raw = signature.to_bytes().to_vec();
-        // 27/28, not 0/1: the offset EIP-191 recovery expects.
-        raw.push(recovery_id.to_byte() + 27);
-        Ok(format!("0x{}", hex::encode(raw)))
+        sign_eip191_with(&self.signing_key, message)
     }
 }
 
@@ -698,13 +711,41 @@ fn hex_field(value: &serde_json::Value, field: &str) -> Result<Vec<u8>, EnclaveE
 #[async_trait]
 impl GuestAgent for DstackSocketAgent {
     async fn signing_key(&self) -> Result<DerivedSigningKey, EnclaveError> {
+        self.get_key(SIGNING_KEY_PATH, SIGNING_KEY_PURPOSE, SIGNING_KEY_ALGORITHM)
+            .await
+    }
+
+    async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError> {
+        self.get_quote(report_data).await
+    }
+}
+
+#[cfg(unix)]
+impl DstackSocketAgent {
+    /// `GetKey(path, purpose, algorithm)` on the pinned v0 surface, falling
+    /// back to its unversioned spelling on a 404.
+    ///
+    /// The witness asks for `path = "vms"` through
+    /// [`GuestAgent::signing_key`]. Other services in the same app derive
+    /// separate keys by asking for other paths: different paths give
+    /// different keys, and `purpose` and `algorithm` do not enter the
+    /// derivation (see the module docs). The judgement service uses this for
+    /// its `judgement-limiter` root, its only `GetKey` key.
+    ///
+    /// `path`, `purpose` and `algorithm` are compile-time constants at every
+    /// call site, never caller input, so they are written into the query
+    /// unescaped.
+    pub async fn get_key(
+        &self,
+        path: &str,
+        purpose: &str,
+        algorithm: &str,
+    ) -> Result<DerivedSigningKey, EnclaveError> {
         let response = self
             .get_either(
+                &format!("{GET_KEY_PATH}?path={path}&purpose={purpose}&algorithm={algorithm}"),
                 &format!(
-                    "{GET_KEY_PATH}?path={SIGNING_KEY_PATH}&purpose={SIGNING_KEY_PURPOSE}&algorithm={SIGNING_KEY_ALGORITHM}"
-                ),
-                &format!(
-                    "{GET_KEY_PATH_UNVERSIONED}?path={SIGNING_KEY_PATH}&purpose={SIGNING_KEY_PURPOSE}&algorithm={SIGNING_KEY_ALGORITHM}"
+                    "{GET_KEY_PATH_UNVERSIONED}?path={path}&purpose={purpose}&algorithm={algorithm}"
                 ),
             )
             .await?;
@@ -730,7 +771,11 @@ impl GuestAgent for DstackSocketAgent {
         })
     }
 
-    async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError> {
+    /// `GetQuote(report_data)`, raw quote bytes. See [`GuestAgent::quote`].
+    pub async fn get_quote(
+        &self,
+        report_data: &[u8; REPORT_DATA_LEN],
+    ) -> Result<Vec<u8>, EnclaveError> {
         let response = self
             .get_either(
                 &format!(

@@ -1,0 +1,59 @@
+# The Insights judgement service, development profile, as its own dstack app.
+#
+# MEASURED, like the production file, and deliberately a DIFFERENT app: the
+# limiter key derives from the app id, so this deployment can never derive
+# the production one, even from an identical image. Deployed and read back
+# as README.md, "Deploy", says, with `allowed_envs` empty. Release
+# daemons accept only production measurements (spec section 4), so they
+# never reach this service.
+#
+# SYNTHETIC OR DEVELOPER-OWNED DATA ONLY. The development image compiles in
+# models that are not on the production allowlist.
+#
+# This slice serves the mock model: deterministic, hash-derived labels and
+# receipts signed by a key the service generates at boot, with a synthetic
+# catalog entry. It exercises the whole request path in a measured CVM and
+# calls nobody. Slice 6 adds the Jev adapter and the development deploy.
+
+services:
+  judgement:
+    # By digest, from the `judgement-image` workflow with profile
+    # `development`. Set when slice 6 deploys.
+    image: ghcr.io/tracecommons/trace-commons-judgement-development@sha256:SET_FROM_THE_JUDGEMENT_IMAGE_WORKFLOW
+
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - judgement-development-data:/data
+
+    environment:
+      TRACE_COMMONS_JUDGEMENT_BIND: "0.0.0.0:8089"
+
+      # The mock. No NEAR AI call, so no API key and no signer pins: its
+      # signer is generated at boot and pinned to itself.
+      TRACE_COMMONS_JUDGEMENT_MODEL: "trace-commons/mock-judgement-model"
+
+      # The development issuer's public key, never the production issuer's,
+      # so a production claim is refused here.
+      # TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS: "<development issuer public key hex>"
+
+      TRACE_COMMONS_JUDGEMENT_ACCOUNT_MONTHLY_CAP_USD: "5"
+      TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD: "100"
+      TRACE_COMMONS_JUDGEMENT_DATA_DIR: "/data"
+      TRACE_COMMONS_JUDGEMENT_MAX_CONCURRENT_REQUESTS: "8"
+      TRACE_COMMONS_JUDGEMENT_REQUEST_TIMEOUT_SECS: "240"
+      RUST_LOG: "info"
+
+    ports:
+      - "8089:8089"
+
+volumes:
+  judgement-development-data:
