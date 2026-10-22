@@ -78,8 +78,7 @@ State these limits before the model, so a reader does not over-trust it.
 
 This section summarizes the research that informs the persona and the
 parameters. It is not exhaustive. It gives the rationale for the terms in
-section 5. The full report is the Notion page "Buyer personas and value
-functions for Trace Commons" (2026-10-20), built from a market scan.
+section 5, and each claim names its source.
 
 ### 3.1 Who buys this data
 
