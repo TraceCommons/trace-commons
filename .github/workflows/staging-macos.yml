@@ -22,9 +22,10 @@
 #     release check holds that), and a tag created with the job token starts
 #     no workflow at all.
 #
-# No GitHub environment and no approval gate (owner decision, 2026-10-22):
+# No GitHub environment and no approval gate (staging design S14, #1561):
 # the secrets are repository secrets. The release check allows a job here to
-# name no environment, and refuses any environment other than `staging`.
+# name no environment, refuses any environment other than `staging`, and
+# allows only the secrets listed below.
 # The Developer ID and notary credentials are production's, as today (Apple
 # has no separate staging identity); every other secret has a staging name
 # of its own, never a production one:
@@ -41,6 +42,18 @@
 #
 # The publisher trusts this workflow only when it runs from main, so it is
 # always dispatched from main; the `ref` input picks the commit to build.
+# Main's copy of the release check runs against that commit's tree, so a
+# chosen ref cannot bring its own check.
+#
+# Three jobs. preflight checks and fixes the version; macos builds, signs,
+# notarizes and writes the signed appcast with no write token and no OIDC
+# token in reach of the build; publish, which builds nothing, attests,
+# uploads to the bucket and creates the pre-release.
+#
+# Before the first dispatch the feed must be publicly readable. Never grant
+# public read on the staging artifacts bucket for that: it is the staging
+# server's object store and holds its database dumps, and a public grant on
+# a uniform-access bucket covers every object (staging design 3.1, 3.2).
 name: staging-macos
 
 on:
@@ -71,15 +84,11 @@ jobs:
       build: ${{ steps.v.outputs.build }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ inputs.ref }}
-
       # The staging publisher trusts only this workflow run from main (its
       # workload identity binding names the main branch's OIDC subject), so a
       # dispatch from any other branch would build, sign and notarize and
-      # then fail at upload. Refuse it here instead; to build another commit,
-      # dispatch from main and name it in the `ref` input.
+      # then fail at upload. Refuse it here, first, instead; to build another
+      # commit, dispatch from main and name it in the `ref` input.
       - name: Dispatched from main
         env:
           DISPATCH_REF: ${{ github.ref }}
@@ -88,6 +97,18 @@ jobs:
             echo "refusing: dispatch this workflow from main (got $DISPATCH_REF); pass another commit in the ref input" >&2
             exit 1
           fi
+
+      # The tools are main's, the commit that holds the running workflow;
+      # the tree to build goes under build/.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          path: build
+          persist-credentials: false
 
       - name: Confirm the staging credentials are configured
         env:
@@ -119,10 +140,11 @@ jobs:
           fi
           echo "all 10 staging credentials are present"
 
-      # The commit being built must pass the release check itself: it is
-      # what keeps the staging feature out of every release build.
+      # The commit being built must pass the release check: it is what keeps
+      # the staging feature out of every release build. The check is main's
+      # copy, run against the built tree.
       - name: The release check passes at this commit
-        run: scripts/ci/check-release-staging-feature.sh check
+        run: scripts/ci/check-release-staging-feature.sh check build
 
       # CFBundleShortVersionString is the next production version with a
       # -staging.<run number> suffix; CFBundleVersion only rises, so Sparkle
@@ -134,8 +156,8 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          SHA="$(git rev-parse HEAD)"
-          MANIFEST=crates/trace-commons-contributor-gtk/Cargo.toml
+          SHA="$(git -C build rev-parse HEAD)"
+          MANIFEST=build/crates/trace-commons-contributor-gtk/Cargo.toml
           BASE="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
           if ! printf '%s' "$BASE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "refusing to build: $MANIFEST version '$BASE' is not three-part numeric" >&2
@@ -153,12 +175,16 @@ jobs:
     needs: [preflight]
     # The same image the production DMG builds on.
     runs-on: macos-26
-    # Holds the Developer ID private key and the staging Sparkle key.
+    # Holds the Developer ID private key and the staging Sparkle key, but no
+    # write token and no OIDC token: code the build runs (a build script, a
+    # test) can reach neither. Publishing is the next job's.
     timeout-minutes: 120
     permissions:
-      contents: write # the pre-release and its tag
-      id-token: write # workload identity federation, build provenance
-      attestations: write
+      contents: read
+    outputs:
+      dmg: ${{ steps.loc.outputs.dmg }}
+      feed_url: ${{ steps.loc.outputs.feed_url }}
+      gs_base: ${{ steps.loc.outputs.gs_base }}
     env:
       SHA: ${{ needs.preflight.outputs.sha }}
       SHORT_VERSION: ${{ needs.preflight.outputs.short }}
@@ -168,6 +194,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
       # The same pinned toolchain as the production DMG build, with both
       # darwin targets for the universal dylib and CLI.
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
@@ -250,15 +277,10 @@ jobs:
           ( cd dist && shasum -a 256 "$DMG" > "$DMG.sha256" )
           echo "DMG=$DMG" >> "$GITHUB_ENV"
 
-      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
-        with:
-          subject-path: |
-            dist/*.dmg
-            dist/*.dmg.sha256
-
       # Where the appcast and DMG go comes from the channel file's feed URL,
       # the one the bundle was built with, so the two cannot drift apart.
       - name: Resolve the staging update location
+        id: loc
         env:
           TC_CHANNEL: staging
         run: |
@@ -272,11 +294,12 @@ jobs:
             exit 1
           fi
           BASE="${FEED%/appcast.xml}"
+          echo "DMG_URL=$BASE/$DMG" >> "$GITHUB_ENV"
           {
-            echo "FEED_URL=$FEED"
-            echo "DMG_URL=$BASE/$DMG"
-            echo "GS_BASE=gs://${BASE#"$PREFIX"}"
-          } >> "$GITHUB_ENV"
+            echo "dmg=$DMG"
+            echo "feed_url=$FEED"
+            echo "gs_base=gs://${BASE#"$PREFIX"}"
+          } >> "$GITHUB_OUTPUT"
 
       # The signature check below needs `pkeyutl -rawin`; the runner's
       # /usr/bin/openssl is LibreSSL, which has no such thing.
@@ -300,6 +323,7 @@ jobs:
           set -euo pipefail
           KEY="$RUNNER_TEMP/staging-sparkle-ed-key"
           rm -f "$KEY"
+          trap 'rm -f "$KEY"' EXIT
           ( umask 077; printf '%s' "$STAGING_PRIVATE_KEY" > "$KEY" )
           chmod 600 "$KEY"
           SIGN_UPDATE="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
@@ -314,7 +338,6 @@ jobs:
             --sign-update "$SIGN_UPDATE" \
             --ed-key-file "$KEY" \
             --out dist/updates/appcast.xml
-          rm -f "$KEY"
           cat dist/updates/appcast.xml
 
       # Verify the appcast's signature over the DMG against the public key
@@ -344,6 +367,50 @@ jobs:
             -inkey "$RUNNER_TEMP/staging-sparkle-pub.der" \
             -sigfile "$RUNNER_TEMP/staging-sparkle.sig" \
             -in "dist/$DMG"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: staging-macos-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Builds nothing: it takes the signed DMG and the signed appcast from the
+  # macos job, so the write token and the OIDC token never share a job with
+  # the build.
+  publish:
+    name: staging publish
+    needs: [preflight, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # the pre-release and its tag
+      id-token: write # workload identity federation, build provenance
+      attestations: write
+    env:
+      SHA: ${{ needs.preflight.outputs.sha }}
+      SHORT_VERSION: ${{ needs.preflight.outputs.short }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      DMG: ${{ needs.macos.outputs.dmg }}
+      FEED_URL: ${{ needs.macos.outputs.feed_url }}
+      GS_BASE: ${{ needs.macos.outputs.gs_base }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: staging-macos-dist
+          path: dist
+
+      - name: The DMG matches its checksum
+        run: |
+          set -euo pipefail
+          test -f "dist/$DMG" && test -f dist/updates/appcast.xml
+          ( cd dist && sha256sum -c "$DMG.sha256" )
+
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
 
       - name: Authenticate to GCP (workload identity federation; no key on the runner)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
