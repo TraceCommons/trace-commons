@@ -300,6 +300,7 @@ Spec: sections 4.1, 4.2, 4.5, 4.7.
 - Create: `macos/channels/production.env` (today's values, so a production build is byte-identical in its Info.plist), fill `macos/channels/staging.env` (bundle id, display name, icon name, entitlements file, profile path variable, feed URL, URL scheme, the opaque cargo-features value)
 - Modify: `macos/scripts/make-app-bundle.sh`, `info-plist.sh`, `make-release-dmg.sh` (read `TC_CHANNEL`, default `production`; pass the features value through; check the bundled `near-ai --version` channel against the plist)
 - Modify: `crates/trace-commons-contributor/src/deep_link.rs` (accept only `channel::URL_SCHEME`)
+- Modify: the IronWire home, pointer and control port per spec 4.2 and S10 (`channel.rs`, `daemon/private_inference.rs`, `daemon/ironwire_pointer.rs`, `daemon/settings.rs`); tests `a_staging_build_uses_its_own_ironwire_home`, `a_staging_build_ignores_the_production_pointer`, and a production pin that its home, pointer and port are unchanged
 - Modify: `scripts/check-aasa.sh` callers in CI only if a test needs the staging app id (the script already takes it)
 - Tests: `scripts/ci/` test for `info-plist.sh` under each channel; `deep_link.rs` tests
 
