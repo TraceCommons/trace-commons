@@ -321,7 +321,7 @@ final class SessionPublicationTests: XCTestCase {
             workflow: "  Retry once with the corrected bounded input.  ",
             reusePermission: .ccBy40,
             evidence: draft.evidence,
-            source: "  https://tracecommons.ai/runs/source-workflow  "
+            source: "  \(LinkedChannel.runLink("source-workflow"))  "
         )
         let inputJSON = try XCTUnwrap(
             String(data: JSONEncoder().encode(input), encoding: .utf8)

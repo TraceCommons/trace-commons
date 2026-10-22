@@ -52,7 +52,10 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // `set_managed_terminal`.
             "managed_terminal",
         ]
-        return ["get_settings": settings, "set_settings": settings]
+        // Staging builds only: where the signed NEAR AI pin set stands, a
+        // label no screen draws yet. A production daemon never sends it.
+        let status: Set<String> = ["near_ai_pins"]
+        return ["get_settings": settings, "set_settings": settings, "status": status]
     }()
 
     private struct Owned: @unchecked Sendable {

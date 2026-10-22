@@ -203,6 +203,9 @@ private final class HostedFunding {
 final class FundingTests: XCTestCase {
     private let organization = "synthetic-org_42"
     private let revision = String(repeating: "0123456789abcdef", count: 4)
+    /// The dashboard the linked dylib names: production's or staging's.
+    private let origin = LinkedChannel.dashboardOrigin
+    private let host = LinkedChannel.dashboardHost
 
     private func ready() -> [String: Any] {
         [
@@ -210,7 +213,7 @@ final class FundingTests: XCTestCase {
             "organization_id": organization,
             "organization_name": "Synthetic organization",
             "connection_revision": revision,
-            "browser_url": "https://cloud.near.ai/dashboard/organizations/\(organization)/credits",
+            "browser_url": "\(origin)/dashboard/organizations/\(organization)/credits",
             "observed_at": "2026-09-09T12:00:00Z",
             "view": ["message": "Cloud organization: Synthetic organization"],
         ]
@@ -258,7 +261,7 @@ final class FundingTests: XCTestCase {
                    "org name", "org\nname", "é", String(repeating: "a", count: 129)] {
             var value = ready()
             value["organization_id"] = id
-            value["browser_url"] = "https://cloud.near.ai/dashboard/organizations/\(id)/credits"
+            value["browser_url"] = "\(origin)/dashboard/organizations/\(id)/credits"
             XCTAssertNil(FundingDestination(organizationID: id, connectionRevision: revision))
             XCTAssertThrowsError(try decode(value), "Accepted malformed organization ID")
         }
@@ -278,13 +281,13 @@ final class FundingTests: XCTestCase {
     func testReadyRefusesEveryNonexactBrowserURL() throws {
         let path = "/dashboard/organizations/\(organization)/credits"
         for url in [
-            "http://cloud.near.ai\(path)", "https://cloud.near.ai:443\(path)",
-            "https://user:password@cloud.near.ai\(path)", "https://cloud.near.ai.evil.invalid\(path)",
-            "https://CLOUD.near.ai\(path)", "https://cloud.near.ai.\(path)",
-            "https://cloud.near.ai\(path)?action=pay", "https://cloud.near.ai\(path)#fragment",
-            "https://cloud.near.ai\(path)/", "//cloud.near.ai\(path)",
-            "https://cloud.near.ai/dashboard/organizations/other/credits",
-            "https://cloud.near.ai/dashboard/organizations/%73ynthetic-org_42/credits",
+            "http://\(host)\(path)", "\(origin):443\(path)",
+            "https://user:password@\(host)\(path)", "\(origin).evil.invalid\(path)",
+            "https://\(host.uppercased())\(path)", "\(origin).\(path)",
+            "\(origin)\(path)?action=pay", "\(origin)\(path)#fragment",
+            "\(origin)\(path)/", "//\(host)\(path)",
+            "\(origin)/dashboard/organizations/other/credits",
+            "\(origin)/dashboard/organizations/%73ynthetic-org_42/credits",
         ] {
             var value = ready()
             value["browser_url"] = url
@@ -426,7 +429,7 @@ final class FundingTests: XCTestCase {
             var changed = ready()
             if field == "organization_id" {
                 changed[field] = "synthetic-other"
-                changed["browser_url"] = "https://cloud.near.ai/dashboard/organizations/synthetic-other/credits"
+                changed["browser_url"] = "\(origin)/dashboard/organizations/synthetic-other/credits"
             } else {
                 changed[field] = String(repeating: "b", count: 64)
             }

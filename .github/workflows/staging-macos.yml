@@ -205,15 +205,16 @@ jobs:
       # No build cache, as in the production signing job: a cache is a
       # write-target a lower-privilege job can poison, and this job signs.
 
-      # The Swift suite, against a production-channel debug dylib, as the
-      # client CI runs it. Its tests pin production hosts (the invite host,
-      # the billing destination, the public run link), so against a staging
-      # dylib about a dozen fail by design. The staging dylib's own channel
-      # is checked on the bundle below, before anything is signed.
+      # The Swift suite, against the staging-channel debug dylib this build
+      # ships. Tests that pin a channel value (the invite host, the billing
+      # destination, the public run link) read it from the linked dylib, so
+      # each channel's suite asserts that channel's own values. The
+      # production suite runs in the client CI. The bundle's channel is also
+      # checked below, before anything is signed.
       - name: swift test
         run: |
           set -euo pipefail
-          cargo build -p trace-commons-contributor-ffi
+          cargo build -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging
           swift test --package-path macos
 
       # make-release-dmg.sh reads macos/channels/staging.env: the bundle id,
