@@ -20,12 +20,24 @@
 //! # Metering spend, not calls
 //!
 //! Units are integer nano-USD, the catalog's `scale: 9`. Before each model
-//! call the service **reserves** an upper bound, `ceil(request_bytes / 3) *
-//! input_price + max_tokens * output_price`, against the account and the
-//! operator total; a reservation that would pass either cap is refused and
-//! no model call is made. After the call it **settles** to the usage the
-//! response reported, or leaves the reservation as the charge when there was
-//! none. A crash between the two leaves the reservation charged: every
+//! call the service **reserves** `(request_bytes + 512) * input_price +
+//! max_tokens * output_price` against the account and the operator total,
+//! checked and added in one step under one lock; a reservation that would
+//! pass either cap is refused and no model call is made.
+//!
+//! That figure is an upper bound under one stated assumption: a byte-level
+//! BPE tokenizer emits at most one token per byte of request text, and
+//! [`CHAT_TEMPLATE_ALLOWANCE_TOKENS`] covers the chat template the provider
+//! adds on top. `max_tokens` bounds every completion token, reasoning
+//! included. If a model ever reports more than its reservation, the bound
+//! did not hold for it: [`Limiter::settle`] charges the reported figure in
+//! full and says so with [`Settled::OverReservation`], and the caller
+//! latches that model (see [`super::receipt_check`]).
+//!
+//! After the call the caller **settles**: to the verified usage when the
+//! receipt verified, to the larger of the reservation and the reported
+//! usage when it did not, and to the reservation when no usage came back. A
+//! crash between reserve and settle leaves the reservation charged: every
 //! failure errs toward over-counting. Arithmetic is checked; an overflow
 //! refuses, it never wraps or saturates into a pass.
 //!
@@ -34,7 +46,10 @@
 //!
 //! Every reserve and every settle is written to the sealed ledger before
 //! the call goes on. A write that fails rolls the in-memory change back
-//! toward the larger charge and refuses with `judgement_saturated`.
+//! toward the larger charge. At reserve that refuses with
+//! `judgement_saturated` and no call is made; at settle the call was already
+//! made and billed, so it refuses with `judgement_service_fault`, which is
+//! not retried.
 
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +60,11 @@ use zeroize::Zeroizing;
 use super::catalog::TokenPrices;
 use super::ledger::{LedgerState, LedgerStore};
 use super::model::TokenUsage;
+
+/// Tokens reserved on top of one token per request byte, for the chat
+/// template the provider wraps around the request's text (role markers,
+/// the system prompt's framing, the structured-output instructions).
+pub const CHAT_TEMPLATE_ALLOWANCE_TOKENS: u64 = 512;
 
 /// HKDF info for the account-digest HMAC key.
 pub const ACCOUNT_DIGEST_INFO: &[u8] = b"account-digest";
@@ -176,14 +196,17 @@ pub fn month_index(now: i64) -> Option<u32> {
     year.checked_mul(12)?.checked_add(now.month0())
 }
 
-/// The reservation for one call: `ceil(request_bytes / 3) * input_price +
-/// max_tokens * output_price`. `None` on overflow.
+/// The reservation for one call: `(request_bytes +
+/// CHAT_TEMPLATE_ALLOWANCE_TOKENS) * input_price + max_tokens *
+/// output_price`, one input token per request byte. `None` on overflow.
 pub fn reservation_nanousd(
     request_bytes: usize,
     max_tokens: u32,
     prices: TokenPrices,
 ) -> Option<u64> {
-    let input_tokens = u64::try_from(request_bytes).ok()?.div_ceil(3);
+    let input_tokens = u64::try_from(request_bytes)
+        .ok()?
+        .checked_add(CHAT_TEMPLATE_ALLOWANCE_TOKENS)?;
     input_tokens
         .checked_mul(prices.input_nanousd)?
         .checked_add(u64::from(max_tokens).checked_mul(prices.output_nanousd)?)
@@ -196,6 +219,16 @@ pub fn charge_nanousd(usage: TokenUsage, prices: TokenPrices) -> Option<u64> {
         .prompt_tokens
         .checked_mul(prices.input_nanousd)?
         .checked_add(usage.completion_tokens.checked_mul(prices.output_nanousd)?)
+}
+
+/// How a settle came out against its reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// The charge was at or below the reservation (or none was reported).
+    WithinReservation,
+    /// The charge was above the reservation and was charged in full. The
+    /// reservation's bound did not hold for this model.
+    OverReservation,
 }
 
 /// A reserved amount, charged until settled. Dropping one without settling
@@ -301,22 +334,32 @@ impl Limiter {
         })
     }
 
-    /// Settle a reservation to the charge the response reported. `None`
-    /// leaves the reservation as the charge. A reservation from a month that
-    /// has since rolled over is dropped with that month.
+    /// Settle a reservation to `charge_nanousd`. `None` leaves the
+    /// reservation as the charge. A reservation from a month that has since
+    /// rolled over is dropped with that month.
+    ///
+    /// A charge above the reservation is charged in full, never capped to
+    /// it, and comes back as [`Settled::OverReservation`]. A ledger write
+    /// that fails refuses with [`JudgementRefusal::ServiceFault`]: the call
+    /// was already made and billed, so it is not a capacity refusal.
     pub fn settle(
         &self,
         reservation: Reservation,
         charge_nanousd: Option<u64>,
-    ) -> Result<(), JudgementRefusal> {
+    ) -> Result<Settled, JudgementRefusal> {
         let Some(charge) = charge_nanousd else {
             // The reservation stands, and it is already on disk.
-            return Ok(());
+            return Ok(Settled::WithinReservation);
+        };
+        let outcome = if charge > reservation.amount_nanousd {
+            Settled::OverReservation
+        } else {
+            Settled::WithinReservation
         };
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.month != reservation.month {
             // That month was dropped at the rollover, reservation and all.
-            return Ok(());
+            return Ok(outcome);
         }
         let before = state.clone();
         // Settling only ever moves a figure the reservation already put on
@@ -341,9 +384,9 @@ impl Limiter {
             if charge < reservation.amount_nanousd {
                 *state = before;
             }
-            return Err(JudgementRefusal::Saturated);
+            return Err(JudgementRefusal::ServiceFault);
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// The account's remaining monthly budget, as the coarse bucket the
@@ -516,14 +559,15 @@ pub(crate) mod tests {
             input_nanousd: 40,
             output_nanousd: 1350,
         };
-        // ceil(9000 / 3) = 3000 input tokens, 64 output tokens.
+        // One input token per request byte, plus the chat-template
+        // allowance, plus every completion token.
+        assert_eq!(CHAT_TEMPLATE_ALLOWANCE_TOKENS, 512);
         assert_eq!(
             reservation_nanousd(9000, 64, prices),
-            Some(3000 * 40 + 64 * 1350)
+            Some((9000 + 512) * 40 + 64 * 1350)
         );
-        // ceil rounds up.
-        assert_eq!(reservation_nanousd(1, 0, prices), Some(40));
-        assert_eq!(reservation_nanousd(0, 0, prices), Some(0));
+        assert_eq!(reservation_nanousd(1, 0, prices), Some(513 * 40));
+        assert_eq!(reservation_nanousd(0, 0, prices), Some(512 * 40));
         assert_eq!(
             charge_nanousd(
                 TokenUsage {
@@ -577,8 +621,158 @@ pub(crate) mod tests {
         let reservation = limiter
             .reserve(&account, 100, ClaimTime::at(NOW))
             .expect("reserves");
-        limiter.settle(reservation, Some(250)).expect("settles");
+        assert_eq!(
+            limiter.settle(reservation, Some(250)).expect("settles"),
+            Settled::OverReservation
+        );
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 250);
+        assert_eq!(limiter.operator_spent_nanousd(NOW), 250);
+        // At or below the reservation is within it.
+        let reservation = limiter
+            .reserve(&account, 100, ClaimTime::at(NOW))
+            .expect("reserves");
+        assert_eq!(
+            limiter.settle(reservation, Some(100)).expect("settles"),
+            Settled::WithinReservation
+        );
+        let reservation = limiter
+            .reserve(&account, 100, ClaimTime::at(NOW))
+            .expect("reserves");
+        assert_eq!(
+            limiter.settle(reservation, None).expect("settles"),
+            Settled::WithinReservation
+        );
+    }
+
+    #[test]
+    fn a_charge_above_the_reservation_can_pass_the_cap_and_the_next_reserve_sees_it() {
+        // The reported figure is charged even past the cap: it was billed.
+        let limiter = limiter(Arc::new(MemoryStore::default()));
+        let account = keys().account_key("near-a");
+        let cap = caps().account_nanousd();
+        let reservation = limiter
+            .reserve(&account, cap - 10, ClaimTime::at(NOW))
+            .expect("reserves");
+        assert_eq!(
+            limiter.settle(reservation, Some(cap + 5)).expect("settles"),
+            Settled::OverReservation
+        );
+        assert_eq!(limiter.account_spent_nanousd(&account, NOW), cap + 5);
+        assert_eq!(
+            limiter
+                .reserve(&account, 1, ClaimTime::at(NOW))
+                .unwrap_err(),
+            JudgementRefusal::AccountBudgetExhausted
+        );
+    }
+
+    /// `threads` reservations of `amount` each, started together, for the
+    /// accounts `account_of(i)` names. Returns how many were admitted and
+    /// every refusal.
+    fn race(
+        limiter: &Limiter,
+        threads: usize,
+        amount: u64,
+        account_of: impl Fn(usize) -> AccountKey + Sync,
+    ) -> (usize, Vec<JudgementRefusal>) {
+        let barrier = std::sync::Barrier::new(threads);
+        let outcomes: Vec<Result<Reservation, JudgementRefusal>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|i| {
+                    let barrier = &barrier;
+                    let account_of = &account_of;
+                    scope.spawn(move || {
+                        let account = account_of(i);
+                        barrier.wait();
+                        limiter.reserve(&account, amount, ClaimTime::at(NOW))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread"))
+                .collect()
+        });
+        let mut admitted = 0;
+        let mut refusals = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                // Left standing as the charge, as a crash would.
+                Ok(reservation) => {
+                    admitted += 1;
+                    drop(reservation);
+                }
+                Err(refusal) => refusals.push(refusal),
+            }
+        }
+        (admitted, refusals)
+    }
+
+    #[test]
+    fn concurrent_reservations_on_one_account_admit_exactly_what_fits() {
+        // $5 fits exactly 5 reservations of $1; 16 race for it.
+        let limiter = limiter(Arc::new(MemoryStore::default()));
+        let account = keys().account_key("near-a");
+        let (admitted, refusals) = race(&limiter, 16, NANOUSD_PER_USD, |_| account);
+        assert_eq!(admitted, 5);
+        assert_eq!(refusals.len(), 11);
+        assert!(
+            refusals
+                .iter()
+                .all(|r| *r == JudgementRefusal::AccountBudgetExhausted)
+        );
+        assert_eq!(
+            limiter.account_spent_nanousd(&account, NOW),
+            caps().account_nanousd()
+        );
+    }
+
+    #[test]
+    fn two_devices_on_one_account_cannot_both_take_the_last_of_it() {
+        // Each device holds the same account, so both reserve against one
+        // entry. Only one of them fits in what is left.
+        for _ in 0..50 {
+            let limiter = limiter(Arc::new(MemoryStore::default()));
+            let account = keys().account_key("near-a");
+            let first = limiter
+                .reserve(&account, 4 * NANOUSD_PER_USD, ClaimTime::at(NOW))
+                .expect("reserves");
+            limiter.settle(first, None).expect("settles");
+            let device_a = keys().account_key("near-a");
+            let device_b = keys().account_key("near-a");
+            let (admitted, refusals) = race(&limiter, 2, NANOUSD_PER_USD, |i| {
+                if i == 0 { device_a } else { device_b }
+            });
+            assert_eq!(admitted, 1);
+            assert_eq!(refusals, vec![JudgementRefusal::AccountBudgetExhausted]);
+            assert_eq!(
+                limiter.account_spent_nanousd(&account, NOW),
+                caps().account_nanousd()
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_reservations_across_accounts_admit_exactly_the_operator_budget() {
+        // $7 operator-wide, $5 per account: 20 accounts race with $1 each,
+        // and exactly 7 are admitted.
+        let limiter = Limiter::new(
+            LimiterCaps::from_usd(5, 7).expect("caps"),
+            LedgerState::default(),
+            Arc::new(MemoryStore::default()),
+        );
+        let accounts: Vec<AccountKey> = (0..20)
+            .map(|i| keys().account_key(&format!("near-{i}")))
+            .collect();
+        let (admitted, refusals) = race(&limiter, 20, NANOUSD_PER_USD, |i| accounts[i]);
+        assert_eq!(admitted, 7);
+        assert_eq!(refusals.len(), 13);
+        assert!(
+            refusals
+                .iter()
+                .all(|r| *r == JudgementRefusal::OperatorBudgetExhausted)
+        );
+        assert_eq!(limiter.operator_spent_nanousd(NOW), 7 * NANOUSD_PER_USD);
     }
 
     #[test]
@@ -773,9 +967,10 @@ pub(crate) mod tests {
             .reserve(&account, 100, ClaimTime::at(NOW))
             .expect("reserves");
         store.fail.store(true, Ordering::SeqCst);
+        // The call was already made and billed: a fault, not capacity.
         assert_eq!(
             limiter.settle(r, Some(10)).unwrap_err(),
-            JudgementRefusal::Saturated
+            JudgementRefusal::ServiceFault
         );
         // The lower settled charge was not recorded, so it is not believed.
         assert_eq!(limiter.account_spent_nanousd(&account, NOW), 100);
