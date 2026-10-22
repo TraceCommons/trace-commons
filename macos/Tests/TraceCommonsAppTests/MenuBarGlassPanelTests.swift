@@ -17,6 +17,14 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(panel.contains("radius: GlassTokens.Radius.menuPanel"))
     }
 
+    /// The popover is a quarter narrower than the handoff's 380 (owner,
+    /// 2026-10-21), and its top row is spaced to fit that.
+    func test_thePanelIsAQuarterNarrower() throws {
+        XCTAssertEqual(MenuBarGlassPanel.width, 380 * 0.75)
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains(".minimumScaleFactor(0.85)"), "a long count shrinks the heading, never cut off")
+    }
+
     // MARK: Mode roll-up
 
     /// One mode for every folder reads as that mode; any difference is
@@ -110,6 +118,60 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(columns[34].up, 1)
         XCTAssertEqual(columns[33].down, 1)
         XCTAssertEqual(columns.reduce(0) { $0 + $1.up }, 3, "a day outside the window is not drawn")
+    }
+
+    // MARK: Menu-bar item
+
+    /// The item's trace bars count per four-hour step over the last 24
+    /// hours: a contribution or kept session lands in its step, one stamped
+    /// after the span's end in the last, one before the span nowhere.
+    func test_theItemCountsTracesPerFourHourStep() {
+        let end = Date(timeIntervalSince1970: 1_790_000_000)
+        let hour: TimeInterval = 3_600
+        let steps = MenuPanelData.steps(
+            shared: [end - 60, end - 5 * hour, end + 30, end - 25 * hour],
+            kept: [end - 21 * hour, end - 24 * hour], span: MenuPanelData.Span(end: end))
+        XCTAssertEqual(steps.count, 6)
+        XCTAssertEqual(steps[5].up, 2, "the newest step, and one stamped after the end")
+        XCTAssertEqual(steps[4].up, 1)
+        XCTAssertEqual(steps.reduce(0) { $0 + $1.up }, 3, "a contribution before the span is not drawn")
+        XCTAssertEqual(steps[0].down, 2, "the oldest step starts 24 hours before the end")
+    }
+
+    /// The Private AI steps are verified (up) over all calls (down), their
+    /// span ends one step after the last step's start, and a ledger that
+    /// did not answer is unknown, never six zeros.
+    func test_thePrivateAIStepsAreVerifiedOverCalls() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let activity = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(#"""
+            {"readable":true,"window_hours":24,"step_hours":2,"steps":[
+             {"start":"2026-10-21T08:00:00+00:00","calls":5,"verified":3},
+             {"start":"2026-10-21T10:00:00+00:00","calls":2,"verified":2}]}
+            """#.utf8))
+        let steps = try XCTUnwrap(MenuPanelData.privateAISteps(activity))
+        XCTAssertEqual(steps.map(\.up), [3, 2])
+        XCTAssertEqual(steps.map(\.down), [5, 2])
+        let span = try XCTUnwrap(MenuPanelData.span(activity))
+        XCTAssertEqual(span.count, 2)
+        XCTAssertEqual(span.stepHours, 2)
+        XCTAssertEqual(span.end, DaemonTimestamp.parse("2026-10-21T12:00:00Z"))
+
+        let unread = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(
+            #"{"readable":false,"window_hours":24,"step_hours":2,"steps":[]}"#.utf8))
+        XCTAssertNil(MenuPanelData.privateAISteps(unread))
+        XCTAssertNil(MenuPanelData.span(unread))
+
+        // A step that is no length of time gives no clock to count on.
+        let zero = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(#"""
+            {"readable":true,"window_hours":24,"step_hours":0,"steps":[
+             {"start":"2026-10-21T10:00:00+00:00","calls":1,"verified":1}]}
+            """#.utf8))
+        XCTAssertNil(MenuPanelData.span(zero))
+        XCTAssertNil(
+            MenuPanelData.privateAISteps(zero),
+            "steps with no clock are not drawn, or they would pair with trace steps on another clock")
+        XCTAssertEqual(
+            MenuPanelData.steps(shared: [Date()], kept: [], span: MenuPanelData.Span(end: Date(), stepHours: 0)), [])
     }
 
     // MARK: Flagged and recent

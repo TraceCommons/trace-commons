@@ -434,6 +434,7 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "inference_activity",
     "insights_glance",
     "insights_week",
     "insights_sessions",
@@ -538,6 +539,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "route_disclosure",
     "tool_destinations",
     "inference_calls",
+    "inference_activity",
     "insights_glance",
     "insights_week",
     "insights_sessions",
@@ -1017,6 +1019,14 @@ pub struct DaemonShared {
     near_ai_credential_changes: std::sync::atomic::AtomicU64,
     private_inference_stop_confirmed: Arc<AtomicBool>,
     pub(crate) private_inference_changed: tokio::sync::Notify,
+    /// The earliest instant a person's approval becomes sendable, when that
+    /// is sooner than the next poll would get to it. Set by
+    /// [`approve_as_a_person`] to the approval's hold deadline, read and
+    /// cleared by the daemon loop, which then runs its pass at once instead
+    /// of waiting out `poll_interval_secs`.
+    upload_due: Mutex<Option<chrono::DateTime<Utc>>>,
+    /// Wakes the daemon loop to re-read `upload_due`.
+    pub(crate) upload_due_changed: tokio::sync::Notify,
     private_inference_stop_task: Mutex<Option<tokio::task::JoinHandle<bool>>>,
     /// The runtime a hosted proxy's tasks must be spawned onto.
     ///
@@ -1485,6 +1495,8 @@ impl DaemonShared {
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
+            upload_due: Mutex::new(None),
+            upload_due_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
             proxy_runtime: std::sync::OnceLock::new(),
             near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::new(
@@ -1872,6 +1884,36 @@ impl DaemonShared {
     #[cfg(test)]
     pub(crate) fn private_inference_stop_confirmation_for_test(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.private_inference_stop_confirmed)
+    }
+
+    /// Ask for an upload pass at `at`, or at the earlier instant already
+    /// asked for. The pass is the daemon's ordinary one, with every gate it
+    /// applies; this only moves it sooner than the next poll.
+    pub(crate) fn request_upload_at(&self, at: chrono::DateTime<Utc>) {
+        {
+            let mut due = self.upload_due.lock().expect("upload due lock");
+            if due.is_none_or(|d| at < d) {
+                *due = Some(at);
+            }
+        }
+        self.upload_due_changed.notify_one();
+    }
+
+    /// The instant an upload pass was asked for, if one is outstanding.
+    pub(crate) fn upload_due(&self) -> Option<chrono::DateTime<Utc>> {
+        *self.upload_due.lock().expect("upload due lock")
+    }
+
+    /// Clear the outstanding request if it is due by `now`, and say whether
+    /// it was. A request for a later instant is left in place.
+    pub(crate) fn take_upload_due(&self, now: chrono::DateTime<Utc>) -> bool {
+        let mut due = self.upload_due.lock().expect("upload due lock");
+        if due.is_some_and(|d| d <= now) {
+            *due = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn private_inference_is_stopping(&self) -> bool {
@@ -3676,6 +3718,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
@@ -7187,6 +7230,12 @@ pub(super) async fn approve_as_a_person(
     drop(queue);
     drop(policy);
     shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    // A person is waiting on these, so the upload pass runs as soon as the
+    // hold lets them go rather than on the next poll. With the hold off they
+    // are sendable now.
+    if !approved_ids.is_empty() {
+        shared.request_upload_at(hold_until.unwrap_or_else(Utc::now));
+    }
     Ok(ApprovedBatch {
         approved_ids,
         skipped,
@@ -12122,6 +12171,64 @@ mod tests {
                  {entry_hold} > {reported}"
             );
         }
+    }
+
+    /// A person's approval asks for an upload pass at the instant its hold
+    /// ends, so the daemon loop sends it then rather than on the next poll.
+    #[tokio::test]
+    async fn an_approval_asks_for_an_upload_pass_when_its_hold_ends() {
+        let s = shared();
+        let key = "/tmp/wakeproj";
+        let id = seed_entry_with_eligibility(&s, key, None);
+        assert!(
+            s.queue
+                .lock()
+                .unwrap()
+                .record_previewed_envelope(id, "sha256:pinned", None, None)
+        );
+        assert_eq!(s.upload_due(), None, "nothing asked for before an approval");
+
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
+        let result = r.result.expect("approve answers");
+        assert_eq!(result["approved"], 1, "{result}");
+        let reported: chrono::DateTime<Utc> = result["hold_until"]
+            .as_str()
+            .expect("a deadline")
+            .parse()
+            .expect("an RFC 3339 instant");
+        let due = s.upload_due().expect("an upload pass asked for");
+        let hold = s
+            .queue
+            .lock()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .hold_until(s.settings.lock().unwrap().approval_hold_secs)
+            .unwrap();
+        assert_eq!(due, hold, "due exactly when the hold lets the entry go");
+        assert!(due <= reported);
+
+        // Not taken before it is due; taken, once, after.
+        assert!(!s.take_upload_due(due - chrono::Duration::milliseconds(1)));
+        assert_eq!(s.upload_due(), Some(due));
+        assert!(s.take_upload_due(due));
+        assert_eq!(s.upload_due(), None);
+        assert!(!s.take_upload_due(due));
+    }
+
+    /// Two requests keep the earlier one, so a later approval never pushes
+    /// back a pass an earlier one is owed.
+    #[test]
+    fn an_upload_request_keeps_the_earliest_instant() {
+        let s = shared();
+        let first = at("2030-01-01T00:00:10Z");
+        s.request_upload_at(first);
+        s.request_upload_at(first + chrono::Duration::seconds(5));
+        assert_eq!(s.upload_due(), Some(first));
+        let sooner = first - chrono::Duration::seconds(5);
+        s.request_upload_at(sooner);
+        assert_eq!(s.upload_due(), Some(sooner));
     }
 
     /// The count a shell draws its button from: "send the 2 of 5 that can be
@@ -17767,7 +17874,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 89, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

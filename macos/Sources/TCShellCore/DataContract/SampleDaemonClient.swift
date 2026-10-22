@@ -467,6 +467,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
+    public func inferenceActivity() async throws -> DaemonData.InferenceActivity {
+        try serve("inference_activity", as: DaemonData.InferenceActivity.self)
+    }
+
     // MARK: Insights
 
     public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {

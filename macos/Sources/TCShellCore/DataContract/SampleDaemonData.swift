@@ -52,6 +52,10 @@ import Foundation
 /// capture, before the write), but its drift test excludes them, since a
 /// fresh real capture can never equal a value it was deliberately edited
 /// away from.
+///
+/// `inference_activity` is hand-written for the same reason, and drawn
+/// against the clock: its steps end at the moment of the read, so the
+/// menu-bar item's Private AI bars show in a preview at any date.
 enum SampleDaemonData {
     typealias Sample = SampleDaemonClient.SampleSet
 
@@ -72,6 +76,8 @@ enum SampleDaemonData {
         case "keep": return recordedShared("keep")
         case "undo_keep": return recordedShared("undo_keep")
         case "set_project_mode": return recordedShared("set_project_mode")
+        // Hand-written, see above: `readable` needs a live IronWire proxy.
+        case "inference_activity": return inferenceActivity(set)
         // Network methods (C3, #1187): hand-written, see above.
         case "inference_summary": return inferenceSummary(set)
         case "inference_call_proof": return proofDetail(set)
@@ -222,6 +228,30 @@ enum SampleDaemonData {
 
     static func unsureSpans(entryId: String, bodyDigest: String) -> String {
         #"{"entry_id":"\#(entryId)","body_digest":"\#(bodyDigest)","envelope_digest":"sha256:sample-envelope","span_count":2,"spans":[{"label":"looks-like-email","byte_offset":1408,"byte_len":11},{"label":"looks-like-phone","byte_offset":2210,"byte_len":12}],"spans_truncated":false}"#
+    }
+
+    // MARK: - inference_activity: hand-written, against the clock
+
+    /// Six four-hour steps ending at `now`, shaped as `activity_steps`
+    /// builds them (`daemon/inference_map.rs`), for the two sets with a
+    /// readable calls page; every other set's ledger has not answered.
+    static func inferenceActivity(_ set: Sample, now: Date = Date()) -> String {
+        let counts: [(calls: Int, verified: Int)]
+        switch set {
+        case .normalDay:
+            counts = [(2, 2), (1, 1), (13, 11), (19, 17), (9, 7), (16, 14)]
+        case .busyQueue:
+            counts = [(13, 11), (5, 4), (27, 22), (40, 36), (32, 27), (41, 35)]
+        default:
+            return #"{"_sample":"hand-written","readable":false,"window_hours":24,"step_hours":4,"steps":[]}"#
+        }
+        let formatter = ISO8601DateFormatter()
+        let first = now.addingTimeInterval(-24 * 3600)
+        let steps = counts.enumerated().map { index, step in
+            let start = formatter.string(from: first.addingTimeInterval(Double(index) * 4 * 3600))
+            return #"{"start":"\#(start)","calls":\#(step.calls),"verified":\#(step.verified)}"#
+        }
+        return #"{"_sample":"hand-written","readable":true,"window_hours":24,"step_hours":4,"steps":[\#(steps.joined(separator: ","))]}"#
     }
 
     // MARK: - Network methods (C3, #1187): hand-written, marked per reply

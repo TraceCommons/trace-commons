@@ -4112,9 +4112,10 @@ second edit to the same file, and on a file that did not exist before.
 
 ### The map and the Inference tab
 
-K8 of #1118, the client half. `tool_destinations` feeds the map and
-`inference_calls` feeds the Inference tab's routing table. Both are
-synchronous and local. They read state this daemon already holds -- the
+K8 of #1118, the client half. `tool_destinations` feeds the map,
+`inference_calls` feeds the Inference tab's routing table, and
+`inference_activity` feeds the menu-bar item's Private AI bars. All three
+are synchronous and local. They read state this daemon already holds -- the
 harness list, the private-inference state, the route `route_disclosure`
 reports, the source settings, the project policy and the local routing
 ledger -- and make no network call and read no body.
@@ -4338,6 +4339,37 @@ that wants fewer buckets maps them itself, and must keep `failed` distinct.
 `routed` (through NEAR AI) for any other label, and `unknown` for
 `unrecorded`. It is never taken from the backend id, which is whatever the
 contributor named it.
+
+#### `inference_activity`
+
+```json
+{
+  "readable": true,
+  "window_hours": 24,
+  "step_hours": 4,
+  "steps": [
+    { "start": "2026-10-20T14:00:00+00:00", "calls": 37, "verified": 31 }
+  ]
+}
+```
+
+The menu-bar item's Private AI bars: the same 24-hour window as
+`inference_calls`, counted in `step_hours` steps. `steps` is oldest first,
+six of them, and the last ends at the moment of the read. `start` is when
+a step begins.
+
+- `calls` counts exactly the rows `inference_calls` lists (rows with a
+  ledger id), so the steps add up to the Inference tab's call count. A row
+  from just before the first step counts in the first, and one stamped after
+  the read (a proxy clock ahead of this one) in the last.
+- `verified` is how many of those carry the `verified` label. Only
+  `verified` is proof; a row with any other label, `outside` and
+  `unrecorded` included, counts in `calls` and not here.
+
+`readable: false`, with `steps: []`, means no ledger has answered, which is
+not evidence of no calls and must not be drawn as empty bars. No
+parameters; local and synchronous, and answered in a developer dry run.
+Counts and times only.
 
 #### What the ledger does not record (Z4)
 

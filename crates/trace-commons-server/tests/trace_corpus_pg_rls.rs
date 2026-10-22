@@ -1433,6 +1433,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V131__starter_plausibility_features.sql"
+    ));
     sql.push_str(include_str!("../../../migrations/V132__payout_rails.sql"));
     sql.push_str(include_str!(
         "../../../migrations/V133__payout_reversal_hold_decisions.sql"
@@ -1554,6 +1557,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V131__starter_plausibility_features.sql"
     ));
     sql.push_str(include_str!("../../../migrations/V132__payout_rails.sql"));
     sql.push_str(include_str!(

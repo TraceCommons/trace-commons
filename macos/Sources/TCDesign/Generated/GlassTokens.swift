@@ -152,10 +152,18 @@ public enum GlassTokens {
         public static let menuModeNever: GlassRGBA = GlassRGBA(0xFF453A, alpha: 1)
         /// Menu-bar pill circle when paused or off.
         public static let menuPillOff: GlassRGBA = GlassRGBA(0x5A5A5F, alpha: 1, light: GlassRGBA(0xAEAEB2, alpha: 1))
-        /// Graph and strip bars while watching is paused.
+        /// The popover graph's bars while watching is paused. The menu-bar item's paused bars are menuItemMark at lower alpha.
         public static let menuBarsPaused: GlassRGBA = GlassRGBA(0x555555, alpha: 1, light: GlassRGBA(0xB4B4B8, alpha: 1))
-        /// The tinted capsule behind the menu-bar strip's bars, so they read over any wallpaper (owner, 2026-10-11).
-        public static let menuStripTint: GlassRGBA = GlassRGBA(0x000000, alpha: 0.32, light: GlassRGBA(0xFFFFFF, alpha: 0.6))
+        /// The NEAR AI mark on the menu-bar item, in the logo kit's single inks: white on a dark menu bar, black on a light one (owner, 2026-10-21). The item's centre line and paused bars are this ink at lower alpha.
+        public static let menuItemMark: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1, light: GlassRGBA(0x000000, alpha: 1))
+        /// The menu-bar item's shared-traces bars, above the centre line. Drawn on the bar itself with no capsule (owner, 2026-10-21), so dark is dataShared's hue lifted to 3:1 or more on a dark bar; light is dataShared.
+        public static let menuStripShared: GlassRGBA = GlassRGBA(0xB08BFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
+        /// The menu-bar item's kept-traces bars, below the centre line. Dark is dataKept's hue lifted to 3:1 or more on a dark bar; light is dataKept.
+        public static let menuStripKept: GlassRGBA = GlassRGBA(0x6AA6FF, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
+        /// The menu-bar item's verified Private AI calls, the Private AI bars above the centre line: the Verified status green, 3:1 or more on a dark or light bar.
+        public static let menuStripVerified: GlassRGBA = GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))
+        /// The menu-bar item's Private AI calls, the Private AI bars below the centre line: the data palette's amber (chartSeries4), lifted on a dark bar to 3:1 or more.
+        public static let menuStripCalls: GlassRGBA = GlassRGBA(0xFFB340, alpha: 1, light: GlassRGBA(0xA97200, alpha: 1))
         public static let menuChipShared: GlassRGBA = GlassRGBA(0xC86BFA, alpha: 0.35, light: GlassRGBA(0x7A2CF5, alpha: 0.18))
         public static let menuChipKept: GlassRGBA = GlassRGBA(0x3AA0FF, alpha: 0.35, light: GlassRGBA(0x2F6BC4, alpha: 0.18))
         public static let menuNoProof: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1))
@@ -283,7 +291,11 @@ public enum GlassTokens {
             "menuModeNever": menuModeNever,
             "menuPillOff": menuPillOff,
             "menuBarsPaused": menuBarsPaused,
-            "menuStripTint": menuStripTint,
+            "menuItemMark": menuItemMark,
+            "menuStripShared": menuStripShared,
+            "menuStripKept": menuStripKept,
+            "menuStripVerified": menuStripVerified,
+            "menuStripCalls": menuStripCalls,
             "menuChipShared": menuChipShared,
             "menuChipKept": menuChipKept,
             "menuNoProof": menuNoProof,

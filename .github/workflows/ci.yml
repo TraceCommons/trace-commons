@@ -129,6 +129,7 @@ jobs:
         admission_test_pipeline_compat
         admission_test_pipeline_parity
         admission_test_unbound_reaper
+        admission_test_starter
         pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
     # Each skips or is `#[ignore]`d without an environment variable, no job sets
@@ -266,6 +267,13 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
+      # NEAR AI starter advance, first slice (V131): write-once plausibility
+      # features, the account read's filters, the ingest runtime's grants,
+      # and the dry-run report over the earned-trust enumeration seam.
+      - name: starter_plausibility_pg
+        run: cargo test -p trace-commons-server --test starter_plausibility_pg
+        env:
+          TRACE_COMMONS_STARTER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_starter
       # Earned account trust, live (V126): the attested_submission fact, the
       # guard's witness column grants, and a tiered-v1 admission policy whose
       # applied evaluation raises the allowance and falls back to the base

@@ -231,6 +231,12 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         assertDeclared(
             DaemonData.InferenceCallPage.self, try result(daemon, "inference_calls", ["limit": 25]),
             method: "inference_calls")
+        // A temp store runs no IronWire proxy, so the steps are unknown: no
+        // ledger answered, and no steps, never six empty ones.
+        let activity = try result(daemon, "inference_activity")
+        XCTAssertEqual((activity as? [String: Any])?["readable"] as? Bool, false)
+        XCTAssertEqual(((activity as? [String: Any])?["steps"] as? [Any])?.count, 0)
+        assertDeclared(DaemonData.InferenceActivity.self, activity, method: "inference_activity")
 
         // The Insights glance: on by default (owner decision D3, settled
         // 2026-10-09), which a temp store with no IronWire proxy answers as

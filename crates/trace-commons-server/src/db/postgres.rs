@@ -25,6 +25,8 @@ mod public_run;
 mod reward_participant;
 #[cfg(test)]
 mod reward_upgrade_tests;
+#[path = "postgres_starter_plausibility.rs"]
+mod starter_plausibility;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
@@ -292,6 +294,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_reward_principals",
     "trace_reward_principal_accounts",
     "trace_reward_participant_reservations",
+    "trace_starter_plausibility_features",
     "trace_payout_links",
     "trace_payout_link_requests",
     "trace_payout_accruals",
@@ -1856,6 +1859,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_score_hold_assessments",
         include_str!("../../../../migrations/V130__pipeline_score_hold_assessments.sql"),
     ),
+    // V131: hash-only per-submission features for the NEAR AI starter
+    // advance's plausibility check, read by its dry-run report. SELECT and
+    // INSERT for trace_ingest_runtime.
+    (
+        131,
+        "starter_plausibility_features",
+        include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
+    ),
     // V132: the payout rail tables (links, link requests, accruals, lines,
     // holds, audit, rate epochs, control) and the enumerator and config
     // writer roles. V129 stays unused: #1415 reserved it. V131 is #1536's.
@@ -1950,6 +1961,23 @@ impl Database for PgBackend {
         limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustAccount>, DatabaseError> {
         PgBackend::list_account_trust_worker_accounts(self, after, limit).await
+    }
+
+    async fn record_starter_plausibility_features(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        features: &crate::starter_plausibility::StarterEnvelopeFeatures,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::record_starter_plausibility_features(self, tenant_id, submission_id, features)
+            .await
+    }
+
+    async fn starter_plausibility_features_for_account(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::starter_plausibility::StarterEnvelopeFeatures>, DatabaseError> {
+        PgBackend::starter_plausibility_features_for_account(self, account).await
     }
 
     async fn list_account_trust_fact_candidates(
@@ -8208,6 +8236,7 @@ mod tests {
             include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
+            include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
@@ -8257,6 +8286,7 @@ mod tests {
             include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
+            include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
