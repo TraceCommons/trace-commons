@@ -1,0 +1,23 @@
+# Build and publish the internal staging macOS app (the `near-ai-staging`
+# channel). Placeholder: the real job lands with the staging workflow task
+# (docs/superpowers/plans/2026-10-21-staging-environment.md, Task 10).
+#
+# Manual only. scripts/ci/check-release-staging-feature.sh requires this
+# file's `on:` to be exactly `workflow_dispatch` and refuses any other
+# workflow that references it.
+name: staging-macos
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  not-built-yet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The staging build is not built yet
+        run: |
+          echo "the staging macOS build is not built yet"
+          exit 1
