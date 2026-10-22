@@ -1,8 +1,9 @@
 # The Insights judgement service, development profile, as its own dstack app.
 #
-# MEASURED, like the production file, and deliberately a DIFFERENT app:
-# keys derive from the app id, so this deployment can never derive the
-# production signing or limiter key, even from an identical image. Release
+# MEASURED, like the production file, and deliberately a DIFFERENT app: the
+# limiter key derives from the app id, so this deployment can never derive
+# the production one, even from an identical image. Deployed and read back
+# as README.md, "Deploy", says, with `allowed_envs` empty. Release
 # daemons accept only production measurements (spec section 4), so they
 # never reach this service.
 #

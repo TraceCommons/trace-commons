@@ -81,6 +81,15 @@ jobs:
         run: |
           scripts/ci/check-release-judgement-features.sh check
           scripts/ci/check-release-judgement-features.sh self-test
+      # Seconds, no build. A committed judgement compose read-back
+      # (deploy/judgement/compose-readback.<profile>.json, the
+      # `compose_file` that `phala cvms get --json` reports) must show the
+      # hardened manifest: logs and sysinfo private, only the expected
+      # allowed_envs, no DSTACK_AUTHORIZED_KEYS, no SSH pre-launch step.
+      - name: Committed judgement compose read-backs are hardened
+        run: |
+          scripts/ci/check-judgement-compose-readback.sh check
+          scripts/ci/check-judgement-compose-readback.sh self-test
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py

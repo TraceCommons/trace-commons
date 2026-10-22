@@ -14,9 +14,11 @@
 # Slice 9 fills in the image digest, the model, the issuer key and the
 # signer pins below, and deploys.
 #
-# Its own dstack app, never the development app: keys derive from the app
-# id, so the two can never share a signing or limiter key. Upgrade in place
-# (`phala cvms upgrade`), never delete and recreate; see README.md.
+# Its own dstack app, never the development app: the limiter key derives
+# from the app id, so the two can never share one. Deploy with
+# `--no-public-logs --no-public-sysinfo` and read the manifest back before
+# recording anything; upgrade in place (`phala cvms upgrade`), never delete
+# and recreate. See README.md, "Deploy".
 
 services:
   judgement:
