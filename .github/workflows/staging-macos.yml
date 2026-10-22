@@ -38,13 +38,16 @@
 #   TC_STAGING_GCP_WIF_PROVIDER, TC_STAGING_GCP_PUBLISHER_SA   the staging
 #     workload identity provider and the publisher service account, whose
 #     only bucket role is on the staging bucket
+#
+# The publisher trusts this workflow only when it runs from main, so it is
+# always dispatched from main; the `ref` input picks the commit to build.
 name: staging-macos
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch, tag or commit to build (default the dispatched ref)
+        description: Branch, tag or commit to build (default main); dispatch from main
         type: string
         required: false
 
@@ -71,6 +74,20 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
+
+      # The staging publisher trusts only this workflow run from main (its
+      # workload identity binding names the main branch's OIDC subject), so a
+      # dispatch from any other branch would build, sign and notarize and
+      # then fail at upload. Refuse it here instead; to build another commit,
+      # dispatch from main and name it in the `ref` input.
+      - name: Dispatched from main
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          if [ "$DISPATCH_REF" != refs/heads/main ]; then
+            echo "refusing: dispatch this workflow from main (got $DISPATCH_REF); pass another commit in the ref input" >&2
+            exit 1
+          fi
 
       - name: Confirm the staging credentials are configured
         env:
