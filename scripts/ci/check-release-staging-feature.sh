@@ -346,7 +346,7 @@ check() {
 
   # 5b. Any job environment in the staging workflow is exactly `staging`,
   #     inline or as a block's name:. A job may name no environment at all
-  #     (owner decision 2026-10-22: no approval gate; the staging secrets are
+  #     (staging design S14, #1561: no approval gate; the staging secrets are
   #     repository secrets with staging names, which check 4 holds). The
   #     release environment carries the production publishing identity (its
   #     WIF subject is bound to it).
