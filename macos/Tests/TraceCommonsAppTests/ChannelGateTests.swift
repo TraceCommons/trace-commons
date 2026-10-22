@@ -28,12 +28,31 @@ final class ChannelGateTests: XCTestCase {
         XCTAssertEqual(model.configDirectory, "")
     }
 
-    func testTheGateRefusesComputeToo() throws {
+    func testTheDylibsOwnChannelAgrees() throws {
         guard case .refused = BuildChannelGate.verdict(plistChannel: try otherChannel()) else {
             return XCTFail("a mismatch must refuse")
         }
         guard case .agreed = BuildChannelGate.verdict(
             plistChannel: try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json())).channel)
         else { return XCTFail("the dylib's own channel agrees") }
+    }
+
+    /// Compute opens the same state directory the daemon does, so it is
+    /// gated the same way, and it says the same sentence.
+    func testAChannelMismatchRefusesCompute() async throws {
+        let model = ComputeModel()
+        await model.start(plistChannel: try otherChannel())
+        XCTAssertEqual(model.failureLabel, "channel-mismatch")
+        XCTAssertEqual(model.refusalSentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
+        XCTAssertNil(model.requestedDirectory, "no state directory was opened")
+        XCTAssertNil(model.snapshot)
+    }
+
+    func testAMissingPlistChannelRefusesCompute() async throws {
+        let model = ComputeModel()
+        await model.start(plistChannel: nil)
+        XCTAssertEqual(model.failureLabel, "channel-mismatch")
+        XCTAssertEqual(model.refusalSentence, try XCTUnwrap(TCBuildChannel.mismatchLine()))
+        XCTAssertNil(model.requestedDirectory)
     }
 }
