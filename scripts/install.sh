@@ -142,8 +142,7 @@ Nothing was installed."
   say "  (notarized: macOS checks this itself on first run)"
 else
   say "  note: the Linux build is not code-signed, so the checksum above is the"
-  say "        only check available. The desktop app ships as a GPG-signed"
-  say "        flatpak if you want a verified Linux artifact."
+  say "        only check available."
 fi
 
 # ---- install ----------------------------------------------------------

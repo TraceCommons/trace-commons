@@ -69,8 +69,23 @@ it.
    # Signed in. This device is enrolled.
    ```
 
-   The sign-in finishes on a loopback address, so complete it in a browser
-   on this machine. If you are already signed in to NEAR AI here (for
+   The sign-in finishes on a loopback address on this machine. Over SSH, or
+   on a Linux machine with no display, `login` opens no browser and prints
+   the command that forwards that address to your own computer instead:
+
+   ```bash
+   trace-commons-contributor login
+   # No browser on this machine can reach you, so sign in from your own computer:
+   #   1. In a terminal on your computer, forward the sign-in port and leave it running:
+   #        ssh -N -L <port>:127.0.0.1:<port> <this-machine>
+   #      Put the host you SSH to in place of <this-machine>.
+   #   2. Open this address in your computer's browser within 5 minutes:
+   #        http://127.0.0.1:<port>/...
+   ```
+
+   Open the address exactly as printed, with `127.0.0.1` and the same port
+   on both sides of the forward. `login --no-browser` prints the address
+   without opening a browser on any machine. If you are already signed in to NEAR AI here (for
    example in the desktop app), the browser step is skipped. When the
    daemon is running, `login` goes through it, so the app and the CLI share
    one sign-in and one enrollment. `--allowed-hosts` applies to the invite

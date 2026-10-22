@@ -297,6 +297,7 @@ pub async fn login(
     allowed_hosts: Option<&str>,
     scopes: Option<&str>,
     default_consent: bool,
+    no_browser: bool,
 ) -> Result<()> {
     let env_invite = std::env::var("TRACE_COMMONS_INVITE").ok();
     login_with(
@@ -307,7 +308,7 @@ pub async fn login(
         allowed_hosts,
         scopes,
         default_consent,
-        &mut |store, consent| crate::near_ai_login::run(store, consent),
+        &mut |store, consent| crate::near_ai_login::run(store, consent, no_browser),
     )
     .await
 }
@@ -1328,7 +1329,7 @@ pub(crate) async fn enroll_before_submit(
     if let Some(invite) = auto_enroll_invite(sel.invite, env_invite, sel.json) {
         // Consent is asked in full here, exactly as `login` asks it.
         // Pre-seeding scopes from an invite would be a dark pattern.
-        return login(store, None, Some(&invite), None, None, false)
+        return login(store, None, Some(&invite), None, None, false, false)
             .await
             .context("enrolling with the supplied invite");
     }
@@ -1580,7 +1581,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             &mut |store| {
                 // Consent is asked in full here, exactly as `login` asks it.
                 let (scopes, chosen) = resolve_consent_scopes(None, false)?;
-                crate::near_ai_login::run(store, &crate::near_ai_login::Consent { scopes, chosen })
+                crate::near_ai_login::run(
+                    store,
+                    &crate::near_ai_login::Consent { scopes, chosen },
+                    false,
+                )
             },
         )
         .await?;
@@ -2481,6 +2486,7 @@ mod tests {
             Some("api.example"),
             None,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -2536,9 +2542,17 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None, false)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("already enrolled"), "{msg}");
         // The original config must survive untouched: no repointing to a
@@ -2707,9 +2721,17 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None, false)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("already enrolled"));
 
         // The invite path refuses before the redemption call, so an
