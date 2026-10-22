@@ -684,6 +684,52 @@ fn the_staging_entitlements_grant_the_staging_access_group() {
     assert_eq!(application_id, channel::KEYCHAIN_ACCESS_GROUP);
 }
 
+/// The staging entitlements are production's with exactly three lines
+/// changed: the application id, the keychain access group and the
+/// `webcredentials:` domain, each the staging twin of production's. Anything
+/// else (a sandbox, a network or hardened-runtime entitlement) is the same
+/// in both, so a staging build is tested under production's entitlements.
+#[test]
+fn the_staging_entitlements_differ_from_production_in_three_lines() {
+    let read = |file: &str| {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../macos")
+                .join(file),
+        )
+        .expect("entitlements file exists")
+    };
+    let production = read("entitlements.plist");
+    let staging = read("entitlements-staging.plist");
+    let production: Vec<&str> = production.lines().collect();
+    let staging: Vec<&str> = staging.lines().collect();
+    assert_eq!(production.len(), staging.len());
+    let changed: Vec<(&str, &str)> = production
+        .iter()
+        .zip(&staging)
+        .filter(|(p, s)| p != s)
+        .map(|(p, s)| (p.trim(), s.trim()))
+        .collect();
+    let group = "<string>KXSWJN7WY8.ai.tracecommons.shell";
+    assert_eq!(
+        changed,
+        [
+            (
+                format!("{group}</string>").as_str(),
+                format!("{group}.staging</string>").as_str()
+            ),
+            (
+                format!("{group}</string>").as_str(),
+                format!("{group}.staging</string>").as_str()
+            ),
+            (
+                "<string>webcredentials:tracecommons.ai</string>",
+                "<string>webcredentials:staging.tracecommons.ai</string>"
+            ),
+        ]
+    );
+}
+
 /// IronWire falls back to its own compiled-in NEAR AI base, which is
 /// production, whenever nothing names one. Every place this crate writes an
 /// IronWire NEAR AI backend names the base, and the daemon's private-inference
