@@ -103,7 +103,7 @@ use std::panic::UnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use trace_commons_contributor::config::ConfigStore;
+use trace_commons_contributor::config::{ConfigStore, OtherChannelStateDir};
 use trace_commons_contributor::daemon::attached::{AttachError, AttachedDaemon};
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
 use trace_commons_contributor::daemon::settings::{
@@ -830,6 +830,66 @@ pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
         ))
     })
 }
+
+/// The state directory the contributor crate's `ConfigStore::resolve` would
+/// pick (`config::resolve_state_dir`), so a shell that chooses its own
+/// directory still gets the core's refusal of the other channel's.
+///
+/// Precedence: `explicit_dir`, used as given; then `override_dir`, the
+/// value of this build's override variable (the `state_dir_env` of
+/// [`tc_build_channel_json`]), refused when it resolves to the other
+/// channel's default directory or inside it; then the platform default.
+/// NULL or an empty string is unset. The shell passes the variable's value
+/// rather than this library reading the process environment, so the caller
+/// that decides what is set is the one asking.
+///
+/// Returns the directory as an owned string; free it with
+/// [`tc_string_free`]. Nothing is opened or created. On failure returns NULL
+/// and, when `err` is non-null, sets `*err` to an owned label (free it with
+/// [`tc_string_free`]) that names no path:
+/// - `state-dir-other-channel`: the override names the other channel's
+///   directory.
+/// - `state-dir-unresolved`: anything else, including a non-UTF-8 argument
+///   and a platform with no config directory.
+/// - `panic`: a caught panic.
+///
+/// # Safety
+/// `explicit_dir` and `override_dir`, if non-null, must point to valid,
+/// NUL-terminated C strings. `err` must be NULL or point to a writable
+/// `char*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_resolve_state_dir(
+    explicit_dir: *const c_char,
+    override_dir: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guarded_string(err, || {
+        let arg = |ptr: *const c_char| -> Result<Option<std::path::PathBuf>, ()> {
+            if ptr.is_null() {
+                return Ok(None);
+            }
+            let text = unsafe { borrow_str(ptr) }.map_err(|_| ())?;
+            Ok((!text.is_empty()).then(|| std::path::PathBuf::from(text)))
+        };
+        let (Ok(explicit), Ok(override_dir)) = (arg(explicit_dir), arg(override_dir)) else {
+            return Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err));
+        };
+        match trace_commons_contributor::config::resolve_state_dir(explicit, override_dir) {
+            Ok(dir) => match dir.to_str() {
+                Some(dir) => Ok(to_owned_cstring(dir)),
+                None => Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err)),
+            },
+            Err(e) if e.is::<OtherChannelStateDir>() => {
+                Ok(witness_fail(ERR_STATE_DIR_OTHER_CHANNEL, err))
+            }
+            Err(_) => Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err)),
+        }
+    })
+}
+
+/// `config::OtherChannelStateDir`'s label: fixed, and names no path.
+const ERR_STATE_DIR_OTHER_CHANNEL: &str = "state-dir-other-channel";
+const ERR_STATE_DIR_UNRESOLVED: &str = "state-dir-unresolved";
 
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from

@@ -11,7 +11,7 @@ use std::ffi::{CStr, c_char};
 
 use trace_commons_contributor::{channel, health_copy};
 use trace_commons_contributor_ffi::{
-    tc_build_channel_json, tc_channel_mismatch_line, tc_string_free,
+    tc_build_channel_json, tc_channel_mismatch_line, tc_resolve_state_dir, tc_string_free,
 };
 
 fn take_owned(out: *mut c_char) -> String {
@@ -99,4 +99,97 @@ fn the_channel_mismatch_line_is_the_core_sentence() {
     );
     // Copy guide: say what is happening to the contributor's data.
     assert!(health_copy::CHANNEL_MISMATCH.contains("Nothing is being watched or sent"));
+}
+
+/// `tc_resolve_state_dir` with `explicit` and `override_dir` as C strings
+/// (`None` is NULL): the owned path, or the owned `*err` label.
+fn resolve_state_dir(explicit: Option<&str>, override_dir: Option<&str>) -> Result<String, String> {
+    let explicit = explicit.map(|s| std::ffi::CString::new(s).unwrap());
+    let override_dir = override_dir.map(|s| std::ffi::CString::new(s).unwrap());
+    let ptr = |s: &Option<std::ffi::CString>| s.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let out = unsafe { tc_resolve_state_dir(ptr(&explicit), ptr(&override_dir), &mut err) };
+    if out.is_null() {
+        Err(take_owned(err))
+    } else {
+        assert!(err.is_null(), "a success sets no error");
+        Ok(take_owned(out))
+    }
+}
+
+/// The other channel's default directory on this platform: beside this
+/// channel's default, under the other channel's name. On macOS that is
+/// `~/Library/Application Support/<name>`, where the app's Swift code puts
+/// it.
+fn other_channel_default() -> String {
+    let own = resolve_state_dir(None, None).expect("a platform default");
+    let (parent, name) = own
+        .rsplit_once(std::path::MAIN_SEPARATOR)
+        .expect("a parent");
+    assert_eq!(name, channel::STATE_DIR_NAME);
+    format!(
+        "{parent}{}{}",
+        std::path::MAIN_SEPARATOR,
+        channel::OTHER_STATE_DIR_NAME
+    )
+}
+
+#[test]
+fn an_override_naming_the_other_channel_directory_is_refused_without_a_path() {
+    let other = other_channel_default();
+    let nested = format!("{other}{}nested", std::path::MAIN_SEPARATOR);
+    for candidate in [other.clone(), nested] {
+        assert_eq!(
+            resolve_state_dir(None, Some(&candidate)),
+            Err("state-dir-other-channel".to_string())
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_case_variant_of_the_other_channel_directory_is_refused() {
+    let other = other_channel_default();
+    let (parent, name) = other
+        .rsplit_once(std::path::MAIN_SEPARATOR)
+        .expect("a parent");
+    let upper = format!(
+        "{parent}{}{}",
+        std::path::MAIN_SEPARATOR,
+        name.to_ascii_uppercase()
+    );
+    assert_eq!(
+        resolve_state_dir(None, Some(&upper)),
+        Err("state-dir-other-channel".to_string())
+    );
+}
+
+#[test]
+fn the_state_dir_precedence_is_explicit_then_override_then_default() {
+    let other = other_channel_default();
+    // An explicit directory is the caller's own and is not checked.
+    assert_eq!(
+        resolve_state_dir(Some(&other), Some("/tmp/override")),
+        Ok(other.clone())
+    );
+    assert_eq!(
+        resolve_state_dir(None, Some("/tmp/tc-own-override")),
+        Ok("/tmp/tc-own-override".to_string())
+    );
+    let default = resolve_state_dir(None, None).expect("a platform default");
+    assert!(
+        default.ends_with(channel::STATE_DIR_NAME),
+        "the default carries this channel's name"
+    );
+    // An empty string is unset, never a directory anyone chose.
+    assert_eq!(resolve_state_dir(Some(""), Some("")), Ok(default));
+}
+
+#[test]
+fn a_non_utf8_state_dir_argument_is_refused_with_a_fixed_label() {
+    let bytes = [0xff_u8, 0xfe, 0];
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let out = unsafe { tc_resolve_state_dir(std::ptr::null(), bytes.as_ptr().cast(), &mut err) };
+    assert!(out.is_null());
+    assert_eq!(take_owned(err), "state-dir-unresolved");
 }
