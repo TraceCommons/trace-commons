@@ -1558,16 +1558,18 @@ jobs:
       # channel, its window label (`a_staging_channel_shows_the_label`, and
       # the FFI `build_channel` suite, whose label check is the staging half
       # of a test the default build runs as production), the FFI suite as
-      # staging, the attestation crate's signed pin-set verifier, whose unit
-      # tests no other crate's run reaches, and the server's pin re-sign tool
-      # (`trace-commons-staging-pins`), which requires the feature. None of
-      # them is compiled into the default build above.
+      # staging, the daemon's signed pin source (`proof_attestor`, the status
+      # pin label and its reconcile twin), the attestation crate's signed
+      # pin-set verifier, whose unit tests no other crate's run reaches, and
+      # the server's pin re-sign tool (`trace-commons-staging-pins`), which
+      # requires the feature. None of them is compiled into the default build
+      # above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of a_staging_channel_shows_the_label
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of a_staging_channel_shows_the_label proof_attestor pin_refusal reconcile_never_fetches_the_signed_pins
             cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi --test build_channel
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
             cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool

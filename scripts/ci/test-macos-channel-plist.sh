@@ -51,6 +51,18 @@ lint() {
       fail "$label: plutil rejects it"
     fi
   fi
+  # plutil tolerates a `--` inside an XML comment; a strict parser does not.
+  # The release scripts read TCChannel with Python's plistlib, so a plist it
+  # cannot parse fails the channel check at signing time on every channel.
+  if python3 -I -c '
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    plistlib.load(f)["TCChannel"]
+' "$file" 2>/dev/null; then
+    pass "$label: a strict XML parser reads its TCChannel"
+  else
+    fail "$label: a strict XML parser cannot read its TCChannel"
+  fi
 }
 
 # --- production, byte for byte ------------------------------------------------
@@ -113,7 +125,7 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   has staging "$s" '<key>TCChannel</key><string>staging</string>'
   has staging "$s" '<key>CFBundleURLSchemes</key><array><string>tracecommons-staging</string></array>'
   has staging "$s" '<key>CFBundleURLName</key><string>ai.tracecommons.shell.staging.invite</string>'
-  has staging "$s" '<key>SUFeedURL</key><string>https://storage.googleapis.com/tc-staging-artifacts-20261021/staging/appcast.xml</string>'
+  has staging "$s" '<key>SUFeedURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/appcast.xml</string>'
   has staging "$s" '<key>SUPublicEDKey</key><string>c3RhZ2luZy1rZXktbm90LXJlYWw=</string>'
   lacks staging "$s" '<string>ai.tracecommons.shell</string>'
   lacks staging "$s" '<string>tracecommons</string>'
