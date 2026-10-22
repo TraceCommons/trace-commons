@@ -11,9 +11,13 @@
 # - a staging plist carries the staging bundle id, name, URL scheme, feed
 #   and channel, and nothing of production's identity or feed, and it never
 #   takes the production Sparkle key;
-# - an unknown channel, or a channel file missing a key, renders nothing.
+# - an unknown channel, or a channel file missing, repeating or emptying a
+#   key, or naming an unsafe bundle name, renders nothing;
+# - the pre-signing bundle check refuses a fake bundle whose plist, CLI and
+#   FFI library do not all report the chosen channel and scheme.
 #
-# Seconds, no build: bash only, plus plutil where it exists.
+# Seconds, no cargo build: bash, python3 and a C compiler for one stub
+# library, plus plutil where it exists.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -178,6 +182,105 @@ if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
   fail "a staging file with an unknown key rendered a plist"
 else
   pass "a staging file with an unknown key is refused"
+fi
+
+# A key set twice, or left empty, is refused: the second would otherwise
+# silently win, and an empty bundle id or scheme is no identity at all.
+cp "$repo/macos/channels/staging.env" "$scratch/tree/macos/channels/staging.env"
+echo "TC_BUNDLE_ID=ai.example" >>"$scratch/tree/macos/channels/staging.env"
+if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
+  bash "$scratch/tree/macos/scripts/info-plist.sh" 1.2.3 45 >/dev/null 2>&1; then
+  fail "a staging file setting TC_BUNDLE_ID twice rendered a plist"
+else
+  pass "a staging file setting TC_BUNDLE_ID twice is refused"
+fi
+sed 's/^TC_BUNDLE_ID=.*/TC_BUNDLE_ID=/' "$repo/macos/channels/staging.env" \
+  >"$scratch/tree/macos/channels/staging.env"
+if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
+  bash "$scratch/tree/macos/scripts/info-plist.sh" 1.2.3 45 >/dev/null 2>&1; then
+  fail "a staging file with an empty TC_BUNDLE_ID rendered a plist"
+else
+  pass "a staging file with an empty TC_BUNDLE_ID is refused"
+fi
+
+# The bundle name becomes a path the build script deletes and recreates, so
+# it may not carry a slash or start with a dot.
+for name in "../Near.ai" "Near/ai" ".Near.ai" "Near.ai;x"; do
+  sed "s|^TC_BUNDLE_NAME=.*|TC_BUNDLE_NAME=$name|" "$repo/macos/channels/staging.env" \
+    >"$scratch/tree/macos/channels/staging.env"
+  if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
+    bash "$scratch/tree/macos/scripts/info-plist.sh" 1.2.3 45 >/dev/null 2>&1; then
+    fail "a staging bundle name '$name' rendered a plist"
+  else
+    pass "a staging bundle name '$name' is refused"
+  fi
+done
+cp "$repo/macos/channels/staging.env" "$scratch/tree/macos/channels/staging.env"
+
+# --- the bundle channel check (spec 4.3) -----------------------------------
+#
+# assert_bundle_channel runs only inside a real bundle build, which CI makes
+# only on a release tag. Here it runs against a fake .app: a plist, a stub
+# near-ai printing a --version line, and a stub library exporting the two
+# symbols the check calls. The chosen channel, the plist, the CLI and the
+# library must all agree, and the library's URL scheme must be the channel's.
+if command -v cc >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  fake_app() {
+    local app="$1" plist_channel="$2" cli_channel="$3" lib_json="$4"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
+    python3 -I -c 'import plistlib, sys
+with open(sys.argv[1], "wb") as f:
+    plistlib.dump({"TCChannel": sys.argv[2]}, f)' "$app/Contents/Info.plist" "$plist_channel"
+    printf '#!/bin/sh\necho "near-ai 1.2.3 (0000000) channel %s"\n' "$cli_channel" \
+      >"$app/Contents/MacOS/near-ai"
+    chmod +x "$app/Contents/MacOS/near-ai"
+    if [[ -n "$lib_json" ]]; then
+      python3 -I -c 'import json, sys
+body = json.dumps(sys.argv[2])
+open(sys.argv[1], "w").write(
+    "#include <stdlib.h>\n#include <string.h>\n"
+    "char *tc_build_channel_json(void) { return strdup(%s); }\n"
+    "void tc_string_free(char *s) { free(s); }\n" % body)' "$scratch/stub.c" "$lib_json"
+      cc -shared -fPIC -o "$app/Contents/Frameworks/libtrace_commons_contributor_ffi.dylib" \
+        "$scratch/stub.c"
+    fi
+  }
+  bundle_check() {
+    env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging bash -c '
+      source "$1/macos/scripts/channel.sh"
+      load_channel && assert_bundle_channel "$2"' _ "$repo" "$1" >"$scratch/bundle.out" 2>&1
+  }
+  agree='{"channel":"staging","url_scheme":"tracecommons-staging"}'
+  app="$scratch/Fake Staging.app"
+
+  fake_app "$app" staging staging "$agree"
+  if bundle_check "$app"; then
+    pass "a bundle whose plist, CLI and library all say staging is accepted"
+  else
+    fail "a bundle whose plist, CLI and library all say staging was refused"
+    cat "$scratch/bundle.out" >&2
+  fi
+  refused() {
+    local label="$1"
+    if bundle_check "$app"; then
+      fail "$label was accepted"
+    else
+      pass "$label is refused"
+    fi
+  }
+  fake_app "$app" staging production "$agree"
+  refused "a staging plist around a production CLI"
+  fake_app "$app" production staging "$agree"
+  refused "a production plist around a staging CLI"
+  fake_app "$app" staging staging '{"channel":"production","url_scheme":"tracecommons-staging"}'
+  refused "a staging plist and CLI around a production library"
+  fake_app "$app" staging staging '{"channel":"staging","url_scheme":"tracecommons"}'
+  refused "a staging library reporting production's URL scheme"
+  fake_app "$app" staging staging ""
+  refused "a bundle with no library"
+else
+  fail "cc and python3 are needed to check the bundle channel against a fake bundle"
 fi
 
 if ((failures > 0)); then

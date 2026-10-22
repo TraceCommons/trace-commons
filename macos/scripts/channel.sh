@@ -85,6 +85,12 @@ load_channel() {
       return 1
     fi
   done
+  # The bundle name becomes a path the build deletes and recreates: no
+  # slash, no leading dot, nothing a shell would read as syntax.
+  if [[ ! "$TC_BUNDLE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.\ ]*$ ]]; then
+    echo "refusing: $TC_CHANNEL channel file's TC_BUNDLE_NAME must be letters, digits, dots and spaces" >&2
+    return 1
+  fi
   # Variable names, used with ${!name}: refuse anything that is not one.
   for key in TC_SPARKLE_KEY_VAR TC_PROFILE_VAR; do
     if [[ ! "${!key}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
@@ -103,12 +109,54 @@ near_ai_channel() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-# Refuse a bundle whose Info.plist TCChannel, bundled CLI and chosen channel
-# disagree (staging design 4.3). The app makes the same comparison against
-# its dylib at launch and starts nothing on a mismatch.
+# The channel and URL scheme a bundled FFI library reports through
+# tc_build_channel_json, as "<channel> <scheme>". The library is loaded from
+# a scratch copy, ad-hoc signed where codesign exists, because the copy in
+# the bundle has had its install name rewritten and is not signed yet.
+library_channel() {
+  local lib="$1" scratch out
+  [[ -f "$lib" ]] || return 1
+  scratch="$(mktemp -d)" || return 1
+  cp "$lib" "$scratch/lib.dylib" || {
+    rm -rf "$scratch"
+    return 1
+  }
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - --timestamp=none "$scratch/lib.dylib" >/dev/null 2>&1 || true
+  fi
+  out="$(python3 -I -c '
+import ctypes, json, sys
+lib = ctypes.CDLL(sys.argv[1])
+lib.tc_build_channel_json.restype = ctypes.c_void_p
+lib.tc_string_free.argtypes = [ctypes.c_void_p]
+raw = lib.tc_build_channel_json()
+if not raw:
+    sys.exit(1)
+try:
+    doc = json.loads(ctypes.string_at(raw).decode("utf-8"))
+finally:
+    lib.tc_string_free(raw)
+print(doc["channel"], doc["url_scheme"])
+' "$scratch/lib.dylib" 2>/dev/null)"
+  local status=$?
+  rm -rf "$scratch"
+  ((status == 0)) || return 1
+  [[ "$out" =~ ^[a-z]+\ [a-z-]+$ ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# Refuse a bundle whose Info.plist TCChannel, bundled CLI, bundled FFI
+# library and chosen channel disagree, or whose library's URL scheme is not
+# the channel's (staging design 4.3). The app makes the same comparison
+# against its dylib at launch and starts nothing on a mismatch; checking it
+# here stops a bundle that could never start from being signed.
 assert_bundle_channel() {
-  local app="$1" plist_channel cli_channel
-  plist_channel="$(/usr/libexec/PlistBuddy -c 'Print :TCChannel' "$app/Contents/Info.plist" 2>/dev/null)" || {
+  local app="$1" plist_channel cli_channel lib_report lib_channel lib_scheme
+  plist_channel="$(python3 -I -c '
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    print(plistlib.load(f)["TCChannel"])
+' "$app/Contents/Info.plist" 2>/dev/null)" || {
     echo "FATAL: the bundle's Info.plist has no TCChannel" >&2
     return 1
   }
@@ -120,5 +168,19 @@ assert_bundle_channel() {
     echo "FATAL: channel mismatch: chosen $TC_CHANNEL, Info.plist $plist_channel, near-ai $cli_channel" >&2
     return 1
   fi
-  echo "verified channel $TC_CHANNEL: Info.plist and near-ai agree"
+  lib_report="$(library_channel "$app/Contents/Frameworks/libtrace_commons_contributor_ffi.dylib")" || {
+    echo "FATAL: the bundled FFI library does not report its channel" >&2
+    return 1
+  }
+  lib_channel="${lib_report%% *}"
+  lib_scheme="${lib_report#* }"
+  if [[ "$lib_channel" != "$TC_CHANNEL" ]]; then
+    echo "FATAL: channel mismatch: chosen $TC_CHANNEL, FFI library $lib_channel" >&2
+    return 1
+  fi
+  if [[ "$lib_scheme" != "$TC_URL_SCHEME" ]]; then
+    echo "FATAL: URL scheme mismatch: $TC_CHANNEL channel file $TC_URL_SCHEME, FFI library $lib_scheme" >&2
+    return 1
+  fi
+  echo "verified channel $TC_CHANNEL: Info.plist, near-ai and the FFI library agree"
 }
