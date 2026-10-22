@@ -1116,6 +1116,9 @@ jobs:
       # sign-up without the admission ledger and the boot channel check
       # compile only there.
       - run: cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets --features trace-commons-ingest/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The signed pin-set verifier (`staging_pins`), which only the
+      # attestation crate's own `near-ai-staging` feature compiles.
+      - run: cargo clippy -p trace-commons-attestation --all-targets --features near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1544,8 +1547,10 @@ jobs:
       # pointer and no declared production folder or port, its --version
       # channel, its window label (`a_staging_channel_shows_the_label`, and
       # the FFI `build_channel` suite, whose label check is the staging half
-      # of a test the default build runs as production), and the FFI suite
-      # as staging. None of them is compiled into the default build above.
+      # of a test the default build runs as production), the FFI suite as
+      # staging, and the attestation crate's signed pin-set verifier, whose
+      # unit tests no other crate's run reaches. None of them is compiled into
+      # the default build above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1553,6 +1558,7 @@ jobs:
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of a_staging_channel_shows_the_label
             cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi --test build_channel
+            cargo test --locked -p trace-commons-attestation --features near-ai-staging
           '
       - name: Verify real Secret Service storage
         run: |

@@ -28,3 +28,10 @@ pub mod quote;
 /// only needs the other.
 #[cfg(feature = "receipt")]
 pub mod receipt;
+/// The signed NEAR AI pin-set format a staging build takes its measurement
+/// sets from, and its verifier.
+///
+/// Behind the `near-ai-staging` feature: a default build compiles no code
+/// that reads a signed pin set.
+#[cfg(feature = "near-ai-staging")]
+pub mod staging_pins;
