@@ -53,9 +53,9 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::AttestationReport;
 use super::quote::Collateral;
 use super::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
+use super::{AttestationReport, ReportShapeError};
 
 /// Missing-control name when no NEAR AI base URL is configured.
 pub const BASE_URL_CONTROL: &str = "near_ai_base_url";
@@ -137,6 +137,14 @@ pub enum AttestationClientError {
         step: AttestationStep,
         detail_hash: String,
     },
+    /// A gateway-shape report parsed, but did not yield exactly one ECDSA
+    /// attestation for the requested model. `label` is
+    /// [`super::ReportShapeError::label`].
+    #[error("{step} step report did not attest the requested model ({label})")]
+    ModelSelection {
+        step: AttestationStep,
+        label: &'static str,
+    },
 }
 
 impl AttestationClientError {
@@ -146,7 +154,8 @@ impl AttestationClientError {
             Self::MissingControl { step, .. }
             | Self::Transport { step, .. }
             | Self::HttpStatus { step, .. }
-            | Self::MalformedResponse { step, .. } => *step,
+            | Self::MalformedResponse { step, .. }
+            | Self::ModelSelection { step, .. } => *step,
         }
     }
 
@@ -157,6 +166,7 @@ impl AttestationClientError {
             Self::Transport { .. } => "transport",
             Self::HttpStatus { .. } => "http_status",
             Self::MalformedResponse { .. } => "malformed_response",
+            Self::ModelSelection { label, .. } => label,
         }
     }
 
@@ -324,6 +334,32 @@ impl HttpAttestationClient {
     }
 }
 
+/// Parse a `GET /attestation/report` body into the report for `model`.
+///
+/// Either shape: a per-model completions host's single report, parsed as it
+/// always was, or the gateway's `model_attestations`, from which exactly one
+/// entry naming `model` is selected (see
+/// [`AttestationReport::from_json_for_model`]). The gateway's own quote is
+/// never returned. Accepted in every build, not only `near-ai-staging`: the
+/// only bodies whose outcome this changes are ones that previously failed to
+/// parse at all, and every verification the drill makes then runs unchanged
+/// on the selected model quote.
+pub fn parse_report_body(
+    body: &str,
+    model: &str,
+) -> Result<AttestationReport, AttestationClientError> {
+    let step = AttestationStep::Report;
+    AttestationReport::from_json_for_model(body, model).map_err(|error| match error {
+        ReportShapeError::Malformed { detail_hash } => {
+            AttestationClientError::MalformedResponse { step, detail_hash }
+        }
+        other => AttestationClientError::ModelSelection {
+            step,
+            label: other.label(),
+        },
+    })
+}
+
 /// The completion response, as much of it as the drill reads.
 ///
 /// Only `id`, which addresses the receipt. Deliberately nothing else: the
@@ -371,10 +407,7 @@ impl AttestationClient for HttpAttestationClient {
                 detail_hash: detail_hash(&e.to_string()),
             })?;
         let body = success_body(step, response).await?;
-        AttestationReport::from_json(&body).map_err(|e| AttestationClientError::MalformedResponse {
-            step,
-            detail_hash: detail_hash(&format!("{e:#}")),
-        })
+        parse_report_body(&body, &self.model)
     }
 
     #[cfg(feature = "near-attestation-collateral")]
@@ -489,9 +522,11 @@ impl AttestationClient for HttpAttestationClient {
 /// that publishes it. See [`ATTESTATION_GATEWAY_BASE_URL`].
 ///
 /// [`Self::fetch_ed25519_report_json`] returns the **raw body**, not a parsed
-/// [`AttestationReport`]. `AttestationReport` models the single-enclave shape
-/// and has no `model_attestations` field at all, and the key readers in
-/// `trace_commons_attestation::receipt` take the report JSON as a string.
+/// [`AttestationReport`]. `AttestationReport` is one ECDSA model enclave's
+/// report (selected out of `model_attestations` when the body is
+/// gateway-shaped), and the key readers in
+/// `trace_commons_attestation::receipt` take the report JSON as a string,
+/// because they need every ed25519 entry, not one ECDSA one.
 /// Re-serializing a parsed form would also be the same class of mistake the
 /// completion path warns about.
 #[async_trait]

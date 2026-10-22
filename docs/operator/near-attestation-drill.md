@@ -118,6 +118,32 @@ step. That is deliberate: an unpinned drill proves the endpoint is *an*
 enclave, not *the* enclave, and reporting that as a pass would be worse than
 not running it.
 
+### When the ECDSA drill's base URL is the gateway
+
+NEAR AI staging has no per-model completions hosts: inference, receipts and
+attestation are all on the gateway, so a staging deployment's
+`TRACE_COMMONS_NEAR_AI_BASE_URL` is the gateway. Asked for
+`/attestation/report?model=<model>&signing_algo=ecdsa`, the gateway answers
+with its own quote under `gateway_attestation` and one ECDSA entry per model
+under `model_attestations`.
+
+The drill accepts that shape in every build. It selects the one entry whose
+`model_name` equals `TRACE_COMMONS_NEAR_AI_MODEL` exactly and runs every step
+-- collateral, TCB, nonce offset, signer padding, measurement pins, receipt
+join -- on that entry's quote. It never reads `gateway_attestation`. It
+fails `report_fetched` with a named reason instead of guessing:
+
+| Reason | Meaning |
+|---|---|
+| `model_not_attested` | No entry names the configured model. |
+| `model_attested_more_than_once` | Two or more entries name it. |
+| `model_entry_not_ecdsa` | The entry is not an ECDSA attestation. |
+| `gateway_report_without_model_attestations` | Only the gateway's own attestation came back. |
+| `report_carries_both_shapes` | A top-level single report and `model_attestations` in one body. |
+
+A completions host's single report, with no `model_attestations`, is parsed
+exactly as before and the model name is not consulted.
+
 ### The cargo feature
 
 Fetching Intel collateral requires the binary to be built with
@@ -151,6 +177,11 @@ The drill reports where the two disagree, in `outcome.json_claim_anomalies`.
 That is reporting only, never gating — it means the endpoint is describing
 itself inaccurately in a way the quote exposes, which is worth knowing on its
 own terms.
+
+A gateway report's model entry carries no `info.tcb_info`, so there is no
+claim to compare. The drill then sets `outcome.json_claim_registers_absent:
+true` and leaves `json_claim_anomalies` empty: nothing was compared, which is
+not the same as agreement. The key is omitted when false.
 
 ## The zero-padding assertion
 
