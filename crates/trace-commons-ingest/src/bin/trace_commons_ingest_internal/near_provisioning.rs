@@ -38,10 +38,13 @@ mod control {
     pub(super) const ISSUER: &str = "issuer";
     /// The index pepper and account-name KEK required by both enrollment paths.
     pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
+    /// A staging build never offers the NEAR wallet ceremony: staging admits
+    /// accounts only through NEAR AI and its allow-list (staging spec S1/S5).
+    pub(super) const STAGING_WALLET_CLOSED: &str = "staging_wallet_provisioning_closed";
 
     /// Every label, for the tests that hold the label-only rule.
     #[cfg(test)]
-    pub(super) const ALL: [&str; 13] = [
+    pub(super) const ALL: [&str; 14] = [
         PROVISIONING_ENABLED,
         ADMISSION_READY,
         PUBLIC_ORIGIN,
@@ -55,6 +58,7 @@ mod control {
         WITNESS_MEASUREMENT_SYNTAX,
         ISSUER,
         NEAR_ACCOUNT_IDENTITY,
+        STAGING_WALLET_CLOSED,
     ];
 }
 
@@ -118,6 +122,11 @@ fn wallet_readiness_named(
     state: &AppState,
     contract: ProvisionContract,
 ) -> Result<Option<PublishedWitness>, &'static str> {
+    // First, so no configuration can open it: the wallet ceremony creates an
+    // account with no invite and no allow-list, which staging must not do.
+    if cfg!(feature = "near-ai-staging") {
+        return Err(control::STAGING_WALLET_CLOSED);
+    }
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }

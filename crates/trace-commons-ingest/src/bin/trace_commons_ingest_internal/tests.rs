@@ -98919,6 +98919,10 @@ fn a_run_that_passed_every_step_still_records_red_evidence_when_it_drifted() {
     );
 }
 
+// A staging build refuses the wallet ceremony before any of these, so this
+// holds for the default build; `a_staging_build_never_offers_wallet_provisioning`
+// is its staging twin.
+#[cfg(not(feature = "near-ai-staging"))]
 #[tokio::test]
 async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() {
     let temp = tempfile::tempdir().unwrap();
@@ -98939,6 +98943,37 @@ async fn wallet_readiness_refuses_missing_identity_before_starting_a_ceremony() 
     )
     .unwrap();
     assert_eq!(body["ready"], false);
+}
+
+/// Everyone signs in to staging through NEAR AI, where the operator's
+/// allow-list decides who gets an account (staging spec S1/S5). The NEAR
+/// wallet ceremony creates an account with no invite and no list, so a
+/// staging build refuses it by name whatever the configuration says, rather
+/// than relying on the operator leaving it unconfigured.
+#[cfg(feature = "near-ai-staging")]
+#[tokio::test]
+async fn a_staging_build_never_offers_wallet_provisioning() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let settings = Arc::get_mut(&mut state).unwrap();
+    settings.near_provisioning_enabled = true;
+    settings.near_provisioning_admission_ready = true;
+    assert_eq!(
+        near_provisioning::wallet_readiness_refusal(&state),
+        Some("staging_wallet_provisioning_closed")
+    );
+    for capabilities in [
+        near_provisioning::capabilities(State(state.clone())).await,
+        near_provisioning::capabilities_v2(State(state.clone())).await,
+    ] {
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(capabilities.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["ready"], false);
+    }
 }
 
 include!("token_bundle_journey_test.rs");
