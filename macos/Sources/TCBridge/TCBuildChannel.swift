@@ -17,6 +17,14 @@ public enum TCBuildChannel {
     /// `tc_channel_mismatch_line`. Nil only on a caught panic.
     public static func mismatchLine() -> String? { take(tc_channel_mismatch_line()) }
 
+    /// `tc_channel_window_label`: the core's label for the main window on a
+    /// staging build (spec S7, 4.8). Nil on production, whose answer is
+    /// empty, and on a caught panic.
+    public static func windowLabel() -> String? {
+        guard let label = take(tc_channel_window_label()), !label.isEmpty else { return nil }
+        return label
+    }
+
     /// Whether `dir`, taken from this build's override variable, may be the
     /// state directory: nil to allow it, or the label `tc_resolve_state_dir`
     /// refused it with (`state-dir-other-channel` when it names the other
