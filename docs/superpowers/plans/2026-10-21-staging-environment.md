@@ -215,7 +215,15 @@ Spec: sections 5.1, 5.3, 5.5, 5.6, 5.7.
 #[test] fn status_names_the_pin_refusal()
 #[test] fn a_default_build_has_no_staging_pin_key() // cfg(not(feature)): channel exposes no staging key or URL
 #[test] fn a_default_build_still_uses_the_ingest_document()
+#[test] fn the_pin_gateway_host_is_the_signed_documents_host() // staging: host(NEAR_AI_ATTESTATION_GATEWAY) == "cloud-stg-api.near.ai"
 ```
+
+Acceptance: the host the app compares a document's `gateway_host` with is
+the bare host of `channel::NEAR_AI_ATTESTATION_GATEWAY`, never the full URL,
+and a staging-build test pins it to the same literal the re-sign tool's
+`the_payload_names_the_staging_gateway_host` test pins
+(`cloud-stg-api.near.ai`). The tool writes the host of the server's
+compiled-in staging base; nothing else checks that the two agree.
 
 - [ ] **Steps 2-4** as in task 2; also `cargo test -p trace-commons-contributor --features near-ai-staging routing::proof_attestor`.
 - [ ] **Step 5: Commit** — `Take NEAR AI pins only from the signed staging set in a staging build`.
