@@ -36,10 +36,11 @@
 //!   number of marked events.
 //! - [`service`]: one request end to end, over the pieces above, with the
 //!   hash-only log line.
-//! - [`enclave`]: the two `GetKey` paths (`judgement-signing`,
-//!   `judgement-limiter`) and the `tcjudge1` quote.
-//! - [`http`]: the two routes, `GET /v1/attestation` and
-//!   `POST /v1/judgement`, and the load bound.
+//! - [`enclave`]: the one `GetKey` path (`judgement-limiter`), the
+//!   sealing and signing keys generated in memory at each boot, and the
+//!   `tcjudge1` quote that binds them.
+//! - [`http`]: the two routes, `GET /v1/attestation` and the sealed
+//!   `POST /v1/judgement`, and their bounds.
 //! - [`boot`]: the fail-closed boot order and its refusal labels.
 //!
 //! Logging is hash-only (spec section 6): a random request id,

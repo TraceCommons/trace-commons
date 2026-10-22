@@ -730,7 +730,7 @@ impl DstackSocketAgent {
     /// separate keys by asking for other paths: different paths give
     /// different keys, and `purpose` and `algorithm` do not enter the
     /// derivation (see the module docs). The judgement service uses this for
-    /// its `judgement-signing` and `judgement-limiter` keys.
+    /// its `judgement-limiter` root, its only `GetKey` key.
     ///
     /// `path`, `purpose` and `algorithm` are compile-time constants at every
     /// call site, never caller input, so they are written into the query
