@@ -199,6 +199,8 @@ Spec: sections 5.1, 5.3, 5.5, 5.6, 5.7.
 - Modify: `crates/trace-commons-contributor/src/routing/proof_attestor.rs` (`PinProvider`: under the feature, the signed document is the only source; the ingest document and the env override are not compiled; the sequence file `near-ai-pins-sequence` in the state directory; refresh timing unchanged)
 - Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (status reports the pin refusal label)
 - Tests: `proof_attestor.rs` tests with a mock pin server
+- Modify: `scripts/ci/staging-pin-public-keys.txt` (the staging public key, in the same commit that compiles it in) and `scripts/ci/assert-no-staging-markers.sh` (extend `sources_agree` so the pin URL constant must contain `URL_MARKER` and the compiled-in key must be listed in the keys file, as it already does for the format constants)
+- Modify: `.github/workflows/staging-macos.yml` (an inverted marker scan that requires the staging bundle's dylib and CLI to contain the format string and the key: the positive control for the release scan, which until then passes on an absent signal)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -339,7 +341,7 @@ Spec: sections 6.1, 5.7.
 
 - [ ] **Step 1: Write the failing self-test**, run it.
 - [ ] **Step 2-3: Implement.**
-- [ ] **Step 4: Verify** — release check and self-test; marker self-test; `actionlint`; one dispatch of the workflow on the PR branch by the owner once the `staging` environment exists (not a precondition for opening the PR).
+- [ ] **Step 4: Verify** — release check and self-test; marker self-test; `actionlint`; one dispatch of the workflow from main by the owner once its prerequisites exist (spec 6.1; not a precondition for merging).
 - [ ] **Step 5: Commit** — `Add a manual workflow that publishes the staging macOS app`.
 
 ---

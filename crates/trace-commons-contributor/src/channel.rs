@@ -224,6 +224,26 @@ pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
 pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
 
+/// Where a staging build fetches its signed NEAR AI measurement pins (spec
+/// 5.3): a static file on the staging site. The device never takes this from
+/// configuration, from ingest or from IPC.
+#[cfg(feature = "near-ai-staging")]
+pub const STAGING_PIN_URL: &str =
+    concat!("https://", staging_host!(), "/near-ai-pins/current.json");
+
+/// The Ed25519 public key a staging pin set must be signed by (spec 5.4),
+/// as its 32 raw bytes.
+///
+/// PLACEHOLDER until the staging pin-signing key pair exists: 31 fixed
+/// ASCII bytes, one short of an Ed25519 public key, so a release scan can
+/// search a binary for them and no signature can verify against them. A
+/// document under another key id is refused as an unknown key; one claiming
+/// this key's id fails its signature check. Either way the refusal label is
+/// in the daemon status and nothing is pinned until the real public key
+/// replaces this, the only place it is written.
+#[cfg(feature = "near-ai-staging")]
+pub const STAGING_PIN_PUBLIC_KEY: &[u8] = b"TC-STAGING-PIN-KEY-PLACEHOLDER!";
+
 /// The environment variable that moves the IronWire home (spec 4.2, S10).
 /// A staging build reads only its own, so a production `IRONWIRE_HOME` never
 /// points it at production's proxy, ledger or token.
@@ -260,6 +280,8 @@ pub const HOST_VALUES: &[&str] = &[
     NEAR_AI_PRIVACY_FILTER_BASE,
     NEAR_AI_DASHBOARD_ORIGIN,
     NEAR_AI_WALLET_RECIPIENT,
+    #[cfg(feature = "near-ai-staging")]
+    STAGING_PIN_URL,
 ];
 
 /// A host the other channel owns, held as a digest so a build never carries

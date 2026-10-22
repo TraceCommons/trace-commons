@@ -33,13 +33,15 @@
 #       Exit 1 naming each file and marker found.
 #   scripts/ci/assert-no-staging-markers.sh self-test
 #       Seed each marker into a scratch binary and prove each is refused,
-#       and that a clean binary passes.
+#       and that a clean binary passes. Also require the format marker to be
+#       the one the verifier's source compiles in.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEFAULT_KEYS_FILE="$REPO_ROOT/scripts/ci/staging-pin-public-keys.txt"
 FORMAT_MARKER="trace-commons-near-ai-pins/"
 URL_MARKER="near-ai-pins/current.json"
+STAGING_PINS_SOURCE="$REPO_ROOT/crates/trace-commons-attestation/src/staging_pins.rs"
 
 check() {
   local keys_file="$DEFAULT_KEYS_FILE"
@@ -126,6 +128,25 @@ if failures:
     sys.exit(1)
 print(f"no staging pin verifier in {len(files)} file(s); {len(keys)} staging key(s) listed")
 PY
+}
+
+# The verifier's source must spell the format and the signing prefix with
+# FORMAT_MARKER, so the scan looks for the bytes a staging build carries.
+# The pin URL and the compiled-in key do not exist yet; the change that adds
+# them extends this check (staging plan, Task 5).
+sources_agree() {
+  local source="${1:-$STAGING_PINS_SOURCE}" failures=0 name
+  if [[ ! -f "$source" ]]; then
+    echo "REFUSING: the verifier source $source does not exist" >&2
+    return 1
+  fi
+  for name in 'FORMAT: &str = "' 'SIGNING_PREFIX: &[u8] = b"'; do
+    if ! grep -q -F -- "pub const $name$FORMAT_MARKER" "$source"; then
+      echo "REFUSING: $source has no 'pub const $name$FORMAT_MARKER...'; the scan's format marker has drifted from the verifier" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  ((failures == 0))
 }
 
 self_test() {
@@ -281,6 +302,37 @@ open(sys.argv[1], "wb").write(data[:mid] + forms[sys.argv[3]] + data[mid:])
   expect_refused "a path that does not exist" --keys-file "$scratch/keys.txt" "$scratch/absent"
   mkdir -p "$scratch/empty"
   expect_refused "a directory with no file in it" --keys-file "$scratch/keys.txt" "$scratch/empty"
+
+  # The markers must be the strings the verifier compiles in. A rename of the
+  # format there, with these markers left behind, would make every release
+  # scan pass vacuously while every case above stays green.
+  if (sources_agree >/dev/null 2>&1); then
+    echo "self-test: passed as expected: the markers match the verifier's source"
+  else
+    echo "self-test: the markers no longer match the verifier's source" >&2
+    (sources_agree 2>&1 | sed 's/^/  /') || true
+    status=1
+  fi
+  local renamed out
+  for renamed in \
+    's#^pub const FORMAT: &str = "trace-commons-near-ai-pins/#pub const FORMAT: &str = "trace-commons-near-ai-pinset/#m' \
+    's#^pub const SIGNING_PREFIX: &\[u8\] = b"trace-commons-near-ai-pins/#pub const SIGNING_PREFIX: &[u8] = b"tc-pins/#m' \
+    's#^pub const FORMAT: .*\n##m'; do
+    cp "$STAGING_PINS_SOURCE" "$scratch/staging_pins.rs"
+    perl -0pi -e "$renamed" "$scratch/staging_pins.rs"
+    if cmp -s "$STAGING_PINS_SOURCE" "$scratch/staging_pins.rs"; then
+      echo "self-test: seeding '$renamed' changed nothing; the fixture drifted" >&2
+      status=1
+    elif out="$(sources_agree "$scratch/staging_pins.rs" 2>&1)"; then
+      echo "self-test: a verifier source with '$renamed' was NOT refused" >&2
+      status=1
+    elif ! grep -q '^REFUSING: ' <<<"$out"; then
+      echo "self-test: '$renamed' failed without a refusal" >&2
+      status=1
+    else
+      echo "self-test: refused as expected: a verifier source whose format drifted from the marker"
+    fi
+  done
 
   return "$status"
 }
