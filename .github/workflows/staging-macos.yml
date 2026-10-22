@@ -38,7 +38,7 @@
 #     generate_keys exports it, which signs the staging appcast
 #   TC_STAGING_GCP_WIF_PROVIDER, TC_STAGING_GCP_PUBLISHER_SA   the staging
 #     workload identity provider and the publisher service account, whose
-#     only bucket role is on the staging bucket
+#     only bucket role is on the public staging updates bucket
 #
 # The publisher trusts this workflow only when it runs from main, so it is
 # always dispatched from main; the `ref` input picks the commit to build.
@@ -50,10 +50,11 @@
 # token in reach of the build; publish, which builds nothing, attests,
 # uploads to the bucket and creates the pre-release.
 #
-# Before the first dispatch the feed must be publicly readable. Never grant
-# public read on the staging artifacts bucket for that: it is the staging
-# server's object store and holds its database dumps, and a public grant on
-# a uniform-access bucket covers every object (staging design 3.1, 3.2).
+# The feed and DMGs live in a public bucket of their own, the one the channel
+# file's feed URL names (S15). Never grant public read on the staging
+# artifacts bucket: it is the staging server's object store and holds its
+# database dumps, and a public grant on a uniform-access bucket covers every
+# object (staging design 3.1, 3.2).
 name: staging-macos
 
 on:

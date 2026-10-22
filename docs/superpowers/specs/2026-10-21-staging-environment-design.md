@@ -93,6 +93,12 @@ All dated 2026-10-21. The owner's words are quoted.
   staging environment right now" (2026-10-22), meaning the GitHub
   environment and its approval gate. The staging workflow runs on manual
   dispatch only, with staging-named repository secrets (6.1).
+- **(S15) A public bucket for staging updates.** "New public updates
+  bucket" (2026-10-22). The staging appcast and DMGs live in
+  `tc-staging-updates-20261022`, readable by anyone, like production's
+  updates bucket. The publisher can write only there. The artifacts bucket
+  stays private: it is the staging server's object store and holds its
+  database dumps.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
