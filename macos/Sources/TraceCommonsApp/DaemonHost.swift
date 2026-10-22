@@ -1,4 +1,5 @@
 import Foundation
+import TCBridge
 import TCShellCore
 
 /// Where the in-process daemon keeps its state.
@@ -22,6 +23,11 @@ enum DaemonHost {
     /// `channel` is the one `BuildChannelGate` agreed: the directory and its
     /// override variable are the dylib's.
     static func resolveConfigDirectory(channel: BuildChannel) throws -> Resolution {
-        try StateDirectory.resolve(channel: channel)
+        try StateDirectory.resolve(channel: channel, overrideCheck: overrideCheck)
     }
+
+    /// The dylib's check of a directory taken from the override variable
+    /// (`tc_resolve_state_dir`): the daemon and compute open their directory
+    /// with `ConfigStore::open`, which does not run it (staging design 4.4).
+    static let overrideCheck = StateDirectory.OverrideCheck { TCBuildChannel.overrideRefusal($0) }
 }

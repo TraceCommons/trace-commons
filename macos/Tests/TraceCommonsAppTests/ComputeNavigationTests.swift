@@ -130,9 +130,9 @@ final class ComputeNavigationTests: XCTestCase {
     func testComputeDirectoryDoesNotInheritDaemonSocketLengthRestriction() throws {
         let path = "/private/tmp/" + String(repeating: "a", count: 120)
         let channel = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
-        XCTAssertThrowsError(try StateDirectory.resolve(channel: channel, explicit: path, probe: .init { _ in .absent }))
-        XCTAssertEqual(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .absent }).path, path)
-        XCTAssertThrowsError(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .file }))
+        XCTAssertThrowsError(try StateDirectory.resolve(channel: channel, explicit: path, probe: .init { _ in .absent }, overrideCheck: DaemonHost.overrideCheck))
+        XCTAssertEqual(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .absent }, overrideCheck: DaemonHost.overrideCheck).path, path)
+        XCTAssertThrowsError(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .file }, overrideCheck: DaemonHost.overrideCheck))
     }
 
     @MainActor

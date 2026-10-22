@@ -534,10 +534,20 @@ inside it. Both sides are resolved before comparing: symlinks are followed,
 and for a path that does not exist yet the nearest existing ancestor is
 canonicalized and the rest re-appended. The comparison is by path
 component, so `trace-commons` and `trace-commons-staging` never match each
-other. The refusal is the label `state-dir-other-channel`, with no path, and
+other. On macOS and Windows a component matches ignoring ASCII case, since
+APFS and NTFS are case-insensitive by default; on Linux it is exact. The
+refusal is the label `state-dir-other-channel`, with no path, and
 nothing is created. It applies in both builds. An explicit `--config-dir`
 and the platform default are not checked. No file is written to the state
 directory (S11).
+
+The rule is `config::resolve_state_dir`, which `ConfigStore::resolve`
+calls. The macOS app chooses its directory in Swift and opens it with
+`ConfigStore::open`, so it would never reach `resolve`; it is covered
+through the C ABI's `tc_resolve_state_dir`, which runs the same function.
+`StateDirectory` passes every directory that came from the override variable
+to it, and the label becomes the app's startup refusal (no daemon, no
+compute). The macOS app is the only client with a staging build.
 
 ### 4.5 URL scheme
 

@@ -50,7 +50,7 @@ final class ComputeModel {
             refusalSentence = sentence
             return
         }
-        do { await start(configDirectory: try StateDirectory.resolveCompute(channel: channel).path) }
+        do { await start(configDirectory: try StateDirectory.resolveCompute(channel: channel, overrideCheck: DaemonHost.overrideCheck).path) }
         catch { fail(error) }
     }
 

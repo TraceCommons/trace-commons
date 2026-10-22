@@ -66,7 +66,7 @@ Tasks 4, 6 and 7 touch no client code and can be reviewed in parallel with 2-3. 
 
 ## Review Focus
 
-1. **No production path ever reaches staging, or the reverse.** Tests: `a_staging_build_names_no_production_host` and `a_default_build_names_no_staging_host` (task 2), `a_staging_ingest_refuses_a_production_near_ai_host` (task 7), `a_staging_store_refuses_a_production_directory` (task 3).
+1. **No production path ever reaches staging, or the reverse.** Tests: `a_staging_build_names_no_production_host` and `a_default_build_names_no_staging_host` (task 2), `a_staging_ingest_refuses_a_production_near_ai_host` (task 7), `an_override_naming_the_other_channel_default_is_refused` (config.rs) and `an_override_to_the_other_channel_directory_is_refused_before_it_is_opened` (`channel_hosts`), plus `tc_resolve_state_dir`'s `an_override_naming_the_other_channel_directory_is_refused_without_a_path` and the macOS app's `testAnOverrideNamingTheOtherChannelDirectoryIsRefused` (task 8).
 2. **Pins fail closed on every path.** Bad signature, unknown key, wrong channel or gateway host, expired, future-issued, rollback, same sequence with other bytes, one bad set: each pins nothing. Tests in tasks 4 and 5.
 3. **Production carries nothing of the staging verifier.** `a_default_build_has_no_staging_pin_key` (task 5) and the marker scan (task 10).
 4. **The release check still fails when it should.** Every new allowance has a self-test case proving one more step past it is refused (task 1).
@@ -289,6 +289,7 @@ Spec: sections 4.1 (last paragraph), 4.3.
 - Modify: both `trace_commons.h` copies
 - Modify: `macos/Sources/TCShellCore/StateDirectory.swift` (default directory and env name from the FFI), `macos/Sources/TCShellCore/NativePasskey.swift` (RP ID from the FFI), `macos/Sources/TraceCommonsApp/WindowBreadcrumb.swift` (subsystem from the bundle id), app startup (compare Info.plist `TCChannel` with the dylib's; refuse to start the daemon on a mismatch)
 - Tests: FFI tests; `macos/Tests/TCShellCoreTests/StateDirectoryTests.swift`, `NativePasskeyTests.swift`, a new `ChannelAgreementTests.swift`
+- Note (spec 4.4): the app opens its directory with `ConfigStore::open`, never `ConfigStore::resolve`, so the other-channel override refusal reaches it only through `tc_resolve_state_dir`. `StateDirectory` sends every directory taken from the override variable through it and refuses to start on `state-dir-other-channel`. Tests: FFI `an_override_naming_the_other_channel_directory_is_refused_without_a_path`; Swift `StateDirectoryTests` (the check is consulted for the override and only for it) and `TCBridgeTests/StateDirectoryBridgeTests` (the real dylib refuses the other channel's directory).
 
 - [ ] **Step 1: Write the failing tests** — Rust: `the_channel_json_matches_the_channel_module`, `the_channel_json_carries_no_key`. Swift: `testDefaultDirectoryComesFromTheDylib`, `testPasskeyRpComesFromTheDylib`, `testAChannelMismatchRefusesToStart`, `testAMissingPlistChannelRefusesToStart`.
 - [ ] **Step 2: Run** — `cargo build -p trace-commons-contributor-ffi && swift test --package-path macos --filter 'StateDirectoryTests|NativePasskeyTests|ChannelAgreementTests'`.
