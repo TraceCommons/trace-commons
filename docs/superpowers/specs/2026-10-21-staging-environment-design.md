@@ -86,6 +86,9 @@ All dated 2026-10-21. The owner's words are quoted.
   the owner chose to skip the ledger on staging (2026-10-22): a staging build
   creates accounts without the admission ledger or witness; production is
   unchanged.
+- **(S13) Staging DMGs on public pre-releases.** "Github pre-relase for
+  straging is fine" (2026-10-22), knowing the repository is public and
+  sign-up is open, so anyone who finds a staging DMG can use staging (6.1).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -831,8 +834,8 @@ lists it explicitly instead (6.2).
 The pre-release is internal in intent but public in fact (the repository is
 public). The DMG is notarized and points only at staging hosts. Since
 sign-up is open (S12), a stranger who installs it and makes a staging NEAR
-AI account can use staging (section 8). Open item 8 asks whether to keep the
-DMG off GitHub and only in the bucket.
+AI account can use staging (section 8). The owner accepted that: staging
+DMGs go on GitHub pre-releases (S13).
 
 ### 6.2 What the release check must allow
 
@@ -976,12 +979,12 @@ The plan breaks this into small PRs. In order:
 
 Settled on 2026-10-21: the host name, PostgreSQL on the VM, the in-window
 label (wording approved 2026-10-22), re-signing and where the DMG lives
-(S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12). Still
-open:
+(S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12), and the
+public pre-release as the DMG's home (S13). The Apple setup is done: the App
+ID `ai.tracecommons.shell.staging` exists and its Developer ID provisioning
+profile is in `macos/` (#1545). Still open:
 
-1. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
-   with the keychain group and associated domain, and a Developer ID
-   provisioning profile for it.
+1. **Apple setup (owner).** Done (see above).
 2. **The staging icon.**
 3. **NEAR AI facts still needed:** whether staging has per-model completions
    hosts; which registers staging pins (5.2); staging's current
