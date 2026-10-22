@@ -1136,7 +1136,7 @@ mod tests {
         assert_eq!(crate::channel::IRONWIRE_HOME_ENV, "IRONWIRE_HOME");
         assert_eq!(crate::channel::IRONWIRE_HOME_DIR, ".ironwire");
         assert_eq!(crate::channel::IRONWIRE_CONTROL_PORT, None);
-        assert!(crate::channel::IRONWIRE_READS_POINTER);
+        const { assert!(crate::channel::IRONWIRE_READS_POINTER) };
 
         let _at = IronWireAt::none();
         let default_home = dirs::home_dir().map(|h| h.join(".ironwire"));

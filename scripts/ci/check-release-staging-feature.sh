@@ -679,7 +679,8 @@ self_test() {
     "the bundle plist declaring TCChannel twice|macos/scripts/info-plist.sh|s/^ *<key>TCChannel<\\/key><string>\\\$\\{TC_CHANNEL\\}<\\/string>\\n/\$&\$&/m"
     # The bundle channel files (spec 4.1): production's file is a release
     # file, and the loader's default is production.
-    "the production channel file naming the feature|macos/channels/production.env|s/^TC_CARGO_FEATURES=\\n/TC_CARGO_FEATURES=trace-commons-contributor\\/near-ai-staging\\n/m"
+    "the production channel file giving the dylib the feature|macos/channels/production.env|s/^TC_FFI_CARGO_FEATURES=\\n/TC_FFI_CARGO_FEATURES=trace-commons-contributor\\/near-ai-staging\\n/m"
+    "the production channel file giving the CLI the feature|macos/channels/production.env|s/^TC_CLI_CARGO_FEATURES=\\n/TC_CLI_CARGO_FEATURES=near-ai-staging\\n/m"
     "the channel loader defaulting to staging|macos/scripts/channel.sh|s/TC_CHANNEL:-production/TC_CHANNEL:-staging/"
     # A TOML escape spells the feature without its literal name.
     "the FFI enabling it through a TOML escape|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"near-ai-\\\\u0073taging\"] }#m"

@@ -43,9 +43,15 @@ if [ "$CONFIG" = "release" ]; then
   CARGO_PROFILE_DIR="release"
   CARGO_BUILD_ARGS+=(--release)
 fi
-# The channel's features, opaque here: production adds none.
-if [ -n "$TC_CARGO_FEATURES" ]; then
-  CARGO_BUILD_ARGS+=(--features "$TC_CARGO_FEATURES")
+# The channel's features, opaque here, one value per build below:
+# production adds none.
+FFI_FEATURE_ARGS=()
+if [ -n "$TC_FFI_CARGO_FEATURES" ]; then
+  FFI_FEATURE_ARGS+=(--features "$TC_FFI_CARGO_FEATURES")
+fi
+CLI_FEATURE_ARGS=()
+if [ -n "$TC_CLI_CARGO_FEATURES" ]; then
+  CLI_FEATURE_ARGS+=(--features "$TC_CLI_CARGO_FEATURES")
 fi
 
 # A staging directory for the lipo'd universal dylib. TC_FFI_LIB_DIR already
@@ -75,9 +81,11 @@ DYLIB_PATHS=()
 NEAR_AI_PATHS=()
 for target in "${RUST_TARGETS[@]}"; do
   (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
+    ${FFI_FEATURE_ARGS[@]+"${FFI_FEATURE_ARGS[@]}"} \
     --target "$target" -p trace-commons-contributor-ffi)
   DYLIB_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/$DYLIB_NAME")
   (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
+    ${CLI_FEATURE_ARGS[@]+"${CLI_FEATURE_ARGS[@]}"} \
     --target "$target" -p trace-commons-contributor --bin near-ai)
   NEAR_AI_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/near-ai")
 done

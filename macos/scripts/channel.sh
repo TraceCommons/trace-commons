@@ -4,9 +4,10 @@
 # Sourced by info-plist.sh, make-app-bundle.sh and make-release-dmg.sh. Each
 # calls `load_channel`, which reads TC_CHANNEL (unset or empty means
 # production), checks it names a channel this repository has, and sets the
-# TC_* bundle values from that channel's file. The cargo feature that makes
-# a staging dylib arrives through the file's TC_CARGO_FEATURES, so no build
-# script names it (scripts/ci/check-release-staging-feature.sh scans them).
+# TC_* bundle values from that channel's file. The cargo features that make
+# a staging dylib and CLI arrive through the file's TC_FFI_CARGO_FEATURES and
+# TC_CLI_CARGO_FEATURES, so no build script names the feature
+# (scripts/ci/check-release-staging-feature.sh scans them).
 #
 # The file is data, not a script. It is read line by line and never
 # evaluated: a value cannot run a command, an unknown key is refused (a
@@ -26,7 +27,8 @@ TC_CHANNEL_KEYS=(
   TC_PROFILE
   TC_PROFILE_VAR
   TC_ICON_SOURCE
-  TC_CARGO_FEATURES
+  TC_FFI_CARGO_FEATURES
+  TC_CLI_CARGO_FEATURES
 )
 
 load_channel() {
@@ -78,7 +80,7 @@ load_channel() {
       return 1
     fi
     # Only the features may be empty: production adds none.
-    if [[ "$key" != TC_CARGO_FEATURES && -z "${!key}" ]]; then
+    if [[ "$key" != TC_*_CARGO_FEATURES && -z "${!key}" ]]; then
       echo "refusing: $TC_CHANNEL channel file leaves $key empty" >&2
       return 1
     fi
