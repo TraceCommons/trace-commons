@@ -408,6 +408,15 @@ pub const ESTIMATE_TOTAL_LINE: &str = "About {low} to {high} of inference in tra
 /// [`ESTIMATE_TOTAL_LINE`] when the rounded low end is $0.
 pub const ESTIMATE_TOTAL_LINE_UP_TO: &str =
     "Up to {high} of inference in traces on this Mac, as an estimate";
+/// Home's Not contributed card: the same estimate as a call to share
+/// (owner, 2026-10-20: "You could make $x.xx amount if shared..."). Still a
+/// band, never one figure. DRAFT, NEEDS APPROVAL.
+pub const ESTIMATE_SHARE_LINE: &str =
+    "You could make about {low} to {high} of inference if you share these";
+/// [`ESTIMATE_SHARE_LINE`] when the rounded low end is $0. DRAFT, NEEDS
+/// APPROVAL.
+pub const ESTIMATE_SHARE_LINE_UP_TO: &str =
+    "You could make up to {high} of inference if you share these, as an estimate";
 /// The line's small label.
 pub const ESTIMATE_TOTAL_LABEL: &str = "Estimate";
 /// The line's action.
@@ -662,6 +671,8 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("ENTRY_ESTIMATE_BAND_UP_TO", ENTRY_ESTIMATE_BAND_UP_TO),
     ("ESTIMATE_TOTAL_LINE", ESTIMATE_TOTAL_LINE),
     ("ESTIMATE_TOTAL_LINE_UP_TO", ESTIMATE_TOTAL_LINE_UP_TO),
+    ("ESTIMATE_SHARE_LINE", ESTIMATE_SHARE_LINE),
+    ("ESTIMATE_SHARE_LINE_UP_TO", ESTIMATE_SHARE_LINE_UP_TO),
     ("ESTIMATE_TOTAL_LABEL", ESTIMATE_TOTAL_LABEL),
     ("ESTIMATE_TOTAL_ACTION", ESTIMATE_TOTAL_ACTION),
     ("NOTIFY_SETTLEMENT_TITLE", NOTIFY_SETTLEMENT_TITLE),
@@ -1331,7 +1342,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(figures, 10);
+        assert_eq!(figures, 12);
     }
 
     /// Ron's #1303 design review, item 8: the backlog title names the

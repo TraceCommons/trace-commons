@@ -285,4 +285,30 @@ final class ThreePaneTests: XCTestCase {
             }
         }
     }
+
+    /// The divider beside the map (owner, 2026-10-20) moves room between
+    /// the main pane and the map: dragged right the main pane widens and
+    /// the map narrows, never under its minimum; dragged left the main pane
+    /// stops at its default. The window keeps its width.
+    func test_theDividerMovesRoomBetweenTheMainPaneAndTheMap() {
+        for inspector in [false, true] {
+            let window = GlassPaneLayout.windowWidth(showsMap: true, showsInspector: inspector) + 200
+            let wider = GlassPaneLayout.draggedMain(from: main, by: 120, windowWidth: window, showsInspector: inspector)
+            XCTAssertEqual(wider, main + 120)
+            let layout = GlassPaneLayout(windowWidth: window, showsMap: true, showsInspector: inspector, main: wider)
+            XCTAssertEqual(layout.main + (layout.map ?? 0), main + mapWidth + 200, "the window keeps its width")
+            let widest = GlassPaneLayout.draggedMain(from: main, by: 10_000, windowWidth: window, showsInspector: inspector)
+            let squeezed = GlassPaneLayout(windowWidth: window, showsMap: true, showsInspector: inspector, main: widest)
+            XCTAssertEqual(squeezed.map, GlassTokens.Size.mapMinWidth)
+            XCTAssertEqual(GlassPaneLayout.draggedMain(from: main, by: -500, windowWidth: window, showsInspector: inspector), main)
+        }
+    }
+
+    /// A window that opens with a main pane the divider widened is that
+    /// much wider, so the map keeps its kept width.
+    func test_theKeptMainWidthWidensTheOpeningWindow() {
+        let base = GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true)
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true, main: main + 80), base + 80)
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true, main: main - 80), base)
+    }
 }

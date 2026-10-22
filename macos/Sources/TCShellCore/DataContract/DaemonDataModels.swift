@@ -347,6 +347,9 @@ extension DaemonData {
         public let pricingVersion: String?
         public let estimatedAt: String
         public let text: String
+        /// The same band as a call to share, for Home's Not contributed
+        /// card (owner, 2026-10-20). Absent from an older core.
+        public let shareText: String?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case lowUsdMicros = "low_usd_micros"
@@ -357,6 +360,7 @@ extension DaemonData {
             case pricingVersion = "pricing_version"
             case estimatedAt = "estimated_at"
             case text
+            case shareText = "share_text"
         }
     }
 

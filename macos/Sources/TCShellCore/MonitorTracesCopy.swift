@@ -721,6 +721,12 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let uncontributed: String
     public let uncontributedSize: String
     public let uncontributedEstimate: String
+    /// Home's section titles, and the Private AI section's line while
+    /// NEAR AI is signed out (owner, 2026-10-20).
+    public let sectionPrivateAI: String
+    public let sectionTraces: String
+    public let sectionAccount: String
+    public let privateAISignIn: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -765,6 +771,10 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case uncontributed
         case uncontributedSize = "uncontributed_size"
         case uncontributedEstimate = "uncontributed_estimate"
+        case sectionPrivateAI = "section_private_ai"
+        case sectionTraces = "section_traces"
+        case sectionAccount = "section_account"
+        case privateAISignIn = "private_ai_sign_in"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

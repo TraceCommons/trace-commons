@@ -10,8 +10,10 @@ import TCShellCore
 /// core's (`MonitorEdgeRailCopy`, and the tables each tab already shows).
 struct EdgeRailView: View {
     let state: EdgeRailState
-    /// Asks the controller to resize the panel for the new state.
-    let onOpenChange: (Bool) -> Void
+    /// Asks the controller to open or close the rail, with the animation
+    /// the rail slides with (`EdgeRailOpening`): it sizes the panel and
+    /// changes `state.open`, each in its turn.
+    let request: (Bool, Animation?) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: AppModel
@@ -24,10 +26,10 @@ struct EdgeRailView: View {
     @State private var data: EdgeRailData
 
     @MainActor
-    init(state: EdgeRailState, data: EdgeRailData? = nil, onOpenChange: @escaping (Bool) -> Void) {
+    init(state: EdgeRailState, data: EdgeRailData? = nil, request: @escaping (Bool, Animation?) -> Void) {
         self.state = state
         self._data = State(initialValue: data ?? EdgeRailData())
-        self.onOpenChange = onOpenChange
+        self.request = request
     }
 
     private var rail: MonitorEdgeRailCopy? { MonitorWords.table?.edgeRail }
@@ -77,13 +79,7 @@ struct EdgeRailView: View {
     }
 
     private func setOpen(_ open: Bool) {
-        // The panel grows before the rail draws into it, and shrinks after
-        // the rail has gone.
-        if open { onOpenChange(true) }
-        withAnimation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide)) {
-            state.open = open
-        }
-        if !open { onOpenChange(false) }
+        request(open, reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide))
     }
 
     /// The closed rail: its handle on the edge (`GlassRailHandle`).

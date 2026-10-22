@@ -1093,6 +1093,66 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn declared_subscription_logins_survive_an_embedded_start_without_granting_consent() {
+        let home = tempfile::tempdir().unwrap();
+        let first = home.path().join("codex-first");
+        let second = home.path().join("codex-second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        // Disable discovery so this contract cannot consult the developer's
+        // own native logins or send startup probes to a real provider.
+        let mut config = String::from("[privacy]\nmode = 'off'\n");
+        for (id, kind) in [
+            ("claude-sub", "claude-subscription"),
+            ("codex-sub", "codex-subscription"),
+            ("openai-key", "openai-api"),
+            ("anthropic-key", "anthropic-api"),
+            ("nearai", "nearai"),
+        ] {
+            config.push_str(&format!(
+                "\n[[backends]]\nid = '{id}'\nkind = '{kind}'\nenabled = false\n"
+            ));
+        }
+        for (id, directory) in [("codex-first", &first), ("codex-second", &second)] {
+            config.push_str(&format!(
+                "\n[[backends]]\nid = '{id}'\nkind = 'codex-subscription'\nconfig_dir = {}\n",
+                serde_json::to_string(&directory.to_string_lossy()).unwrap()
+            ));
+        }
+        std::fs::write(home.path().join("config.toml"), &config).unwrap();
+        let options = embed_options(None)
+            .with_credentials(|_| None)
+            .with_credential_files(CredentialFiles::Discover);
+        let proxy = embed::start_with_options(home.path(), Some(0), options, |_, _| {})
+            .await
+            .expect("declared logins remain registrable before sign-in");
+        let token = std::fs::read_to_string(home.path().join("control.token")).unwrap();
+        let status = ironwire_proxy::statusline::fetch_status(proxy.port(), token.trim())
+            .await
+            .expect("authenticated local status");
+        assert_eq!(
+            status
+                .backends
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex-first", "codex-second"]
+        );
+        assert!(
+            status
+                .backends
+                .iter()
+                .all(|b| !b.consented && !b.authenticated)
+        );
+        assert!(!status.cross_account_fallback);
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+            config
+        );
+        proxy.shutdown().await;
+    }
+
     /// The workaround this replaced wrote `[updates] check = false` into the
     /// home. Nothing does now, and a home the daemon started out of must come
     /// back with no file this daemon put there -- including for a contributor

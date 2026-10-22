@@ -89,26 +89,32 @@ struct InsightsOverviewTab: View {
         }
     }
 
-    /// The Sessions figure and the week on one row, the week picker on the
-    /// right as on Patterns (owner, 2026-10-19), then the coverage line and
-    /// whatever qualifies the counts.
+    /// The week picker on its own row, on the right as on Patterns (owner,
+    /// 2026-10-19), then one section under it (owner, 2026-10-20): the
+    /// Sessions figure over the coverage line, with whatever qualifies the
+    /// counts behind its "i", on a card as the harnesses' are.
     private func header(_ overview: InsightsWeekOverview) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
+                                   select: selectWeek)
+            }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 drillButton("sessions") {
                     HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(text("analytics_card_sessions")).insightsEyebrow()
                             Text(String(overview.sessions)).insightsFigure()
                         }
+                        Spacer(minLength: 0)
                         if model.drills("sessions") { GlassChevron() }
                     }
                 }
-                Spacer(minLength: GlassTokens.Space.s4)
-                InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
-                                   select: selectWeek)
+                InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
             }
-            InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSection()
         }
     }
 

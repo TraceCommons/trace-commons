@@ -59,28 +59,32 @@ struct InsightsPatternsTab: View {
         }
     }
 
-    /// The week's scope on the left, on a card of its own, and the week
-    /// picker on the right (owner, 2026-10-19), then the coverage line.
+    /// The week picker on its own row, on the right (owner, 2026-10-19),
+    /// then one section under it (owner, 2026-10-20), as on Overview: the
+    /// week's scope over the coverage line.
     private func header(_ patterns: InsightsWeekPatterns) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                // Only Claude Code records tool calls: the figures cover its
-                // traces when another harness is in the week.
-                if let line = InsightsPatternsWords.claudeOnlyLine(patterns, copy: copy) {
-                    InsightsScopeCard(source: "claude_code", line: line)
-                } else {
-                    Spacer(minLength: 0)
-                }
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
                 InsightsWeekSelect(weekStart: patterns.week_start, weeks: patterns.weeks, copy: copy,
                                    select: selectWeek)
                     .fixedSize()
             }
-            // How the patterns are found, that they overlap, and which feed
-            // this is: behind the coverage line's "i".
-            InsightsCoverageLine(
-                coverage: patterns.coverage, copy: copy,
-                info: [text("analytics_patterns_intro"), text("analytics_patterns_overlap")]
-                    + InsightsOverviewWords.feedLines(patterns.feed, copy: copy))
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                // Only Claude Code records tool calls: the figures cover its
+                // traces when another harness is in the week.
+                if let line = InsightsPatternsWords.claudeOnlyLine(patterns, copy: copy) {
+                    InsightsScopeLine(source: "claude_code", line: line)
+                }
+                // How the patterns are found, that they overlap, and which
+                // feed this is: behind the coverage line's "i".
+                InsightsCoverageLine(
+                    coverage: patterns.coverage, copy: copy,
+                    info: [text("analytics_patterns_intro"), text("analytics_patterns_overlap")]
+                        + InsightsOverviewWords.feedLines(patterns.feed, copy: copy))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSection()
         }
     }
 

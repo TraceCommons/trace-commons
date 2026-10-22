@@ -281,16 +281,24 @@ struct MenuBarGlassPanel: View {
 /// the same glass, veil and gradient as the main window's and the edge
 /// rail's panes (owner, 2026-10-12: one glass spec), with the system
 /// window's own material hidden under it (`MenuBarMaterialMask`), so there
-/// is never glass on glass; and the window's top edge is pinned. The debug
-/// preview window, which has no material, draws the popover tier.
+/// is never glass on glass; and the window is sized and its top edge
+/// pinned by `MenuBarTopEdgePin`, from the content's size measured at its
+/// ideal height (so the window's own size never feeds back into it).
+/// The debug preview window, which has no material, draws the popover tier.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
+    /// The content's size at its ideal height, for the window's frame.
+    @State private var contentSize: CGSize = .zero
 
     func body(content: Content) -> some View {
         if owns {
             content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         } else {
             content
+                // Its ideal height whatever the window's height is: the
+                // window is sized from this, never the other way round.
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGSize.self, of: \.size) { contentSize = $0 }
                 .background {
                     // Full bleed, rounded as the window is.
                     Color.clear
@@ -298,7 +306,9 @@ private struct PanelSurface: ViewModifier {
                         .ignoresSafeArea()
                 }
                 .background(MenuBarMaterialMask().frame(width: 0, height: 0))
-                .background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+                .background(MenuBarTopEdgePin(content: contentSize).frame(width: 0, height: 0))
+                // Names this window in the log when it resizes.
+                .windowBreadcrumb(.menuBarPanel)
         }
     }
 }
@@ -395,25 +405,56 @@ struct MenuBarMaterialMask: NSViewRepresentable {
     }
 }
 
-/// Holds the `MenuBarExtra` window's top edge under the menu bar. An
-/// `NSWindow` that is resized keeps its bottom edge, so opening a pill's
-/// sub-list grew the window upward into the menu bar, where AppKit pushed
-/// it back down, and a panel that shrank (its first read landing, a notice
-/// going) dropped its top edge away from the menu bar. Remembering the top
-/// the window had when it became key was not enough: a shrink before that
-/// left the panel hanging far below the bar (owner, 2026-10-11). The top is
-/// now the menu bar's bottom edge on the window's screen, whenever the
-/// window opens, moves or resizes.
+/// Sizes the `MenuBarExtra` window and holds its top edge under the menu
+/// bar: the one writer of the panel's size.
+///
+/// SwiftUI used to size this window to its content itself, from inside
+/// the window's layout pass (`NSHostingView.updateAnimatedWindowSize`), and
+/// AppKit aborted the app when that kept asking for another pass: the
+/// crash reported from 0.16 to 0.20.4, every report through a borderless
+/// window's frame (`NSNextStepFrame`). The edge rail had the same signature
+/// until #1402 took its sizing away from its hosting view; this does the
+/// same for the panel. The hosting view takes no sizing options or
+/// safe-area insets, and the window is set here, on the next turn, to the
+/// content's measured size (`PanelSurface` measures it with the content at
+/// its ideal height, so it never depends on the window), with its top at
+/// the menu bar's bottom edge. The sizing is taken over on the next turn
+/// too, after SwiftUI has placed and first sized the window. Empty sizing
+/// options do not stop the hosting view's animated resize of its window;
+/// the window drops that (`MenuBarPanelFrame`).
+///
+/// The top: an `NSWindow` that is resized keeps its bottom edge, so a panel
+/// that grew used to rise into the menu bar and one that shrank dropped
+/// away from it (owner, 2026-10-11). The top is the menu bar's bottom edge
+/// on the window's screen, whenever the window opens, moves or resizes.
 struct MenuBarTopEdgePin: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Pin() }
+    /// The panel content's size, as last measured.
+    let content: CGSize
 
-    func updateNSView(_ view: NSView, context: Context) {}
+    func makeNSView(context: Context) -> NSView {
+        let pin = Pin()
+        pin.content = content
+        return pin
+    }
 
-    /// The origin that puts `frame`'s top edge at `top`, or nil when it is
-    /// already there. Pure, so tested.
-    static func pinnedOrigin(_ frame: CGRect, top: CGFloat?) -> CGPoint? {
-        guard let top, abs(frame.maxY - top) > 0.5 else { return nil }
-        return CGPoint(x: frame.minX, y: top - frame.height)
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? Pin)?.content = content
+    }
+
+    /// The panel's frame for content of size `content`: that size, the
+    /// leading edge it has, the top at `top` (the top it has while none is
+    /// known), extending downward. Nil when the window is already there, or
+    /// nothing has been measured yet. Computed from the content and the
+    /// menu bar alone, never from the window's own size, so a resize this
+    /// causes settles in one step. Pure, so tested.
+    static func frame(current: CGRect, content: CGSize, top: CGFloat?) -> CGRect? {
+        guard content.width > 0, content.height > 0 else { return nil }
+        let maxY = top ?? current.maxY
+        let target = CGRect(
+            x: current.minX, y: maxY - content.height, width: content.width, height: content.height)
+        if abs(target.width - current.width) < 0.5, abs(target.height - current.height) < 0.5,
+           abs(target.maxY - current.maxY) < 0.5 { return nil }
+        return target
     }
 
     /// The menu bar's bottom edge on a screen: the top of its visible
@@ -424,38 +465,76 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
         visible.maxY < screen.maxY - 0.5 ? visible.maxY : screen.maxY - thickness
     }
 
+    /// Takes the window's sizing away from SwiftUI: the hosting view at
+    /// the root of `view`'s window no longer sizes the window to its
+    /// content, and takes no safe-area insets (#1402's two settings).
+    static func takeOverSizing(from view: NSView) {
+        var current: NSView? = view.superview
+        var outermost: NSView?
+        while let candidate = current {
+            if candidate is HostingWindowSizing { outermost = candidate }
+            current = candidate.superview
+        }
+        guard let sizing = outermost as? HostingWindowSizing else { return }
+        if !sizing.sizingOptions.isEmpty { sizing.sizingOptions = [] }
+        if !sizing.safeAreaRegions.isEmpty { sizing.safeAreaRegions = [] }
+    }
+
     private final class Pin: NSView {
         private var observers: [NSObjectProtocol] = []
+        /// A placement already asked for on the next turn.
+        private var scheduled = false
+
+        var content: CGSize = .zero {
+            didSet {
+                if abs(content.width - oldValue.width) >= 0.5 || abs(content.height - oldValue.height) >= 0.5 {
+                    schedule()
+                }
+            }
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
             guard let window else { return }
-            pin(window)
+            schedule()
             let center = NotificationCenter.default
             for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
                          NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
-                // On the next turn: a resize arrives inside SwiftUI's own
-                // resize of the panel, and moving the window there
+                // On the next turn: a notification can arrive inside a
+                // resize of the window, and setting its frame there
                 // re-enters that layout pass.
-                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] _ in
-                    MainActor.assumeIsolated {
-                        GlassWindowFrame.onNextTurn { [weak self, weak window] in
-                            guard let self, let window, window.isVisible else { return }
-                            self.pin(window)
-                        }
-                    }
+                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.schedule() }
                 })
             }
         }
 
-        private func pin(_ window: NSWindow) {
+        /// Places the window on the next turn of the run loop, once however
+        /// many changes ask for it in this one, taking its sizing over from
+        /// SwiftUI first: by then SwiftUI has placed and first sized the
+        /// window, which it does after the content lands in it. From then
+        /// on the window keeps only the sizes placed here.
+        private func schedule() {
+            guard !scheduled else { return }
+            scheduled = true
+            GlassWindowFrame.onNextTurn { [weak self] in
+                guard let self else { return }
+                self.scheduled = false
+                guard let window = self.window else { return }
+                MenuBarTopEdgePin.takeOverSizing(from: self)
+                MenuBarPanelFrame.hold(window)
+                self.place(window)
+            }
+        }
+
+        private func place(_ window: NSWindow) {
             guard let screen = window.screen ?? NSScreen.main else { return }
             let top = MenuBarTopEdgePin.menuBarBottom(
                 screen: screen.frame, visible: screen.visibleFrame, thickness: NSStatusBar.system.thickness)
-            if let origin = MenuBarTopEdgePin.pinnedOrigin(window.frame, top: top) {
-                window.setFrameOrigin(origin)
+            if let frame = MenuBarTopEdgePin.frame(current: window.frame, content: content, top: top) {
+                MenuBarPanelFrame.place(frame, in: window)
             }
         }
 
@@ -464,6 +543,17 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
         }
     }
 }
+
+/// The two settings #1402 turned off on the edge rail's hosting view, on
+/// a hosting view of any content type: the `MenuBarExtra`'s hosting view
+/// is generic over a type SwiftUI does not expose, and this conformance
+/// reaches its settings through a plain `NSView`.
+protocol HostingWindowSizing: AnyObject {
+    var sizingOptions: NSHostingSizingOptions { get set }
+    var safeAreaRegions: SafeAreaRegions { get set }
+}
+
+extension NSHostingView: HostingWindowSizing {}
 
 
 /// The menu-bar item in the glass system: the last seven days as a strip,

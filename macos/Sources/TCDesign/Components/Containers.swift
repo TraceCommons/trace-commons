@@ -62,30 +62,35 @@ public struct GlassCard<Content: View>: View {
     }
 }
 
-/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
-/// assistive tech and in its tooltip.
+/// The refresh control: the round glass icon button with the refresh
+/// glyph, at the trailing end of what it re-reads (owner, 2026-10-20: the
+/// right-aligned icon button pattern, as the Traces list's search and
+/// filter; it was a bare glyph, 2026-10-10, and some were "Refresh" in
+/// words). Named for assistive tech and in its tooltip. `small` is the
+/// small round button, for a card's head.
 public struct GlassRefreshButton: View {
     private let label: String
-    private let size: CGFloat
+    private let small: Bool
     private let action: () -> Void
 
-    public init(_ label: String, size: CGFloat = 13, action: @escaping () -> Void) {
+    /// The refresh glyph.
+    public static let systemImage = "arrow.clockwise"
+    /// Where the glyph's weight sits: its arrowhead runs up and right past
+    /// the ring, so centring its box leaves the ring about half a point
+    /// left of and low in the circle (measured at 13pt medium). This moves
+    /// the ring back to the centre (owner, 2026-10-20: "not visually
+    /// centered").
+    public static let opticalOffset = CGSize(width: 0.5, height: -0.6)
+
+    public init(_ label: String, small: Bool = false, action: @escaping () -> Void) {
         self.label = label
-        self.size = size
+        self.small = small
         self.action = action
     }
 
     public var body: some View {
-        Button(action: action) {
-            Image(systemName: "arrow.clockwise")
-                .glassGlyph(size, weight: .medium)
-                .foregroundStyle(GlassColor.textSecondary)
-                .frame(width: size + 7, height: size + 7)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityLabel(label)
-        .help(label)
+        GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
+                         action: action)
     }
 }
 
@@ -211,10 +216,6 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - Self.titleCapHeight }
                                 .accessibilityAddTraits(.isHeader)
-                            if let refresh {
-                                GlassRefreshButton(refresh.label, size: 12, action: refresh.action)
-                                    .disabled(refresh.isDisabled)
-                            }
                             if subtitle.isEmpty { infoButton }
                         }
                         ForEach(Array(subtitle.enumerated()), id: \.offset) { index, line in
@@ -230,6 +231,12 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                     }
                 }
                 Spacer(minLength: GlassTokens.Space.s4)
+                // The re-read control at the head's trailing end (owner,
+                // 2026-10-20), before whatever else sits there.
+                if let refresh {
+                    GlassRefreshButton(refresh.label, small: true, action: refresh.action)
+                        .disabled(refresh.isDisabled)
+                }
                 accessory
             }
             if Content.self != EmptyView.self {

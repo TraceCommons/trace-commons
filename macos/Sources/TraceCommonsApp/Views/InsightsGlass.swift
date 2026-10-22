@@ -173,6 +173,55 @@ struct InsightsInfo: View {
     }
 }
 
+/// A line of text with its "i" right after the last word, wherever the
+/// line wraps (owner, 2026-10-20: "move the tool tip to the end of the
+/// string"). A wrapped `Text` fills its row, so an "i" beside it sat at the
+/// row's far edge. The words flow as text does (`HistoryFilterFlow`, a
+/// space's width apart), and the last word carries the "i", so the "i"
+/// never starts a line alone. With nothing behind the "i" it is a plain
+/// `Text`. Spoken as the whole line, with the "i" inside it.
+struct InsightsTextWithInfo: View {
+    let text: String
+    let style: GlassTypeStyle
+    let infoTitle: String
+    let info: [String]
+
+    init(_ text: String, style: GlassTypeStyle, infoTitle: String, info: [String]) {
+        self.text = text
+        self.style = style
+        self.infoTitle = infoTitle
+        self.info = info
+    }
+
+    /// The words in order; runs of spaces are one break.
+    static func words(_ text: String) -> [String] {
+        text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+    }
+
+    /// A space's width at the style's size.
+    static func wordGap(_ style: GlassTypeStyle) -> CGFloat { (style.size * 0.28).rounded() }
+
+    var body: some View {
+        if info.allSatisfy(\.isEmpty) {
+            Text(text).glassType(style).fixedSize(horizontal: false, vertical: true)
+        } else {
+            let words = Self.words(text)
+            HistoryFilterFlow(spacing: Self.wordGap(style), lineSpacing: style.lineSpacing) {
+                ForEach(Array(words.dropLast().enumerated()), id: \.offset) { _, word in
+                    Text(word).accessibilityHidden(true)
+                }
+                HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
+                    Text(words.last ?? "").accessibilityHidden(true)
+                    InsightsInfo(infoTitle, info)
+                }
+            }
+            .glassType(style)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(text)
+        }
+    }
+}
+
 /// A section's title at the card-title step, its info, and whatever sits
 /// at its trailing edge (a refresh, a link).
 struct InsightsSectionTitle<Trailing: View>: View {
@@ -182,9 +231,8 @@ struct InsightsSectionTitle<Trailing: View>: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-            Text(title).insightsTitle()
-                .fixedSize(horizontal: false, vertical: true)
-            InsightsInfo(title, info)
+            InsightsTextWithInfo(title, style: GlassTokens.TypeScale.title, infoTitle: title, info: info)
+                .foregroundStyle(GlassColor.textPrimary)
             Spacer(minLength: GlassTokens.Space.s4)
             trailing()
         }
@@ -209,12 +257,9 @@ struct InsightsGroupHeading: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-            Text(title).insightsHeading()
-                .fixedSize(horizontal: false, vertical: true)
-            InsightsInfo(title, info)
-        }
-        .accessibilityAddTraits(.isHeader)
+        InsightsTextWithInfo(title, style: GlassTokens.TypeScale.bodyStrong, infoTitle: title, info: info)
+            .foregroundStyle(GlassColor.textPrimary)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -289,14 +334,20 @@ struct InsightsCoverageLine: View {
         return coverage.partial + coverage.unknown == 0 ? .on : .ask
     }
 
+    /// The line's type step.
+    static let style = GlassTokens.TypeScale.label.weight(.regular)
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+        // Top-aligned, the dot centred on the first line: the words flow in
+        // a layout of their own (`InsightsTextWithInfo`), which has no
+        // first baseline to align on.
+        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
             GlassStatusDot(Self.status(coverage), size: GlassTokens.Size.dotLarge, halo: true)
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
-            Text(InsightsOverviewWords.coverageLine(coverage, copy: copy)).insightsNote()
-                .fixedSize(horizontal: false, vertical: true)
-            InsightsInfo(copy["analytics_drill_coverage"] ?? "", info)
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                .padding(.top, max(0, (Self.style.lineHeight - GlassTokens.Size.dotLarge) / 2))
+            InsightsTextWithInfo(InsightsOverviewWords.coverageLine(coverage, copy: copy),
+                                 style: Self.style,
+                                 infoTitle: copy["analytics_drill_coverage"] ?? "", info: info)
+                .foregroundStyle(GlassColor.textSecondary)
         }
     }
 }
@@ -344,23 +395,20 @@ struct InsightsHarnessTile: View {
     }
 }
 
-/// What a tab's figures cover, on a card of its own (owner, 2026-10-19):
-/// the harness's tile and the core's line ("Claude Code traces only: 31 of
-/// 37."). It takes the row's free width; the week picker sits to its right.
-struct InsightsScopeCard: View {
+/// What a tab's figures cover (owner, 2026-10-19): the harness's tile and
+/// the core's line ("Claude Code traces only: 31 of 37."). Since
+/// 2026-10-20 it leads the section under the week picker, over the
+/// coverage line, rather than being a card of its own beside the picker.
+struct InsightsScopeLine: View {
     let source: String
     let line: String
 
     var body: some View {
-        GlassCard(quiet: true, flush: true) {
-            HStack(spacing: GlassTokens.Space.s4) {
-                InsightsHarnessTile(source: source)
-                Text(line).insightsCaption()
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, GlassTokens.Space.s3)
-            .padding(.horizontal, GlassTokens.Space.s5)
+        HStack(spacing: GlassTokens.Space.s4) {
+            InsightsHarnessTile(source: source)
+            Text(line).insightsCaption()
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
     }

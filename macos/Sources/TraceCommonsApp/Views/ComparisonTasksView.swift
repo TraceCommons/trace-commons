@@ -16,9 +16,8 @@ struct ComparisonTasksView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             InsightsSectionTitle(title: text("comparison_task_title"), info: []) {
-                Button(text("comparison_task_list")) { model.refresh() }
-                    .accessibilityLabel(text("comparison_task_list_accessibility"))
                 if model.busy { GlassSpinner() }
+                GlassRefreshButton(text("comparison_task_list_accessibility")) { model.refresh() }
             }
             VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }

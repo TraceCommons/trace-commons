@@ -2,11 +2,13 @@ import XCTest
 
 @testable import TCDesign
 
-/// Every switch's knob is told apart from its track when on: the plain
-/// white knob clears the 3:1 glyph floor against the track (owner ruling,
-/// 2026-10-07: hold the WCAG floors). No knob carries a ring (owner,
-/// 2026-10-08), so the watch switch takes the Settings purple rather than
-/// the watch green, on which white is about 1.8:1.
+/// Every switch's knob is told apart from its track when on: the knob
+/// clears the 3:1 glyph floor against the track (owner ruling, 2026-10-07:
+/// hold the WCAG floors). No knob carries a ring (owner, 2026-10-08), so the
+/// watch switch takes the Settings accent rather than the watch green, on
+/// which white is about 1.8:1. Off, the knob is white; on, it is the
+/// accent's ink, as the NEAR AI design system's switch draws it (owner,
+/// 2026-10-20). The flat theme's tracks are measured in `NearAccentTests`.
 final class SwitchContrastTests: XCTestCase {
     func test_everyKnobClearsTheGlyphFloorWhenOn() {
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
@@ -17,12 +19,13 @@ final class SwitchContrastTests: XCTestCase {
         }
     }
 
-    /// The knob is white on every track.
-    func test_theKnobIsWhiteOnEveryTrack() {
+    /// The knob is white while off and the accent's ink while on, on every
+    /// track.
+    func test_theKnobIsWhiteOffAndTheAccentInkOn() {
+        XCTAssertEqual(GlassTokens.Color.toggleKnobOff.rgb, 0xFFFFFF)
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
-            for isOn in [true, false] {
-                XCTAssertEqual(GlassToggleStyle.knob(kind, isOn: isOn), GlassTokens.Color.textOnAccent)
-            }
+            XCTAssertEqual(GlassToggleStyle.knob(kind, isOn: false), GlassTokens.Color.toggleKnobOff)
+            XCTAssertEqual(GlassToggleStyle.knob(kind, isOn: true), GlassTokens.Color.textOnAccent)
         }
     }
 

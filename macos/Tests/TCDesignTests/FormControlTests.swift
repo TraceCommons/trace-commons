@@ -166,4 +166,25 @@ final class FormControlTests: XCTestCase {
         let many = NSHostingView(rootView: GlassCheckRow(long, isOn: .constant(true)).frame(width: 200)).fittingSize
         XCTAssertGreaterThan(many.height, one.height)
     }
+
+    /// A menu's choices draw the system's one check mark: toggles, never an
+    /// inline picker, which drew two (owner, 2026-10-20). A toggle only
+    /// chooses; turning the chosen one off keeps it.
+    func test_menuChoicesCheckOnce() throws {
+        var chosen: Int? = 2
+        let two = GlassMenuChoices<Int>.isOn(2, chosen: chosen) { chosen = $0 }
+        let three = GlassMenuChoices<Int>.isOn(3, chosen: chosen) { chosen = $0 }
+        XCTAssertTrue(two.wrappedValue)
+        XCTAssertFalse(three.wrappedValue)
+        two.wrappedValue = false
+        XCTAssertEqual(chosen, 2)
+        three.wrappedValue = true
+        XCTAssertEqual(chosen, 3)
+        for file in ["Forms.swift", "Controls.swift"] {
+            let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Sources/TCDesign/Components/" + file)
+            let source = try String(contentsOf: url, encoding: .utf8)
+            XCTAssertFalse(source.contains(".pickerStyle(.inline)"), "\(file) draws a menu's choices as an inline picker")
+        }
+    }
 }
