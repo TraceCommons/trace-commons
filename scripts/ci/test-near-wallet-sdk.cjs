@@ -48,7 +48,12 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/near-ai/near-wallet/assets/browser.js") {
     res.setHeader("Content-Type", "application/javascript");
-    res.end(fs.readFileSync(browser, "utf8"));
+    // Filled in as near_wallet_page.rs does before serving it.
+    res.end(
+      fs
+        .readFileSync(browser, "utf8")
+        .replaceAll("__NEAR_AI_WALLET_RECIPIENT__", "cloud.near.ai"),
+    );
     return;
   }
   if (url.pathname === "/near-ai/near-wallet/assets/fixture-wallet.js") {
