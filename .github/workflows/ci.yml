@@ -837,10 +837,10 @@ jobs:
   ingest-bin-postgres-near-ai-staging:
     name: trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL
     # Not a required status check. `near-ai-staging` compiles a different
-    # ingest: the refusal of the wallet ceremony and the boot check that
-    # refuses a production NEAR AI host compile only under the feature, and
-    # the account and bind suites must admit a new NEAR AI login there exactly
-    # as they do on a default build (staging spec S12). Every other job builds
+    # ingest: the refusal of the wallet ceremony, NEAR AI sign-up without the
+    # admission ledger, and the boot check that refuses a production NEAR AI
+    # host compile only under the feature, and the account and bind suites
+    # must admit a new NEAR AI login there with no invite (staging spec S12). Every other job builds
     # the ingest without it, so before this job none of that ran anywhere in
     # CI. Everything else is
     # `ingest-bin-postgres`: the same service, roles, single thread and
@@ -907,8 +907,10 @@ jobs:
             cargo test --locked -p trace-commons-ingest --features near-ai-staging --lib -- --test-threads=1 2>&1 | tee staging-lib-tests.log
           '
           # The tests that hold the staging rules must have run, not been
-          # filtered or compiled out: open sign-up and the wallet refusal.
+          # filtered or compiled out: open sign-up, sign-up without the
+          # admission ledger, and the wallet refusal.
           grep -q 'open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite ... ok' staging-lib-tests.log
+          grep -q 'open_sign_up::a_staging_build_signs_up_without_the_admission_ledger ... ok' staging-lib-tests.log
           grep -q 'a_staging_build_never_offers_wallet_provisioning ... ok' staging-lib-tests.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
@@ -1105,8 +1107,9 @@ jobs:
       # The staging channel (`near-ai-staging`) compiles different values and
       # tests than the default build; lint that build too.
       - run: cargo clippy -p trace-commons-contributor -p trace-commons-contributor-ffi --all-targets --features trace-commons-contributor/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
-      # The server and ingest under the same feature: the wallet refusal and
-      # the boot channel check compile only there.
+      # The server and ingest under the same feature: the wallet refusal,
+      # sign-up without the admission ledger and the boot channel check
+      # compile only there.
       - run: cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets --features trace-commons-ingest/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.

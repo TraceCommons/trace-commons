@@ -238,6 +238,10 @@ fn near_ai_login_readiness_named(
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
+    // A staging build creates accounts without the admission ledger, and so
+    // without the witness the ledger needs (staging spec S12). Compiled out of
+    // every other build, which still requires the ledger.
+    #[cfg(not(feature = "near-ai-staging"))]
     if !state.near_provisioning_admission_ready {
         return Err(control::ADMISSION_READY);
     }
