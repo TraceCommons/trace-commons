@@ -1231,6 +1231,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// [`Self::provision_near_ai_login`] would and close the passkey account.
     /// `new_account` governs binding a login that has no account yet, exactly
     /// as for provisioning. The default refuses.
+    #[allow(clippy::too_many_arguments)]
     async fn bind_near_ai_login(
         &self,
         _tenant_id: &str,

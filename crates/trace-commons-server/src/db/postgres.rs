@@ -3935,6 +3935,7 @@ impl Database for PgBackend {
         self.near_ai_bind_take_ceremony(ceremony_hash).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn bind_near_ai_login(
         &self,
         tenant_id: &str,

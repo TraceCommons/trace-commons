@@ -695,6 +695,7 @@ impl PgBackend {
     ///   uses, in X's tenant only, and then this account is closed in its own
     ///   tenant only. No transaction touches both tenants, and nothing of this
     ///   account moves to X. (The cross-tenant fold is the deferred S6.)
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn near_ai_login_bind(
         &self,
         tenant: &str,
