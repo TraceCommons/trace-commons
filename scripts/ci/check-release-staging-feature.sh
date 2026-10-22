@@ -593,9 +593,8 @@ self_test() {
   # refusal case below could pass with its allowance missing altogether.
   local accepted=(
     "the contributor forwarding to the attestation crate|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\"]/m"
-    "the server forwarding to the attestation crate|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\"]/m"
+    "the server's own empty definition|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\"trace-commons-attestation\/$FEATURE\"\\]\$/$FEATURE = []/m"
     "the attestation crate's own empty definition|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\n/m"
-    "the re-sign tool requiring it|crates/trace-commons-server/Cargo.toml|s/^\\[dev-dependencies\\]/[[bin]]\\nname = \"trace-commons-staging-pins\"\\npath = \"src\/bin\/trace-commons-staging-pins.rs\"\\nrequired-features = [\"$FEATURE\"]\\n\\n\$&/m"
     "the staging workflow taking a dispatch input|.github/workflows/staging-macos.yml|s/^  workflow_dispatch:\\n/\$&    inputs:\\n      ref:\\n        type: string\\n        required: false\\n/m"
     "a build script defaulting the channel to production and reading its file|macos/scripts/make-app-bundle.sh|s/\\z/TC_CHANNEL=\"\\\${TC_CHANNEL:-production}\"\\nsource \"\\\$(dirname \"\\\$0\")\\/..\\/channels\\/\\\${TC_CHANNEL}.env\"\\nif [[ \"\\\$TC_CHANNEL\" == production ]]; then :; fi\\n/"
     "a release workflow pinning the production channel|.github/workflows/release-apps.yml|s/\\z/env:\\n  TC_CHANNEL: production\\n/"
@@ -620,7 +619,7 @@ self_test() {
     "the feature entering the contributor's default|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
     "ingest enabling it on its server dependency|crates/trace-commons-ingest/Cargo.toml|s#^trace-commons-server = \\{ path = \"../trace-commons-server\" \\}#trace-commons-server = { path = \"../trace-commons-server\", features = [\"$FEATURE\"] }#m"
     "the FFI enabling it on the contributor|crates/trace-commons-contributor-ffi/Cargo.toml|s#^(trace-commons-contributor = \\{[^}\\n]*)\\}#\$1, features = [\"$FEATURE\"] }#m"
-    "the server definition forwarding somewhere new|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\\]/$FEATURE = [\"trace-commons-gate-enclave\\/near-ai-scorer\"]/m"
+    "the server definition forwarding somewhere new|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\"trace-commons-attestation\/$FEATURE\"\\]\$/$FEATURE = [\"trace-commons-gate-enclave\\/near-ai-scorer\"]/m"
     "a flatpak build naming it|crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml|s/\\A/# $FEATURE\\n/"
     # The staging allowances: each case is one step past one of them.
     "the staging workflow no longer naming it|.github/workflows/staging-macos.yml|s/$FEATURE/near-ai-other/g"
@@ -649,7 +648,7 @@ self_test() {
     "a release push trigger ignoring tags instead|.github/workflows/release-apps.yml|s/    tags:\\n      - \"app-v\\*\"\\n/    tags-ignore:\\n      - \"app-v*\"\\n/"
     "a release workflow with an inline push trigger|.github/workflows/release-contributor.yml|s/^on:\\n  push:\\n    tags:\\n      - \"contributor-v\\*\"\\n/on: [push, workflow_dispatch]\\nx:\\n/m"
     "the contributor forward widened by one more crate|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-protocol\/$FEATURE\"]/m"
-    "the server forward widened by one more crate|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-gate-enclave\/near-ai-scorer\"]/m"
+    "the server forward widened by one more crate|crates/trace-commons-server/Cargo.toml|s/^$FEATURE = \\[\"trace-commons-attestation\/$FEATURE\"\\]\$/$FEATURE = [\"trace-commons-attestation\/$FEATURE\", \"trace-commons-gate-enclave\/near-ai-scorer\"]/m"
     "the contributor forwarding somewhere other than attestation|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/$FEATURE = [\"trace-commons-protocol\/$FEATURE\"]/m"
     "the attestation definition forwarding anywhere|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = [\"collateral-client\"]\\n/m"
     "the attestation feature entering its default|crates/trace-commons-attestation/Cargo.toml|s/^\\[features\\]\\n/\$&$FEATURE = []\\ndefault = [\"$FEATURE\"]\\n/m"

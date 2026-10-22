@@ -1545,9 +1545,11 @@ jobs:
       # (`config::tests::` and `channel_hosts`), with the preflight suite run
       # as staging; its URL scheme, its own IronWire home with no production
       # pointer and no declared production folder or port, its --version
-      # channel, the FFI suite as staging, and the attestation crate's signed
-      # pin-set verifier, whose unit tests no other crate's run reaches. None
-      # of them is compiled into the default build above.
+      # channel, the FFI suite as staging, the attestation crate's signed
+      # pin-set verifier, whose unit tests no other crate's run reaches, and
+      # the server's pin re-sign tool (`trace-commons-staging-pins`), which
+      # requires the feature. None of them is compiled into the default build
+      # above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1556,6 +1558,7 @@ jobs:
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of
             cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
+            cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
           '
       - name: Verify real Secret Service storage
         run: |

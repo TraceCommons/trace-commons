@@ -261,6 +261,9 @@ Every runbook in this directory, with a one-line description.
   works on schemas before V76 and says which source it used.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
+- [`./staging-pin-signing.md`](./staging-pin-signing.md) — the staging NEAR AI
+  pin-signing key (creating it, who may read it) and re-signing the pin set a
+  staging app trusts with `trace-commons-staging-pins`.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —
   Cloudflare Pages deployment and pilot playbook for the public
   pseudonymous leaderboard, contributor profiles, and aggregate analytics.

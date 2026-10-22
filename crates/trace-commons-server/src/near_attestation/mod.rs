@@ -21,6 +21,10 @@ pub mod client;
 pub mod drill;
 pub mod key_drift;
 pub mod measurements;
+/// What the staging pin re-sign tool observes: NEAR AI staging's verified
+/// enclave measurements. Staging builds only.
+#[cfg(feature = "near-ai-staging")]
+pub mod pin_observe;
 pub mod signer_resolver;
 
 /// Receipt and quote verification moved to the permissive
