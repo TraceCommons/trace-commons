@@ -1417,9 +1417,9 @@ jobs:
       # The staging channel's half of the channel checks: its host and
       # identity scan, the production deny-list digests, its refusals of
       # production hosts, its entitlements, its IronWire key gate and its
-      # state directory channel mark (`config::tests::`, with the preflight
-      # fixture that marks an enrolled directory). None of them is compiled
-      # into the default build above.
+      # refusal of a state directory override naming production's directory
+      # (`config::tests::` and `channel_hosts`), with the preflight suite run
+      # as staging. None of them is compiled into the default build above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '

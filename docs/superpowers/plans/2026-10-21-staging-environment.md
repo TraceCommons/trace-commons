@@ -51,7 +51,7 @@ Repo and process rules (every task):
 |---|---|---|---|
 | 1 | `staging-release-check` | `payout-rail-near-ai-client` | widen the release check for the staging files and manifest lines; self-test cases |
 | 2 | `staging-channel-module` | `payout-rail-staging-build` (or `staging-release-check`, see Dependencies) | `channel.rs` with every host and identity value; ratchet test; platform crate takes the access group as a parameter |
-| 3 | `staging-state-dir-channel` | `staging-channel-module` | state directory `channel` file; staging refuses a production directory |
+| 3 | `staging-state-dir-channel` | `staging-channel-module` | an override naming the other channel's default state directory is refused (S11; replaced the `channel` file) |
 | 4 | `staging-signed-pins-format` | `staging-release-check` | signed pin-set format and verifier in the attestation crate, behind its feature |
 | 5 | `staging-pin-source` | `staging-signed-pins-format` + `staging-channel-module` | daemon `PinProvider` reads only the signed set in a staging build; sequence file; status labels |
 | 6 | `staging-pins-tool` | `staging-signed-pins-format` | `trace-commons-staging-pins` observe / sign / verify |
@@ -133,24 +133,29 @@ Spec: sections 4.1, 4.2; Verified, first two tables.
 
 ### Task 3: A state directory belongs to one channel (`staging-state-dir-channel`)
 
-Spec: section 4.4.
+Spec: section 4.4. The first version wrote a `channel` file into every state
+directory (#1547); owner decision S11 replaced it with the override check
+below.
 
 **Files:**
-- Modify: `crates/trace-commons-contributor/src/config.rs` (`ConfigStore::open` writes `channel` into a new directory; refuses the other channel's; a directory with `contributor.json` and no `channel` file is production)
-- Tests: `config.rs` tests
+- Modify: `crates/trace-commons-contributor/src/channel.rs` (`OTHER_STATE_DIR_NAME` for both channels)
+- Modify: `crates/trace-commons-contributor/src/config.rs` (`ConfigStore::resolve` refuses an override that resolves to the other channel's default state directory or inside it, as `state-dir-other-channel`)
+- Tests: `config.rs` tests, `tests/channel_hosts.rs`
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-#[test] fn a_new_directory_records_its_channel()
-#[test] fn a_staging_store_refuses_a_production_directory()       // cfg(feature)
-#[test] fn a_staging_store_refuses_an_unmarked_enrolled_directory() // cfg(feature)
-#[test] fn a_production_store_refuses_a_staging_directory()       // cfg(not(feature))
-#[test] fn a_production_store_adopts_an_unmarked_directory()      // existing installs keep working
+#[test] fn an_override_naming_the_other_channel_default_is_refused()
+#[test] fn an_override_inside_the_other_channel_default_is_refused()
+#[test] fn an_override_under_a_missing_child_of_the_other_channel_default_is_refused()
+#[test] fn an_override_symlinked_to_the_other_channel_default_is_refused() // cfg(unix)
+#[test] fn a_sibling_sharing_the_other_channel_name_prefix_is_allowed()
+#[test] fn the_other_channel_default_dirs_carry_the_other_channel_name()
+#[test] fn an_override_to_the_other_channel_directory_is_refused_before_it_is_opened() // channel_hosts.rs, cfg(unix)
 ```
 
-- [ ] **Steps 2-4** as in task 2, plus the Windows `adopt_state_dir` tests still pass.
-- [ ] **Step 5: Commit** — `Mark each state directory with its build channel`.
+- [ ] **Steps 2-4** as in task 2, in both builds.
+- [ ] **Step 5: Commit** — `Replace the state directory channel marker with an override check`.
 
 ---
 
