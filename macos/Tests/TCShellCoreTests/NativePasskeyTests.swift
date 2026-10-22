@@ -51,11 +51,28 @@ final class NativePasskeyTests: XCTestCase {
             "allowed_credentials": Array(repeating: "BAUG", count: 128)]
         let accepted = try JSONDecoder().decode(NativePasskeyBegin.self,
             from: JSONSerialization.data(withJSONObject: object))
-        XCTAssertEqual(try accepted.validated(for: .login).allowedCredentials.count, 128)
+        XCTAssertEqual(try accepted.validated(for: .login, relyingParty: "tracecommons.ai").allowedCredentials.count, 128)
         object["allowed_credentials"] = Array(repeating: "BAUG", count: 129)
         let overflow = try JSONDecoder().decode(NativePasskeyBegin.self,
             from: JSONSerialization.data(withJSONObject: object))
-        XCTAssertThrowsError(try overflow.validated(for: .login))
+        XCTAssertThrowsError(try overflow.validated(for: .login, relyingParty: "tracecommons.ai"))
+    }
+
+    func testPasskeyRpComesFromTheDylib() throws {
+        func begin(_ rp: String) throws -> NativePasskeyBegin {
+            let object: [String: Any] = ["ceremony": "local", "rp_id": rp,
+                "challenge": "AQID", "expires_in_secs": 180, "user_verification": "required"]
+            return try JSONDecoder().decode(NativePasskeyBegin.self,
+                from: JSONSerialization.data(withJSONObject: object))
+        }
+        let staging = BuildChannelFixture.staging.passkeyRelyingParty
+        let production = BuildChannelFixture.production.passkeyRelyingParty
+        XCTAssertEqual(try begin(staging).validated(for: .login, relyingParty: staging).rpID, staging)
+        XCTAssertEqual(try begin(production).validated(for: .login, relyingParty: production).rpID, production)
+        XCTAssertThrowsError(try begin(production).validated(for: .login, relyingParty: staging))
+        XCTAssertThrowsError(try begin(staging).validated(for: .login, relyingParty: production))
+        XCTAssertThrowsError(try begin("").validated(for: .login, relyingParty: ""),
+            "an unread relying party matches nothing")
     }
 }
 
@@ -64,7 +81,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
     func testCreatePresentsOnlyValidatedOptionsThenCompletes() async throws {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()
-        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
         let result = try await coordinator.perform(.create, label: "My Mac")
         XCTAssertEqual(result.bindingState, "unbound")
         let events = await daemon.events
@@ -78,7 +95,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()
         provider.failure = .cancelled
-        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
         do { _ = try await coordinator.perform(.login); XCTFail("Cancellation must refuse") }
         catch { XCTAssertEqual(error as? NativePasskeyFailure, .cancelled) }
         let events = await daemon.events
@@ -92,7 +109,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
             let daemon = IdentityDaemonFixture()
             await daemon.setModification(modification)
             let provider = IdentityProviderFixture()
-            let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+            let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
             do { _ = try await coordinator.perform(.create); XCTFail("Malformed options must refuse") }
             catch { XCTAssertEqual(error as? NativePasskeyFailure, .invalidOptions) }
             XCTAssertTrue(provider.requests.isEmpty)
@@ -105,7 +122,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()
         provider.returnAssertion = true
-        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
         do { _ = try await coordinator.perform(.add); XCTFail("Mismatched credential must refuse") }
         catch { XCTAssertEqual(error as? NativePasskeyFailure, .unexpectedCredential) }
         let events = await daemon.events
@@ -152,7 +169,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()
         provider.suspend = true
-        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
         let task = Task { try await coordinator.perform(.create) }
         while provider.requests.isEmpty { await Task.yield() }
         do { _ = try await coordinator.perform(.login); XCTFail("Concurrent ceremony must refuse") }
@@ -169,7 +186,7 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()
         provider.suspend = true
-        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider)
+        let coordinator = NativePasskeyCoordinator(daemon: daemon, provider: provider, relyingParty: "tracecommons.ai")
         let task = Task { try await coordinator.perform(.create) }
         while provider.requests.isEmpty { await Task.yield() }
         coordinator.cancel()

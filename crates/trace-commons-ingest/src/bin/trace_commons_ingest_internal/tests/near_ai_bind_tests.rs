@@ -166,6 +166,11 @@ impl Harness {
 }
 
 async fn harness() -> Option<Harness> {
+    harness_with_admission(true).await
+}
+
+/// [`harness`], with the admission ledger configured or not.
+async fn harness_with_admission(admission_ready: bool) -> Option<Harness> {
     let backend = postgres_backend_for_ingest_test().await?;
     let env = ProvisioningEnv::publish();
     let subject = fresh_subject();
@@ -175,7 +180,7 @@ async fn harness() -> Option<Harness> {
     let mut state = test_state(temp.path().to_path_buf());
     let settings = Arc::get_mut(&mut state).expect("fresh state is uniquely owned");
     settings.near_provisioning_enabled = true;
-    settings.near_provisioning_admission_ready = true;
+    settings.near_provisioning_admission_ready = admission_ready;
     settings.near_account_identity = Some(Arc::new(identity()));
     settings.db_mirror = Some(backend.clone() as Arc<dyn Database>);
     settings.near_ai_introspection_base_url = Some(near_ai_base.clone());
@@ -2993,4 +2998,167 @@ async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
 
     reset_account_rate_limiter_for_test();
     drop_tenants(&admin, &[&tenant_a, &tenant_b]).await;
+}
+
+// --- Open sign-up (staging S12) ----------------------------------------------
+
+/// Anyone with a NEAR AI account signs up (staging spec S12, section 3.12).
+///
+/// A staging build admits a new NEAR AI login exactly as a default build does:
+/// no invite and no list, through the sign-in and through binding a passkey
+/// account. This test has no `cfg`, so it runs in both builds and holds them
+/// to the same answer. The subjects are minted here, not by the fixtures, so
+/// nothing a fixture does on their behalf can be what lets them in.
+mod open_sign_up {
+    use super::*;
+
+    fn unseen_subject() -> String {
+        format!("auth0|open-sign-up-{}", Uuid::new_v4().simple())
+    }
+
+    #[tokio::test]
+    async fn a_new_near_ai_login_gets_an_account_with_no_invite() {
+        let Some(h) = harness().await else { return };
+        let admin = h.admin().await;
+
+        // Sign-in: a login nobody has seen gets a tenant, account and anchor.
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let reply = finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let tenant = reply.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
+        assert_eq!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .len(),
+            1,
+            "one anchor for the new login"
+        );
+        assert_eq!(
+            audit_metadata(&admin, &tenant, "near_ai_login_provisioned").await,
+            vec![serde_json::json!({"identity": "near_ai_login", "admission": "not_granted"})]
+        );
+        assert_eq!(
+            count(
+                &admin,
+                "SELECT count(*) FROM trace_account_invite_grants WHERE tenant_id = $1",
+                &[tenant.as_str()],
+            )
+            .await,
+            0,
+            "no invite was used"
+        );
+
+        // Bind: a passkey account binds a login nobody has seen.
+        h.sign_in_to_near_ai_as(&unseen_subject());
+        let account = unbound_account(&h.backend).await;
+        let reply = bind(&h, &account, &Device::new()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert_eq!(reply.json()["outcome"], "bound");
+        drop_tenants(&admin, &[&tenant, &account.tenant]).await;
+    }
+
+    /// The sign-in with no admission ledger and no witness: what a staging
+    /// server runs (staging spec S12).
+    #[cfg(feature = "near-ai-staging")]
+    async fn sign_in_without_the_ledger(h: &Harness, subject: &str) -> Reply {
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        assert!(h.state.witness_bypass.is_none(), "no witness");
+        h.sign_in_to_near_ai_as(subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await
+    }
+
+    /// A staging build creates accounts without the admission ledger or the
+    /// witness. Production is unchanged; see the default-build twin below.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_build_signs_up_without_the_admission_ledger() {
+        let Some(h) = harness_with_admission(false).await else {
+            return;
+        };
+        let admin = h.admin().await;
+        assert_eq!(
+            near_provisioning::near_ai_login_v2_readiness_refusal(&h.state),
+            None
+        );
+        let subject = unseen_subject();
+        let reply = sign_in_without_the_ledger(&h, &subject).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let tenant = reply.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
+        assert_eq!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .len(),
+            1
+        );
+        drop_tenants(&admin, &[&tenant]).await;
+    }
+
+    /// A default build still requires the admission ledger before it creates
+    /// an account for a NEAR AI login, and refuses by that control's name.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_default_build_refuses_sign_up_without_the_admission_ledger() {
+        let Some(h) = harness_with_admission(false).await else {
+            return;
+        };
+        let admin = h.admin().await;
+        assert_eq!(
+            near_provisioning::near_ai_login_v2_readiness_refusal(&h.state),
+            Some("near_provisioning_admission_ready")
+        );
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let (_, challenge) = pkce();
+        let reply = send(
+            &h.state,
+            "POST",
+            PROVISION_START,
+            Some(&serde_json::json!({
+                "device_public_key": Device::new().public_b64(),
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })),
+            None,
+        )
+        .await;
+        assert_ne!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert!(
+            anchors_for(&admin, &identity().login_index_label(&subject))
+                .await
+                .is_empty(),
+            "nothing written"
+        );
+    }
 }

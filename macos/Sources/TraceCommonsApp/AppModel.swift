@@ -1234,10 +1234,27 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        start(plistChannel: BuildChannelGate.plistChannel)
+    }
+
+    /// `start()` with the bundle's `TCChannel` given, so a test can show a
+    /// mismatch refusing without a bundle. A bundle that disagrees with the
+    /// dylib, or names no channel, refuses here with the core's sentence and
+    /// resolves no directory and starts no daemon (staging design, 4.3).
+    /// `start(configDirectory:)` below is a test seam that skips this check.
+    func start(plistChannel: String?) {
         guard case .starting = startup else { return }
+        let channel: BuildChannel
+        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        case .agreed(let agreed):
+            channel = agreed
+        case .refused(let sentence):
+            startup = .refused(sentence)
+            return
+        }
         let resolved: DaemonHost.Resolution
         do {
-            resolved = try DaemonHost.resolveConfigDirectory()
+            resolved = try DaemonHost.resolveConfigDirectory(channel: channel)
         } catch {
             startup = .refused("\(error)")
             return

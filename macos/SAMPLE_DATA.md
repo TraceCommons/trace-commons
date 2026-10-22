@@ -52,9 +52,12 @@ can run against your own real Claude Code and Codex sessions while you build
 screens, with a guarantee enforced by the daemon itself, not by this app --
 **nothing it does can reach the network.**
 
-Set `TC_DEV_DRY_RUN=1` (or `true`) in the process environment before
-launching a Debug build (an Xcode scheme's environment variables, or
-`TC_DEV_DRY_RUN=1 .build/debug/TraceCommonsApp`). The Rust library must be a
+Set `TC_DEV_DRY_RUN=1` (or `true`) in the environment of the bundled
+debug app: build it with `macos/scripts/make-app-bundle.sh`, then run
+`open -n .build/Near.ai.app --env TC_DEV_DRY_RUN=1`, as `run-demo.sh` does.
+An unbundled launch (`.build/debug/TraceCommonsApp` or an Xcode scheme) has
+no Info.plist channel, so it refuses to start by design (staging design,
+section 4.3). The Rust library must be a
 debug build too: the switch is compiled out of release builds
 (`cfg(debug_assertions)`), so a release dylib ignores the variable.
 

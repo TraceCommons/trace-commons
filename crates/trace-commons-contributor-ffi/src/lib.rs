@@ -103,7 +103,7 @@ use std::panic::UnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use trace_commons_contributor::config::ConfigStore;
+use trace_commons_contributor::config::{ConfigStore, OtherChannelStateDir};
 use trace_commons_contributor::daemon::attached::{AttachError, AttachedDaemon};
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
 use trace_commons_contributor::daemon::settings::{
@@ -782,6 +782,131 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
         Ok(to_owned_cstring(&serde_json::to_string(&ranges)?))
     })
 }
+
+/// This build's channel identity: what the macOS app needs from
+/// `trace_commons_contributor::channel` so it never holds its own copy
+/// (staging design, sections 4.1 and 4.3).
+///
+/// ```json
+/// {"channel":"production","state_dir_name":"trace-commons",
+///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
+///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
+/// ```
+///
+/// `channel` is `production` or `staging`. The macOS app compares `channel`
+/// with its Info.plist `TCChannel` and starts nothing on a mismatch.
+/// `near_ai_dashboard_origin` is where the funding row's credits link points;
+/// it takes no part in that check. No key, secret
+/// or keychain name is in it. Reads nothing and writes nothing; the same
+/// object for every caller on this build. Returns an owned string; free it
+/// with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_build_channel_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::channel;
+        let json = serde_json::json!({
+            "channel": channel::CHANNEL,
+            "state_dir_name": channel::STATE_DIR_NAME,
+            "state_dir_env": channel::STATE_DIR_ENV,
+            "passkey_rp_id": channel::PASSKEY_RP_ID,
+            "url_scheme": channel::URL_SCHEME,
+            "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
+        });
+        Ok(to_owned_cstring(&serde_json::to_string(&json)?))
+    })
+}
+
+/// The sentence the app shows instead of starting when its bundle and this
+/// library disagree on the channel: `health_copy::CHANNEL_MISMATCH`.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::CHANNEL_MISMATCH,
+        ))
+    })
+}
+
+/// The state directory the contributor crate's `ConfigStore::resolve` would
+/// pick (`config::resolve_state_dir`), so a shell that chooses its own
+/// directory still gets the core's refusal of the other channel's.
+///
+/// Precedence: `explicit_dir`, used as given; then `override_dir`, the
+/// value of this build's override variable (the `state_dir_env` of
+/// [`tc_build_channel_json`]), refused when it resolves to the other
+/// channel's default directory or inside it; then the platform default.
+/// NULL or an empty string is unset. The shell passes the variable's value
+/// rather than this library reading the process environment, so the caller
+/// that decides what is set is the one asking.
+///
+/// Returns the directory as an owned string; free it with
+/// [`tc_string_free`]. No store is opened and no directory is created (on
+/// Windows the platform default may still move a legacy enrollment, as
+/// `ConfigStore::resolve` does). On failure returns NULL
+/// and, when `err` is non-null, sets `*err` to an owned label (free it with
+/// [`tc_string_free`]) that names no path:
+/// - `state-dir-other-channel`: the override names the other channel's
+///   directory.
+/// - `state-dir-unresolved`: anything else, including a non-UTF-8 argument
+///   and a platform with no config directory.
+/// - `panic`: a caught panic.
+///
+/// # Safety
+/// `explicit_dir` and `override_dir`, if non-null, must point to valid,
+/// NUL-terminated C strings. `err` must be NULL or point to a writable
+/// `char*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_resolve_state_dir(
+    explicit_dir: *const c_char,
+    override_dir: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guarded_string(err, || {
+        let arg = |ptr: *const c_char| -> Result<Option<std::path::PathBuf>, ()> {
+            if ptr.is_null() {
+                return Ok(None);
+            }
+            let text = unsafe { borrow_str(ptr) }.map_err(|_| ())?;
+            Ok((!text.is_empty()).then(|| std::path::PathBuf::from(text)))
+        };
+        let (Ok(explicit), Ok(override_dir)) = (arg(explicit_dir), arg(override_dir)) else {
+            return Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err));
+        };
+        match trace_commons_contributor::config::resolve_state_dir(explicit, override_dir) {
+            Ok(dir) => match dir.to_str() {
+                Some(dir) => Ok(to_owned_cstring(dir)),
+                None => Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err)),
+            },
+            Err(e) if e.is::<OtherChannelStateDir>() => {
+                Ok(witness_fail(ERR_STATE_DIR_OTHER_CHANNEL, err))
+            }
+            Err(_) => Ok(witness_fail(ERR_STATE_DIR_UNRESOLVED, err)),
+        }
+    })
+}
+
+/// The sentence the app shows instead of starting when
+/// [`tc_resolve_state_dir`] refuses its override:
+/// `health_copy::STATE_DIR_OVERRIDE_REFUSED`. It names no path.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_state_dir_override_refused_line() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::STATE_DIR_OVERRIDE_REFUSED,
+        ))
+    })
+}
+
+/// `config::OtherChannelStateDir`'s label: fixed, and names no path.
+const ERR_STATE_DIR_OTHER_CHANNEL: &str = "state-dir-other-channel";
+const ERR_STATE_DIR_UNRESOLVED: &str = "state-dir-unresolved";
 
 /// Fixed labels `tc_daemon_start_with_settings` can report via `*err` /
 /// `tc_last_error` for a failure specific to `settings_json`, distinct from

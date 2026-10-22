@@ -38,10 +38,13 @@ mod control {
     pub(super) const ISSUER: &str = "issuer";
     /// The index pepper and account-name KEK required by both enrollment paths.
     pub(super) const NEAR_ACCOUNT_IDENTITY: &str = "near_account_identity";
+    /// A staging build never offers the NEAR wallet ceremony: everyone signs
+    /// in to staging through NEAR AI (staging spec S1, S12).
+    pub(super) const STAGING_WALLET_CLOSED: &str = "staging_wallet_provisioning_closed";
 
     /// Every label, for the tests that hold the label-only rule.
     #[cfg(test)]
-    pub(super) const ALL: [&str; 13] = [
+    pub(super) const ALL: [&str; 14] = [
         PROVISIONING_ENABLED,
         ADMISSION_READY,
         PUBLIC_ORIGIN,
@@ -55,6 +58,7 @@ mod control {
         WITNESS_MEASUREMENT_SYNTAX,
         ISSUER,
         NEAR_ACCOUNT_IDENTITY,
+        STAGING_WALLET_CLOSED,
     ];
 }
 
@@ -118,6 +122,11 @@ fn wallet_readiness_named(
     state: &AppState,
     contract: ProvisionContract,
 ) -> Result<Option<PublishedWitness>, &'static str> {
+    // First, so no configuration can open it: staging is reached through
+    // NEAR AI only, and the wallet ceremony is a second way in.
+    if cfg!(feature = "near-ai-staging") {
+        return Err(control::STAGING_WALLET_CLOSED);
+    }
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
@@ -155,6 +164,12 @@ fn wallet_readiness_named(
 #[cfg(test)]
 pub(super) fn wallet_readiness_refusal(state: &AppState) -> Option<&'static str> {
     published_witness_named(state).err()
+}
+
+/// The control the v2 NEAR AI login readiness check declines on, if any.
+#[cfg(test)]
+pub(super) fn near_ai_login_v2_readiness_refusal(state: &AppState) -> Option<&'static str> {
+    near_ai_login_readiness_named(state, ProvisionContract::ExplicitSelection).err()
 }
 
 /// The published witness, with **no ceremony-specific preconditions**.
@@ -223,6 +238,10 @@ fn near_ai_login_readiness_named(
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
+    // A staging build creates accounts without the admission ledger, and so
+    // without the witness the ledger needs (staging spec S12). Compiled out of
+    // every other build, which still requires the ledger.
+    #[cfg(not(feature = "near-ai-staging"))]
     if !state.near_provisioning_admission_ready {
         return Err(control::ADMISSION_READY);
     }
