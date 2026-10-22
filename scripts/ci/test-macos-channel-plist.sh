@@ -125,7 +125,7 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   has staging "$s" '<key>TCChannel</key><string>staging</string>'
   has staging "$s" '<key>CFBundleURLSchemes</key><array><string>tracecommons-staging</string></array>'
   has staging "$s" '<key>CFBundleURLName</key><string>ai.tracecommons.shell.staging.invite</string>'
-  has staging "$s" '<key>SUFeedURL</key><string>https://storage.googleapis.com/tc-staging-artifacts-20261021/staging/appcast.xml</string>'
+  has staging "$s" '<key>SUFeedURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/appcast.xml</string>'
   has staging "$s" '<key>SUPublicEDKey</key><string>c3RhZ2luZy1rZXktbm90LXJlYWw=</string>'
   lacks staging "$s" '<string>ai.tracecommons.shell</string>'
   lacks staging "$s" '<string>tracecommons</string>'

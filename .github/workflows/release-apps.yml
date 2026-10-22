@@ -204,9 +204,11 @@ jobs:
     # Xcode 26 / Swift 6.3, which is also what this app is developed against
     # locally, so CI and the developer toolchain now match.
     runs-on: macos-26
-    # This job holds a Developer ID private key. The environment scopes those
-    # secrets to release runs and gives the signing path a place to hang
-    # required reviewers, matching how the Windows job is gated.
+    # This job holds a Developer ID private key. The signing secrets are
+    # repository secrets, not environment secrets, and the environment has
+    # no protection rules today, so it scopes nothing yet: it is the place to
+    # hang required reviewers or environment secrets, matching how the
+    # Windows job is gated.
     environment: release
     timeout-minutes: 60
     steps:
