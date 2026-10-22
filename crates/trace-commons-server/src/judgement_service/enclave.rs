@@ -257,7 +257,6 @@ impl JudgementEnclave {
 pub(crate) mod tests {
     use super::*;
     use crate::witness_service::enclave::quote_offsets;
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
     use trace_commons_attestation::judgement_seal::{SealPublicKey, seal_request};
     use trace_commons_attestation::receipt::recover_eip191_signer;

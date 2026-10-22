@@ -34,7 +34,8 @@ use trace_commons_server::judgement_service::boot::{
     volume_is_mounted,
 };
 use trace_commons_server::judgement_service::http::{
-    JudgementHttpState, JudgementIdentity, JudgementLoadBound, judgement_router, system_clock,
+    AttestationBound, JudgementHttpState, JudgementIdentity, JudgementLoadBound,
+    judgement_router, system_clock,
 };
 use trace_commons_server::near_attestation::client::{
     ATTESTATION_GATEWAY_BASE_URL, AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,
@@ -121,11 +122,13 @@ async fn main() -> Result<()> {
         booted.service.clone(),
         booted.enclave.clone() as Arc<dyn JudgementIdentity>,
         clock,
+        load,
+        AttestationBound::default(),
     );
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
-    axum::serve(listener, judgement_router(state, load))
+    axum::serve(listener, judgement_router(state))
         .await
         .context("the judgement listener stopped")?;
     Ok(())
@@ -165,10 +168,10 @@ async fn boot_service(
         now: chrono::Utc::now().timestamp(),
     };
     let booted = boot(config, deps).await?;
-    // Public values an operator pins, and a digest of the pin set. Nothing
-    // about a request is logged here.
+    // The value an operator pins, and a digest of the pin set. The per-boot
+    // sealing key and signing address are not logged: nothing pins them,
+    // and each names one boot. Nothing about a request is logged here.
     tracing::info!(
-        signing_address = %booted.enclave.signing_address(),
         judgement_measurement = %booted.enclave.measurement(),
         model_id = %booted.model_id,
         model_key_pins_sha256_prefix = %pins_sha256_prefix,
