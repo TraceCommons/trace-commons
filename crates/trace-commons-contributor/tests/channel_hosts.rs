@@ -816,3 +816,23 @@ fn the_contributor_never_uses_the_protocol_privacy_filter_default() {
         }
     }
 }
+
+/// The Insights store a host opens when it names no directory is under the
+/// channel's state directory name, so the staging and production apps on one
+/// machine keep separate stores (each with its own channel's digest key).
+/// Resolving it reads no state and creates none.
+#[test]
+fn the_default_insights_store_is_the_channel_s() {
+    use trace_commons_contributor::insights::service;
+    let dir = service::default_store_dir().expect("a per-user data directory");
+    assert!(
+        dir.ends_with(Path::new(channel::STATE_DIR_NAME).join("insights")),
+        "{}",
+        dir.display()
+    );
+    assert_eq!(service::STORE_CHANNEL.keychain, channel::KEYCHAIN);
+    assert_eq!(
+        service::STORE_CHANNEL.state_dir_name,
+        channel::STATE_DIR_NAME
+    );
+}

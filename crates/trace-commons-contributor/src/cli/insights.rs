@@ -618,7 +618,9 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
             println!("{rendered}");
         }
         InsightsCommand::Summary => {
-            let summary = crate::insights::summary::read_saved(args.store_dir.as_deref())?;
+            let summary = crate::insights::summary::read_saved(Some(
+                &crate::insights::service::STORE_CHANNEL.store_dir(args.store_dir.as_deref())?,
+            ))?;
             if !json {
                 println!(
                     "All currently saved, explicitly selected session snapshots; not verified completed tasks."
