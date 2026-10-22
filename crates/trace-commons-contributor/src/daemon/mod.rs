@@ -1845,7 +1845,7 @@ pub async fn drain_approved_for_test(
 pub fn credential_store_self_check() -> i32 {
     use credential_store::{CredentialError, CredentialReference, CredentialStore};
 
-    let backend = match os_secret_store::OsSecretBackend::new() {
+    let backend = match os_secret_store::OsSecretBackend::new(&crate::channel::KEYCHAIN) {
         Ok(backend) => backend,
         Err(CredentialError::Unentitled) => return 1,
         Err(_) => return 2,

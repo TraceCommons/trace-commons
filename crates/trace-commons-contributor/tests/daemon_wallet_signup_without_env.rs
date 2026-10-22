@@ -56,7 +56,7 @@ impl AppDaemon {
             // The point of the whole file. A shipped application sets none of
             // these, so neither does this harness.
             .env_remove("TRACE_COMMONS_ALLOWED_HOSTS")
-            .env_remove("TRACE_COMMONS_CONTRIBUTOR_DIR")
+            .env_remove(trace_commons_contributor::channel::STATE_DIR_ENV)
             .env_remove("TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT");
         let child = command.spawn().unwrap();
         let daemon = Self {

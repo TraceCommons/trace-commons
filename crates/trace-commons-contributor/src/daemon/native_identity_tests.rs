@@ -14,7 +14,7 @@ fn shared() -> (tempfile::TempDir, DaemonShared) {
 }
 fn options() -> Value {
     json!({"ceremony_id":"server-ceremony","expires_in_secs":300,"public_key":{"publicKey":{
-        "rp":{"id":"tracecommons.ai","name":"Trace Commons"},
+        "rp":{"id":crate::channel::PASSKEY_RP_ID,"name":"Trace Commons"},
         "challenge":URL_SAFE_NO_PAD.encode([7;32]),
         "user":{"id":URL_SAFE_NO_PAD.encode([3;16]),"name":"My passkey","displayName":"My passkey"},
         "pubKeyCredParams":[{"type":"public-key","alg":-7}],
@@ -253,7 +253,7 @@ async fn server_once(
 }
 
 fn registration_params() -> Value {
-    let data = json!({"type":"webauthn.create","challenge":"AQID","origin":"https://tracecommons.ai","crossOrigin":false});
+    let data = json!({"type":"webauthn.create","challenge":"AQID","origin":crate::channel::PASSKEY_ORIGIN,"crossOrigin":false});
     json!({"ceremony":"local","credential_id":"AQID","raw_client_data_json":URL_SAFE_NO_PAD.encode(data.to_string()),"raw_attestation_object":"BwgJ"})
 }
 fn put_pending(shared: &DaemonShared, origin: &str, action: Action, expires: Instant) {
@@ -331,7 +331,7 @@ async fn expiration_wrong_action_wrong_challenge_and_signout_refuse_before_netwo
         }
         let mut params = registration_params();
         if case == "wrong-challenge" {
-            params["raw_client_data_json"] = json!(URL_SAFE_NO_PAD.encode(json!({"type":"webauthn.create","challenge":"wrong","origin":"https://tracecommons.ai"}).to_string()));
+            params["raw_client_data_json"] = json!(URL_SAFE_NO_PAD.encode(json!({"type":"webauthn.create","challenge":"wrong","origin":crate::channel::PASSKEY_ORIGIN}).to_string()));
         }
         let response = handle(&shared, &request("passkey_create_complete", params)).await;
         let label = response.error.unwrap().message;
@@ -603,18 +603,16 @@ fn explicit_enrollment_host_policy_wins_over_environment_without_bypassing_signu
 #[test]
 fn unconfigured_identity_refuses_ipc_and_retained_untrusted_origins() {
     let (_dir, shared) = shared();
+    let native = crate::channel::NATIVE_ACCOUNT_ORIGIN;
     for origin in [
-        "https://attacker.example",
-        "https://ingest.tracecommons.ai.attacker.example",
-        "https://ingest.tracecommons.ai:8443",
-        "https://tracecommons.ai",
+        "https://attacker.example".to_string(),
+        format!("{native}.attacker.example"),
+        format!("{native}:8443"),
+        crate::channel::PASSKEY_ORIGIN.to_string(),
     ] {
         assert!(resolve_origin(&shared.store, &json!({"ingest_url":origin})).is_err());
     }
-    assert_eq!(
-        resolve_origin(&shared.store, &json!({})).unwrap(),
-        "https://ingest.tracecommons.ai"
-    );
+    assert_eq!(resolve_origin(&shared.store, &json!({})).unwrap(), native);
     let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
     persist_session(&shared.store, &snapshot, "https://attacker.example", &json!({"access_token":"tcn1_secret","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"unbound"})).unwrap();
     assert!(resolve_origin(&shared.store, &json!({})).is_err());
@@ -771,7 +769,7 @@ fn the_enrol_mismatch_reaches_the_shell_by_name() {
 }
 
 fn login_params() -> Value {
-    let data = json!({"type":"webauthn.get","challenge":"AQID","origin":"https://tracecommons.ai","crossOrigin":false});
+    let data = json!({"type":"webauthn.get","challenge":"AQID","origin":crate::channel::PASSKEY_ORIGIN,"crossOrigin":false});
     json!({"ceremony":"local","credential_id":"AQID","raw_client_data_json":URL_SAFE_NO_PAD.encode(data.to_string()),"raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"})
 }
 

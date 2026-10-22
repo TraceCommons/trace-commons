@@ -95,7 +95,7 @@ pub const NEAR_AI_BACKEND: &str = "nearai";
 /// attestation registry (a per-model completions host answers with its own
 /// single enclave and no registry). Also IronWire's default NEAR AI base, so
 /// the key sent here is the key IronWire already sends here.
-pub const NEAR_AI_GATEWAY: &str = "https://cloud-api.near.ai/v1";
+pub const NEAR_AI_GATEWAY: &str = crate::channel::NEAR_AI_ATTESTATION_GATEWAY;
 
 /// The device's measurement-pin override. The server's variable name, and
 /// each set in the server's syntax; unlike the server, it accepts several

@@ -884,7 +884,10 @@ async fn an_over_long_socket_path_is_explained_rather_than_truncated() {
     let err = bind(&store).await.unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("kernel limit"), "{msg}");
-    assert!(msg.contains("TRACE_COMMONS_CONTRIBUTOR_DIR"), "{msg}");
+    assert!(
+        msg.contains(trace_commons_contributor::channel::STATE_DIR_ENV),
+        "{msg}"
+    );
 }
 
 /// A daemon with one pending entry over a fixture session that carries a

@@ -21,7 +21,7 @@ use crate::daemon::nearai_credential::loopback::SessionTokens;
 use crate::daemon::nearai_credential::session;
 use crate::daemon::settings::{NearAiInferenceCredential, NearAiSession};
 
-const CLOUD_ORIGIN: &str = "https://cloud.near.ai";
+const CLOUD_ORIGIN: &str = crate::channel::NEAR_AI_DASHBOARD_ORIGIN;
 const MAX_ORGANIZATION_ID_BYTES: usize = 128;
 const MAX_ORGANIZATION_NAME_BYTES: usize = 256;
 
@@ -346,7 +346,10 @@ mod tests {
     fn credits_urls_have_one_fixed_origin_and_one_bounded_path_segment() {
         for id in ["org-1_A".to_owned(), "a".repeat(MAX_ORGANIZATION_ID_BYTES)] {
             let url = url::Url::parse(&credits_url(&id).unwrap()).unwrap();
-            assert_eq!(url.origin().ascii_serialization(), "https://cloud.near.ai");
+            assert_eq!(
+                url.origin().ascii_serialization(),
+                crate::channel::NEAR_AI_DASHBOARD_ORIGIN
+            );
             assert_eq!(url.path(), format!("/dashboard/organizations/{id}/credits"));
             assert!(url.query().is_none() && url.fragment().is_none());
             assert!(url.username().is_empty() && url.password().is_none());

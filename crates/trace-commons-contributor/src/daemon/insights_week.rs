@@ -1960,7 +1960,7 @@ struct OsCounterKeyStore;
 impl OsCounterKeyStore {
     fn backend() -> Result<super::os_secret_store::OsSecretBackend, DigestKeyError> {
         crate::insights::turn_series::refuse_in_test_build()?;
-        super::os_secret_store::OsSecretBackend::insights_digest_key()
+        super::os_secret_store::OsSecretBackend::insights_digest_key(&crate::channel::KEYCHAIN)
             .map_err(|_| DigestKeyError::Unavailable("insights_counter_key_keychain"))
     }
 }

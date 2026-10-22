@@ -15,6 +15,7 @@ use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
 use super::InsightsStoreError;
@@ -852,8 +853,30 @@ pub enum LocalInsightsResponse {
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
+///
+/// The store refuses its digest key: see [`LocalInsightStore::open`]. A host
+/// that saves snapshots uses [`open_store_for`] with its channel's keychain.
 pub fn open_store(store_dir: Option<&std::path::Path>) -> Result<LocalInsightStore> {
-    LocalInsightStore::open(&store_path(store_dir)?)
+    open_store_with(store_dir, None)
+}
+
+/// [`open_store`] with the keychain namespace of the build's channel.
+pub fn open_store_for(
+    store_dir: Option<&std::path::Path>,
+    keychain: KeychainIdentity,
+) -> Result<LocalInsightStore> {
+    open_store_with(store_dir, Some(keychain))
+}
+
+fn open_store_with(
+    store_dir: Option<&std::path::Path>,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightStore> {
+    let path = store_path(store_dir)?;
+    match keychain {
+        Some(keychain) => LocalInsightStore::open_for(&path, keychain),
+        None => LocalInsightStore::open(&path),
+    }
 }
 
 fn store_path(store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
@@ -931,14 +954,36 @@ fn refresh_saved_weeks(store: &LocalInsightStore) {
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
 /// Dropping a UI task does not cancel a save/delete that has already started.
+///
+/// A snapshot saved here records its turn series as unknown, because no
+/// keychain namespace is named; hosts use [`execute_for`].
 pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let response = execute_inner(request)?;
+    execute_with(request, None)
+}
+
+/// [`execute`] with the keychain namespace of the build's channel, where the
+/// digest key for a saved snapshot's turn series lives.
+pub fn execute_for(
+    request: LocalInsightsRequest,
+    keychain: KeychainIdentity,
+) -> Result<LocalInsightsResponse> {
+    execute_with(request, Some(keychain))
+}
+
+fn execute_with(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let response = execute_inner(request, keychain)?;
     response_json(&response)?;
     Ok(response)
 }
 
-fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let store = || open_store(request.store_dir.as_deref());
+fn execute_inner(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let store = || open_store_with(request.store_dir.as_deref(), keychain);
     let episode_store = || {
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
@@ -1427,12 +1472,21 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
 
 /// Strict typed JSON boundary. Errors deliberately contain fixed labels only.
 pub fn dispatch_json(bytes: &[u8]) -> Result<String> {
+    dispatch_json_with(bytes, None)
+}
+
+/// [`dispatch_json`] with the keychain namespace of the build's channel.
+pub fn dispatch_json_for(bytes: &[u8], keychain: KeychainIdentity) -> Result<String> {
+    dispatch_json_with(bytes, Some(keychain))
+}
+
+fn dispatch_json_with(bytes: &[u8], keychain: Option<KeychainIdentity>) -> Result<String> {
     if bytes.len() > MAX_REQUEST_BYTES {
         bail!("insights-request-too-large");
     }
     let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("insights-request-invalid-utf8"))?;
     let request = serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
-    let response = execute_inner(request).map_err(public_error)?;
+    let response = execute_inner(request, keychain).map_err(public_error)?;
     response_json(&response).map_err(public_error)
 }
 

@@ -50,7 +50,7 @@ pub fn parse_deep_link(url: &str) -> Result<DeepLinkAction, &'static str> {
     }
     if let Some(slug) = public_run_slug(url) {
         return Ok(DeepLinkAction::PublicRun {
-            url: format!("https://tracecommons.ai/runs/{slug}"),
+            url: format!("{}{slug}", crate::channel::PUBLIC_RUNS_PREFIX),
             slug,
         });
     }
@@ -324,14 +324,20 @@ mod tests {
             parse_deep_link("tracecommons://run/repair-a-stalled-upload"),
             Ok(DeepLinkAction::PublicRun {
                 slug: "repair-a-stalled-upload".to_owned(),
-                url: "https://tracecommons.ai/runs/repair-a-stalled-upload".to_owned(),
+                url: format!(
+                    "{}repair-a-stalled-upload",
+                    crate::channel::PUBLIC_RUNS_PREFIX
+                ),
             })
         );
         assert_eq!(
             parse_deep_link("TraceCommons://run/repair-a-stalled-upload"),
             Ok(DeepLinkAction::PublicRun {
                 slug: "repair-a-stalled-upload".to_owned(),
-                url: "https://tracecommons.ai/runs/repair-a-stalled-upload".to_owned(),
+                url: format!(
+                    "{}repair-a-stalled-upload",
+                    crate::channel::PUBLIC_RUNS_PREFIX
+                ),
             })
         );
     }

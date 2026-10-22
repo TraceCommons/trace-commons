@@ -41,7 +41,7 @@
         || challengeElement.textContent.length > 256 * 1024) throw new Error();
     challenge = JSON.parse(challengeElement.textContent);
     if (!record(challenge) || challenge.message !== "Sign in to NEAR AI Cloud"
-        || challenge.recipient !== "cloud.near.ai"
+        || challenge.recipient !== "__NEAR_AI_WALLET_RECIPIENT__"
         || !Array.isArray(challenge.nonce) || challenge.nonce.length !== 32
         || !challenge.nonce.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
         || !Number.isSafeInteger(challenge.expires_at_ms)

@@ -728,7 +728,7 @@ mod tests {
         std::mem::forget(dir);
         assert_eq!(
             enroll_origin(&store, &serde_json::json!({})).unwrap(),
-            "https://ingest.tracecommons.ai"
+            crate::channel::NATIVE_ACCOUNT_ORIGIN
         );
         assert_eq!(
             enroll_origin(

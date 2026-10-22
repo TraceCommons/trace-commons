@@ -53,7 +53,9 @@ pub(crate) fn native(
     #[cfg(all(not(test), not(feature = "test-credential-store")))]
     Ok(CloudCredentialLifecycle::new(
         store.clone(),
-        std::sync::Arc::new(crate::daemon::os_secret_store::OsSecretBackend::new()?),
+        std::sync::Arc::new(crate::daemon::os_secret_store::OsSecretBackend::new(
+            &crate::channel::KEYCHAIN,
+        )?),
     ))
 }
 
@@ -260,7 +262,7 @@ fn legacy_secret_backend(store: &ConfigStore) -> Option<std::sync::Arc<dyn Secre
     #[cfg(not(test))]
     {
         let _ = store;
-        crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud()
+        crate::daemon::os_secret_store::OsSecretBackend::legacy_cloud(&crate::channel::KEYCHAIN)
             .ok()
             .map(|backend| std::sync::Arc::new(backend) as std::sync::Arc<dyn SecretBackend>)
     }

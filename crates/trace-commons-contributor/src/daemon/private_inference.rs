@@ -447,6 +447,54 @@ fn embed_options(credential: Option<HostSecret>) -> EmbedOptions {
     }
 }
 
+/// IronWire's environment override for its NEAR AI backend's base.
+const IRONWIRE_NEARAI_BASE_ENV: &str = "IRONWIRE_NEARAI_BASE_URL";
+
+/// Whether the proxy on IronWire home `home` may be handed this build's NEAR
+/// AI key. `env_base` is IronWire's environment override, read by the caller.
+///
+/// IronWire always registers a NEAR AI backend and, when neither the home's
+/// `config.toml` nor its environment override names a base, uses its own
+/// compiled-in base, which is production NEAR AI. `EmbedOptions` (IronWire
+/// rev `a2ae5d97`) cannot set that base, and the home's configuration is the
+/// person's, which this daemon leaves alone. So a staging build hands over
+/// its NEAR AI key only when the base IronWire will use is this channel's,
+/// resolved in IronWire's own order: the `nearai` entry's `base_url`, then
+/// the environment override, an empty value counting as unset. Anything
+/// else, including a configuration that does not parse, withholds the key.
+///
+/// A production build keeps its behaviour: the key follows whatever base the
+/// person configured, and IronWire's default is production's.
+pub fn nearai_key_may_go_to(home: &std::path::Path, env_base: Option<&str>) -> bool {
+    if !crate::channel::near_ai_staging() {
+        return true;
+    }
+    let configured = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => {
+            let Ok(config) = text.parse::<toml::Table>() else {
+                return false;
+            };
+            config
+                .get("backends")
+                .and_then(toml::Value::as_array)
+                .and_then(|backends| {
+                    backends.iter().find(|backend| {
+                        backend.get("id").and_then(toml::Value::as_str) == Some("nearai")
+                    })
+                })
+                .and_then(|backend| backend.get("base_url"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return false,
+    };
+    let base = configured
+        .or_else(|| env_base.map(str::to_owned))
+        .filter(|base| !base.is_empty());
+    base.as_deref() == Some(crate::channel::NEAR_AI_INFERENCE_BASE)
+}
+
 /// The one environment name this daemon will ever answer for IronWire.
 ///
 /// It is answered through the credential source rather than by setting the
@@ -888,7 +936,11 @@ impl PrivateInference {
                 .unwrap_or_else(tokio::runtime::Handle::current);
             let home = self.home.clone();
             let port = self.port;
-            let credential = self.credential.clone();
+            let env_base = std::env::var(IRONWIRE_NEARAI_BASE_ENV).ok();
+            let credential = self
+                .credential
+                .clone()
+                .filter(|_| nearai_key_may_go_to(&home, env_base.as_deref()));
             let capture_enabled = self.token_capture_enabled;
             let attestor = self.signer_attestor.clone();
             self.starting = Some(runtime.spawn(async move {

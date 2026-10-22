@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights::{
     Coverage, EvidenceRef, InsightReport, MetricId, ProviderManifest,
 };
@@ -806,8 +807,18 @@ impl Drop for StoreLock {
 }
 
 impl LocalInsightStore {
+    /// Open a store whose digest key, if one is ever needed, is refused: no
+    /// keychain namespace was named. Reading, listing and deleting never
+    /// need the key; saving a snapshot with a turn series does, and records
+    /// the series as unknown. Hosts that save use [`LocalInsightStore::open_for`].
     pub fn open(dir: &Path) -> Result<Self> {
-        Self::open_with(dir, None)
+        Self::open_with(dir, None, None)
+    }
+
+    /// [`LocalInsightStore::open`] with the keychain namespace of the build's
+    /// channel, where the OS-held digest key lives.
+    pub fn open_for(dir: &Path, keychain: KeychainIdentity) -> Result<Self> {
+        Self::open_with(dir, None, Some(keychain))
     }
 
     /// [`LocalInsightStore::open`] with an explicit digest key store, for a
@@ -817,12 +828,13 @@ impl LocalInsightStore {
         dir: &Path,
         digest_keys: Box<dyn DigestKeyStore + Send + Sync>,
     ) -> Result<Self> {
-        Self::open_with(dir, Some(digest_keys))
+        Self::open_with(dir, Some(digest_keys), None)
     }
 
     fn open_with(
         dir: &Path,
         digest_keys: Option<Box<dyn DigestKeyStore + Send + Sync>>,
+        keychain: Option<KeychainIdentity>,
     ) -> Result<Self> {
         // The caller selects the directory, so resolve its ancestor aliases
         // (notably macOS /tmp and /var). Never follow the store leaf itself.
@@ -860,8 +872,8 @@ impl LocalInsightStore {
             .canonicalize()
             .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         reject_symlinks(&dir)?;
-        let digest_keys =
-            digest_keys.unwrap_or_else(|| turn_series::default_digest_key_store(dir.clone()));
+        let digest_keys = digest_keys
+            .unwrap_or_else(|| turn_series::default_digest_key_store(dir.clone(), keychain));
         Ok(Self {
             dir,
             digest_keys,

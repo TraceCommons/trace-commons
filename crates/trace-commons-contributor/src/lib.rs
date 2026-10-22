@@ -8,6 +8,7 @@ pub mod account_contribution;
 pub(crate) mod antigravity;
 pub mod attach_copy;
 pub mod brand;
+pub mod channel;
 pub mod cli;
 pub mod commands;
 pub mod commons_credit;
@@ -34,7 +35,36 @@ pub mod inference_connection;
 // Insights lives in the `trace-commons-contributor-insights` crate, so client
 // builds that edit the rest of this crate do not recompile it; re-exported at
 // its old path.
-pub use trace_commons_contributor_insights::insights;
+pub mod insights {
+    pub use trace_commons_contributor_insights::insights::*;
+
+    /// The Insights service at its old path, with the three entry points
+    /// that can open the OS-held digest key bound to this build's channel
+    /// keychain. Every other item is the insights crate's own.
+    pub mod service {
+        pub use trace_commons_contributor_insights::insights::service::*;
+
+        use super::LocalInsightStore;
+        use trace_commons_contributor_insights::insights::service as inner;
+
+        /// [`inner::execute`] in this build's channel keychain.
+        pub fn execute(request: LocalInsightsRequest) -> anyhow::Result<LocalInsightsResponse> {
+            inner::execute_for(request, crate::channel::KEYCHAIN)
+        }
+
+        /// [`inner::dispatch_json`] in this build's channel keychain.
+        pub fn dispatch_json(bytes: &[u8]) -> anyhow::Result<String> {
+            inner::dispatch_json_for(bytes, crate::channel::KEYCHAIN)
+        }
+
+        /// [`inner::open_store`] in this build's channel keychain.
+        pub fn open_store(
+            store_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<LocalInsightStore> {
+            inner::open_store_for(store_dir, crate::channel::KEYCHAIN)
+        }
+    }
+}
 pub mod install_guides;
 pub mod issuer_client;
 pub mod managed;
