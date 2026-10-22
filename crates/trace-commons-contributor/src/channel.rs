@@ -234,15 +234,16 @@ pub const STAGING_PIN_URL: &str =
 /// The Ed25519 public key a staging pin set must be signed by (spec 5.4),
 /// as its 32 raw bytes.
 ///
-/// PLACEHOLDER until the staging pin-signing key pair exists: 31 fixed
-/// ASCII bytes, one short of an Ed25519 public key, so a release scan can
-/// search a binary for them and no signature can verify against them. A
-/// document under another key id is refused as an unknown key; one claiming
-/// this key's id fails its signature check. Either way the refusal label is
-/// in the daemon status and nothing is pinned until the real public key
-/// replaces this, the only place it is written.
+/// The private half is the Secret Manager secret
+/// `tc-staging-nearai-pin-signing-key`, held off the staging host
+/// (`docs/operator/staging-pin-signing.md`). This value is also listed in
+/// `scripts/ci/staging-pin-public-keys.txt`, so a production release
+/// carrying it is refused. Key id `f4325194de2624f3`.
 #[cfg(feature = "near-ai-staging")]
-pub const STAGING_PIN_PUBLIC_KEY: &[u8] = b"TC-STAGING-PIN-KEY-PLACEHOLDER!";
+pub const STAGING_PIN_PUBLIC_KEY: &[u8] = &[
+    0x15, 0x3e, 0x60, 0xb6, 0x1f, 0x65, 0xbd, 0x5f, 0x28, 0x29, 0xd0, 0xf2, 0x37, 0x8a, 0x3c, 0xc1,
+    0x70, 0x58, 0xa0, 0x6e, 0xaa, 0x86, 0x8e, 0xb1, 0x2e, 0xb3, 0x5b, 0xf1, 0x03, 0xe1, 0xe5, 0x86,
+];
 
 /// The environment variable that moves the IronWire home (spec 4.2, S10).
 /// A staging build reads only its own, so a production `IRONWIRE_HOME` never
