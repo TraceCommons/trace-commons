@@ -227,6 +227,34 @@ Checked live and in NEAR AI's public repositories on 2026-10-21:
   measurements change when the image changes. (nearai/cvm-ansible-playbooks
   `vars/cloud_api_stg.yaml`, `docs/staging-on-plucky.md`.)
 
+### Verified on 2026-10-22: the staging attestation report
+
+Measured live against `https://cloud-stg-api.near.ai/v1`, model
+`Qwen/Qwen3.8-27B`. The report was fetched with a fresh nonce and both quotes
+were checked against Intel collateral with this repo's own verifier. The
+register values are deliberately not recorded here: they change on every
+redeploy.
+
+- **No per-model completions host is advertised.**
+  `GET /v1/attestation/report?model=...&nonce=...` on the gateway returns
+  `gateway_attestation` and a `model_attestations` array, one entry per
+  requested model. Each entry has its own `intel_quote`, `signing_address`,
+  `signing_public_key`, `nvidia_payload` and an `info` object without
+  `tcb_info`. The gateway reports `app_name` `dstack-0.5.11`, the model
+  enclave `dstack-nvidia-0.5.12`. So the gateway bundles the model quotes,
+  and the gateway base is the host for completions, receipts and attestation.
+- **Both quotes verify.** TCB status is UpToDate with no advisories, and our
+  nonce is bound at `report_data[32..64]` in both.
+- **Each model entry carries a `compose_manager_attestation`**: runtime
+  compose actions with their own quote. Runtime actions extend RTMR3.
+- **The server's drill does not parse this shape.** It reads only the
+  single-report shape that a production per-model completions host returns,
+  so against staging it fails `ReportFetched: malformed_response`. A server
+  change is in progress separately (branch `staging-gateway-quotes`). That is
+  follow-up work, not done here.
+- **Still unknown:** whether an API key minted before a redeploy survives the
+  JWT rotation.
+
 ## 1. Goal and non-goals
 
 Goal: an internal tester installs "Near.ai Staging" beside the production
@@ -423,9 +451,9 @@ too.
 | `TRACE_COMMONS_COMMUNITY_*` | off; staging has no public community page |
 | `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME`, `_REMOTE_OBJECT_STORE_*` | the `tc-staging` key and staging bucket |
 
-Whether staging NEAR AI serves per-model completions hosts like the pilot's
-is unknown; the gateway base works for both the scorer and the filter, so
-staging uses it. Open item 6.
+Staging NEAR AI advertises no per-model completions hosts (verified
+2026-10-22); the gateway base works for both the scorer and the filter, so
+staging uses it. Open item 3.
 
 ### 3.9 Every server NEAR AI host is staging: a boot guard
 
@@ -674,11 +702,18 @@ syntax and must parse; any one set matching is a pass, as today. The
 re-sign tool records which registers each set names. Its default mirrors
 what production pins today, `mrtd` and `rtmr0-3`
 (`deploy/pilot-gcp/ingest.env.template:66`,
-`docs/operator/near-attestation-drill.md`). Whether staging should drop
-`rtmr3` (which may change per boot under dstack and would then force a
-re-sign on every restart) or add `mrconfigid` (which commits to the
-compose hash) is open item 6. Several sets cover a rolling deploy where
-two images serve at once.
+`docs/operator/near-attestation-drill.md`). For the staging channel the
+spec's position is different: pin `mrtd`, `rtmr0`, `rtmr1`, `rtmr2` and
+`mrconfigid`, and not `rtmr3`. This is a recommendation, not an owner
+decision. The reason (probe, 2026-10-22): runtime compose actions extend
+RTMR3, and each model entry reports them in its
+`compose_manager_attestation`, so pinning `rtmr3` would force a re-sign on
+every compose action. dstack writes `01` followed by the compose hash into
+MRCONFIGID, and it is stable across instances, so it still commits to the
+compose. The re-sign tool's default for the staging channel follows this
+(plan Task 6). Several sets cover a rolling deploy where two images serve at
+once. Every redeploy changes the measurements, so the tool re-verifies each
+time and never copies `info.tcb_info` into a set.
 
 ### 5.3 Serving
 
@@ -992,11 +1027,15 @@ profile is in `macos/` (#1545). Still open:
 
 1. **Apple setup (owner).** Done (see above).
 2. **The staging icon.**
-3. **NEAR AI facts still needed:** whether staging has per-model completions
-   hosts; which registers staging pins (5.2); staging's current
-   measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
-   whether an API key minted before a redeploy survives the JWT rotation or
-   only sessions break.
+3. **NEAR AI facts.** Answered on 2026-10-22 (see Verified on 2026-10-22):
+   staging has no per-model completions hosts, because the gateway bundles
+   the model quotes; staging pins `mrtd`, `rtmr0-2` and `mrconfigid`, not
+   `rtmr3` (5.2, the spec's position); the quotes verify, TCB UpToDate. The
+   measurements are not recorded here and are collected by the re-sign tool
+   at each redeploy. Still open: whether an API key minted before a
+   redeploy survives the JWT rotation or only sessions break; the per-model
+   receipt signers for `Qwen/Qwen3.8-27B` are in the report's
+   `signing_address` and are checked per request, not pinned.
 4. **Witness and self-hosted filter in staging.** Not built now. That no
    longer blocks sign-in: resolved 2026-10-22, a staging build creates NEAR
    AI accounts without the admission ledger, which is what needed the

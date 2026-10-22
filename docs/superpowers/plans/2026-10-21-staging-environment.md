@@ -14,7 +14,7 @@
 
 - The payout stack: #1534 (rail contract), #1538 (schema), #1541 (accrual), #1542 (NEAR AI client, `near_ai_api.rs`, the contributor's `near-ai-staging` feature and `scripts/ci/check-release-staging-feature.sh`). Tasks 1, 2 and 7 base on #1542's branch `payout-rail-near-ai-client` until it merges, then rebase on `main`.
 - Payout plan Task 7a (`payout-rail-staging-build`): switches the daemon's NEAR AI hosts and wires `near_ai_staging()` into the daemon status. Task 2 here extends it into the channel module. If Task 7a has not started when Task 2 does, Task 2 does Task 7a's host switch itself and Task 7a is closed as included; agree which with the owner first.
-- NEAR AI facts still open (spec section 10 item 6): per-model completions hosts on staging, staging's measurements and per-model signers, API-key survival across a redeploy. Nothing in this plan blocks on them; Task 6's `observe` is how the measurements get collected.
+- NEAR AI facts (spec section 10 item 3): answered on 2026-10-22 are the per-model completions hosts (none; the gateway bundles the model quotes) and the registers to pin (`mrtd`, `rtmr0-2`, `mrconfigid`, not `rtmr3`). Still open: API-key survival across a redeploy. Staging's measurements change on every redeploy and are not recorded in the repo. Nothing in this plan blocks on them; Task 6's `observe` is how the measurements get collected.
 - Owner actions (spec section 10): the staging host name and DNS (item 1), the Apple App ID and provisioning profile (item 4), Secret Manager secrets and the `staging` GitHub environment, the staging NEAR AI keys. Tasks 9-11 can merge before these exist; they are needed before the first staging run.
 
 ## Global Constraints
@@ -223,6 +223,8 @@ Spec: sections 5.1, 5.3, 5.5, 5.6, 5.7.
 ### Task 6: The re-sign tool (`staging-pins-tool`, base `staging-signed-pins-format`)
 
 Spec: sections 5.4, 5.9.
+
+Requirements from the 2026-10-22 probe (spec 5.2): the staging channel's default register set is `mrtd`, `rtmr0`, `rtmr1`, `rtmr2` and `mrconfigid`, not `rtmr3`. `observe` re-verifies the quote on every run, because measurements change on each NEAR AI staging redeploy, and never copies `info.tcb_info` into a set. The live report is the gateway's `model_attestations` shape, not a per-model host's single report; the server-side parsing is separate work (branch `staging-gateway-quotes`).
 
 **Files:**
 - Create: `crates/trace-commons-server/src/bin/trace-commons-staging-pins.rs` (AGPL header; `observe`, `sign`, `verify`; keys from stdin only; `sign` refuses a sequence not above the served file's and a TTL above 14 days; `sign` prints the `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=` line for the first set)
