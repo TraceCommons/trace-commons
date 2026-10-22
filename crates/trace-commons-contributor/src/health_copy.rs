@@ -252,6 +252,7 @@ pub const CHANNEL_MISMATCH: &str = concat!(
 /// (`config::resolve_state_dir`, staging design 4.4): the override names
 /// the other channel's state directory, or it could not be checked. It
 /// names no path and no channel, so it is the same sentence in both builds.
+/// Approved 2026-10-22.
 pub const STATE_DIR_OVERRIDE_REFUSED: &str = concat!(
     crate::app_name!(),
     " can't start because its folder override points to a folder this \
