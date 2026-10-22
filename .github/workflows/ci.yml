@@ -1416,14 +1416,16 @@ jobs:
           '
       # The staging channel's half of the channel checks: its host and
       # identity scan, the production deny-list digests, its refusals of
-      # production hosts, its entitlements and its IronWire key gate. None of
-      # them is compiled into the default build above.
+      # production hosts, its entitlements, its IronWire key gate and its
+      # state directory channel mark (`config::tests::`, with the preflight
+      # fixture that marks an enrolled directory). None of them is compiled
+      # into the default build above.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests::
           '
       - name: Verify real Secret Service storage
         run: |
