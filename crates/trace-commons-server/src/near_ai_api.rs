@@ -28,13 +28,13 @@ pub const NEAR_AI_API_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 #[cfg(feature = "near-ai-staging")]
 pub const NEAR_AI_API_BASE_URL: &str = "https://cloud-stg-api.near.ai/v1";
 
-/// Whether this build talks to NEAR AI staging (`near-ai-staging`).
 /// SHA-256 of the NEAR AI staging API host. A default build carries the
 /// staging host as this digest only, never in plain text.
 #[cfg(not(feature = "near-ai-staging"))]
 const STAGING_API_HOST_SHA256: &str =
     "061787df4438033eeb2502f81dff38864a5242f386169b1f1785788e13c058af";
 
+/// Whether this build talks to NEAR AI staging (`near-ai-staging`).
 pub const fn near_ai_staging() -> bool {
     cfg!(feature = "near-ai-staging")
 }
