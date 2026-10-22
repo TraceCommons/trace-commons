@@ -28,7 +28,21 @@ use serde::Deserialize;
 use std::time::Duration;
 
 /// The one service this credential is minted against.
+#[cfg(not(feature = "near-ai-staging"))]
 pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
+
+/// NEAR AI staging, in a `near-ai-staging` build only. The server's
+/// `near-ai-staging` feature switches its own NEAR AI base to the same
+/// host, so the org a staging daemon lists is the org a staging server
+/// verifies and pays. No release workflow or shipped manifest may enable
+/// it: `scripts/ci/check-release-staging-feature.sh` refuses one that does.
+#[cfg(feature = "near-ai-staging")]
+pub const CLOUD_API_ORIGIN: &str = "https://cloud-stg-api.near.ai";
+
+/// Whether this build talks to NEAR AI staging (`near-ai-staging`).
+pub const fn near_ai_staging() -> bool {
+    cfg!(feature = "near-ai-staging")
+}
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];
 /// This client's own agent. Also the agent recorded for a NEAR wallet
@@ -878,7 +892,11 @@ mod tests {
         let api = CloudApi::live().unwrap();
         assert_eq!(api.base.scheme(), "https");
         // `api.near.ai` is retired and answers 410. The host is a constant so
-        // that no environment can point a contributor's session at another.
+        // that no environment can point a contributor's session at another;
+        // only a `near-ai-staging` build compiles a different one.
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(api.base.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(api.base.host_str(), Some("cloud-api.near.ai"));
         for refused in [
             "http://cloud-api.near.ai",
@@ -895,6 +913,9 @@ mod tests {
         let api = CloudApi::live().unwrap();
         let url = api.authorize_url("github", 49721).unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(parsed.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(parsed.host_str(), Some("cloud-api.near.ai"));
         assert_eq!(parsed.path(), "/v1/auth/github");
         let callback = parsed
@@ -964,5 +985,29 @@ AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
             api.refresh_session("rt_example", USER_AGENT).await.is_err(),
             "presenting our own User-Agent must not be treated as a live session"
         );
+    }
+}
+
+#[cfg(test)]
+mod staging_origin_tests {
+    use super::*;
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_default_build_pins_production() {
+        assert!(!near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-api.near.ai");
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_says_so() {
+        assert!(near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-stg-api.near.ai");
+    }
+
+    #[test]
+    fn the_origin_passes_the_pinned_client_checks() {
+        assert!(CloudApi::live().is_ok());
     }
 }

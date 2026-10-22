@@ -71,6 +71,15 @@ jobs:
         run: |
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
+      # Seconds, no build. `near-ai-staging` switches the compiled-in NEAR AI
+      # host (server, ingest and the contributor daemon) to NEAR AI staging,
+      # for the payout staging run only. This refuses any release, packaging
+      # or deploy file or shipped manifest that could turn it on; the
+      # self-test seeds each violation and requires a refusal.
+      - name: No shipped build enables the NEAR AI staging host
+        run: |
+          scripts/ci/check-release-staging-feature.sh check
+          scripts/ci/check-release-staging-feature.sh self-test
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
@@ -111,6 +120,7 @@ jobs:
         admission_test_activity_missions
         admission_test_inference_connection
         admission_test_inference_connection_route
+        admission_test_payout_rails
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -302,6 +312,14 @@ jobs:
         run: cargo test -p trace-commons-server --test inference_connection_pg
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
+      # The payout rail tables (V132): forced RLS, the one-link-per-state and
+      # one-pending-line indexes, NUMERIC(39,0) amounts, and the runtime,
+      # enumerator and config-writer grants, each exercised as a real LOGIN
+      # role the suite provisions, never this job's superuser.
+      - name: payout_rails_pg
+        run: cargo test -p trace-commons-server --test payout_rails_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_rails
       - name: inference connection HTTP session selection
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:
