@@ -69,9 +69,16 @@ It prints `public_key=<64 hex>` and `key_id=<16 hex>`. The key id is the
 first 16 hex characters of the public key's SHA-256; every signed document
 carries it.
 
-Rotating the key means a new staging build with the new public key. Keep the
-sequence climbing across a rotation: devices remember the highest sequence
-they have accepted, whichever key signed it.
+The change that sets `STAGING_PIN_PUBLIC_KEY` to the printed `public_key`
+must also add it, as one line, to `scripts/ci/staging-pin-public-keys.txt`,
+in the same commit. That file is what the production release scan looks for:
+a release binary carrying a listed key is refused.
+
+Rotating the key means a new staging build with the new public key, and the
+new key added to `scripts/ci/staging-pin-public-keys.txt` in the same change
+(keep the retired key listed too). Keep the sequence climbing across a
+rotation: devices remember the highest sequence they have accepted,
+whichever key signed it.
 
 ## Re-signing
 
@@ -88,7 +95,10 @@ after it was signed; 7 is the default).
      > observed.txt
    ```
 
-   Name every model the staging app uses. `observe` fetches each model's
+   Name every model the staging app uses, and name first the model the
+   staging ingest's own receipts come from: sets are printed in the order
+   they are first seen (model order, then quote order), and `sign` pins the
+   ingest to the first one. `observe` fetches each model's
    attestation report from the staging gateway for a fresh nonce, verifies
    each quote against Intel collateral, requires an `UpToDate` TCB and the
    nonce bound inside the verified quote, and prints the distinct sets, one
@@ -137,7 +147,8 @@ after it was signed; 7 is the default).
 ## Refusals
 
 Every refusal prints `refused: <label>` on stderr, exits 1 and writes
-nothing.
+nothing. An argument error (an unknown flag such as `--key`, a missing
+required one) is clap's, and exits 2.
 
 | Label | Meaning |
 |---|---|
