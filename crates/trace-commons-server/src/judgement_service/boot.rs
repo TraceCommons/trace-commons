@@ -14,7 +14,8 @@
 //! infrastructure the later ones need:
 //!
 //! 1. configuration ([`BootConfig::from_lookup`]):
-//!    1. a model is configured;
+//!    1. a model is configured, and a production build has a non-empty
+//!       allowlist;
 //!    2. this build has an adapter for it and it is allowed in this build
 //!       (a production build refuses every development model);
 //!    3. the per-model receipt signer pins parse;
@@ -28,6 +29,12 @@
 //!    (allowlisted, both flags, prices, a pin);
 //! 6. for a NEAR AI model, the gateway report's DCAP-verified quotes bind
 //!    every pinned key.
+//!
+//! A NEAR AI model also needs the gateway check of spec section 5, check 5
+//! (NEAR AI's gateway quote verified at boot and its TLS key pinned on every
+//! connection). This build does not have it, so a NEAR AI model refuses
+//! before step 2 with `missing_control:judgement_near_gateway_pin`, and step
+//! 6 is reached only by the tests of [`attest_model_pins`] until it lands.
 //!
 //! # The production build has no model yet
 //!
@@ -127,6 +134,12 @@ pub enum BootRefusal {
     GatewayReportUnavailable,
     #[error("judgement_model_key_pin_unattested")]
     KeyPinUnattested,
+    /// A model that calls NEAR AI, in a build without the gateway check
+    /// (spec section 5, check 5): NEAR AI's gateway quote verified at boot
+    /// and its TLS key pinned on every connection. Named as a missing
+    /// control, because nothing the operator configures can supply it.
+    #[error("missing_control:judgement_near_gateway_pin")]
+    NearGatewayPinMissing,
 }
 
 impl BootRefusal {
@@ -345,12 +358,30 @@ pub fn registry_model_ids() -> Vec<&'static str> {
         .collect()
 }
 
+/// A production build refuses to boot while its allowlist is empty, so
+/// nothing but the allowlist can admit a production model: not a later
+/// adapter registered ahead of its allowlist entry, and not configuration.
+/// A development build boots its development models without one.
+fn production_allowlist_check(
+    development_build: bool,
+    allowlist: &[&str],
+) -> Result<(), BootRefusal> {
+    if !development_build && allowlist.is_empty() {
+        return Err(BootRefusal::ModelNotAllowlisted);
+    }
+    Ok(())
+}
+
 /// The configured model, if this build may call it.
 pub fn resolve_model(
     model_id: &str,
     pins: &BTreeMap<String, Vec<String>>,
 ) -> Result<ResolvedModel, BootRefusal> {
     let _ = pins;
+    production_allowlist_check(
+        cfg!(feature = "judgement-development-models"),
+        PRODUCTION_MODEL_ALLOWLIST,
+    )?;
     if PRODUCTION_MODEL_ALLOWLIST.contains(&model_id) {
         // Allowlisted, but no production adapter exists in this slice:
         // `ChatStructuredAdapter` and `DecisionModelAdapter` arrive with the
@@ -507,8 +538,27 @@ impl std::fmt::Debug for Booted {
     }
 }
 
+/// Spec section 5, check 5, which this build does not have: NEAR AI's
+/// gateway quote, fetched in fingerprint mode and DCAP-verified against a
+/// pinned gateway measurement, binding the TLS key every connection to the
+/// gateway is then pinned to. It waits on a live fingerprint-mode fixture
+/// and a direct `rustls` dependency (design open decision S2). Until it
+/// lands, a model that calls NEAR AI does not boot: without it, a non-TEE
+/// proxy or a mis-issued certificate for the gateway would see every digest
+/// while the per-request receipts still verified.
+fn require_near_gateway_pin(attestation: SignerAttestation) -> Result<(), BootRefusal> {
+    match attestation {
+        SignerAttestation::NearAiGateway => Err(BootRefusal::NearGatewayPinMissing),
+        #[cfg(any(test, feature = "judgement-development-models"))]
+        SignerAttestation::DevelopmentSelfSigned => Ok(()),
+    }
+}
+
 /// Steps 2 to 6. See the module docs.
 pub async fn boot(config: BootConfig, deps: BootDeps) -> Result<Booted, BootRefusal> {
+    // Before step 2: the NEAR AI gateway check, so a model that needs it
+    // asks nothing of the enclave and writes nothing to the volume.
+    require_near_gateway_pin(config.model.attestation)?;
     // 2. The volume, before anything derives a key for it.
     if !(deps.volume_is_mounted)(&config.data_dir) {
         return Err(BootRefusal::LimiterVolumeAbsent);
@@ -1300,40 +1350,75 @@ mod tests {
         );
     }
 
+    /// #1501 review point 2, #1531 review point 2: until the gateway check
+    /// (spec section 5, check 5) is compiled in and configured, a NEAR AI
+    /// model refuses to boot by that control's name, whatever else is in
+    /// order, and before the guest agent is asked for anything.
     #[tokio::test]
-    async fn a_near_ai_model_with_no_report_source_refuses_the_boot() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (d, _) = deps(StubAgent::new());
-        let near_ai = config(
-            dir.path(),
-            Arc::new(FixedCatalog(mock_entries(true))),
-            SignerAttestation::NearAiGateway,
-            true,
-        );
+    async fn a_near_ai_model_refuses_until_the_gateway_pin_check_exists() {
         assert_eq!(
-            boot(near_ai, d).await.unwrap_err(),
-            BootRefusal::GatewayReportUnavailable
+            BootRefusal::NearGatewayPinMissing.label(),
+            "missing_control:judgement_near_gateway_pin"
         );
+        for reports in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (mut d, agent) = deps(StubAgent::new());
+            if reports {
+                d.reports = Some(Box::new(CapturedReports {
+                    report: Some(ED25519_REPORT),
+                    collateral: true,
+                }));
+            }
+            let near_ai = config(
+                dir.path(),
+                Arc::new(FixedCatalog(mock_entries(true))),
+                SignerAttestation::NearAiGateway,
+                true,
+            );
+            assert_eq!(
+                boot(near_ai, d).await.unwrap_err(),
+                BootRefusal::NearGatewayPinMissing
+            );
+            assert!(agent.keys_asked.lock().expect("lock").is_empty());
+            assert!(
+                std::fs::read_dir(dir.path())
+                    .expect("dir")
+                    .next()
+                    .is_none(),
+                "nothing written to the volume"
+            );
+        }
     }
 
+    /// A model that does not call NEAR AI is not held to the gateway check.
     #[tokio::test]
-    async fn a_near_ai_model_whose_pins_the_report_does_not_attest_refuses_the_boot() {
+    async fn a_development_model_is_not_held_to_the_gateway_check() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (mut d, _) = deps(StubAgent::new());
-        d.reports = Some(Box::new(CapturedReports {
-            report: Some(ED25519_REPORT),
-            collateral: true,
-        }));
-        let near_ai = config(
-            dir.path(),
-            Arc::new(FixedCatalog(mock_entries(true))),
-            SignerAttestation::NearAiGateway,
-            true,
-        );
+        let (d, _) = deps(StubAgent::new());
+        boot(dev_config(dir.path()), d)
+            .await
+            .expect("the mock calls nobody");
+    }
+
+    #[test]
+    fn a_production_build_with_an_empty_allowlist_refuses() {
         assert_eq!(
-            boot(near_ai, d).await.unwrap_err(),
-            BootRefusal::KeyPinUnattested
+            production_allowlist_check(false, &[]),
+            Err(BootRefusal::ModelNotAllowlisted)
         );
+        assert_eq!(production_allowlist_check(false, &["vendor/model"]), Ok(()));
+        // A development build boots its development models without one.
+        assert_eq!(production_allowlist_check(true, &[]), Ok(()));
+        // The state of this slice: nothing is allowlisted, so a production
+        // build refuses every model it could be told to call.
+        assert!(PRODUCTION_MODEL_ALLOWLIST.is_empty());
+        #[cfg(not(feature = "judgement-development-models"))]
+        for id in ["vendor/model", "typesafe/jev-1.13"] {
+            assert_eq!(
+                resolve_model(id, &BTreeMap::new()).unwrap_err(),
+                BootRefusal::ModelNotAllowlisted
+            );
+        }
     }
 
     #[test]
@@ -1358,5 +1443,11 @@ mod tests {
         ] {
             assert!(refusal.label().starts_with("judgement_"));
         }
+        // A missing control is named as one, the shape the drills use.
+        assert!(
+            BootRefusal::NearGatewayPinMissing
+                .label()
+                .starts_with("missing_control:judgement_")
+        );
     }
 }
