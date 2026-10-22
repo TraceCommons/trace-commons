@@ -834,6 +834,117 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  ingest-bin-postgres-near-ai-staging:
+    name: trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL
+    # Not a required status check. `near-ai-staging` compiles a different
+    # ingest: the refusal of the wallet ceremony, NEAR AI sign-up without the
+    # admission ledger, and the boot check that refuses a production NEAR AI
+    # host compile only under the feature, and the account and bind suites
+    # must admit a new NEAR AI login there with no invite (staging spec S12). Every other job builds
+    # the ingest without it, so before this job none of that ran anywhere in
+    # CI. Everything else is
+    # `ingest-bin-postgres`: the same service, roles, single thread and
+    # xact_commit floors, on its own database and cache.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+          # Same reason as `ingest-bin-postgres`.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-near-ai-staging-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pg-ingest-bin-near-ai-staging-${{ runner.os }}-
+      # The same database name rule and login-resolver roles as
+      # `ingest-bin-postgres`.
+      - name: Create the database and the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_ingest_bin_staging
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      # The built binary refuses a NEAR AI host from the other channel at
+      # boot. A filter that matches nothing passes with "0 passed", so the
+      # step requires at least one.
+      - name: ingest boot channel check (near-ai-staging)
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest --features near-ai-staging --test near_ai_host_coherence_boot 2>&1 | tee staging-boot-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' staging-boot-tests.log
+      - name: trace-commons-ingest, every test, one thread (near-ai-staging)
+        run: |
+          set -euo pipefail
+          # bash, not sh: the run is piped to tee, and only pipefail keeps a
+          # failing cargo from reading as tee's success.
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-ingest --features near-ai-staging --lib -- --test-threads=1 2>&1 | tee staging-lib-tests.log
+          '
+          # The tests that hold the staging rules must have run, not been
+          # filtered or compiled out: open sign-up, sign-up without the
+          # admission ledger, and the wallet refusal.
+          grep -q 'open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite ... ok' staging-lib-tests.log
+          grep -q 'open_sign_up::a_staging_build_signs_up_without_the_admission_ledger ... ok' staging-lib-tests.log
+          grep -q 'a_staging_build_never_offers_wallet_provisioning ... ok' staging-lib-tests.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_staging
+      # The guard of `ingest-bin-postgres`, with the same floors.
+      - name: Refuse a run that executed nothing
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pair in admission_test_ingest_bin_staging:1000 admission_test_ingest_bin_staging_pilot:2000; do
+            db=${pair%%:*}
+            floor=${pair##*:}
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions (floor $floor)"
+            if [ "${n:-0}" -lt "$floor" ]; then
+              echo "::error::$db shows no real activity; the PostgreSQL tests skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   pipeline-qualification:
     # Not a required status check (owner decision P4-D17): it runs on every
     # pull request and in the merge queue, and it blocks nothing until the
@@ -996,6 +1107,10 @@ jobs:
       # The staging channel (`near-ai-staging`) compiles different values and
       # tests than the default build; lint that build too.
       - run: cargo clippy -p trace-commons-contributor -p trace-commons-contributor-ffi --all-targets --features trace-commons-contributor/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The server and ingest under the same feature: the wallet refusal,
+      # sign-up without the admission ledger and the boot channel check
+      # compile only there.
+      - run: cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets --features trace-commons-ingest/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1031,6 +1146,7 @@ jobs:
       - run: cargo check --locked -p trace-commons-server -p trace-commons-ingest --bins
       - run: cargo check --locked -p trace-commons-contributor
       - run: cargo check --locked -p trace-commons-contributor -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging
+      - run: cargo check --locked -p trace-commons-server -p trace-commons-ingest --bins --features trace-commons-ingest/near-ai-staging
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
