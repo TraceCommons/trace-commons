@@ -768,10 +768,11 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     HStack(spacing: Self.settingsGap) {
-                        // A staging build's label (spec S7, 4.8), always
-                        // shown, in the core's word; production has none.
+                        // A staging build's label (spec S7, 4.8), in the
+                        // core's word; production has none. Neutral, so it
+                        // never reads as a decision waiting.
                         if let label = BuildChannelGate.windowLabel {
-                            GlassTag(label, tone: .ask)
+                            GlassTag(label)
                         }
                         Spacer(minLength: 0)
                         // No View menu (owner, 2026-10-19): its one item,

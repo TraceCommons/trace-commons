@@ -335,9 +335,10 @@ char*       tc_build_channel_json(void);
  */
 char*       tc_channel_mismatch_line(void);
 
-/* The label the app shows in its main window: the core's word on a staging
- * build, the empty string on production (which shows nothing). Returns an
- * owned string; free it with tc_string_free. NULL only on a caught panic.
+/* The label a shell shows in its windows to mark a staging build: the
+ * core's word on staging, the empty string on production (which shows
+ * nothing). Returns an owned string; free it with tc_string_free. NULL only
+ * on a caught panic.
  */
 char*       tc_channel_window_label(void);
 

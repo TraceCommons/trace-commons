@@ -69,6 +69,15 @@ struct FirstRunWindowView: View {
                 .frame(width: FirstRunProgress.paneWidth)
             }
         }
+        // A staging build's label (spec S7, 4.8), as on the Monitor, over
+        // every state of this window: sign-in is where a tester most needs
+        // to tell staging from production. Production has none.
+        .overlay(alignment: .top) {
+            if let label = BuildChannelGate.windowLabel {
+                GlassTag(label)
+                    .padding(.top, GlassTokens.Space.s6)
+            }
+        }
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
         // A screen's modals and confirmations cover the whole window.
         .glassModalHost()

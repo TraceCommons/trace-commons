@@ -59,7 +59,8 @@ All dated 2026-10-21. The owner's words are quoted.
 - **(S6) DMG on a GitHub pre-release.** "GitHub pre-release". A `staging-*`
   pre-release in the public repo, never marked latest (6.1).
 - **(S7) A staging label in the window.** "Yes, a small staging label". Its
-  wording, "Staging", was approved on 2026-10-22 (4.8).
+  wording, "Staging", is proposed and still needs the owner's approval
+  (4.8).
 - **(S8) Manual re-signing.** "Manual for now". An operator runs the re-sign
   tool after a NEAR AI staging redeploy (5.4).
 - **(S9) Built infrastructure.** Already created in the pilot project on
@@ -616,13 +617,14 @@ path and key name as arguments rather than gaining a staging branch.
 Name, Dock and menu-bar icon, and window titles say "Near.ai Staging". The
 daemon's status reports `channel: "staging"` (D9 asks for this; Task 7a
 wires `near_ai_staging()` into `daemon/ipc.rs`). The staging app also shows
-a persistent label in its main window, the one word "Staging", at the left of
-the Monitor's top row. It is a notice under `docs/ui-copy-guide.md` section
-9: the owner approved it existing (S7) and its wording (2026-10-22). It is
-`health_copy::STAGING_WINDOW_LABEL`, read through `tc_channel_window_label`,
-which answers with an empty string on production, so a production build
-shows nothing. Any staging string lives in the Rust copy tables (section 8 of
-the guide), not in Swift.
+a label, the one word "Staging", at the left of the Monitor's top row and at
+the top of the first-run window, so it is there from sign-in on. It is a
+notice under `docs/ui-copy-guide.md` section 9: the owner approved it
+existing (S7); its wording is proposed and pending the owner's approval
+(open item 2). It is `health_copy::STAGING_WINDOW_LABEL`, read through
+`tc_channel_window_label`, which answers with an empty string on production,
+so a production build shows nothing. Any staging string lives in the Rust
+copy tables (section 8 of the guide), not in Swift.
 
 ## 5. Signed pins
 
@@ -975,14 +977,14 @@ The plan breaks this into small PRs. In order:
 ## 10. Open items
 
 Settled on 2026-10-21: the host name, PostgreSQL on the VM, the in-window
-label (wording approved 2026-10-22), re-signing and where the DMG lives
+label (wording still to approve), re-signing and where the DMG lives
 (S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12). Still
 open:
 
 1. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
    with the keychain group and associated domain, and a Developer ID
    provisioning profile for it.
-2. **The staging icon.**
+2. **The staging icon** and the label's wording ("Staging" proposed).
 3. **NEAR AI facts still needed:** whether staging has per-model completions
    hosts; which registers staging pins (5.2); staging's current
    measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;

@@ -831,7 +831,7 @@ pub extern "C" fn tc_channel_mismatch_line() -> *mut c_char {
     })
 }
 
-/// The label the app shows, persistently, in its main window:
+/// The label a shell shows in its windows to mark a staging build:
 /// `health_copy::window_label`, the core's word on a staging build and the
 /// empty string on production, which shows nothing (staging design S7,
 /// section 4.8).
