@@ -925,3 +925,42 @@ fn the_production_identity_values_never_change() {
     assert_eq!(channel::PASSKEY_RP_ID, "tracecommons.ai");
     assert_eq!(channel::NEAR_AI_WALLET_RECIPIENT, "cloud.near.ai");
 }
+
+/// The override variable is checked where the CLI resolves its state
+/// directory: naming the other channel's default directory is refused with a
+/// label and no path, and nothing is created there. Naming this channel's own
+/// default, whose name shares a prefix with the other's, is not refused.
+#[cfg(unix)]
+#[test]
+fn an_override_to_the_other_channel_directory_is_refused_before_it_is_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let config_base = if cfg!(target_os = "macos") {
+        home_path.join("Library").join("Application Support")
+    } else {
+        home_path.join(".config")
+    };
+    let run = |dir: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"))
+            .arg("whoami")
+            .env("HOME", &home_path)
+            .env("XDG_CONFIG_HOME", &config_base)
+            .env(channel::STATE_DIR_ENV, dir)
+            .output()
+            .unwrap()
+    };
+
+    let other = config_base.join(channel::OTHER_STATE_DIR_NAME);
+    let refused = run(&other.join("nested"));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(stderr.contains("state-dir-other-channel"), "{stderr}");
+    assert!(!stderr.contains(&*home_path.to_string_lossy()), "{stderr}");
+    assert!(!other.exists(), "the refused directory was created");
+
+    let own = config_base.join(channel::STATE_DIR_NAME);
+    let allowed = run(&own);
+    let stderr = String::from_utf8_lossy(&allowed.stderr);
+    assert!(!stderr.contains("state-dir-other-channel"), "{stderr}");
+    assert!(own.exists());
+}

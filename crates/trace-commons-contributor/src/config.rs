@@ -20,10 +20,6 @@ use crate::witness::WitnessTrust;
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
 pub(crate) const CONFIG_FILE: &str = "contributor.json";
-/// The state directory's channel mark: `production` or `staging`
-/// (`crate::channel::CHANNEL`). It describes the directory, not an
-/// enrollment, so neither `unenroll` nor `wipe()` removes it.
-pub const CHANNEL_FILE: &str = "channel";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
@@ -977,82 +973,137 @@ fn adopt_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
     }
 }
 
-/// Why a state directory was refused: it belongs to the other channel, or its
-/// mark is not one this build knows. Labels only; the mark's contents are
-/// never echoed.
+/// The other channel's default state directories on this platform: where a
+/// build of that channel keeps its enrollment when no override is set. On
+/// Windows that is both the LocalAppData directory and the roaming one it
+/// migrates from. Computing them has no side effect; [`adopt_state_dir`] is
+/// never run for the other channel.
+fn other_channel_default_dirs() -> Result<Vec<PathBuf>> {
+    let name = crate::channel::OTHER_STATE_DIR_NAME;
+    Ok(vec![
+        #[cfg(windows)]
+        dirs::config_local_dir()
+            .context("could not determine a local config directory for this platform")?
+            .join(name),
+        dirs::config_dir()
+            .context("could not determine a config directory for this platform")?
+            .join(name),
+    ])
+}
+
+/// The fixed refusal for a state directory override that resolves to the
+/// other channel's default state directory or anything inside it. It names
+/// no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum StateDirChannelRefusal {
-    #[error("state-dir-other-channel")]
-    OtherChannel,
-    #[error("state-dir-channel-unrecognised")]
-    Unrecognised,
-}
+#[error("state-dir-other-channel")]
+pub struct OtherChannelStateDir;
 
-/// The two channel marks a directory can carry.
-const CHANNELS: [&str; 2] = ["production", "staging"];
-
-/// What `ConfigStore::open` does about an existing directory's mark.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChannelMark {
-    /// Marked for this build, or unmarked and unenrolled: leave it.
-    Keep,
-    /// Unmarked and this build's: mark it.
-    Write,
-}
-
-/// The longest channel mark read: room for either channel name and a newline.
-const CHANNEL_MARK_MAX: u64 = 64;
-
-/// Read a directory's channel mark: `Ok(false)` when there is none,
-/// `Ok(true)` when it names this build's channel, and a refusal for anything
-/// else -- the other channel, a mark this build does not know, a mark that is
-/// not a regular file (a link included) or one longer than
-/// [`CHANNEL_MARK_MAX`]. Any error reading it refuses too.
-fn read_channel_mark(dir: &Path) -> Result<bool> {
-    use std::io::Read;
-    let path = dir.join(CHANNEL_FILE);
-    let meta = match std::fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).context("reading the state directory channel"),
-    };
-    if !meta.file_type().is_file() {
-        return Err(StateDirChannelRefusal::Unrecognised.into());
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path)
-        .and_then(|file| file.take(CHANNEL_MARK_MAX + 1).read_to_end(&mut bytes))
-        .context("reading the state directory channel")?;
-    if bytes.len() as u64 > CHANNEL_MARK_MAX {
-        return Err(StateDirChannelRefusal::Unrecognised.into());
-    }
-    let mark = std::str::from_utf8(&bytes)
-        .map(str::trim)
-        .map_err(|_| StateDirChannelRefusal::Unrecognised)?;
-    if mark == crate::channel::CHANNEL {
-        Ok(true)
-    } else if CHANNELS.contains(&mark) {
-        Err(StateDirChannelRefusal::OtherChannel.into())
-    } else {
-        Err(StateDirChannelRefusal::Unrecognised.into())
-    }
-}
-
-/// Decide whether this build may open an existing state directory. Any
-/// error reading the mark refuses the directory.
-fn existing_dir_channel(dir: &Path) -> Result<ChannelMark> {
-    if read_channel_mark(dir)? {
-        return Ok(ChannelMark::Keep);
-    }
-    // Present at all, even as a dangling link, counts as enrolled.
-    match std::fs::symlink_metadata(dir.join(CONFIG_FILE)) {
-        Ok(_) if crate::channel::near_ai_staging() => {
-            Err(StateDirChannelRefusal::OtherChannel.into())
+/// `path` with symlinks resolved, including for a path that does not exist
+/// yet: the nearest existing ancestor is canonicalized and the rest is
+/// re-appended with `.` dropped and `..` applied, so a missing tail cannot
+/// step back out past the comparison.
+fn resolve_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let components: Vec<Component> = absolute.components().collect();
+    // The longest prefix that exists anchors the result; what follows it does
+    // not exist, so it holds no symlink and its `..` steps are lexical.
+    let (mut resolved, rest) = (0..=components.len())
+        .rev()
+        .find_map(|split| {
+            let prefix: PathBuf = components[..split].iter().collect();
+            let real = if split == 0 {
+                Some(PathBuf::new())
+            } else {
+                prefix.canonicalize().ok()
+            };
+            real.map(|real| (real, &components[split..]))
+        })
+        .unwrap_or_default();
+    for component in rest {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
         }
-        Ok(_) => Ok(ChannelMark::Write),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChannelMark::Keep),
-        Err(e) => Err(e).context("reading the state directory"),
     }
+    resolved
+}
+
+/// Refuse `dir`, a state directory named by the channel's override variable,
+/// when it resolves to one of `other_defaults` or a path inside one. Both
+/// sides are resolved first ([`resolve_path`]) and compared by path
+/// component, so `trace-commons-staging` is not inside `trace-commons`.
+///
+/// The channels already keep apart by default: different directory names,
+/// different override variables, separate keychain services and a refusal of
+/// the other channel's hosts. This covers the one remaining case, an override
+/// set by hand to the other channel's directory.
+pub(crate) fn refuse_other_channel_state_dir(
+    dir: &Path,
+    other_defaults: &[PathBuf],
+) -> Result<(), OtherChannelStateDir> {
+    let dir = resolve_path(dir);
+    for other in other_defaults {
+        if path_is_within(&dir, &resolve_path(other)) {
+            return Err(OtherChannelStateDir);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is `base` or inside it, compared component by component.
+///
+/// On macOS and Windows a component matches ignoring ASCII case, because
+/// their default filesystems (APFS, NTFS) treat `Trace-Commons` and
+/// `trace-commons` as one directory. [`resolve_path`] canonicalizes only the
+/// part that exists, so without this an override differing in case from a
+/// directory that is not there yet would pass, and then be the same folder
+/// once the other channel creates it. Elsewhere the comparison is exact.
+fn path_is_within(path: &Path, base: &Path) -> bool {
+    let mut path = path.components();
+    base.components().all(|want| {
+        path.next()
+            .is_some_and(|have| component_matches(have.as_os_str(), want.as_os_str()))
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have.as_encoded_bytes()
+        .eq_ignore_ascii_case(want.as_encoded_bytes())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have == want
+}
+
+/// The state directory [`ConfigStore::resolve`] would open, without opening
+/// or creating it (on Windows the platform default may still move a legacy
+/// enrollment, `adopt_state_dir`). Precedence:
+/// 1. `explicit`, used as given
+/// 2. `override_dir`, the value of the channel's override variable,
+///    refused with [`OtherChannelStateDir`] when it resolves to the other
+///    channel's default directory or inside it
+/// 3. the platform default, see `platform_default_dir`
+///
+/// The C ABI's `tc_resolve_state_dir` calls this, so the macOS app, which picks its
+/// directory in Swift, gets the same refusal as the CLI.
+pub fn resolve_state_dir(
+    explicit: Option<PathBuf>,
+    override_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(dir) = explicit {
+        return Ok(dir);
+    }
+    if let Some(dir) = override_dir {
+        refuse_other_channel_state_dir(&dir, &other_channel_default_dirs()?)?;
+        return Ok(dir);
+    }
+    platform_default_dir()
 }
 
 /// Filesystem-backed store for contributor config, device key, and receipts.
@@ -1076,74 +1127,33 @@ impl ConfigStore {
     /// 1. `explicit` flag
     /// 2. the channel's override variable, `crate::channel::STATE_DIR_ENV`
     ///    (`TRACE_COMMONS_CONTRIBUTOR_DIR` in a production build); a staging
-    ///    build ignores the production variable
+    ///    build ignores the production variable. A value that resolves to
+    ///    the other channel's default directory, or inside it, is refused
+    ///    ([`refuse_other_channel_state_dir`])
     /// 3. the platform default, see [`platform_default_dir`]
     ///
     /// Creates the directory (mode 0700 on unix) if it does not exist.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
-        let dir = if let Some(dir) = explicit {
-            dir
-        } else if let Ok(dir) = std::env::var(crate::channel::STATE_DIR_ENV) {
-            PathBuf::from(dir)
-        } else {
-            platform_default_dir()?
-        };
-        Self::open(dir)
+        let override_dir = std::env::var(crate::channel::STATE_DIR_ENV)
+            .ok()
+            .map(PathBuf::from);
+        Self::open(resolve_state_dir(explicit, override_dir)?)
     }
 
     /// Open (creating if necessary) the given directory as a contributor
     /// state store. Does not consult the environment.
-    ///
-    /// A state directory belongs to one channel (spec section 4.4). A
-    /// directory this call creates is marked with the build's channel. An
-    /// existing one is refused, before anything in it changes, when its mark
-    /// names the other channel or is not a channel at all, or when it is
-    /// enrolled (`contributor.json`) with no mark: every directory from before
-    /// the mark is production's, so a production build adopts and marks it and
-    /// a staging build refuses it. An unmarked, unenrolled directory is opened
-    /// as it is and marked on enrollment ([`Self::save_config`]).
     pub fn open(dir: PathBuf) -> Result<Self> {
-        let mark = if dir.exists() {
-            existing_dir_channel(&dir)?
-        } else {
+        if !dir.exists() {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating contributor state dir {}", dir.display()))?;
-            ChannelMark::Write
-        };
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
                 .with_context(|| format!("setting permissions on {}", dir.display()))?;
         }
-        let store = Self { dir };
-        if mark == ChannelMark::Write {
-            store.write_channel_mark()?;
-        }
-        Ok(store)
-    }
-
-    fn channel_path(&self) -> PathBuf {
-        self.dir.join(CHANNEL_FILE)
-    }
-
-    fn write_channel_mark(&self) -> Result<()> {
-        let body = format!("{}\n", crate::channel::CHANNEL);
-        write_atomic_0600(&self.dir, &self.channel_path(), body.as_bytes())
-            .context("writing the state directory channel")
-    }
-
-    /// Mark the directory before its first enrollment is written, so a
-    /// crash leaves it marked and unenrolled, never enrolled and unmarked
-    /// (which would read as production's). A mark that is already there is
-    /// checked again: one re-written for the other channel since `open`, or
-    /// not a channel at all, refuses the enrollment before it is written.
-    fn ensure_channel_mark(&self) -> Result<()> {
-        if read_channel_mark(&self.dir)? {
-            Ok(())
-        } else {
-            self.write_channel_mark()
-        }
+        Ok(Self { dir })
     }
 
     /// The directory backing this store.
@@ -1170,7 +1180,6 @@ impl ConfigStore {
 
     pub fn save_config(&self, cfg: &ContributorConfig) -> Result<()> {
         refuse_other_channel_services(cfg)?;
-        self.ensure_channel_mark()?;
         let body = serde_json::to_vec_pretty(cfg).context("serializing contributor config")?;
         crate::daemon::commons_credentials::save_config(self, cfg, &body)
     }
@@ -1657,6 +1666,167 @@ mod tests {
         (dir, store)
     }
 
+    /// A tempdir's path with symlinks resolved (on macOS `/var` is a link to
+    /// `/private/var`), so expected paths compare like the check's own.
+    fn real_root() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().canonicalize().unwrap();
+        (root, real)
+    }
+
+    fn refused_as_other_channel(candidate: &Path, other_default: &Path) -> bool {
+        match refuse_other_channel_state_dir(candidate, &[other_default.to_path_buf()]) {
+            Ok(()) => false,
+            Err(err) => {
+                assert_eq!(err.to_string(), "state-dir-other-channel");
+                true
+            }
+        }
+    }
+
+    #[test]
+    fn an_override_naming_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        // Whether or not the other channel has ever run here.
+        assert!(refused_as_other_channel(&other, &other));
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(refused_as_other_channel(&other, &other));
+        assert!(refused_as_other_channel(&other.join(""), &other));
+    }
+
+    #[test]
+    fn an_override_inside_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(other.join("nested")).unwrap();
+        assert!(refused_as_other_channel(&other.join("nested"), &other));
+    }
+
+    #[test]
+    fn an_override_under_a_missing_child_of_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(refused_as_other_channel(
+            &other.join("not-yet").join("deeper"),
+            &other
+        ));
+        // `..` is resolved, not compared as text, in both directions.
+        assert!(refused_as_other_channel(
+            &root
+                .join("elsewhere")
+                .join("..")
+                .join(crate::channel::OTHER_STATE_DIR_NAME),
+            &other
+        ));
+        assert!(!refused_as_other_channel(
+            &other.join("not-yet").join("..").join(".."),
+            &other
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_override_symlinked_to_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(&other).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(refused_as_other_channel(&link, &other));
+        assert!(refused_as_other_channel(&link.join("missing"), &other));
+        // The other default reached through a link of its own.
+        let (_second, second) = real_root();
+        let other_link = second.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::os::unix::fs::symlink(&other, &other_link).unwrap();
+        assert!(refused_as_other_channel(&other, &other_link));
+    }
+
+    /// Paths compare by component: `trace-commons` and
+    /// `trace-commons-staging` share a prefix and nothing else.
+    #[test]
+    fn a_sibling_sharing_the_other_channel_name_prefix_is_allowed() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        let own = root.join(crate::channel::STATE_DIR_NAME);
+        let longer = root.join(format!("{}-x", crate::channel::OTHER_STATE_DIR_NAME));
+        for dir in [&other, &own, &longer] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert!(!refused_as_other_channel(&own, &other));
+        assert!(!refused_as_other_channel(&longer, &other));
+        assert!(!refused_as_other_channel(&root, &other));
+        assert!(refused_as_other_channel(&other, &other));
+    }
+
+    /// APFS and NTFS are case-insensitive by default, so on macOS and
+    /// Windows a case variant of the other channel's directory is that
+    /// directory, whether or not it exists yet. Linux compares exactly.
+    #[test]
+    fn a_case_variant_of_a_missing_other_channel_default_follows_the_platform() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        let upper = root.join(crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase());
+        assert!(!other.exists() && !upper.exists());
+        let case_insensitive = cfg!(any(target_os = "macos", windows));
+        assert_eq!(refused_as_other_channel(&upper, &other), case_insensitive);
+        assert_eq!(
+            refused_as_other_channel(&upper.join("nested"), &other),
+            case_insensitive
+        );
+        // Still by component: a case variant of a longer sibling is not it.
+        let longer = root.join(format!(
+            "{}-X",
+            crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase()
+        ));
+        assert!(!refused_as_other_channel(&longer, &other));
+    }
+
+    #[test]
+    fn resolve_state_dir_takes_explicit_then_override_then_the_default() {
+        let other = other_channel_default_dirs().unwrap().remove(0);
+        // An explicit directory is the caller's own choice and is not checked.
+        assert_eq!(
+            resolve_state_dir(Some(other.clone()), Some(PathBuf::from("/elsewhere"))).unwrap(),
+            other
+        );
+        let (_root, root) = real_root();
+        let own = root.join("own");
+        assert_eq!(resolve_state_dir(None, Some(own.clone())).unwrap(), own);
+        assert_eq!(
+            resolve_state_dir(None, None).unwrap(),
+            platform_default_dir().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_state_dir_refuses_an_override_naming_the_other_channel_default() {
+        for other in other_channel_default_dirs().unwrap() {
+            for candidate in [other.clone(), other.join("nested")] {
+                let err = resolve_state_dir(None, Some(candidate)).unwrap_err();
+                assert!(err.downcast_ref::<OtherChannelStateDir>().is_some());
+                assert_eq!(err.to_string(), "state-dir-other-channel");
+            }
+        }
+    }
+
+    #[test]
+    fn the_other_channel_default_dirs_carry_the_other_channel_name() {
+        let dirs = other_channel_default_dirs().unwrap();
+        assert!(!dirs.is_empty());
+        for dir in dirs {
+            assert_eq!(
+                dir.file_name().unwrap(),
+                std::ffi::OsStr::new(crate::channel::OTHER_STATE_DIR_NAME)
+            );
+        }
+        assert_ne!(
+            crate::channel::OTHER_STATE_DIR_NAME,
+            crate::channel::STATE_DIR_NAME
+        );
+    }
+
     /// A directory that looks enrolled: what `adopt_state_dir` keys off.
     fn enrolled_dir(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
@@ -1763,251 +1933,6 @@ mod tests {
             public_since: None,
             witness: None,
         }
-    }
-
-    /// The channel this build is not.
-    fn other_channel() -> &'static str {
-        if crate::channel::near_ai_staging() {
-            "production"
-        } else {
-            "staging"
-        }
-    }
-
-    fn channel_refusal(result: Result<ConfigStore>) -> StateDirChannelRefusal {
-        let Err(err) = result else {
-            panic!("the store opened a directory it should have refused");
-        };
-        *err.downcast_ref::<StateDirChannelRefusal>()
-            .expect("the refusal is a state directory channel refusal")
-    }
-
-    fn channel_mark(dir: &Path) -> Option<String> {
-        std::fs::read_to_string(dir.join(CHANNEL_FILE)).ok()
-    }
-
-    #[test]
-    fn a_new_directory_records_its_channel() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("state");
-
-        ConfigStore::open(dir.clone()).unwrap();
-
-        assert_eq!(
-            channel_mark(&dir).as_deref().map(str::trim),
-            Some(crate::channel::CHANNEL)
-        );
-        // Its own channel opens it again.
-        ConfigStore::open(dir).unwrap();
-    }
-
-    #[test]
-    fn opening_an_existing_unmarked_unenrolled_directory_writes_nothing() {
-        let root = tempfile::tempdir().unwrap();
-
-        ConfigStore::open(root.path().to_path_buf()).unwrap();
-
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn enrolling_marks_an_unmarked_directory() {
-        // The app, or a test, can make the directory before the store sees
-        // it, so the mark cannot come only from `open`. Without one here, a
-        // staging enrollment would read as production's on the next open.
-        let root = tempfile::tempdir().unwrap();
-        let store = ConfigStore::open(root.path().to_path_buf()).unwrap();
-        assert_eq!(channel_mark(root.path()), None);
-
-        store.save_config(&sample_config()).unwrap();
-
-        assert_eq!(
-            channel_mark(root.path()).as_deref().map(str::trim),
-            Some(crate::channel::CHANNEL)
-        );
-        let reopened = ConfigStore::open(root.path().to_path_buf()).unwrap();
-        assert!(reopened.load_config().unwrap().is_some());
-    }
-
-    #[test]
-    fn a_store_refuses_the_other_channels_directory() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join(CHANNEL_FILE), other_channel()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::OtherChannel
-        );
-        assert_eq!(channel_mark(root.path()).as_deref(), Some(other_channel()));
-        // The refusal comes before the 0700 chmod: nothing in the directory
-        // changes, its mode included.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(root.path()).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o755);
-        }
-    }
-
-    #[test]
-    fn logging_out_and_wiping_keep_the_channel_mark() {
-        // The mark describes the directory, not an enrollment.
-        let (d, store) = store();
-        store.save_config(&sample_config()).unwrap();
-        let marked = channel_mark(d.path());
-        assert!(marked.is_some());
-
-        store.remove_enrollment_files().unwrap();
-        assert!(store.load_config().unwrap().is_none());
-        assert_eq!(channel_mark(d.path()), marked, "unenroll removed the mark");
-
-        store.save_config(&sample_config()).unwrap();
-        store.wipe().unwrap();
-        assert!(store.load_config().unwrap().is_none());
-        assert_eq!(channel_mark(d.path()), marked, "wipe() removed the mark");
-    }
-
-    #[test]
-    fn enrolling_refuses_a_directory_re_marked_for_the_other_channel() {
-        // Re-marked between `open` and the first enrollment: the enrollment
-        // is not written into the other channel's directory.
-        let root = tempfile::tempdir().unwrap();
-        let store = ConfigStore::open(root.path().join("state")).unwrap();
-        std::fs::write(store.dir().join(CHANNEL_FILE), other_channel()).unwrap();
-
-        let err = store.save_config(&sample_config()).unwrap_err();
-
-        assert_eq!(
-            *err.downcast_ref::<StateDirChannelRefusal>().unwrap(),
-            StateDirChannelRefusal::OtherChannel
-        );
-        assert!(!store.dir().join(CONFIG_FILE).exists());
-    }
-
-    #[test]
-    fn enrolling_refuses_an_unrecognised_channel_mark() {
-        let root = tempfile::tempdir().unwrap();
-        let store = ConfigStore::open(root.path().join("state")).unwrap();
-        std::fs::write(store.dir().join(CHANNEL_FILE), "beta\n").unwrap();
-
-        let err = store.save_config(&sample_config()).unwrap_err();
-
-        assert_eq!(
-            *err.downcast_ref::<StateDirChannelRefusal>().unwrap(),
-            StateDirChannelRefusal::Unrecognised
-        );
-        assert!(!store.dir().join(CONFIG_FILE).exists());
-    }
-
-    #[test]
-    fn a_store_refuses_an_oversized_channel_mark() {
-        // The mark is read with a cap: a huge file is not a channel name.
-        let root = tempfile::tempdir().unwrap();
-        let mut body = crate::channel::CHANNEL.to_string();
-        body.push_str(&" ".repeat(4096));
-        std::fs::write(root.path().join(CHANNEL_FILE), body).unwrap();
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::Unrecognised
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_store_refuses_a_channel_mark_that_is_not_a_regular_file() {
-        // A link to this build's own mark is still refused: the mark must be
-        // the directory's own file.
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("elsewhere");
-        std::fs::write(&target, format!("{}\n", crate::channel::CHANNEL)).unwrap();
-        let dir = root.path().join("state");
-        std::fs::create_dir(&dir).unwrap();
-        std::os::unix::fs::symlink(&target, dir.join(CHANNEL_FILE)).unwrap();
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(dir)),
-            StateDirChannelRefusal::Unrecognised
-        );
-    }
-
-    #[test]
-    fn a_store_refuses_an_unrecognised_channel_mark() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join(CHANNEL_FILE), "beta\n").unwrap();
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::Unrecognised
-        );
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    #[test]
-    fn a_staging_store_refuses_a_production_directory() {
-        let root = tempfile::tempdir().unwrap();
-        enrolled_dir(root.path());
-        std::fs::write(root.path().join(CHANNEL_FILE), "production\n").unwrap();
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::OtherChannel
-        );
-        assert_eq!(
-            channel_refusal(ConfigStore::resolve(Some(root.path().to_path_buf()))),
-            StateDirChannelRefusal::OtherChannel
-        );
-    }
-
-    #[cfg(feature = "near-ai-staging")]
-    #[test]
-    fn a_staging_store_refuses_an_unmarked_enrolled_directory() {
-        // Every directory before the channel mark is production's.
-        let root = tempfile::tempdir().unwrap();
-        enrolled_dir(root.path());
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::OtherChannel
-        );
-        assert_eq!(channel_mark(root.path()), None);
-    }
-
-    #[cfg(not(feature = "near-ai-staging"))]
-    #[test]
-    fn a_production_store_refuses_a_staging_directory() {
-        let root = tempfile::tempdir().unwrap();
-        enrolled_dir(root.path());
-        std::fs::write(root.path().join(CHANNEL_FILE), "staging\n").unwrap();
-
-        assert_eq!(
-            channel_refusal(ConfigStore::open(root.path().to_path_buf())),
-            StateDirChannelRefusal::OtherChannel
-        );
-    }
-
-    #[cfg(not(feature = "near-ai-staging"))]
-    #[test]
-    fn a_production_store_adopts_an_unmarked_directory() {
-        // Existing installs keep working, and are marked as they open.
-        let root = tempfile::tempdir().unwrap();
-        enrolled_dir(root.path());
-
-        ConfigStore::open(root.path().to_path_buf()).unwrap();
-
-        assert_eq!(
-            channel_mark(root.path()).as_deref().map(str::trim),
-            Some("production")
-        );
-        assert_eq!(
-            std::fs::read(root.path().join(CONFIG_FILE)).unwrap(),
-            b"{}".to_vec()
-        );
     }
 
     #[test]

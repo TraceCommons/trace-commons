@@ -74,6 +74,10 @@ All dated 2026-10-21. The owner's words are quoted.
   admission token and tool connections live apart from production's, so
   neither app reads the other's inference rows or reconfigures the other's
   proxy (4.2, IronWire rows).
+- **(S11) No state-directory markers.** "I think remove the markeres"
+  (2026-10-22). A `channel` file in every state directory guarded only an
+  override set by hand to the other channel's directory; one check on the
+  override covers that case without writing anything to the directory (4.4).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -516,12 +520,37 @@ daemon. The bundled `near-ai` CLI prints its channel in `--version`, and
 
 ### 4.4 A state directory belongs to one channel
 
-`ConfigStore::open` writes a `channel` file into a new state directory and
-refuses a directory whose file names the other channel. A directory with a
-`contributor.json` and no `channel` file is production (every directory
-before this change), so a staging build refuses it. This catches a
-hand-set override pointing staging at production's enrollment, which the
-separate default directories alone would not.
+The channels keep apart by default: different state directory names
+(`channel::STATE_DIR_NAME`), different override variables (a staging build
+ignores production's), separate keychain groups and services, and the
+refusal of the other channel's hosts before any request. What that leaves is
+an override set by hand to the other channel's directory.
+
+So when the state directory comes from the channel's override variable,
+`ConfigStore::resolve` refuses it if it resolves to the other channel's
+default state directory (`channel::OTHER_STATE_DIR_NAME` under the platform
+base; on Windows both the LocalAppData and the roaming one) or anything
+inside it. Both sides are resolved before comparing: symlinks are followed,
+and for a path that does not exist yet the nearest existing ancestor is
+canonicalized and the rest re-appended. The comparison is by path
+component, so `trace-commons` and `trace-commons-staging` never match each
+other. On macOS and Windows a component matches ignoring ASCII case, since
+APFS and NTFS are case-insensitive by default; on Linux it is exact. The
+refusal is the label `state-dir-other-channel`, with no path, and
+nothing is created. It applies in both builds. An explicit `--config-dir`
+and the platform default are not checked. No file is written to the state
+directory (S11).
+
+The rule is `config::resolve_state_dir`, which `ConfigStore::resolve`
+calls. The macOS app chooses its directory in Swift and opens it with
+`ConfigStore::open`, so it would never reach `resolve`; it is covered
+through the C ABI's `tc_resolve_state_dir`, which runs the same function.
+`StateDirectory` passes every directory that came from the override variable
+to it, and on a refusal the app starts neither the daemon nor compute. The
+startup refusal shows the core's sentence
+(`health_copy::STATE_DIR_OVERRIDE_REFUSED`, read through
+`tc_state_dir_override_refused_line`); compute shows its existing
+`compute-unavailable` failure. The macOS app is the only client with a staging build.
 
 ### 4.5 URL scheme
 
@@ -840,7 +869,7 @@ an envelope or a key from one is refused by the other. On the device they
 share no state directory, keychain group, socket, passkey RP, URL scheme or
 update feed (4.2). The checks that hold it: the server boot guard (3.9),
 the deploy channel check (3.6), the dylib/bundle agreement (4.3), the state
-directory channel file (4.4), the release check (6.2) and the binary marker
+directory override check (4.4), the release check (6.2) and the binary marker
 scan (5.7).
 
 The one route that remains is the tester: both apps can watch the same
@@ -890,7 +919,7 @@ The plan breaks this into small PRs. In order:
 
 1. Release check widened for staging (base: #1542's branch).
 2. Channel module and identity constants (base: Task 7a's branch).
-3. State directory channel file.
+3. State directory override check (S11; it replaced a channel file).
 4. Signed pin format and verifier in the attestation crate (base: PR 1).
 5. Staging pin source in the daemon (needs 2 and 4).
 6. Re-sign tool.

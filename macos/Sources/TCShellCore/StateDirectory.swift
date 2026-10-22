@@ -32,6 +32,13 @@ public enum StateDirectory {
     public enum Refusal: Error, CustomStringConvertible {
         case pathTooLong(Int)
         case notADirectory
+        /// The override variable names the other channel's state directory
+        /// or a folder inside it (`state-dir-other-channel`, staging design
+        /// 4.4). Carries the core's sentence.
+        case otherChannel(sentence: String)
+        /// The dylib could not check the override (any other label). The
+        /// override is not used unchecked. Carries the core's sentence.
+        case overrideUnchecked(sentence: String)
 
         public var description: String {
             switch self {
@@ -46,6 +53,8 @@ public enum StateDirectory {
                     The state directory path is a file, not a folder. Nothing is being \
                     watched.
                     """
+            case .otherChannel(let sentence), .overrideUnchecked(let sentence):
+                return sentence
             }
         }
     }
@@ -74,6 +83,36 @@ public enum StateDirectory {
         }
     }
 
+    /// Asks the dylib whether a directory taken from the override variable
+    /// may be used: nil to allow it, or the refusal label
+    /// `tc_resolve_state_dir` reported with the core's sentence for it
+    /// (`tc_state_dir_override_refused_line`). Injected because this target never
+    /// links the dylib; the app passes the real one (`DaemonHost`), and
+    /// there is deliberately no default, so a build cannot ship without it.
+    ///
+    /// The app opens its directory with `ConfigStore::open`, which checks
+    /// nothing, so this is the only place the other-channel refusal reaches
+    /// the macOS app (staging design 4.4).
+    public struct OverrideCheck: Sendable {
+        public struct Refused: Equatable, Sendable {
+            public let label: String
+            public let sentence: String
+
+            public init(label: String, sentence: String) {
+                self.label = label
+                self.sentence = sentence
+            }
+        }
+
+        let refusal: @Sendable (String) -> Refused?
+
+        public init(_ refusal: @escaping @Sendable (String) -> Refused?) {
+            self.refusal = refusal
+        }
+    }
+
+    static let otherChannelLabel = "state-dir-other-channel"
+
     /// The daemon's socket is `<dir>/daemon.sock`, and the daemon refuses a
     /// socket path over 104 bytes. Checked here so an over-long path is a
     /// sentence rather than an opaque start failure.
@@ -85,11 +124,12 @@ public enum StateDirectory {
         explicit: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String = NSHomeDirectory(),
-        probe: Probe = .filesystem
+        probe: Probe = .filesystem,
+        overrideCheck: OverrideCheck
     ) throws -> Resolution {
-        let dir = chooseDirectory(
+        let dir = try chooseDirectory(
             channel: channel, explicit: explicit, environment: environment,
-            homeDirectory: homeDirectory)
+            homeDirectory: homeDirectory, overrideCheck: overrideCheck)
 
         let socketBytes = (dir + socketFileName).utf8.count
         guard socketBytes <= maxSocketPathBytes else {
@@ -116,11 +156,12 @@ public enum StateDirectory {
         explicit: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String = NSHomeDirectory(),
-        probe: Probe = .filesystem
+        probe: Probe = .filesystem,
+        overrideCheck: OverrideCheck
     ) throws -> Resolution {
-        let dir = chooseDirectory(
+        let dir = try chooseDirectory(
             channel: channel, explicit: explicit, environment: environment,
-            homeDirectory: homeDirectory)
+            homeDirectory: homeDirectory, overrideCheck: overrideCheck)
         if case .file = probe.verdict(dir) { throw Refusal.notADirectory }
         return Resolution(path: dir)
     }
@@ -128,20 +169,31 @@ public enum StateDirectory {
     /// The directory name and override variable come from the dylib
     /// (`channel`), never from Swift: a staging build reads only its own
     /// variable and names its own directory, so it cannot open production's
-    /// enrollment (staging design, section 4.2).
+    /// enrollment (staging design, section 4.2). A directory from the
+    /// override variable must also pass `overrideCheck`, so a hand-set
+    /// override cannot name the other channel's directory (section 4.4).
+    /// An explicit directory and the default are not checked, as in
+    /// `ConfigStore::resolve`.
     private static func chooseDirectory(
         channel: BuildChannel,
         explicit: String?,
         environment: [String: String],
-        homeDirectory: String
-    ) -> String {
+        homeDirectory: String,
+        overrideCheck: OverrideCheck
+    ) throws -> String {
         if let explicit, !explicit.isEmpty {
             return explicit
         }
         if let fromEnvironment = environment[channel.stateDirEnv],
             !fromEnvironment.isEmpty
         {
-            return fromEnvironment
+            guard let refused = overrideCheck.refusal(fromEnvironment) else {
+                return fromEnvironment
+            }
+            if refused.label == otherChannelLabel {
+                throw Refusal.otherChannel(sentence: refused.sentence)
+            }
+            throw Refusal.overrideUnchecked(sentence: refused.sentence)
         }
         // For production, the Homebrew cask's `zap` stanza already treats
         // this as the state directory, and it is where a contributor's
