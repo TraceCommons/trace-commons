@@ -23,4 +23,18 @@ final class BuildChannelBridgeTests: XCTestCase {
         let line = try XCTUnwrap(TCBuildChannel.mismatchLine())
         XCTAssertTrue(line.hasSuffix("."))
     }
+
+    /// Spec S7, 4.8: a staging dylib gives the main window its label, a
+    /// production one gives none. CI links only a production dylib, so there
+    /// this kills "the bridge returns an empty string instead of nil"; that
+    /// a staging build keeps its label is pinned by the staging channel
+    /// tests in ci.yml (`a_staging_channel_shows_the_label` and the FFI
+    /// `build_channel` suite run as staging), and here only against a
+    /// locally built staging dylib.
+    func test_onlyAStagingDylibGivesAWindowLabel() throws {
+        let channel = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
+        let label = TCBuildChannel.windowLabel()
+        XCTAssertEqual(label != nil, channel.channel == "staging")
+        if let label { XCTAssertFalse(label.isEmpty) }
+    }
 }

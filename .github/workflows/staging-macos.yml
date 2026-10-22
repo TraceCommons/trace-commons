@@ -1,23 +1,396 @@
-# Build and publish the internal staging macOS app (the `near-ai-staging`
-# channel). Placeholder: the real job lands with the staging workflow task
-# (docs/superpowers/plans/2026-10-21-staging-environment.md, Task 10).
+# Build and publish the internal staging macOS app: the near-ai-staging
+# channel, installed beside the production app and sharing nothing with it
+# (staging design 4 and 6.1).
 #
 # Manual only. scripts/ci/check-release-staging-feature.sh requires this
-# file's `on:` to be exactly `workflow_dispatch` and refuses any other
-# workflow that references it.
+# file's `on:` to be exactly `workflow_dispatch`, any job environment to be
+# `staging`, every GitHub release it creates to be a pre-release, and it
+# refuses any other workflow that references this file or the staging
+# channel file. It also refuses this file naming a production destination or
+# a production credential, comments included.
+#
+# What it produces, from one dispatch:
+#   - `Near.ai Staging.app`, built with TC_CHANNEL=staging, so the bundle
+#     identity, entitlements, profile, Sparkle feed and the cargo features of
+#     the dylib and CLI all come from macos/channels/staging.env;
+#   - signed with the same Developer ID as production (Apple has no separate
+#     staging identity), notarized and stapled;
+#   - the staging appcast, signed with the staging Sparkle key, beside the DMG
+#     in the staging bucket the channel file's feed URL names;
+#   - a GitHub pre-release tagged staging-<date>-<short sha>-<run>, never
+#     marked latest. No release workflow runs on a `staging-` tag (the
+#     release check holds that), and a tag created with the job token starts
+#     no workflow at all.
+#
+# No GitHub environment and no approval gate (owner decision, 2026-10-22):
+# the secrets are repository secrets. The release check allows a job here to
+# name no environment, and refuses any environment other than `staging`.
+# The Developer ID and notary credentials are production's, as today (Apple
+# has no separate staging identity); every other secret has a staging name
+# of its own, never a production one:
+#   MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD,
+#   MACOS_SIGNING_IDENTITY, MACOS_NOTARY_ASC_KEY_P8_BASE64,
+#   MACOS_NOTARY_ASC_KEY_ID, MACOS_NOTARY_ASC_ISSUER_ID
+#   TC_STAGING_SPARKLE_PUBLIC_ED_KEY    the staging Sparkle EdDSA public key,
+#     base64, which goes into the bundle's Info.plist
+#   TC_STAGING_SPARKLE_PRIVATE_ED_KEY   its private key, as Sparkle's
+#     generate_keys exports it, which signs the staging appcast
+#   TC_STAGING_GCP_WIF_PROVIDER, TC_STAGING_GCP_PUBLISHER_SA   the staging
+#     workload identity provider and the publisher service account, whose
+#     only bucket role is on the staging bucket
+#
+# The publisher trusts this workflow only when it runs from main, so it is
+# always dispatched from main; the `ref` input picks the commit to build.
 name: staging-macos
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build (default main); dispatch from main
+        type: string
+        required: false
+
+concurrency:
+  group: staging-macos
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  not-built-yet:
+  # Every credential is checked before anything is built or signed, and the
+  # version and tag are fixed once, from the commit being built.
+  preflight:
+    name: staging preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.v.outputs.sha }}
+      short: ${{ steps.v.outputs.short }}
+      build: ${{ steps.v.outputs.build }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
-      - name: The staging build is not built yet
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The staging publisher trusts only this workflow run from main (its
+      # workload identity binding names the main branch's OIDC subject), so a
+      # dispatch from any other branch would build, sign and notarize and
+      # then fail at upload. Refuse it here instead; to build another commit,
+      # dispatch from main and name it in the `ref` input.
+      - name: Dispatched from main
+        env:
+          DISPATCH_REF: ${{ github.ref }}
         run: |
-          echo "the staging macOS build is not built yet"
-          exit 1
+          if [ "$DISPATCH_REF" != refs/heads/main ]; then
+            echo "refusing: dispatch this workflow from main (got $DISPATCH_REF); pass another commit in the ref input" >&2
+            exit 1
+          fi
+
+      - name: Confirm the staging credentials are configured
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+          TC_STAGING_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.TC_STAGING_SPARKLE_PUBLIC_ED_KEY }}
+          TC_STAGING_SPARKLE_PRIVATE_ED_KEY: ${{ secrets.TC_STAGING_SPARKLE_PRIVATE_ED_KEY }}
+          TC_STAGING_GCP_WIF_PROVIDER: ${{ secrets.TC_STAGING_GCP_WIF_PROVIDER }}
+          TC_STAGING_GCP_PUBLISHER_SA: ${{ secrets.TC_STAGING_GCP_PUBLISHER_SA }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
+            MACOS_SIGNING_IDENTITY MACOS_NOTARY_ASC_KEY_P8_BASE64 \
+            MACOS_NOTARY_ASC_KEY_ID MACOS_NOTARY_ASC_ISSUER_ID \
+            TC_STAGING_SPARKLE_PUBLIC_ED_KEY TC_STAGING_SPARKLE_PRIVATE_ED_KEY \
+            TC_STAGING_GCP_WIF_PROVIDER TC_STAGING_GCP_PUBLISHER_SA
+          do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "refusing to build: the repository is missing the secrets ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "all 10 staging credentials are present"
+
+      # The commit being built must pass the release check itself: it is
+      # what keeps the staging feature out of every release build.
+      - name: The release check passes at this commit
+        run: scripts/ci/check-release-staging-feature.sh check
+
+      # CFBundleShortVersionString is the next production version with a
+      # -staging.<run number> suffix; CFBundleVersion only rises, so Sparkle
+      # orders staging builds (6.1). The run number is this workflow's own,
+      # monotonic across branches and dispatches.
+      - id: v
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          MANIFEST=crates/trace-commons-contributor-gtk/Cargo.toml
+          BASE="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
+          if ! printf '%s' "$BASE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "refusing to build: $MANIFEST version '$BASE' is not three-part numeric" >&2
+            exit 1
+          fi
+          {
+            echo "sha=$SHA"
+            echo "short=$BASE-staging.$RUN_NUMBER"
+            echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))"
+            echo "tag=staging-$(date -u +%Y%m%d)-${SHA:0:7}-$RUN_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: staging macOS DMG
+    needs: [preflight]
+    # The same image the production DMG builds on.
+    runs-on: macos-26
+    # Holds the Developer ID private key and the staging Sparkle key.
+    timeout-minutes: 120
+    permissions:
+      contents: write # the pre-release and its tag
+      id-token: write # workload identity federation, build provenance
+      attestations: write
+    env:
+      SHA: ${{ needs.preflight.outputs.sha }}
+      SHORT_VERSION: ${{ needs.preflight.outputs.short }}
+      BUILD_VERSION: ${{ needs.preflight.outputs.build }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      # The same pinned toolchain as the production DMG build, with both
+      # darwin targets for the universal dylib and CLI.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.96"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # No build cache, as in the production signing job: a cache is a
+      # write-target a lower-privilege job can poison, and this job signs.
+
+      # The Swift suite, against a production-channel debug dylib, as the
+      # client CI runs it. Its tests pin production hosts (the invite host,
+      # the billing destination, the public run link), so against a staging
+      # dylib about a dozen fail by design. The staging dylib's own channel
+      # is checked on the bundle below, before anything is signed.
+      - name: swift test
+        run: |
+          set -euo pipefail
+          cargo build -p trace-commons-contributor-ffi
+          swift test --package-path macos
+
+      # make-release-dmg.sh reads macos/channels/staging.env: the bundle id,
+      # name, entitlements and profile, the staging Sparkle key variable, and
+      # the near-ai-staging cargo features for the dylib and the CLI. It
+      # refuses on any missing credential and, before signing, on a bundle
+      # whose Info.plist, CLI and FFI library do not all report `staging`
+      # (4.3).
+      - name: Build, sign, notarize and staple
+        env:
+          TC_CHANNEL: staging
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_ASC_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_ASC_KEY_P8_BASE64 }}
+          MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
+          MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
+          TC_STAGING_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.TC_STAGING_SPARKLE_PUBLIC_ED_KEY }}
+        run: ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
+
+      # The signed app is launched, not merely inspected: an app carrying a
+      # keychain entitlement without its profile is killed at exec.
+      - name: Verify entitlements and reach the credential store
+        run: ./scripts/ci/verify-macos-entitlements.sh "macos/.build/Near.ai Staging.app"
+
+      # The channel agreement once more on the signed bundle, and the update
+      # identity: the feed is the channel file's and the key is the staging
+      # one, so a production appcast can never update this app (4.7).
+      - name: Check the signed bundle's channel and update feed
+        env:
+          TC_CHANNEL: staging
+          STAGING_KEY: ${{ secrets.TC_STAGING_SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          set -euo pipefail
+          . macos/scripts/channel.sh
+          load_channel
+          APP="macos/.build/$TC_BUNDLE_NAME.app"
+          assert_bundle_channel "$APP"
+          python3 -I - "$APP/Contents/Info.plist" "$TC_BUNDLE_ID" "$TC_SPARKLE_FEED_URL" <<'PY'
+          import os, plistlib, sys
+          path, bundle_id, feed = sys.argv[1:]
+          with open(path, "rb") as f:
+              plist = plistlib.load(f)
+          checks = {
+              "CFBundleIdentifier": bundle_id,
+              "TCChannel": "staging",
+              "SUFeedURL": feed,
+              "SUPublicEDKey": os.environ["STAGING_KEY"],
+          }
+          bad = [k for k, want in checks.items() if plist.get(k) != want]
+          if bad:
+              sys.exit("FATAL: the signed bundle's Info.plist differs from the staging channel at: " + ", ".join(bad))
+          print("the signed bundle names the staging channel, feed and update key")
+          PY
+
+      - name: Name and checksum the DMG
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          DMG="Near.ai-Staging-$SHORT_VERSION.dmg"
+          cp "macos/.build/Near.ai Staging.dmg" "dist/$DMG"
+          ( cd dist && shasum -a 256 "$DMG" > "$DMG.sha256" )
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+        with:
+          subject-path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+
+      # Where the appcast and DMG go comes from the channel file's feed URL,
+      # the one the bundle was built with, so the two cannot drift apart.
+      - name: Resolve the staging update location
+        env:
+          TC_CHANNEL: staging
+        run: |
+          set -euo pipefail
+          . macos/scripts/channel.sh
+          load_channel
+          FEED="$TC_SPARKLE_FEED_URL"
+          PREFIX="https://storage.googleapis.com/"
+          if ! printf '%s' "$FEED" | grep -Eq '^https://storage\.googleapis\.com/[a-z0-9][a-z0-9._-]*/([a-z0-9._-]+/)*appcast\.xml$'; then
+            echo "refusing to publish: the staging feed URL is not a bucket object URL" >&2
+            exit 1
+          fi
+          BASE="${FEED%/appcast.xml}"
+          {
+            echo "FEED_URL=$FEED"
+            echo "DMG_URL=$BASE/$DMG"
+            echo "GS_BASE=gs://${BASE#"$PREFIX"}"
+          } >> "$GITHUB_ENV"
+
+      # The signature check below needs `pkeyutl -rawin`; the runner's
+      # /usr/bin/openssl is LibreSSL, which has no such thing.
+      - name: Resolve a real OpenSSL (not LibreSSL)
+        run: |
+          set -euo pipefail
+          OPENSSL_DIR="$(brew --prefix openssl@3)/bin"
+          VERSION_STRING="$("$OPENSSL_DIR/openssl" version)"
+          case "$VERSION_STRING" in
+            OpenSSL\ *) ;;
+            *) echo "not OpenSSL at $OPENSSL_DIR/openssl: $VERSION_STRING" >&2; exit 1 ;;
+          esac
+          echo "$OPENSSL_DIR" >> "$GITHUB_PATH"
+
+      # The key is written to RUNNER_TEMP with mode 600 and passed to
+      # sign_update as a file, never in argv. Never `set -x` here.
+      - name: Generate the signed staging appcast
+        env:
+          STAGING_PRIVATE_KEY: ${{ secrets.TC_STAGING_SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          KEY="$RUNNER_TEMP/staging-sparkle-ed-key"
+          rm -f "$KEY"
+          ( umask 077; printf '%s' "$STAGING_PRIVATE_KEY" > "$KEY" )
+          chmod 600 "$KEY"
+          SIGN_UPDATE="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          test -x "$SIGN_UPDATE" || { echo "sign_update missing at $SIGN_UPDATE" >&2; exit 1; }
+          ./scripts/updates/generate-appcast.sh \
+            --short-version "$SHORT_VERSION" \
+            --prerelease staging \
+            --title "Near.ai Staging" \
+            --build-version "$BUILD_VERSION" \
+            --dmg-url "$DMG_URL" \
+            --dmg-path "dist/$DMG" \
+            --sign-update "$SIGN_UPDATE" \
+            --ed-key-file "$KEY" \
+            --out dist/updates/appcast.xml
+          rm -f "$KEY"
+          cat dist/updates/appcast.xml
+
+      # Verify the appcast's signature over the DMG against the public key
+      # the bundle carries, which is what an installed staging app checks.
+      # A private key that is not the public key's pair would otherwise
+      # publish an update every staging app silently rejects.
+      - name: Verify the appcast signature against the staging public key
+        env:
+          STAGING_KEY: ${{ secrets.TC_STAGING_SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          set -euo pipefail
+          SIG="$(sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p' dist/updates/appcast.xml)"
+          [ -n "$SIG" ] || { echo "the appcast has no edSignature" >&2; exit 1; }
+          python3 -I - "$RUNNER_TEMP/staging-sparkle-pub.der" "$RUNNER_TEMP/staging-sparkle.sig" "$SIG" <<'PY'
+          import base64, os, sys
+          der_path, sig_path, sig = sys.argv[1:]
+          pub = base64.b64decode(os.environ["STAGING_KEY"], validate=True)
+          if len(pub) != 32:
+              sys.exit("the staging Sparkle public key is not 32 bytes")
+          # SubjectPublicKeyInfo for an Ed25519 key: fixed prefix + raw key.
+          with open(der_path, "wb") as f:
+              f.write(bytes.fromhex("302a300506032b6570032100") + pub)
+          with open(sig_path, "wb") as f:
+              f.write(base64.b64decode(sig, validate=True))
+          PY
+          openssl pkeyutl -verify -rawin -pubin -keyform DER \
+            -inkey "$RUNNER_TEMP/staging-sparkle-pub.der" \
+            -sigfile "$RUNNER_TEMP/staging-sparkle.sig" \
+            -in "dist/$DMG"
+
+      - name: Authenticate to GCP (workload identity federation; no key on the runner)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.TC_STAGING_GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.TC_STAGING_GCP_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # DMG first, appcast second, so the feed never names a DMG that is not
+      # there yet. The DMG is version-named and immutable; the appcast is
+      # cached briefly, so a new staging build reaches testers within minutes.
+      - name: Publish to the staging bucket
+        run: |
+          set -euo pipefail
+          gcloud storage cp \
+            --content-type=application/x-apple-diskimage \
+            --cache-control="public, max-age=31536000, immutable" \
+            "dist/$DMG" "$GS_BASE/$DMG"
+          gcloud storage cp --cache-control="public, max-age=300" \
+            dist/updates/appcast.xml "$GS_BASE/appcast.xml"
+          echo "published $FEED_URL"
+
+      # A pre-release, never latest: the production cask and update manifest
+      # read only full releases, and nothing here touches either.
+      - name: Create the GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Internal staging build of the macOS app, version $SHORT_VERSION, from $SHA.
+
+          It talks only to the staging servers and NEAR AI staging, installs beside the released app and shares nothing with it. It is not a release: use the released app unless you were asked to test staging.
+
+          Signed with Developer ID and notarized. Updates come from the staging feed only.
+          EOF
+          gh release create "$TAG" \
+            "dist/$DMG" "dist/$DMG.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "Staging $SHORT_VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --prerelease \
+            --latest=false
+          {
+            echo "### Staging macOS build $SHORT_VERSION"
+            echo "- pre-release: $TAG"
+            echo "- feed: $FEED_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

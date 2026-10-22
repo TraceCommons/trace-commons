@@ -335,6 +335,13 @@ char*       tc_build_channel_json(void);
  */
 char*       tc_channel_mismatch_line(void);
 
+/* The label a shell shows in its windows to mark a staging build: the
+ * core's word on staging, the empty string on production (which shows
+ * nothing). Returns an owned string; free it with tc_string_free. NULL only
+ * on a caught panic.
+ */
+char*       tc_channel_window_label(void);
+
 /* The state directory the core would pick, so a shell that chooses its own
  * directory still gets the core's refusal of the other channel's.
  *

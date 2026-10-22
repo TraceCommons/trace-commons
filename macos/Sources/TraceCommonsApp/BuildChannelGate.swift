@@ -23,6 +23,10 @@ enum BuildChannelGate {
     /// The dylib's channel, read once: it is fixed for the process.
     static let dylibChannel: BuildChannel? = BuildChannel.decode(fromJSON: TCBuildChannel.json())
 
+    /// The main window's persistent label (spec S7, 4.8): the core's word
+    /// on a staging dylib, nil on production. Read once, like the channel.
+    static let windowLabel: String? = TCBuildChannel.windowLabel()
+
     static func verdict(plistChannel: String?) -> Verdict {
         switch ChannelAgreement.verdict(plistChannel: plistChannel, dylib: dylibChannel) {
         case .agreed(let channel):
