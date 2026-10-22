@@ -718,6 +718,32 @@ mod tests {
         }
     }
 
+    /// The other channel's commons is refused before anything is sent to it:
+    /// a production build never fetches the staging commons's capability or
+    /// hands it a NEAR AI token, nor the reverse, and the refresh token is
+    /// not spent.
+    #[tokio::test]
+    async fn the_other_channel_s_commons_is_refused_before_any_request() {
+        #[cfg(not(feature = "near-ai-staging"))]
+        let other = format!(
+            "https://ingest.{}",
+            ["staging", "tracecommons", "ai"].join(".")
+        );
+        #[cfg(feature = "near-ai-staging")]
+        let other = "https://ingest.tracecommons.ai".to_string();
+        let shared = shared_with_session();
+        let (api, hits) = counting_cloud_api().await;
+        let error = enroll(&shared, &api, &other).await.unwrap_err();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(label(&error), "near_ai_enroll_endpoint_refused");
+        assert_eq!(stored_refresh(&shared).as_deref(), Some(REFRESH));
+        assert!(shared.store.load_config().unwrap().is_none());
+        // `prepare` itself refuses, so the legacy invite migration, which
+        // calls it directly, is covered too.
+        let refusal = prepare(&shared, &other).await.err().unwrap();
+        assert_eq!(label(&refusal), "near_ai_enroll_endpoint_refused");
+    }
+
     /// The first run's "Sign in with near.ai" without an invite names no
     /// commons: an unenrolled daemon enrolls against the native account's
     /// commons, the one origin `native_identity` trusts before any config

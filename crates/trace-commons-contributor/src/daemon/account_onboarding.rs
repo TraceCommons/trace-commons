@@ -215,6 +215,13 @@ fn derive_signup_allowlist(
     origin: &str,
     published: &[&str],
 ) -> Result<HostAllowlist> {
+    // The other channel's hosts are refused whatever the allowlist says, and
+    // before any caller has fetched, posted or spent anything: every signup
+    // and enrollment path derives its allowlist here first.
+    for url in std::iter::once(origin).chain(published.iter().copied()) {
+        crate::channel::refuse_other_channel_origin(url)
+            .map_err(|_| anyhow!("near_signup_endpoint_refused"))?;
+    }
     if configured.is_enforcing() {
         return Ok(configured.clone());
     }
@@ -1151,12 +1158,15 @@ mod tests {
             capability_publishing(
                 "https://issuer.example",
                 "https://witness.example",
-                Some("https://cloud-api.near.ai/v1"),
+                Some(crate::channel::NEAR_AI_INFERENCE_BASE),
             ),
             Path::Wallet,
         )
         .expect("a ready commons");
-        assert_eq!(receipt.as_deref(), Some("https://cloud-api.near.ai/v1"));
+        assert_eq!(
+            receipt.as_deref(),
+            Some(crate::channel::NEAR_AI_INFERENCE_BASE)
+        );
     }
 
     /// A commons that publishes none is not a commons that fails. The person
