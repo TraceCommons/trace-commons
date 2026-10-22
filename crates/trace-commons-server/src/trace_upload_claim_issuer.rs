@@ -10,7 +10,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -43,7 +43,8 @@ use trace_commons_protocol::device_invite_subject::{
 };
 use trace_commons_protocol::insights_judgement::{
     JUDGEMENT_CLAIM_MAX_SKEW_SECONDS, JUDGEMENT_CLAIM_PATH, JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION,
-    JUDGEMENT_CLAIM_REQUEST_STALE, JudgementClaimRequest, JudgementClaimResponse, JudgementRefusal,
+    JUDGEMENT_CLAIM_RETRY_AFTER_SECS, JudgementClaimRefusal, JudgementClaimRequest,
+    JudgementClaimResponse, JudgementClaimRetry,
 };
 use trace_commons_protocol::invite_lookup::{
     INVITE_LOOKUP_PATH, INVITE_LOOKUP_REASON_MALFORMED, INVITE_LOOKUP_REASON_NOT_FOUND,
@@ -1808,16 +1809,36 @@ async fn judgement_claim_handler(
     State(state): State<Arc<TraceUploadClaimIssuerState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<JudgementClaimResponse>, IssuerError> {
+) -> Response {
     let result = state.judgement_claim(&headers, &body).await;
-    // Label-only: never the tenant, the account or the device, so the
-    // issuer's log does not record which accounts use the judgement service.
+    // Label-only: never the tenant, the account or the device. This keeps
+    // the issuer's own log from listing which accounts use judgements. It
+    // does not hide that from the issuer process, which authenticates the
+    // device and so sees which account mints a claim, and when.
     let outcome = match &result {
         Ok(_) => "minted",
-        Err(error) => error.message,
+        Err(refusal) => refusal.label(),
     };
     tracing::info!(outcome, "insights judgement claim");
-    result.map(Json)
+    match result {
+        Ok(response) => Json(response).into_response(),
+        Err(refusal) => judgement_claim_refusal_response(refusal),
+    }
+}
+
+/// A refusal from the closed set: its status, `{"error": "<label>"}`, and
+/// `Retry-After` when the daemon may retry on a timer.
+fn judgement_claim_refusal_response(refusal: JudgementClaimRefusal) -> Response {
+    let status =
+        StatusCode::from_u16(refusal.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, Json(json!({ "error": refusal.label() }))).into_response();
+    if refusal.retry() == JudgementClaimRetry::AfterDelay {
+        response.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from(JUDGEMENT_CLAIM_RETRY_AFTER_SECS),
+        );
+    }
+    response
 }
 
 impl TraceUploadClaimIssuerState {
@@ -1829,56 +1850,75 @@ impl TraceUploadClaimIssuerState {
     /// the tenant id, and only a per-account tenant (`near-` or `nearai-` and
     /// 64 lowercase hex) is one account. Any other tenant may hold many
     /// people, who would share one cap, so v1 refuses it. The judgement
-    /// service applies the same predicate on its side.
+    /// service applies the same predicate on its side. Last, the device must
+    /// still be allowed to mint upload claims under this issuer's grant
+    /// policy.
+    ///
+    /// Every refusal is a [`JudgementClaimRefusal`]; nothing here returns the
+    /// upload-claim route's prose. Nothing here logs the tenant or the
+    /// device.
     async fn judgement_claim(
         &self,
         headers: &HeaderMap,
         body: &Bytes,
-    ) -> Result<JudgementClaimResponse, IssuerError> {
-        let auth = device_claim_auth_from_headers(headers)?
-            .ok_or_else(|| IssuerError::bad_request("device key auth requires id and signature"))?;
-        let request: JudgementClaimRequest = serde_json::from_slice(body)
-            .map_err(|_| IssuerError::bad_request("invalid judgement claim request"))?;
+    ) -> Result<JudgementClaimResponse, JudgementClaimRefusal> {
+        let auth = device_claim_auth_from_headers(headers)
+            .map_err(|_| JudgementClaimRefusal::Malformed)?
+            .ok_or(JudgementClaimRefusal::Malformed)?;
+        let request: JudgementClaimRequest =
+            serde_json::from_slice(body).map_err(|_| JudgementClaimRefusal::Malformed)?;
         if request.schema_version != JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION {
-            return Err(IssuerError::bad_request("invalid judgement claim request"));
+            return Err(JudgementClaimRefusal::Malformed);
         }
         if request.device_key_id != auth.device_key_id {
-            return Err(IssuerError::bad_request("device key id mismatch"));
+            return Err(JudgementClaimRefusal::DeviceKeyMismatch);
         }
         let now = Utc::now();
         if (now.timestamp() - request.issued_at).abs() > JUDGEMENT_CLAIM_MAX_SKEW_SECONDS {
-            return Err(IssuerError::bad_request(JUDGEMENT_CLAIM_REQUEST_STALE));
+            return Err(JudgementClaimRefusal::Stale);
         }
-        let tenant_id =
-            normalized_required(Some(request.tenant_id.as_str()), "tenant_id is required")?;
+        let tenant_id = normalized_required(Some(request.tenant_id.as_str()), "")
+            .map_err(|_| JudgementClaimRefusal::Malformed)?;
         let db = self
             .onboarding_device_key_db
             .as_ref()
-            .ok_or_else(IssuerError::device_key_registry_not_configured)?;
+            .ok_or(JudgementClaimRefusal::RegistryUnavailable)?;
         let device_key = db
             .get_device_key(&tenant_id, &auth.device_key_id)
             .await
-            .map_err(|_| IssuerError::internal())?
-            .ok_or_else(|| IssuerError::forbidden(DEVICE_INVITE_SUBJECT_NOT_REGISTERED))?;
-        let public_key_bytes =
-            device_public_key_bytes(&device_key.public_key, &auth.device_key_id)?;
-        verify_device_claim_signature(&public_key_bytes, body, &auth.signature)?;
+            .map_err(|_| JudgementClaimRefusal::IssueFailed)?
+            .ok_or(JudgementClaimRefusal::DeviceKeyNotRegistered)?;
+        // The upload-claim route logs the device key id for a bad stored key;
+        // this route logs a fixed label instead.
+        let public_key_bytes = stored_device_public_key_bytes(
+            &device_key.public_key,
+            &auth.device_key_id,
+        )
+        .map_err(|_| {
+            tracing::warn!("stored device public key unusable on the judgement claim route");
+            JudgementClaimRefusal::IssueFailed
+        })?;
+        verify_device_claim_signature(&public_key_bytes, body, &auth.signature)
+            .map_err(|_| JudgementClaimRefusal::SignatureInvalid)?;
         if device_key.revoked_at.is_some() {
-            return Err(IssuerError::forbidden(DEVICE_INVITE_SUBJECT_REVOKED));
+            return Err(JudgementClaimRefusal::DeviceKeyRevoked);
         }
         if !crate::judgement_service::claim::is_per_account_tenant_id(&tenant_id) {
-            return Err(IssuerError::forbidden(
-                JudgementRefusal::AccountIneligible.label(),
-            ));
+            return Err(JudgementClaimRefusal::AccountIneligible);
         }
-        // The service refuses a claim that lives longer than 15 minutes, so
-        // an operator who raises the upload TTL must not break these.
-        let lifetime = self
-            .max_ttl_seconds
-            .min(crate::judgement_service::claim::JUDGEMENT_CLAIM_MAX_LIFETIME_SECS);
+        self.judgement_claim_grant_admits(&tenant_id, &auth.device_key_id, now)
+            .await?;
+        // The service refuses a claim that lives longer than 15 minutes, with
+        // a minute of skew on each bound. Clamping to 15 minutes less that
+        // skew keeps a claim acceptable while the service's clock lags or
+        // leads the issuer's, however high an operator sets the upload TTL.
+        let lifetime = self.max_ttl_seconds.min(
+            crate::judgement_service::claim::JUDGEMENT_CLAIM_MAX_LIFETIME_SECS
+                - crate::judgement_service::claim::JUDGEMENT_CLAIM_CLOCK_SKEW_SECS,
+        );
         let expires_at = now
             .checked_add_signed(Duration::seconds(lifetime))
-            .ok_or_else(IssuerError::internal)?;
+            .ok_or(JudgementClaimRefusal::IssueFailed)?;
         let claims = JudgementClaimClaims {
             iss: self.issuer.clone(),
             aud: crate::judgement_service::claim::JUDGEMENT_CLAIM_AUDIENCE,
@@ -1890,13 +1930,61 @@ impl TraceUploadClaimIssuerState {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.signing_kid.clone());
         let access_token = jsonwebtoken::encode(&header, &claims, &self.signing_key)
-            .map_err(|_| IssuerError::internal())?;
+            .map_err(|_| JudgementClaimRefusal::IssueFailed)?;
         Ok(JudgementClaimResponse {
             access_token,
             token_type: "Bearer".to_string(),
             expires_at: expires_at.timestamp(),
             expires_in: lifetime,
         })
+    }
+
+    /// The upload-claim route's grant rule, applied to a judgement claim:
+    /// when this issuer requires tenant access grants, the device must hold
+    /// an active contributor grant bound to this issuer (or a NEAR-provisioned
+    /// anchor, where provisioning is on), exactly as it must to mint an upload
+    /// claim. A device whose grant is revoked mints neither. Without the
+    /// requirement, the upload route does not check grants either.
+    async fn judgement_claim_grant_admits(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), JudgementClaimRefusal> {
+        if !self.require_tenant_access_grants {
+            return Ok(());
+        }
+        let db = self
+            .tenant_access_grant_db
+            .as_ref()
+            .ok_or(JudgementClaimRefusal::IssueFailed)?;
+        let principal_ref = crate::account_trust::device_principal_ref(tenant_id, device_key_id);
+        if near_provisioned_anchor_admits(db.as_ref(), tenant_id, &principal_ref)
+            .await
+            .map_err(|_| JudgementClaimRefusal::IssueFailed)?
+        {
+            return Ok(());
+        }
+        let actor = crate::account_trust::device_claim_actor(tenant_id, device_key_id, None);
+        let grants =
+            active_tenant_access_grants(db.as_ref(), tenant_id, &principal_ref, &actor, now)
+                .await
+                .map_err(|_| JudgementClaimRefusal::IssueFailed)?;
+        let admitted = grants.iter().any(|grant| {
+            grant.status == TraceTenantAccessGrantStatus::Active
+                && grant.role == TraceTenantAccessGrantRole::Contributor
+                && tenant_access_grant_matches_claim_binding(
+                    grant,
+                    &self.issuer,
+                    &self.audience,
+                    &actor,
+                )
+        });
+        if admitted {
+            Ok(())
+        } else {
+            Err(JudgementClaimRefusal::GrantRequired)
+        }
     }
 }
 
@@ -2934,42 +3022,14 @@ impl TraceUploadClaimIssuerState {
         // Explicit NEAR device identity can obtain narrowly scoped claims before
         // submission admission. This does not grant an invite or window budget;
         // ingest's separately configured admission ledger must authorize each upload.
-        if std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED").is_ok_and(|v| v == "true")
-            && db
-                .get_near_provisioned_anchor(tenant_id, principal_ref)
-                .await
-                .map_err(|_| IssuerError::internal())?
-                .is_some()
-        {
+        if near_provisioned_anchor_admits(db.as_ref(), tenant_id, principal_ref).await? {
             if consent_scopes.is_empty() || allowed_uses.is_empty() {
                 return Err(IssuerError::forbidden("native claim scopes required"));
             }
             return Ok(());
         }
-        // Dual-read canonical method-bound refs and pre-#209 signed hashes so
-        // grants provisioned under either shape still authorize.
-        let mut principal_refs = vec![principal_ref.to_string()];
-        let legacy_signed = legacy_signed_claim_principal_ref(tenant_id, actor);
-        if legacy_signed != principal_ref {
-            principal_refs.push(legacy_signed);
-        }
-        let mut grants = Vec::new();
-        for candidate in &principal_refs {
-            let matched = db
-                .list_active_trace_tenant_access_grants_for_principal(tenant_id, candidate, now)
-                .await
-                .map_err(|_| IssuerError::internal())?;
-            for grant in matched {
-                if grants
-                    .iter()
-                    .all(|existing: &TraceTenantAccessGrantRecord| {
-                        existing.grant_id != grant.grant_id
-                    })
-                {
-                    grants.push(grant);
-                }
-            }
-        }
+        let grants =
+            active_tenant_access_grants(db.as_ref(), tenant_id, principal_ref, actor, now).await?;
         authorize_upload_claim_from_tenant_grants(
             &grants,
             &self.issuer,
@@ -2979,6 +3039,56 @@ impl TraceUploadClaimIssuerState {
             allowed_uses,
         )
     }
+}
+
+/// Whether NEAR provisioning is on and this principal has a provisioned
+/// anchor, which stands in for a tenant access grant.
+async fn near_provisioned_anchor_admits(
+    db: &dyn Database,
+    tenant_id: &str,
+    principal_ref: &str,
+) -> Result<bool, IssuerError> {
+    if !std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED").is_ok_and(|v| v == "true") {
+        return Ok(false);
+    }
+    Ok(db
+        .get_near_provisioned_anchor(tenant_id, principal_ref)
+        .await
+        .map_err(|_| IssuerError::internal())?
+        .is_some())
+}
+
+/// The active grants for a principal. Dual-reads the canonical method-bound
+/// ref and the pre-#209 signed hash, so grants provisioned under either shape
+/// still authorize.
+async fn active_tenant_access_grants(
+    db: &dyn Database,
+    tenant_id: &str,
+    principal_ref: &str,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<TraceTenantAccessGrantRecord>, IssuerError> {
+    let mut principal_refs = vec![principal_ref.to_string()];
+    let legacy_signed = legacy_signed_claim_principal_ref(tenant_id, actor);
+    if legacy_signed != principal_ref {
+        principal_refs.push(legacy_signed);
+    }
+    let mut grants = Vec::new();
+    for candidate in &principal_refs {
+        let matched = db
+            .list_active_trace_tenant_access_grants_for_principal(tenant_id, candidate, now)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        for grant in matched {
+            if grants
+                .iter()
+                .all(|existing: &TraceTenantAccessGrantRecord| existing.grant_id != grant.grant_id)
+            {
+                grants.push(grant);
+            }
+        }
+    }
+    Ok(grants)
 }
 
 /// Tag the source label for log lines without exposing the trait method
@@ -3202,35 +3312,54 @@ fn resolve_granted_uses(
     intersect_requested_with_ceiling(requested_uses, ceiling_uses, "allowed uses not permitted")
 }
 
+/// Why a stored device public key cannot be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredDeviceKeyDefect {
+    Malformed,
+    InvalidLength,
+    IdMismatch,
+}
+
+/// Decode a stored device public key and check that it is the key
+/// `expected_device_key_id` names. Logs nothing, so each caller decides what
+/// its log line may carry.
+fn stored_device_public_key_bytes(
+    public_key: &str,
+    expected_device_key_id: &str,
+) -> Result<Vec<u8>, StoredDeviceKeyDefect> {
+    let public_key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(public_key.trim())
+        .map_err(|_| StoredDeviceKeyDefect::Malformed)?;
+    if public_key_bytes.len() != 32 {
+        return Err(StoredDeviceKeyDefect::InvalidLength);
+    }
+    if device_key_id_from_public_key_bytes(&public_key_bytes) != expected_device_key_id {
+        return Err(StoredDeviceKeyDefect::IdMismatch);
+    }
+    Ok(public_key_bytes)
+}
+
 fn device_public_key_bytes(
     public_key: &str,
     expected_device_key_id: &str,
 ) -> Result<Vec<u8>, IssuerError> {
-    let public_key_bytes = base64::engine::general_purpose::STANDARD
-        .decode(public_key.trim())
-        .map_err(|_| {
-            tracing::warn!(
+    stored_device_public_key_bytes(public_key, expected_device_key_id).map_err(|defect| {
+        match defect {
+            StoredDeviceKeyDefect::Malformed => tracing::warn!(
                 device_key_id = %expected_device_key_id,
                 "stored device public key is malformed"
-            );
-            IssuerError::internal()
-        })?;
-    if public_key_bytes.len() != 32 {
-        tracing::warn!(
-            device_key_id = %expected_device_key_id,
-            "stored device public key has invalid length"
-        );
-        return Err(IssuerError::internal());
-    }
-    let actual_device_key_id = device_key_id_from_public_key_bytes(&public_key_bytes);
-    if actual_device_key_id != expected_device_key_id {
-        tracing::warn!(
-            device_key_id = %expected_device_key_id,
-            "stored device public key does not match device key id"
-        );
-        return Err(IssuerError::internal());
-    }
-    Ok(public_key_bytes)
+            ),
+            StoredDeviceKeyDefect::InvalidLength => tracing::warn!(
+                device_key_id = %expected_device_key_id,
+                "stored device public key has invalid length"
+            ),
+            StoredDeviceKeyDefect::IdMismatch => tracing::warn!(
+                device_key_id = %expected_device_key_id,
+                "stored device public key does not match device key id"
+            ),
+        }
+        IssuerError::internal()
+    })
 }
 
 fn verify_device_claim_signature(
@@ -5776,13 +5905,27 @@ mod tests {
         device_keys: std::sync::RwLock<
             std::collections::HashMap<(String, String), crate::db::DeviceKeyRecord>,
         >,
+        /// Tenant access grants by `(tenant_id, principal_ref)`.
+        grants: std::sync::RwLock<
+            std::collections::HashMap<(String, String), Vec<TraceTenantAccessGrantRecord>>,
+        >,
     }
 
     impl StubDeviceKeyDb {
         fn new() -> Self {
             Self {
                 device_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
+                grants: std::sync::RwLock::new(std::collections::HashMap::new()),
             }
+        }
+
+        fn insert_test_grant(&self, grant: TraceTenantAccessGrantRecord) {
+            self.grants
+                .write()
+                .unwrap()
+                .entry((grant.tenant_id.clone(), grant.principal_ref.clone()))
+                .or_default()
+                .push(grant);
         }
 
         fn insert_test_device_key(
@@ -5870,11 +6013,24 @@ mod tests {
         }
         async fn list_active_trace_tenant_access_grants_for_principal(
             &self,
-            _: &str,
-            _: &str,
-            _: DateTime<Utc>,
+            tenant_id: &str,
+            principal_ref: &str,
+            now: DateTime<Utc>,
         ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
-            todo!("stub")
+            // The same filter as the PostgreSQL query: active, not revoked,
+            // not expired.
+            Ok(self
+                .grants
+                .read()
+                .unwrap()
+                .get(&(tenant_id.to_string(), principal_ref.to_string()))
+                .into_iter()
+                .flatten()
+                .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+                .filter(|grant| grant.revoked_at.is_none())
+                .filter(|grant| grant.expires_at.is_none_or(|expires| expires > now))
+                .cloned()
+                .collect())
         }
         async fn list_trace_credit_events(
             &self,
@@ -6969,15 +7125,18 @@ mod tests {
     /// `POST /v1/insights-judgement/claim`: the judgement claim, end to end
     /// against the service's own verifier (spec section 3, slice 4).
     mod insights_judgement_claim {
+        use super::log_capture::capture_logs;
         use super::*;
         use crate::judgement_service::claim::{
-            JUDGEMENT_CLAIM_AUDIENCE, JUDGEMENT_CLAIM_MAX_LIFETIME_SECS, parse_issuer_public_keys,
-            verify_judgement_claim,
+            JUDGEMENT_CLAIM_AUDIENCE, JUDGEMENT_CLAIM_CLOCK_SKEW_SECS,
+            JUDGEMENT_CLAIM_MAX_LIFETIME_SECS, parse_issuer_public_keys, verify_judgement_claim,
         };
         use ring::signature::KeyPair;
         use std::sync::Arc;
         use trace_commons_protocol::insights_judgement::{
-            JUDGEMENT_CLAIM_PATH, JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION, JudgementRefusal,
+            JUDGEMENT_CLAIM_PATH, JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION,
+            JUDGEMENT_CLAIM_RETRY_AFTER_SECS, JudgementClaimRefusal as Refusal,
+            JudgementClaimRetry,
         };
         use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
 
@@ -7057,6 +7216,15 @@ mod tests {
             headers: &[(&str, &str)],
             body: String,
         ) -> (StatusCode, serde_json::Value) {
+            let (status, _, body) = post_with_headers(config, headers, body).await;
+            (status, body)
+        }
+
+        async fn post_with_headers(
+            config: TraceUploadClaimIssuerConfig,
+            headers: &[(&str, &str)],
+            body: String,
+        ) -> (StatusCode, HeaderMap, serde_json::Value) {
             let router = trace_upload_claim_issuer_router(config).expect("router builds");
             let mut request = Request::builder()
                 .method(Method::POST)
@@ -7070,9 +7238,11 @@ mod tests {
                 .await
                 .expect("request completes");
             let status = response.status();
+            let headers = response.headers().clone();
             let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             (
                 status,
+                headers,
                 serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
             )
         }
@@ -7096,6 +7266,77 @@ mod tests {
 
         fn error(body: &serde_json::Value) -> Option<&str> {
             body.get("error").and_then(|v| v.as_str())
+        }
+
+        /// A refusal on this route is exactly one member of the closed set:
+        /// its status, and a body that is only its label.
+        #[track_caller]
+        fn refused(status: StatusCode, body: &serde_json::Value, want: Refusal) {
+            assert_eq!(status.as_u16(), want.status(), "{body}");
+            assert_eq!(body, &json!({ "error": want.label() }));
+        }
+
+        /// Signed headers for `d`, over `body`.
+        fn signed_headers(d: &Device, body: &str) -> Vec<(String, String)> {
+            vec![
+                (TRACE_DEVICE_KEY_ID_HEADER.to_string(), d.id.clone()),
+                (TRACE_DEVICE_SIGNATURE_HEADER.to_string(), sign(d, body)),
+            ]
+        }
+
+        fn borrowed(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect()
+        }
+
+        fn retry_after(headers: &HeaderMap) -> Option<&str> {
+            headers
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+        }
+
+        fn active_grant(tenant: &str, d: &Device) -> TraceTenantAccessGrantRecord {
+            TraceTenantAccessGrantRecord {
+                tenant_id: tenant.to_string(),
+                principal_ref: crate::account_trust::device_principal_ref(tenant, &d.id),
+                ..test_tenant_access_grant(
+                    Utc::now(),
+                    TraceTenantAccessGrantRole::Contributor,
+                    vec![],
+                    vec![],
+                    None,
+                    None,
+                    None,
+                )
+            }
+        }
+
+        /// A config whose issuer requires an active tenant access grant, with
+        /// the one stub serving both the device registry and the grants.
+        fn config_requiring_grants(
+            records: Vec<DeviceKeyRecord>,
+            grants: Vec<TraceTenantAccessGrantRecord>,
+        ) -> TraceUploadClaimIssuerConfig {
+            let stub = Arc::new(StubDeviceKeyDb::new());
+            for record in records {
+                stub.insert_test_device_key(
+                    &record.tenant_id.clone(),
+                    &record.device_key_id.clone(),
+                    record,
+                );
+            }
+            for grant in grants {
+                stub.insert_test_grant(grant);
+            }
+            let db = stub as Arc<dyn crate::db::Database>;
+            TraceUploadClaimIssuerConfig {
+                onboarding_device_key_db: Some(db.clone()),
+                tenant_access_grant_db: Some(db),
+                require_tenant_access_grants: true,
+                ..test_config()
+            }
         }
 
         /// The issuer's public key in the spelling the judgement service's
@@ -7193,12 +7434,7 @@ mod tests {
                     body(&tenant, &d.id, Utc::now().timestamp()),
                 )
                 .await;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{tenant}: {response}");
-                assert_eq!(
-                    error(&response),
-                    Some(JudgementRefusal::AccountIneligible.label()),
-                    "{tenant}"
-                );
+                refused(status, &response, Refusal::AccountIneligible);
             }
         }
 
@@ -7219,8 +7455,7 @@ mod tests {
                 sent,
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
-            assert_eq!(error(&response), Some("invalid device key signature"));
+            refused(status, &response, Refusal::SignatureInvalid);
         }
 
         /// A judgement claim is never an upload claim: ingest's audience
@@ -7260,14 +7495,17 @@ mod tests {
                 upload_body,
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            refused(status, &response, Refusal::Malformed);
         }
 
-        /// The service refuses a claim that lives over 15 minutes, so an
-        /// operator who raises the upload TTL must not break judgement
-        /// claims: the judgement lifetime is clamped.
+        /// The service refuses a claim that lives over 15 minutes, with a
+        /// minute of clock skew. The issuer clamps the lifetime to 15 minutes
+        /// less that skew, so an operator who raises the upload TTL does not
+        /// break judgement claims when the service's clock lags or leads.
         #[tokio::test]
-        async fn the_lifetime_is_clamped_to_fifteen_minutes() {
+        async fn the_lifetime_is_clamped_inside_the_verifiers_skew() {
+            let clamp = JUDGEMENT_CLAIM_MAX_LIFETIME_SECS - JUDGEMENT_CLAIM_CLOCK_SKEW_SECS;
+            assert_eq!(clamp, 840);
             let tenant = near_tenant();
             let d = device();
             let config = TraceUploadClaimIssuerConfig {
@@ -7277,16 +7515,21 @@ mod tests {
             let (status, response) =
                 signed(config, &d, body(&tenant, &d.id, Utc::now().timestamp())).await;
             assert_eq!(status, StatusCode::OK, "{response}");
-            assert_eq!(response["expires_in"], JUDGEMENT_CLAIM_MAX_LIFETIME_SECS);
+            assert_eq!(response["expires_in"], clamp);
             let token = response["access_token"].as_str().unwrap();
             let claims = unverified_claims(token);
-            assert_eq!(
-                claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(),
-                JUDGEMENT_CLAIM_MAX_LIFETIME_SECS
-            );
+            let issuer_now = claims["iat"].as_i64().unwrap();
+            assert_eq!(claims["exp"].as_i64().unwrap() - issuer_now, clamp);
             assert_eq!(response["expires_at"], claims["exp"]);
             let keys = parse_issuer_public_keys(&issuer_public_key_hex()).unwrap();
-            assert!(verify_judgement_claim(&keys, token, Utc::now().timestamp()).is_ok());
+            // A service clock 30 s behind and 30 s ahead of the issuer's.
+            for service_now in [issuer_now - 30, issuer_now + 30] {
+                assert!(
+                    verify_judgement_claim(&keys, token, service_now).is_ok(),
+                    "refused at issuer_now {:+}",
+                    service_now - issuer_now
+                );
+            }
 
             // A shorter upload TTL is kept as it is.
             let d = device();
@@ -7310,11 +7553,7 @@ mod tests {
                 body(&tenant, &d.id, Utc::now().timestamp()),
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-            assert_eq!(
-                error(&response),
-                Some("device key auth requires id and signature")
-            );
+            refused(status, &response, Refusal::Malformed);
         }
 
         #[tokio::test]
@@ -7336,8 +7575,7 @@ mod tests {
                 tampered,
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
-            assert_eq!(error(&response), Some("invalid device key signature"));
+            refused(status, &response, Refusal::SignatureInvalid);
         }
 
         #[tokio::test]
@@ -7351,8 +7589,7 @@ mod tests {
                 body(&tenant, &other.id, Utc::now().timestamp()),
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-            assert_eq!(error(&response), Some("device key id mismatch"));
+            refused(status, &response, Refusal::DeviceKeyMismatch);
         }
 
         /// A device registered under one account cannot mint for another.
@@ -7365,8 +7602,7 @@ mod tests {
                 body(&near_tenant(), &d.id, Utc::now().timestamp()),
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
-            assert_eq!(error(&response), Some("device_key_not_registered"));
+            refused(status, &response, Refusal::DeviceKeyNotRegistered);
         }
 
         #[tokio::test]
@@ -7379,8 +7615,7 @@ mod tests {
                 body(&tenant, &d.id, Utc::now().timestamp()),
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
-            assert_eq!(error(&response), Some("device_key_revoked"));
+            refused(status, &response, Refusal::DeviceKeyRevoked);
         }
 
         #[tokio::test]
@@ -7394,11 +7629,7 @@ mod tests {
                     body(&tenant, &d.id, issued_at),
                 )
                 .await;
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-                assert_eq!(
-                    error(&response),
-                    Some("insights_judgement_claim_request_stale")
-                );
+                refused(status, &response, Refusal::Stale);
             }
         }
 
@@ -7406,16 +7637,14 @@ mod tests {
         async fn without_a_device_registry_the_route_fails_closed() {
             let tenant = near_tenant();
             let d = device();
-            let (status, response) = signed(
-                test_config(),
-                &d,
-                body(&tenant, &d.id, Utc::now().timestamp()),
-            )
-            .await;
-            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+            let sent = body(&tenant, &d.id, Utc::now().timestamp());
+            let headers = signed_headers(&d, &sent);
+            let (status, response_headers, response) =
+                post_with_headers(test_config(), &borrowed(&headers), sent).await;
+            refused(status, &response, Refusal::RegistryUnavailable);
             assert_eq!(
-                error(&response),
-                Some("device key registry is not configured")
+                retry_after(&response_headers),
+                Some(JUDGEMENT_CLAIM_RETRY_AFTER_SECS.to_string().as_str())
             );
         }
 
@@ -7432,22 +7661,308 @@ mod tests {
                 value.to_string(),
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            refused(status, &response, Refusal::Malformed);
+        }
+
+        /// Malformed device-auth headers are the closed set's malformed
+        /// refusal, not the upload-claim route's prose.
+        #[tokio::test]
+        async fn malformed_device_auth_headers_are_malformed() {
+            let tenant = near_tenant();
+            let d = device();
+            let sent = body(&tenant, &d.id, Utc::now().timestamp());
+            let good_signature = sign(&d, &sent);
+            for headers in [
+                vec![(TRACE_DEVICE_KEY_ID_HEADER, d.id.as_str())],
+                vec![(TRACE_DEVICE_SIGNATURE_HEADER, good_signature.as_str())],
+                vec![
+                    (TRACE_DEVICE_KEY_ID_HEADER, "not-a-device-key-id"),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, good_signature.as_str()),
+                ],
+                vec![
+                    (TRACE_DEVICE_KEY_ID_HEADER, d.id.as_str()),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, "%%%not-base64%%%"),
+                ],
+                vec![
+                    (TRACE_DEVICE_KEY_ID_HEADER, d.id.as_str()),
+                    (TRACE_DEVICE_SIGNATURE_HEADER, "AAAA"),
+                ],
+            ] {
+                let (status, response) = post(
+                    config_with(vec![record(&d, &tenant, false)]),
+                    &headers,
+                    sent.clone(),
+                )
+                .await;
+                refused(status, &response, Refusal::Malformed);
+            }
+        }
+
+        /// A stored key that does not decode is the issuer's fault, not the
+        /// device's: retry later.
+        #[tokio::test]
+        async fn a_malformed_stored_key_is_an_issue_failure() {
+            let tenant = near_tenant();
+            let d = device();
+            let mut broken = record(&d, &tenant, false);
+            broken.public_key = "%%%not-base64%%%".to_string();
+            let sent = body(&tenant, &d.id, Utc::now().timestamp());
+            let headers = signed_headers(&d, &sent);
+            let (status, response_headers, response) =
+                post_with_headers(config_with(vec![broken]), &borrowed(&headers), sent).await;
+            refused(status, &response, Refusal::IssueFailed);
+            assert_eq!(
+                Refusal::IssueFailed.retry(),
+                JudgementClaimRetry::AfterDelay
+            );
+            assert_eq!(
+                retry_after(&response_headers),
+                Some(JUDGEMENT_CLAIM_RETRY_AFTER_SECS.to_string().as_str())
+            );
+        }
+
+        /// A permanent refusal carries no `Retry-After`.
+        #[tokio::test]
+        async fn a_permanent_refusal_has_no_retry_after() {
+            let tenant = near_tenant();
+            let d = device();
+            let sent = body(&tenant, &d.id, Utc::now().timestamp());
+            let headers = signed_headers(&d, &sent);
+            let (status, response_headers, response) = post_with_headers(
+                config_with(vec![record(&d, &tenant, true)]),
+                &borrowed(&headers),
+                sent,
+            )
+            .await;
+            refused(status, &response, Refusal::DeviceKeyRevoked);
+            assert_eq!(retry_after(&response_headers), None);
+        }
+
+        /// When the issuer requires tenant access grants, a device mints a
+        /// judgement claim only while it holds an active contributor grant,
+        /// as it must to mint an upload claim. Revoking the grant stops
+        /// judgement claims too.
+        #[tokio::test]
+        async fn with_grants_required_a_device_needs_an_active_grant() {
+            let tenant = near_tenant();
+            let d = device();
+            let other = device();
+            let attempt = |grants: Vec<TraceTenantAccessGrantRecord>| {
+                let config = config_requiring_grants(vec![record(&d, &tenant, false)], grants);
+                signed(config, &d, body(&tenant, &d.id, Utc::now().timestamp()))
+            };
+
+            let (status, response) = attempt(vec![active_grant(&tenant, &d)]).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+
+            let mut revoked = active_grant(&tenant, &d);
+            revoked.status = TraceTenantAccessGrantStatus::Revoked;
+            revoked.revoked_at = Some(Utc::now());
+            let mut expired = active_grant(&tenant, &d);
+            expired.expires_at = Some(Utc::now() - Duration::minutes(1));
+            let mut reviewer = active_grant(&tenant, &d);
+            reviewer.role = TraceTenantAccessGrantRole::Reviewer;
+            let mut elsewhere = active_grant(&tenant, &d);
+            elsewhere.issuer = Some("another-issuer".to_string());
+            for (case, grants) in [
+                ("none", vec![]),
+                ("revoked", vec![revoked]),
+                ("expired", vec![expired]),
+                ("reviewer role", vec![reviewer]),
+                (
+                    "another device's grant",
+                    vec![active_grant(&tenant, &other)],
+                ),
+                ("bound to another issuer", vec![elsewhere]),
+            ] {
+                let (status, response) = attempt(grants).await;
+                assert_eq!(
+                    error(&response),
+                    Some(Refusal::GrantRequired.label()),
+                    "{case}"
+                );
+                refused(status, &response, Refusal::GrantRequired);
+            }
+        }
+
+        /// A pooled tenant is refused for eligibility before the grant
+        /// lookup, so the answer does not depend on its grants.
+        #[tokio::test]
+        async fn with_grants_required_ineligibility_comes_first() {
+            let tenant = "tenant-invitee";
+            let d = device();
+            let (status, response) = signed(
+                config_requiring_grants(vec![record(&d, tenant, false)], vec![]),
+                &d,
+                body(tenant, &d.id, Utc::now().timestamp()),
+            )
+            .await;
+            refused(status, &response, Refusal::AccountIneligible);
+        }
+
+        /// The route's log lines carry the outcome label and nothing that
+        /// names the account or the device: not on a mint, and not on any
+        /// refusal, including the malformed-stored-key path that logs the
+        /// device key id on the upload-claim route.
+        #[test]
+        fn no_log_line_names_the_tenant_or_the_device() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let tenant = near_tenant();
+            let pooled = "tenant-invitee-logcheck".to_string();
+            let d = device();
+            let other = device();
+            let now = Utc::now().timestamp();
+            let mut broken = record(&d, &tenant, false);
+            broken.public_key = "%%%not-base64%%%".to_string();
+            let signed_case = |config: TraceUploadClaimIssuerConfig, sent: String| {
+                (config, signed_headers(&d, &sent), sent)
+            };
+            let forged = body(&tenant, &d.id, now);
+            let forged_headers = vec![
+                (TRACE_DEVICE_KEY_ID_HEADER.to_string(), d.id.clone()),
+                (
+                    TRACE_DEVICE_SIGNATURE_HEADER.to_string(),
+                    sign(&other, &forged),
+                ),
+            ];
+            let cases = vec![
+                // Minted.
+                signed_case(
+                    config_with(vec![record(&d, &tenant, false)]),
+                    body(&tenant, &d.id, now),
+                ),
+                // Malformed: no device-auth headers.
+                (
+                    config_with(vec![record(&d, &tenant, false)]),
+                    vec![],
+                    body(&tenant, &d.id, now),
+                ),
+                // Device key mismatch.
+                signed_case(
+                    config_with(vec![record(&d, &tenant, false)]),
+                    body(&tenant, &other.id, now),
+                ),
+                // Stale.
+                signed_case(
+                    config_with(vec![record(&d, &tenant, false)]),
+                    body(&tenant, &d.id, now - 3600),
+                ),
+                // Signature invalid.
+                (
+                    config_with(vec![record(&d, &tenant, false)]),
+                    forged_headers,
+                    forged,
+                ),
+                // Not registered.
+                signed_case(config_with(vec![]), body(&tenant, &d.id, now)),
+                // Revoked.
+                signed_case(
+                    config_with(vec![record(&d, &tenant, true)]),
+                    body(&tenant, &d.id, now),
+                ),
+                // Ineligible.
+                signed_case(
+                    config_with(vec![record(&d, &pooled, false)]),
+                    body(&pooled, &d.id, now),
+                ),
+                // Grant required.
+                signed_case(
+                    config_requiring_grants(vec![record(&d, &tenant, false)], vec![]),
+                    body(&tenant, &d.id, now),
+                ),
+                // Registry unavailable.
+                signed_case(test_config(), body(&tenant, &d.id, now)),
+                // Issue failed: the stored key does not decode.
+                signed_case(config_with(vec![broken]), body(&tenant, &d.id, now)),
+            ];
+            let requests = cases.len();
+
+            let mut outcomes = Vec::new();
+            let logged = capture_logs(|| {
+                runtime.block_on(async {
+                    for (config, headers, sent) in cases {
+                        outcomes.push(post(config, &borrowed(&headers), sent).await);
+                    }
+                });
+            });
+
+            // Every refusal in the set was produced once, and every request
+            // logged one line, so the absence checks below are over real
+            // lines.
+            assert_eq!(outcomes[0].0, StatusCode::OK, "{}", outcomes[0].1);
+            let mut seen: Vec<&str> = outcomes[1..]
+                .iter()
+                .map(|(_, body)| error(body).expect("a refusal label"))
+                .collect();
+            seen.sort_unstable();
+            let mut every: Vec<&str> = Refusal::ALL.iter().map(|r| r.label()).collect();
+            every.sort_unstable();
+            assert_eq!(seen, every, "one request per refusal");
+            let lines: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("insights judgement claim"))
+                .collect();
+            assert_eq!(lines.len(), requests, "{logged}");
+            assert!(lines.iter().any(|line| line.contains("minted")), "{logged}");
+            // The bad stored key took this route's own fixed-label line.
+            assert!(
+                logged.contains("stored device public key unusable on the judgement claim route"),
+                "{logged}"
+            );
+            for label in every {
+                assert!(
+                    lines.iter().any(|line| line.contains(label)),
+                    "{label} not logged: {logged}"
+                );
+            }
+            for secret in [
+                tenant.as_str(),
+                &tenant["near-".len()..],
+                pooled.as_str(),
+                d.id.as_str(),
+                &d.id["sha256:".len()..],
+                other.id.as_str(),
+                &other.id["sha256:".len()..],
+            ] {
+                assert!(
+                    !logged.contains(secret),
+                    "{secret} reached the log: {logged}"
+                );
+            }
+        }
+
+        /// The edge does not log which device asks for a claim: every Caddy
+        /// logger deletes the device-key headers, which Caddy otherwise logs
+        /// by default.
+        #[test]
+        fn the_edge_logs_drop_the_device_key_headers() {
+            let template = include_str!("../../../deploy/pilot-gcp/Caddyfile.template");
+            let filters: Vec<&str> = template
+                .split("format filter {")
+                .skip(1)
+                .map(|rest| rest.split("wrap json").next().expect("filter body"))
+                .collect();
+            assert_eq!(filters.len(), 3, "default, ingest and issuer loggers");
+            for filter in filters {
+                for line in [
+                    "request>headers>X-Trace-Device-Key-Id delete",
+                    "request>headers>X-Trace-Device-Signature delete",
+                ] {
+                    assert!(filter.contains(line), "{line} missing from: {filter}");
+                }
+            }
         }
     }
 
-    /// `POST /v1/invite/lookup` without a database: routing, throttling,
-    /// fail-closed behaviour and secret-free logging. The database-backed
-    /// behaviour (labels, no use spent) is `tests/trace_invite_registry_pg.rs`.
-    mod invite_lookup {
-        use super::*;
+    /// Captures the log lines a test emits on its own thread. One module
+    /// for every capture test in this file, because it installs the one
+    /// process-global subscriber the lib tests may have.
+    mod log_capture {
         use std::io::Write;
-        use std::sync::Mutex;
-        use trace_commons_protocol::invite_lookup::{
-            INVITE_LOOKUP_PATH, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
-        };
-
-        const CODE: &str = "ABCDEFGHJKLMNPQR";
+        use std::sync::{Arc, Mutex};
 
         std::thread_local! {
             static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
@@ -7484,7 +7999,7 @@ mod tests {
         /// be dynamic: a plain `filter_fn` caches its first answer per
         /// callsite, so whichever thread registered the handler's `info!`
         /// would decide for all of them again.
-        fn capture_logs(f: impl FnOnce()) -> String {
+        pub(super) fn capture_logs(f: impl FnOnce()) -> String {
             use tracing_subscriber::Layer;
             use tracing_subscriber::layer::SubscriberExt;
             static INSTALL: std::sync::Once = std::sync::Once::new();
@@ -7505,6 +8020,19 @@ mod tests {
             let bytes = sink.lock().unwrap().clone();
             String::from_utf8(bytes).unwrap()
         }
+    }
+
+    /// `POST /v1/invite/lookup` without a database: routing, throttling,
+    /// fail-closed behaviour and secret-free logging. The database-backed
+    /// behaviour (labels, no use spent) is `tests/trace_invite_registry_pg.rs`.
+    mod invite_lookup {
+        use super::log_capture::capture_logs;
+        use super::*;
+        use trace_commons_protocol::invite_lookup::{
+            INVITE_LOOKUP_PATH, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+        };
+
+        const CODE: &str = "ABCDEFGHJKLMNPQR";
 
         fn request_body(code: &str) -> String {
             json!({
