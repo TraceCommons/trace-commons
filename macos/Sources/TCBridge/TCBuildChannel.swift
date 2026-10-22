@@ -16,4 +16,20 @@ public enum TCBuildChannel {
 
     /// `tc_channel_mismatch_line`. Nil only on a caught panic.
     public static func mismatchLine() -> String? { take(tc_channel_mismatch_line()) }
+
+    /// Whether `dir`, taken from this build's override variable, may be the
+    /// state directory: nil to allow it, or the label `tc_resolve_state_dir`
+    /// refused it with (`state-dir-other-channel` when it names the other
+    /// channel's directory). A NULL answer with no label is reported as
+    /// `null-response`, never as allowed.
+    public static func overrideRefusal(_ dir: String) -> String? {
+        var err: UnsafeMutablePointer<CChar>?
+        if take(tc_resolve_state_dir(nil, dir, &err)) != nil { return nil }
+        return take(err) ?? "null-response"
+    }
+
+    /// `tc_state_dir_override_refused_line`. Nil only on a caught panic.
+    public static func overrideRefusedLine() -> String? {
+        take(tc_state_dir_override_refused_line())
+    }
 }

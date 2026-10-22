@@ -62,6 +62,7 @@ mod values {
     pub const CHANNEL: &str = "production";
 
     pub const STATE_DIR_NAME: &str = "trace-commons";
+    pub const OTHER_STATE_DIR_NAME: &str = "trace-commons-staging";
     pub const STATE_DIR_ENV: &str = state_dir_env!();
 
     pub const KEYCHAIN_ACCESS_GROUP: &str = "KXSWJN7WY8.ai.tracecommons.shell";
@@ -88,6 +89,7 @@ mod values {
     pub const CHANNEL: &str = "staging";
 
     pub const STATE_DIR_NAME: &str = "trace-commons-staging";
+    pub const OTHER_STATE_DIR_NAME: &str = "trace-commons";
     pub const STATE_DIR_ENV: &str = state_dir_env!();
 
     pub const KEYCHAIN_ACCESS_GROUP: &str = "KXSWJN7WY8.ai.tracecommons.shell.staging";
@@ -117,6 +119,10 @@ pub const CHANNEL: &str = values::CHANNEL;
 
 /// The state directory's name under the platform's per-user base.
 pub const STATE_DIR_NAME: &str = values::STATE_DIR_NAME;
+/// The other channel's state directory name. An override variable that
+/// resolves to the other channel's default directory is refused
+/// (`crate::config::refuse_other_channel_state_dir`).
+pub const OTHER_STATE_DIR_NAME: &str = values::OTHER_STATE_DIR_NAME;
 /// The environment variable that overrides the state directory. A staging
 /// build reads only its own, so a production override never points it at
 /// production's enrollment.

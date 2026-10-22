@@ -5,7 +5,11 @@ const vm = require("node:vm");
 const assert = require("node:assert/strict");
 const source = fs.readFileSync(process.argv[2] ?? require("node:path").resolve(
   __dirname, "../../crates/trace-commons-contributor/src/daemon/nearai_credential/near_wallet_browser.js"
-), "utf8");
+), "utf8").replace(
+  // The daemon fills in the channel's NEP-413 recipient before serving the
+  // page (near_wallet_page.rs); the fixture below uses production's.
+  /__NEAR_AI_WALLET_RECIPIENT__/g, "cloud.near.ai"
+);
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((a, b) => {
