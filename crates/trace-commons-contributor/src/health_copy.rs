@@ -265,8 +265,7 @@ pub const STATE_DIR_OVERRIDE_REFUSED: &str = concat!(
 /// The short label a staging build shows in its windows (staging design S7
 /// and section 4.8), so a tester never mistakes the staging app for
 /// production. A notice under `docs/ui-copy-guide.md` section 9: the owner
-/// approved it existing (S7); its wording is proposed and pending owner
-/// approval (proposed 2026-10-22).
+/// approved it existing (S7) and its wording. Approved 2026-10-22.
 pub const STAGING_WINDOW_LABEL: &str = "Staging";
 
 /// The label this build shows in its main window: [`STAGING_WINDOW_LABEL`]
@@ -525,9 +524,15 @@ mod tests {
         assert_eq!(window_label(), None);
     }
 
-    /// The proposed wording (pending owner approval) is one plain word.
+    /// The approved wording (2026-10-22) is one word, with no sentence
+    /// punctuation and nothing that names a host or a build.
     #[test]
-    fn the_staging_window_label_is_one_plain_word() {
+    fn the_staging_window_label_is_the_approved_word() {
         assert_eq!(STAGING_WINDOW_LABEL, "Staging");
+        assert!(!STAGING_WINDOW_LABEL.contains(char::is_whitespace));
+        assert!(!STAGING_WINDOW_LABEL.ends_with('.'));
+        for internal in ["near-ai", "tracecommons", "channel", "feature"] {
+            assert!(!STAGING_WINDOW_LABEL.to_lowercase().contains(internal));
+        }
     }
 }
