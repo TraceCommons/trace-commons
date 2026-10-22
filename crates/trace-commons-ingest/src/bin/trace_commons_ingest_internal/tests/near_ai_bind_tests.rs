@@ -3025,7 +3025,7 @@ async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
 /// unlisted subject would reach staging by creating a passkey account and
 /// binding a fresh near.ai login to it.
 ///
-/// These run in the same PostgreSQL suite as the rest of this file. The four
+/// These run in the same PostgreSQL suite as the rest of this file. The
 /// staging tests compile only under `near-ai-staging`; the default-build test
 /// only without it, so each build is checked against its own rule.
 mod staging_allow_list {
@@ -3166,6 +3166,24 @@ mod staging_allow_list {
             audit_metadata(&admin, &tenant, "near_ai_login_provisioned").await,
             vec![serde_json::json!({"identity": "near_ai_login", "admission": "allow_list"})]
         );
+
+        // Signing in again, still listed, finds the account: only the sign-in
+        // that created it says the list admitted it.
+        let again = sign_in(&h, &Device::new()).await;
+        assert_eq!(again.status, StatusCode::OK, "{:?}", again.json());
+        assert_eq!(again.json()["tenant_id"], tenant.as_str());
+        let mut admissions: Vec<String> =
+            audit_metadata(&admin, &tenant, "near_ai_login_provisioned")
+                .await
+                .iter()
+                .map(|row| row["admission"].as_str().expect("admission").to_string())
+                .collect();
+        admissions.sort();
+        assert_eq!(
+            admissions,
+            ["allow_list", "not_granted"],
+            "allow_list once, for the sign-in that created the account"
+        );
         assert_eq!(
             count(
                 &admin,
@@ -3249,6 +3267,31 @@ mod staging_allow_list {
         assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
         assert_eq!(reply.json()["outcome"], "bound");
         drop_tenants(&admin, &[&account.tenant]).await;
+    }
+
+    /// The counterpart of a delisted subject still signing in: a subject off
+    /// the list that already has an account may still bind a passkey account
+    /// to it, since no new account is made for that login.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn an_unlisted_subject_with_an_account_still_binds_to_it() {
+        let Some(h) = harness().await else { return };
+        let admin = h.admin().await;
+        let list = AllowList::with(&[&h.subject]);
+        let first = sign_in(&h, &Device::new()).await;
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.json());
+        let tenant = first.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+
+        list.write(&[]);
+        let p = unbound_account(&h.backend).await;
+        let reply = bind(&h, &p, &Device::new()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert_eq!(reply.json()["outcome"], "existing_account");
+        assert_eq!(anchors_for(&admin, &h.anchor_hash()).await.len(), 1);
+        drop_tenants(&admin, &[&tenant, &p.tenant]).await;
     }
 
     /// The operator's invite still works on a staging build, and taking a
