@@ -1047,11 +1047,62 @@ pub(crate) fn refuse_other_channel_state_dir(
 ) -> Result<(), OtherChannelStateDir> {
     let dir = resolve_path(dir);
     for other in other_defaults {
-        if dir.starts_with(resolve_path(other)) {
+        if path_is_within(&dir, &resolve_path(other)) {
             return Err(OtherChannelStateDir);
         }
     }
     Ok(())
+}
+
+/// Whether `path` is `base` or inside it, compared component by component.
+///
+/// On macOS and Windows a component matches ignoring ASCII case, because
+/// their default filesystems (APFS, NTFS) treat `Trace-Commons` and
+/// `trace-commons` as one directory. [`resolve_path`] canonicalizes only the
+/// part that exists, so without this an override differing in case from a
+/// directory that is not there yet would pass, and then be the same folder
+/// once the other channel creates it. Elsewhere the comparison is exact.
+fn path_is_within(path: &Path, base: &Path) -> bool {
+    let mut path = path.components();
+    base.components().all(|want| {
+        path.next()
+            .is_some_and(|have| component_matches(have.as_os_str(), want.as_os_str()))
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have.as_encoded_bytes()
+        .eq_ignore_ascii_case(want.as_encoded_bytes())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have == want
+}
+
+/// The state directory [`ConfigStore::resolve`] would open, without opening
+/// or creating it. Precedence:
+/// 1. `explicit`, used as given
+/// 2. `override_dir`, the value of the channel's override variable,
+///    refused with [`OtherChannelStateDir`] when it resolves to the other
+///    channel's default directory or inside it
+/// 3. the platform default, see [`platform_default_dir`]
+///
+/// The C ABI's `tc_resolve_state_dir` calls this, so the macOS app, which picks its
+/// directory in Swift, gets the same refusal as the CLI.
+pub fn resolve_state_dir(
+    explicit: Option<PathBuf>,
+    override_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(dir) = explicit {
+        return Ok(dir);
+    }
+    if let Some(dir) = override_dir {
+        refuse_other_channel_state_dir(&dir, &other_channel_default_dirs()?)?;
+        return Ok(dir);
+    }
+    platform_default_dir()
 }
 
 /// Filesystem-backed store for contributor config, device key, and receipts.
@@ -1082,16 +1133,10 @@ impl ConfigStore {
     ///
     /// Creates the directory (mode 0700 on unix) if it does not exist.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
-        let dir = if let Some(dir) = explicit {
-            dir
-        } else if let Ok(dir) = std::env::var(crate::channel::STATE_DIR_ENV) {
-            let dir = PathBuf::from(dir);
-            refuse_other_channel_state_dir(&dir, &other_channel_default_dirs()?)?;
-            dir
-        } else {
-            platform_default_dir()?
-        };
-        Self::open(dir)
+        let override_dir = std::env::var(crate::channel::STATE_DIR_ENV)
+            .ok()
+            .map(PathBuf::from);
+        Self::open(resolve_state_dir(explicit, override_dir)?)
     }
 
     /// Open (creating if necessary) the given directory as a contributor
@@ -1712,6 +1757,57 @@ mod tests {
         assert!(!refused_as_other_channel(&longer, &other));
         assert!(!refused_as_other_channel(&root, &other));
         assert!(refused_as_other_channel(&other, &other));
+    }
+
+    /// APFS and NTFS are case-insensitive by default, so on macOS and
+    /// Windows a case variant of the other channel's directory is that
+    /// directory, whether or not it exists yet. Linux compares exactly.
+    #[test]
+    fn a_case_variant_of_a_missing_other_channel_default_follows_the_platform() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        let upper = root.join(crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase());
+        assert!(!other.exists() && !upper.exists());
+        let case_insensitive = cfg!(any(target_os = "macos", windows));
+        assert_eq!(refused_as_other_channel(&upper, &other), case_insensitive);
+        assert_eq!(
+            refused_as_other_channel(&upper.join("nested"), &other),
+            case_insensitive
+        );
+        // Still by component: a case variant of a longer sibling is not it.
+        let longer = root.join(format!(
+            "{}-X",
+            crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase()
+        ));
+        assert!(!refused_as_other_channel(&longer, &other));
+    }
+
+    #[test]
+    fn resolve_state_dir_takes_explicit_then_override_then_the_default() {
+        let other = other_channel_default_dirs().unwrap().remove(0);
+        // An explicit directory is the caller's own choice and is not checked.
+        assert_eq!(
+            resolve_state_dir(Some(other.clone()), Some(PathBuf::from("/elsewhere"))).unwrap(),
+            other
+        );
+        let (_root, root) = real_root();
+        let own = root.join("own");
+        assert_eq!(resolve_state_dir(None, Some(own.clone())).unwrap(), own);
+        assert_eq!(
+            resolve_state_dir(None, None).unwrap(),
+            platform_default_dir().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_state_dir_refuses_an_override_naming_the_other_channel_default() {
+        for other in other_channel_default_dirs().unwrap() {
+            for candidate in [other.clone(), other.join("nested")] {
+                let err = resolve_state_dir(None, Some(candidate)).unwrap_err();
+                assert!(err.downcast_ref::<OtherChannelStateDir>().is_some());
+                assert_eq!(err.to_string(), "state-dir-other-channel");
+            }
+        }
     }
 
     #[test]
