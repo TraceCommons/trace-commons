@@ -51,6 +51,18 @@ lint() {
       fail "$label: plutil rejects it"
     fi
   fi
+  # plutil tolerates a `--` inside an XML comment; a strict parser does not.
+  # The release scripts read TCChannel with Python's plistlib, so a plist it
+  # cannot parse fails the channel check at signing time on every channel.
+  if python3 -I -c '
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    plistlib.load(f)["TCChannel"]
+' "$file" 2>/dev/null; then
+    pass "$label: a strict XML parser reads its TCChannel"
+  else
+    fail "$label: a strict XML parser cannot read its TCChannel"
+  fi
 }
 
 # --- production, byte for byte ------------------------------------------------
