@@ -724,6 +724,66 @@ fn ironwire_is_never_built_on_its_default_base() {
         nearai_key_may_go_to(home.path(), None),
         !cfg!(feature = "near-ai-staging")
     );
+
+    // A second NEAR AI entry under another id gets the same key, and IronWire
+    // builds it on its own base_url alone, with no environment fallback.
+    let own = channel::NEAR_AI_INFERENCE_BASE;
+    let two_entries = |second: &str| {
+        format!(
+            "[[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"{own}\"\n\
+             [[backends]]\nid = \"nearai-team\"\nkind = \"nearai\"\n{second}"
+        )
+    };
+    // With no base_url it is IronWire's default, production: never in a
+    // staging build, whatever the environment says.
+    std::fs::write(home.path().join("config.toml"), two_entries("")).unwrap();
+    assert_eq!(
+        nearai_key_may_go_to(home.path(), Some(own)),
+        !cfg!(feature = "near-ai-staging")
+    );
+    // On the channel's own base: allowed.
+    std::fs::write(
+        home.path().join("config.toml"),
+        two_entries(&format!("base_url = \"{own}\"\n")),
+    )
+    .unwrap();
+    assert!(nearai_key_may_go_to(home.path(), None));
+    // On the other channel's base: never, in either build.
+    std::fs::write(
+        home.path().join("config.toml"),
+        two_entries(&format!(
+            "base_url = \"{}\"\n",
+            other_channel_near_ai_base()
+        )),
+    )
+    .unwrap();
+    assert!(!nearai_key_may_go_to(home.path(), None));
+
+    // The other channel's base as the `nearai` entry's, or from the
+    // environment: never, in either build.
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"{}\"\n",
+            other_channel_near_ai_base()
+        ),
+    )
+    .unwrap();
+    assert!(!nearai_key_may_go_to(home.path(), None));
+    let empty = tempfile::tempdir().unwrap();
+    assert!(!nearai_key_may_go_to(
+        empty.path(),
+        Some(&other_channel_near_ai_base())
+    ));
+}
+
+/// The other channel's NEAR AI inference base.
+fn other_channel_near_ai_base() -> String {
+    if cfg!(feature = "near-ai-staging") {
+        "https://cloud-api.near.ai/v1".to_string()
+    } else {
+        "https://cloud-stg-api.near.ai/v1".to_string()
+    }
 }
 
 /// The protocol crate's privacy-filter default is production for the server;

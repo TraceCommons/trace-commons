@@ -453,46 +453,65 @@ const IRONWIRE_NEARAI_BASE_ENV: &str = "IRONWIRE_NEARAI_BASE_URL";
 /// Whether the proxy on IronWire home `home` may be handed this build's NEAR
 /// AI key. `env_base` is IronWire's environment override, read by the caller.
 ///
-/// IronWire always registers a NEAR AI backend and, when neither the home's
-/// `config.toml` nor its environment override names a base, uses its own
-/// compiled-in base, which is production NEAR AI. `EmbedOptions` (IronWire
-/// rev `a2ae5d97`) cannot set that base, and the home's configuration is the
-/// person's, which this daemon leaves alone. So a staging build hands over
-/// its NEAR AI key only when the base IronWire will use is this channel's,
-/// resolved in IronWire's own order: the `nearai` entry's `base_url`, then
-/// the environment override, an empty value counting as unset. Anything
-/// else, including a configuration that does not parse, withholds the key.
+/// IronWire hands `NEARAI_API_KEY` to every NEAR AI backend it builds (IronWire
+/// rev `a2ae5d97`, `embed.rs`):
 ///
-/// A production build keeps its behaviour: the key follows whatever base the
-/// person configured, and IronWire's default is production's.
+/// - the one it always registers, id `nearai`, on that entry's `base_url`,
+///   else the environment override, else its own compiled-in base, which is
+///   production NEAR AI;
+/// - every other entry the home declares with `kind = "nearai"`, on that
+///   entry's `base_url` alone, else the same compiled-in base.
+///
+/// An empty value counts as unset. `EmbedOptions` cannot set the base, and the
+/// home's configuration is the person's, which this daemon leaves alone. So:
+///
+/// - a staging build hands over its key only when every one of those bases is
+///   this channel's; anything else, including a configuration that does not
+///   parse, withholds it;
+/// - a production build withholds its key when any of them is on the other
+///   channel's host, and otherwise keeps its behaviour: the key follows the
+///   bases the person configured, and IronWire's default is production's.
 pub fn nearai_key_may_go_to(home: &std::path::Path, env_base: Option<&str>) -> bool {
-    if !crate::channel::near_ai_staging() {
-        return true;
-    }
-    let configured = match std::fs::read_to_string(home.join("config.toml")) {
-        Ok(text) => {
-            let Ok(config) = text.parse::<toml::Table>() else {
-                return false;
-            };
-            config
+    let staging = crate::channel::near_ai_staging();
+    let backends = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => match text.parse::<toml::Table>() {
+            Ok(config) => config
                 .get("backends")
                 .and_then(toml::Value::as_array)
-                .and_then(|backends| {
-                    backends.iter().find(|backend| {
-                        backend.get("id").and_then(toml::Value::as_str) == Some("nearai")
-                    })
-                })
-                .and_then(|backend| backend.get("base_url"))
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return false,
+                .cloned()
+                .unwrap_or_default(),
+            Err(_) => return !staging,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return !staging,
     };
-    let base = configured
-        .or_else(|| env_base.map(str::to_owned))
-        .filter(|base| !base.is_empty());
-    base.as_deref() == Some(crate::channel::NEAR_AI_INFERENCE_BASE)
+    let set = |value: Option<&str>| value.filter(|v| !v.is_empty()).map(str::to_owned);
+    let field = |backend: &toml::Value, name: &str| -> Option<String> {
+        set(backend.get(name).and_then(toml::Value::as_str))
+    };
+    let registered = backends
+        .iter()
+        .find(|backend| field(backend, "id").as_deref() == Some("nearai"))
+        .and_then(|backend| field(backend, "base_url"))
+        .or_else(|| set(env_base));
+    let declared = backends
+        .iter()
+        .filter(|backend| {
+            field(backend, "id").as_deref() != Some("nearai")
+                && field(backend, "kind").as_deref() == Some("nearai")
+        })
+        .map(|backend| field(backend, "base_url"));
+    let bases: Vec<Option<String>> = std::iter::once(registered).chain(declared).collect();
+    if staging {
+        bases
+            .iter()
+            .all(|base| base.as_deref() == Some(crate::channel::NEAR_AI_INFERENCE_BASE))
+    } else {
+        bases
+            .iter()
+            .flatten()
+            .all(|base| crate::channel::refuse_other_channel_origin(base).is_ok())
+    }
 }
 
 /// The one environment name this daemon will ever answer for IronWire.
