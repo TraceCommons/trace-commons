@@ -1,29 +1,35 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The judgement service's enclave seam (spec section 2, "Keys").
+//! The judgement service's enclave seam (spec section 2, "Keys", and
+//! section 3, "Per-boot keys").
 //!
-//! Two keys, both from the dstack guest agent's `GetKey` on the pinned v0
-//! surface (`/v0/GetKey`, see [`crate::witness_service::enclave::GET_KEY_PATH`]),
-//! each on its own path:
+//! Three keys:
 //!
-//! | Path | Use |
-//! |---|---|
-//! | [`JUDGEMENT_SIGNING_KEY_PATH`] | secp256k1 key that signs every response. |
-//! | [`JUDGEMENT_LIMITER_KEY_PATH`] | 32-byte root of the limiter keys ([`LimiterKeys::from_root`]). |
+//! | Key | Source | Use |
+//! |---|---|---|
+//! | limiter root | `GetKey` on [`JUDGEMENT_LIMITER_KEY_PATH`], the pinned v0 surface | 32-byte root of the limiter keys ([`LimiterKeys::from_root`]). |
+//! | sealing key | generated in memory at boot | key agreement for the sealed request and response bodies. |
+//! | response-signing key | generated in memory at boot | secp256k1 key that signs every response. |
 //!
-//! Neither path is the witness's `vms`, so neither equals the witness's key
-//! even under one app id. dstack derives a key from the app id and the path;
-//! `purpose` and `algorithm` do not enter the derivation, so the path is the
-//! only separator, and this module refuses to start if the two paths came
-//! back with the same bytes.
+//! Only the limiter root comes from `GetKey`, because the ledger it seals
+//! must outlive a restart. `GetKey` material is released to every image the
+//! app's KMS admits, so a key derived there cannot tell the pinned image
+//! from another admitted one (#1501 review point 1). The sealing and
+//! signing keys are therefore born in this process's memory from the system
+//! random source, never written, never logged, and returned by no route
+//! except as public values. A restart, an upgrade and a second instance each
+//! have different ones.
 //!
-//! The quote this service serves on `GET /v1/attestation` binds
-//! `"tcjudge1" | signing address (20) | nonce (32) | zeros (4)`, built with
-//! [`trace_commons_attestation::report_data::expected_report_data`] under
-//! [`JUDGEMENT_QUOTE_DOMAIN`]. A new tag, because the tag is domain
-//! separation: a witness quote must never read as a judgement quote, or the
-//! reverse.
+//! The limiter path is not the witness's `vms`, so the limiter root never
+//! equals the witness's key even under one app id.
+//!
+//! The quote this service serves on `GET /v1/attestation` binds both
+//! per-boot public values with the judgement layout of
+//! [`ReportDataLayout::Judgement`]:
+//! `"tcjudge1" | SHA-256(label || seal_pk || signing_address)[0..24] | nonce`.
+//! A quote from this process is therefore the only thing that vouches for
+//! the sealing key a contributor seals to.
 //!
 //! The measurement (`mrtd` + `mrconfigid`) is read once at boot out of a
 //! signed TD report, as the witness does, and every later quote must carry
@@ -31,8 +37,12 @@
 
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
+use ring::rand::{SecureRandom, SystemRandom};
+use trace_commons_attestation::judgement_seal::{
+    ResponseSealer, SealError, SealSecretKey, open_request,
+};
 use trace_commons_attestation::report_data::{
-    JUDGEMENT_QUOTE_DOMAIN, REPORT_DATA_LEN, expected_report_data,
+    REPORT_DATA_LEN, ReportDataLayout, SEAL_PUBLIC_KEY_LEN, expected_report_data,
 };
 use trace_commons_protocol::insights_judgement::JudgementNonce;
 use zeroize::Zeroizing;
@@ -42,25 +52,26 @@ use crate::witness_service::enclave::{
     EnclaveError, QuoteFacts, SIGNING_KEY_ALGORITHM, address_of, sign_eip191_with,
 };
 
-/// `GetKey` path of the response-signing key.
-pub const JUDGEMENT_SIGNING_KEY_PATH: &str = "judgement-signing";
-/// `GetKey` path of the limiter root.
+/// `GetKey` path of the limiter root. The only `GetKey` path this service
+/// asks for.
 pub const JUDGEMENT_LIMITER_KEY_PATH: &str = "judgement-limiter";
-/// Echoed into the signing key's chain claim; not part of the derivation.
-pub const JUDGEMENT_SIGNING_KEY_PURPOSE: &str = "signing";
 /// Echoed into the limiter key's chain claim; not part of the derivation.
 pub const JUDGEMENT_LIMITER_KEY_PURPOSE: &str = "limiter";
-/// The `algorithm` argument for both keys: the one the witness already
-/// sends on a live agent. It does not enter the derivation, so the limiter
-/// root is the same 32 bytes whatever is asked for here; reusing the proven
-/// value avoids depending on what else an agent accepts.
+/// The `algorithm` argument for the limiter key: the one the witness
+/// already sends on a live agent. It does not enter the derivation, so the
+/// limiter root is the same 32 bytes whatever is asked for here; reusing
+/// the proven value avoids depending on what else an agent accepts.
 pub const JUDGEMENT_KEY_ALGORITHM: &str = SIGNING_KEY_ALGORITHM;
+/// A uniformly random 32-byte string is a valid secp256k1 scalar with
+/// probability about 1 - 2^-128, so this bound is never reached by a
+/// working generator; it only stops a broken one from looping.
+const KEY_GENERATION_ATTEMPTS: usize = 16;
 
 /// The transport to a dstack guest agent, as this service uses it.
 ///
 /// Separate from the witness's `GuestAgent`, which asks for exactly one key
-/// path; this one names the path, so the two judgement keys are two calls a
-/// test can observe.
+/// path; this one names the path, so a test can observe every `GetKey`
+/// call.
 #[async_trait]
 pub trait JudgementAgent: Send + Sync {
     /// `GetKey(path, purpose, algorithm = JUDGEMENT_KEY_ALGORITHM)`: the 32
@@ -94,15 +105,42 @@ impl JudgementAgent for crate::witness_service::enclave::DstackSocketAgent {
     }
 }
 
-/// The 64 report-data bytes for `address` and `nonce` under `tcjudge1`.
-pub fn judgement_report_data(address: &[u8; 20], nonce: &[u8; 32]) -> [u8; REPORT_DATA_LEN] {
-    expected_report_data(JUDGEMENT_QUOTE_DOMAIN, address, nonce)
+/// The 64 report-data bytes for the per-boot `seal_public_key` and
+/// `signing_address` and `nonce`, in the judgement layout.
+pub fn judgement_report_data(
+    seal_public_key: &[u8; SEAL_PUBLIC_KEY_LEN],
+    signing_address: &[u8; 20],
+    nonce: &[u8; 32],
+) -> [u8; REPORT_DATA_LEN] {
+    expected_report_data(
+        ReportDataLayout::Judgement {
+            seal_public_key,
+            signing_address,
+        },
+        nonce,
+    )
 }
 
-/// The judgement service's identity inside a dstack guest: the signing key,
-/// the limiter root, and the boot measurement.
+/// A fresh response-signing key from the system random source.
+fn generate_signing_key() -> Result<SigningKey, EnclaveError> {
+    let rng = SystemRandom::new();
+    for _ in 0..KEY_GENERATION_ATTEMPTS {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        rng.fill(bytes.as_mut_slice())
+            .map_err(|_| EnclaveError::SigningKeyUnusable)?;
+        if let Ok(key) = SigningKey::from_slice(bytes.as_slice()) {
+            return Ok(key);
+        }
+    }
+    Err(EnclaveError::SigningKeyUnusable)
+}
+
+/// The judgement service's identity inside a dstack guest: the per-boot
+/// sealing and signing keys, the limiter root, and the boot measurement.
 pub struct JudgementEnclave {
     agent: Box<dyn JudgementAgent>,
+    seal_secret_key: SealSecretKey,
+    seal_public_key: [u8; SEAL_PUBLIC_KEY_LEN],
     signing_key: SigningKey,
     signing_address: String,
     address: [u8; 20],
@@ -111,35 +149,28 @@ pub struct JudgementEnclave {
     boot_mr_td: [u8; 48],
 }
 
-/// Public values only: the address and the measurement.
+/// The measurement only. The per-boot public values are not secret, but
+/// they are linkable to one boot, and nothing needs them in a debug line.
 impl std::fmt::Debug for JudgementEnclave {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JudgementEnclave")
-            .field("signing_address", &self.signing_address)
             .field("measurement", &self.measurement)
             .finish_non_exhaustive()
     }
 }
 
 impl JudgementEnclave {
-    /// Derive both keys and read the boot measurement. Three agent calls,
-    /// once.
+    /// Derive the limiter root, generate the two per-boot keys, and read the
+    /// boot measurement from a quote binding them. Two agent calls, once:
+    /// one `GetKey` (the limiter path) and one `GetQuote`.
     pub async fn connect(agent: Box<dyn JudgementAgent>) -> Result<Self, EnclaveError> {
-        let signing = agent
-            .derive_key(JUDGEMENT_SIGNING_KEY_PATH, JUDGEMENT_SIGNING_KEY_PURPOSE)
-            .await?;
         let limiter_root = agent
             .derive_key(JUDGEMENT_LIMITER_KEY_PATH, JUDGEMENT_LIMITER_KEY_PURPOSE)
             .await?;
-        // Different paths derive different keys. The same bytes on both
-        // means the agent did not separate them, and a limiter root equal to
-        // the signing key would put the ledger key one step from a key whose
-        // signatures are public.
-        if *signing == *limiter_root {
-            return Err(EnclaveError::MalformedResponse);
-        }
-        let signing_key = SigningKey::from_slice(signing.as_slice())
-            .map_err(|_| EnclaveError::SigningKeyUnusable)?;
+        let seal_secret_key =
+            SealSecretKey::generate().map_err(|_| EnclaveError::SigningKeyUnusable)?;
+        let seal_public_key = seal_secret_key.public_key().to_bytes();
+        let signing_key = generate_signing_key()?;
         let signing_address = address_of(&signing_key);
         let address: [u8; 20] = hex::decode(&signing_address[2..])
             .ok()
@@ -148,8 +179,10 @@ impl JudgementEnclave {
 
         // A zero nonce: this quote is served to nobody. It exists so the
         // measurement is read from a signed TD report, the only place
-        // MRCONFIGID exists as a measured value (the witness's reason).
-        let boot_report_data = judgement_report_data(&address, &[0u8; 32]);
+        // MRCONFIGID exists as a measured value (the witness's reason), and
+        // so a platform that does not sign the judgement layout refuses the
+        // boot.
+        let boot_report_data = judgement_report_data(&seal_public_key, &address, &[0u8; 32]);
         let facts = QuoteFacts::parse(&agent.quote(&boot_report_data).await?)?;
         if facts.report_data != boot_report_data {
             return Err(EnclaveError::ReportDataMismatch);
@@ -157,6 +190,8 @@ impl JudgementEnclave {
 
         Ok(Self {
             agent,
+            seal_secret_key,
+            seal_public_key,
             signing_key,
             signing_address,
             address,
@@ -166,14 +201,14 @@ impl JudgementEnclave {
         })
     }
 
-    /// `0x` + 40 lowercase hex.
+    /// `0x` + 40 lowercase hex. Per boot.
     pub fn signing_address(&self) -> &str {
         &self.signing_address
     }
 
-    /// The signing address as raw bytes, for the ledger's associated data.
-    pub fn signing_address_bytes(&self) -> [u8; 20] {
-        self.address
+    /// The per-boot sealing public key, SEC1 compressed.
+    pub fn seal_public_key(&self) -> [u8; SEAL_PUBLIC_KEY_LEN] {
+        self.seal_public_key
     }
 
     /// `mrtd:<hex>+mrconfigid:<hex>`, the value an operator pins.
@@ -186,11 +221,12 @@ impl JudgementEnclave {
         LimiterKeys::from_root(&self.limiter_root)
     }
 
-    /// A quote whose report data binds this service's address and `nonce`
-    /// under `tcjudge1`. Refused unless the quote carries exactly that and
-    /// the boot MRTD.
+    /// A quote whose report data binds this boot's two public keys and
+    /// `nonce` in the judgement layout. Refused unless the quote carries
+    /// exactly that and the boot MRTD.
     pub async fn attest(&self, nonce: &JudgementNonce) -> Result<Vec<u8>, EnclaveError> {
-        let report_data = judgement_report_data(&self.address, nonce.as_bytes());
+        let report_data =
+            judgement_report_data(&self.seal_public_key, &self.address, nonce.as_bytes());
         let quote = self.agent.quote(&report_data).await?;
         let facts = QuoteFacts::parse(&quote)?;
         // The replay guard: a stored quote, or one taken for another
@@ -204,7 +240,14 @@ impl JudgementEnclave {
         Ok(quote)
     }
 
-    /// An EIP-191 signature over `message` by the response-signing key.
+    /// Open a sealed request with this boot's sealing key. Returns the
+    /// plaintext and the one sealer for its response.
+    pub fn open_request(&self, sealed: &[u8]) -> Result<(Vec<u8>, ResponseSealer), SealError> {
+        open_request(&self.seal_secret_key, sealed)
+    }
+
+    /// An EIP-191 signature over `message` by the per-boot response-signing
+    /// key.
     pub fn sign_eip191(&self, message: &[u8]) -> Result<String, EnclaveError> {
         sign_eip191_with(&self.signing_key, message).map_err(|_| EnclaveError::SigningFailed)
     }
@@ -214,23 +257,16 @@ impl JudgementEnclave {
 pub(crate) mod tests {
     use super::*;
     use crate::witness_service::enclave::quote_offsets;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
     use std::sync::Mutex;
+    use trace_commons_attestation::judgement_seal::{SealPublicKey, seal_request};
     use trace_commons_attestation::receipt::recover_eip191_signer;
-    use trace_commons_attestation::report_data::{
-        ReportDataError, WITNESS_QUOTE_DOMAIN, check_report_data,
-    };
+    use trace_commons_attestation::report_data::{ReportDataError, check_report_data};
 
     const REAL_REPORT: &str = include_str!(
         "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
     );
 
-    /// secp256k1 scalar 1 and its published address.
-    const SCALAR_ONE: [u8; 32] = {
-        let mut scalar = [0u8; 32];
-        scalar[31] = 1;
-        scalar
-    };
-    const ADDRESS_OF_SCALAR_ONE: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
     const LIMITER_ROOT: [u8; 32] = [0x42; 32];
     const MR_TD: [u8; 48] = [0xa1; 48];
     const MR_CONFIG_ID: [u8; 48] = [0xb2; 48];
@@ -258,7 +294,6 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct StubAgent {
-        signing: [u8; 32],
         limiter: [u8; 32],
         after_boot: AfterBoot,
         pub(crate) keys_asked: Mutex<Vec<(String, String)>>,
@@ -268,7 +303,6 @@ pub(crate) mod tests {
     impl StubAgent {
         pub(crate) fn new() -> Self {
             Self {
-                signing: SCALAR_ONE,
                 limiter: LIMITER_ROOT,
                 after_boot: AfterBoot::Honest,
                 keys_asked: Mutex::new(Vec::new()),
@@ -288,11 +322,9 @@ pub(crate) mod tests {
                 .lock()
                 .expect("lock")
                 .push((path.to_string(), purpose.to_string()));
-            match path {
-                JUDGEMENT_SIGNING_KEY_PATH => Ok(Zeroizing::new(self.signing)),
-                JUDGEMENT_LIMITER_KEY_PATH => Ok(Zeroizing::new(self.limiter)),
-                _ => Err(EnclaveError::AgentRefused { status: 400 }),
-            }
+            // Any path answers, as a real agent does: the test asserts which
+            // paths were asked, not which were refused.
+            Ok(Zeroizing::new(self.limiter))
         }
 
         async fn quote(
@@ -330,41 +362,66 @@ pub(crate) mod tests {
             .expect("20 bytes")
     }
 
+    fn layout_of(enclave: &JudgementEnclave) -> ([u8; SEAL_PUBLIC_KEY_LEN], [u8; 20]) {
+        (
+            enclave.seal_public_key(),
+            address_bytes(enclave.signing_address()),
+        )
+    }
+
+    /// #1501 review point 1, #1531 review point 1: the signing key is not a
+    /// `GetKey` key. The only path asked for is the limiter's, and it is
+    /// not the witness's.
     #[tokio::test]
-    async fn both_keys_come_from_their_own_paths_and_neither_is_the_witness_path() {
+    async fn the_only_get_key_call_is_the_limiter_root() {
         let (_, agent) = connected(StubAgent::new()).await;
         let asked = agent.keys_asked.lock().expect("lock").clone();
         assert_eq!(
             asked,
-            vec![
-                (
-                    JUDGEMENT_SIGNING_KEY_PATH.to_string(),
-                    JUDGEMENT_SIGNING_KEY_PURPOSE.to_string()
-                ),
-                (
-                    JUDGEMENT_LIMITER_KEY_PATH.to_string(),
-                    JUDGEMENT_LIMITER_KEY_PURPOSE.to_string()
-                ),
-            ]
+            vec![(
+                JUDGEMENT_LIMITER_KEY_PATH.to_string(),
+                JUDGEMENT_LIMITER_KEY_PURPOSE.to_string()
+            )]
         );
-        assert_eq!(JUDGEMENT_SIGNING_KEY_PATH, "judgement-signing");
         assert_eq!(JUDGEMENT_LIMITER_KEY_PATH, "judgement-limiter");
-        for (path, _) in &asked {
-            assert_ne!(
-                path,
-                crate::witness_service::enclave::SIGNING_KEY_PATH,
-                "a judgement key on the witness's path would be the witness's key"
-            );
-        }
+        assert_ne!(
+            JUDGEMENT_LIMITER_KEY_PATH,
+            crate::witness_service::enclave::SIGNING_KEY_PATH,
+            "a judgement key on the witness's path would be the witness's key"
+        );
     }
 
+    /// The structural half of the same rule: this module's production code
+    /// names exactly one `GetKey` path and no signing path. A later edit
+    /// that derives the signing key again has to delete this test.
+    #[test]
+    fn the_production_code_names_no_signing_get_key_path() {
+        let source = include_str!("enclave.rs");
+        let production = &source[..source
+            .find("#[cfg(test)]\npub(crate) mod tests")
+            .expect("the test module marker")];
+        assert_eq!(production.matches(".derive_key(").count(), 1);
+        assert!(!production.contains(concat!("\"judgement-", "signing\"")));
+        assert!(!production.contains(concat!("SIGNING_KEY", "_PATH")));
+    }
+
+    /// Two boots, even against one agent and one limiter root, have two
+    /// different sealing keys and two different signing addresses: the
+    /// keys are born in memory, not derived.
     #[tokio::test]
-    async fn the_signing_address_comes_from_the_signing_path() {
-        let (enclave, _) = connected(StubAgent::new()).await;
-        assert_eq!(enclave.signing_address(), ADDRESS_OF_SCALAR_ONE);
+    async fn two_connects_give_different_per_boot_keys() {
+        let (first, _) = connected(StubAgent::new()).await;
+        let (second, _) = connected(StubAgent::new()).await;
+        assert_ne!(first.seal_public_key(), second.seal_public_key());
+        assert_ne!(first.signing_address(), second.signing_address());
+        // The sealing key and the signing key are two key pairs: the seal
+        // key's x is not the signing key's.
+        let signing_public = first.signing_key.verifying_key().to_encoded_point(true);
+        assert_ne!(first.seal_public_key().as_slice(), signing_public.as_bytes());
+        // The limiter root, which must survive a restart, does not change.
         assert_eq!(
-            enclave.signing_address_bytes(),
-            address_bytes(ADDRESS_OF_SCALAR_ONE)
+            first.limiter_keys().account_key("near-acct").as_bytes(),
+            second.limiter_keys().account_key("near-acct").as_bytes()
         );
     }
 
@@ -376,29 +433,24 @@ pub(crate) mod tests {
             enclave.limiter_keys().account_key("near-acct").as_bytes(),
             expected.as_bytes()
         );
-        // Positive control: the signing key is not what the limiter used.
-        let from_signing = LimiterKeys::from_root(&SCALAR_ONE).account_key("near-acct");
-        assert_ne!(expected.as_bytes(), from_signing.as_bytes());
     }
 
     #[tokio::test]
-    async fn one_value_on_both_paths_refuses_the_boot() {
-        let mut agent = StubAgent::new();
-        agent.limiter = agent.signing;
-        let refused = JudgementEnclave::connect(Box::new(std::sync::Arc::new(agent)))
-            .await
-            .unwrap_err();
-        assert_eq!(refused, EnclaveError::MalformedResponse);
-    }
-
-    #[tokio::test]
-    async fn the_boot_quote_is_bound_under_the_judgement_tag() {
+    async fn the_boot_quote_binds_both_per_boot_keys_in_the_judgement_layout() {
         let (enclave, agent) = connected(StubAgent::new()).await;
         let boot = agent.quotes_asked.lock().expect("lock")[0];
         assert_eq!(&boot[..8], b"tcjudge1");
+        let (seal, address) = layout_of(&enclave);
         assert_eq!(
-            boot,
-            judgement_report_data(&enclave.signing_address_bytes(), &[0u8; 32])
+            check_report_data(
+                &boot,
+                ReportDataLayout::Judgement {
+                    seal_public_key: &seal,
+                    signing_address: &address
+                },
+                &[0u8; 32]
+            ),
+            Ok(())
         );
         assert_eq!(
             enclave.measurement(),
@@ -411,34 +463,53 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_attestation_binds_the_address_and_nonce_under_tcjudge1_only() {
+    async fn an_attestation_binds_both_keys_and_the_nonce_and_never_reads_as_a_witness_quote() {
         let (enclave, _) = connected(StubAgent::new()).await;
         let nonce = JudgementNonce::from_bytes(std::array::from_fn(|i| i as u8 * 7 + 3));
         let quote = enclave.attest(&nonce).await.expect("attested");
         let facts = QuoteFacts::parse(&quote).expect("parses");
-        let address = enclave.signing_address_bytes();
+        let (seal, address) = layout_of(&enclave);
         assert_eq!(
             check_report_data(
                 &facts.report_data,
-                JUDGEMENT_QUOTE_DOMAIN,
-                &address,
+                ReportDataLayout::Judgement {
+                    seal_public_key: &seal,
+                    signing_address: &address
+                },
                 nonce.as_bytes()
             ),
             Ok(())
+        );
+        // Another boot's sealing key with this boot's address does not
+        // match: the quote vouches for this sealing key only.
+        let (other, _) = connected(StubAgent::new()).await;
+        assert_eq!(
+            check_report_data(
+                &facts.report_data,
+                ReportDataLayout::Judgement {
+                    seal_public_key: &other.seal_public_key(),
+                    signing_address: &address
+                },
+                nonce.as_bytes()
+            ),
+            Err(ReportDataError::SignerUnexpected)
         );
         // The same quote does not read as a witness quote.
         assert_eq!(
             check_report_data(
                 &facts.report_data,
-                WITNESS_QUOTE_DOMAIN,
-                &address,
+                ReportDataLayout::Witness {
+                    signing_address: &address
+                },
                 nonce.as_bytes()
             ),
             Err(ReportDataError::SignerUnexpected)
         );
         // And another nonce gives another quote.
-        let other = JudgementNonce::from_bytes([0x5c; 32]);
-        let other_quote = enclave.attest(&other).await.expect("attested");
+        let other_quote = enclave
+            .attest(&JudgementNonce::from_bytes([0x5c; 32]))
+            .await
+            .expect("attested");
         assert_ne!(quote, other_quote);
     }
 
@@ -471,16 +542,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_signature_recovers_to_the_signing_address() {
+    async fn a_signature_recovers_to_the_per_boot_address() {
         let (enclave, _) = connected(StubAgent::new()).await;
         let signature = enclave.sign_eip191(b"judgement bytes").expect("signed");
         assert_eq!(signature.len(), 2 + 130);
         let recovered = recover_eip191_signer(b"judgement bytes", &signature).expect("recovers");
-        assert_eq!(recovered, address_bytes(ADDRESS_OF_SCALAR_ONE));
+        assert_eq!(recovered, address_bytes(enclave.signing_address()));
+    }
+
+    /// A request sealed to this boot's key opens here and nowhere else, and
+    /// the sealer it yields answers only that request's sender.
+    #[tokio::test]
+    async fn a_request_sealed_to_this_boot_opens_here_and_not_at_another_boot() {
+        let (here, _) = connected(StubAgent::new()).await;
+        let (elsewhere, _) = connected(StubAgent::new()).await;
+        let key = SealPublicKey::from_bytes(&here.seal_public_key()).expect("a point");
+        let (sealed, opener) = seal_request(&key, b"plaintext").expect("sealed");
+        assert_eq!(
+            elsewhere.open_request(&sealed).unwrap_err(),
+            SealError::DoesNotOpen
+        );
+        let (plaintext, sealer) = here.open_request(&sealed).expect("opens");
+        assert_eq!(plaintext, b"plaintext");
+        let reply = sealer.seal(b"answer").expect("sealed");
+        assert_eq!(opener.open(&reply).expect("opens"), b"answer");
     }
 
     #[tokio::test]
-    async fn an_agent_that_refuses_a_key_refuses_the_boot() {
+    async fn an_agent_that_refuses_the_limiter_key_refuses_the_boot() {
         struct NoKeys;
         #[async_trait]
         impl JudgementAgent for NoKeys {
@@ -503,6 +592,36 @@ pub(crate) mod tests {
                 .await
                 .unwrap_err(),
             EnclaveError::Transport
+        );
+    }
+
+    #[tokio::test]
+    async fn a_boot_quote_without_the_judgement_layout_refuses_the_boot() {
+        let mut agent = StubAgent::new();
+        // Every quote, the boot quote included, carries other report data.
+        struct Wrong(std::sync::Arc<StubAgent>);
+        #[async_trait]
+        impl JudgementAgent for Wrong {
+            async fn derive_key(
+                &self,
+                path: &str,
+                purpose: &str,
+            ) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+                self.0.derive_key(path, purpose).await
+            }
+            async fn quote(
+                &self,
+                _report_data: &[u8; REPORT_DATA_LEN],
+            ) -> Result<Vec<u8>, EnclaveError> {
+                Ok(quote_with(&[0x99; REPORT_DATA_LEN], &MR_TD))
+            }
+        }
+        agent.after_boot = AfterBoot::Honest;
+        assert_eq!(
+            JudgementEnclave::connect(Box::new(Wrong(std::sync::Arc::new(agent))))
+                .await
+                .unwrap_err(),
+            EnclaveError::ReportDataMismatch
         );
     }
 }

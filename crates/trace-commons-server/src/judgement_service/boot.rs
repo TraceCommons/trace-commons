@@ -21,7 +21,8 @@
 //!    4. the issuer public keys parse;
 //!    5. both caps are set;
 //! 2. the limiter volume is mounted at the data directory;
-//! 3. the dstack guest agent derives both keys and a `tcjudge1` boot quote;
+//! 3. the dstack guest agent derives the limiter root, and a `tcjudge1`
+//!    boot quote binds the two per-boot keys generated in memory;
 //! 4. the sealed ledger opens under the boot rules;
 //! 5. the catalog is fetched, and the model passes the production check
 //!    (allowlisted, both flags, prices, a pin);
@@ -518,11 +519,7 @@ pub async fn boot(config: BootConfig, deps: BootDeps) -> Result<Booted, BootRefu
         .map_err(|_| BootRefusal::EnclaveUnavailable)?;
     // 4. The ledger.
     let limiter_keys = enclave.limiter_keys();
-    let (ledger, state) = SealedLedger::open(
-        &config.data_dir,
-        limiter_keys.ledger_seal_key(),
-        enclave.signing_address_bytes(),
-    )?;
+    let (ledger, state) = SealedLedger::open(&config.data_dir, limiter_keys.ledger_seal_key())?;
     // 5. The catalog and the production check.
     let model_id = config.model.model_id().to_string();
     let entries = config
