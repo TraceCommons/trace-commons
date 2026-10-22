@@ -1668,7 +1668,10 @@ fn tc_daemon_start_with_settings_null_config_dir_is_an_error() {
 /// sentence.
 #[test]
 fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
-    let invite = cstr_str("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6");
+    use trace_commons_contributor::channel::PUBLIC_SITE_HOST;
+    let invite = cstr_str(&format!(
+        "https://issuer.{PUBLIC_SITE_HOST}/onboard#VQWWPGYSG8Y4LTP6"
+    ));
     let out = unsafe { tc_invite_issuer_host(invite.as_ptr()) };
     assert!(!out.is_null(), "a well-formed invite resolves");
     let host = unsafe { std::ffi::CStr::from_ptr(out) }
@@ -1677,7 +1680,7 @@ fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
         .to_string();
     unsafe { tc_string_free(out) };
 
-    assert_eq!(host, "issuer.tracecommons.ai");
+    assert_eq!(host, format!("issuer.{PUBLIC_SITE_HOST}"));
     // The point of the narrow return: the credential does not cross.
     assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
 }
@@ -3545,7 +3548,10 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "workflow": "Renew the session, then retry once.",
             "reuse_permission": "cc_by_4_0",
             "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The retry succeeded."}],
-            "source": "https://tracecommons.ai/runs/run-source-workflow"
+            "source": format!(
+                "{}run-source-workflow",
+                trace_commons_contributor::channel::PUBLIC_RUNS_PREFIX
+            )
         })
         .to_string(),
     )
@@ -5765,8 +5771,11 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     );
     assert!(err.is_null());
 
-    let enroll =
-        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    // In the build channel's own scheme (staging design 4.5).
+    let enroll = cstr_str(&format!(
+        "{}enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        trace_commons_contributor::channel::DEEP_LINK_PREFIX
+    ));
     let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
     assert_eq!(
         value,
@@ -5782,7 +5791,10 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     for garbage in [
         cstr_str("not-a-deep-link"),
         cstr_str("javascript:alert(1)"),
-        cstr_str("tracecommons://review@evil.example"),
+        cstr_str(&format!(
+            "{}review@evil.example",
+            trace_commons_contributor::channel::DEEP_LINK_PREFIX
+        )),
     ] {
         let mut err: *mut c_char = std::ptr::null_mut();
         assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());
@@ -5796,15 +5808,19 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
 
 #[test]
 fn the_external_url_allowlist_crosses_the_abi() {
+    use trace_commons_contributor::channel::{NEAR_AI_DASHBOARD_ORIGIN, PUBLIC_RUNS_PREFIX};
     use trace_commons_contributor::external_url::is_allowed;
     use trace_commons_contributor_ffi::tc_external_url_is_allowed;
 
+    // The channel's own dashboard and public site, so a staging build is
+    // held to its hosts and a production build to production's.
     for url in [
-        "http://127.0.0.1:49152/near-ai/callback?state=abc",
-        "https://cloud.near.ai/dashboard/organizations/example/credits",
-        "https://tracecommons.ai/runs/repair-a-stalled-upload",
-        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5",
+        "http://127.0.0.1:49152/near-ai/callback?state=abc".to_string(),
+        format!("{NEAR_AI_DASHBOARD_ORIGIN}/dashboard/organizations/example/credits"),
+        format!("{PUBLIC_RUNS_PREFIX}repair-a-stalled-upload"),
+        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5".to_string(),
     ] {
+        let url = url.as_str();
         assert!(is_allowed(url), "{url}");
         let c = cstr_str(url);
         assert_eq!(
@@ -5814,10 +5830,11 @@ fn the_external_url_allowlist_crosses_the_abi() {
         );
     }
     for url in [
-        "https://example.com/redirect",
-        "javascript:alert(1)",
-        "https://cloud.near.ai.evil.example/dashboard/organizations/example/credits",
+        "https://example.com/redirect".to_string(),
+        "javascript:alert(1)".to_string(),
+        format!("{NEAR_AI_DASHBOARD_ORIGIN}.evil.example/dashboard/organizations/example/credits"),
     ] {
+        let url = url.as_str();
         assert!(!is_allowed(url), "{url}");
         let c = cstr_str(url);
         assert_eq!(

@@ -666,6 +666,40 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var credentialBusy = false
 
+    /// How often a sign-in in flight is re-read. Tests shorten it.
+    var credentialPollInterval: Duration = .seconds(2)
+
+    /// The loop that re-reads a sign-in while it is in flight.
+    ///
+    /// The ceremony finishes in a browser this app does not own and the
+    /// daemon publishes no event when it does, so the model asks. It lives
+    /// here and not in a view because the sign-in starts from the Private AI
+    /// notice and from Home as well as from Settings, and closing any of them
+    /// must not stop it. At most one runs. It ends when the shared table stops
+    /// offering a cancel, which is also where `refreshNearAiCredential` lets
+    /// go of the attempt, so cancel, failure and timeout all stop it.
+    private(set) var credentialPoll: Task<Void, Never>?
+
+    /// A sign-in is pending while this shell holds its attempt or the shared
+    /// table still offers a cancel for the status last read. The second half
+    /// covers an app restarted while the daemon kept its ceremony running.
+    private var credentialSignInPending: Bool {
+        credentialAttempt != nil
+            || CredentialSurface.action(credentialStatus, calls: credentialCalls) == .cancel
+    }
+
+    private func startCredentialPollIfNeeded() {
+        guard credentialPoll == nil, credentialSignInPending else { return }
+        credentialPoll = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(for: self.credentialPollInterval)
+                guard !Task.isCancelled, self.credentialSignInPending else { break }
+                self.refreshNearAiCredential()
+            }
+            self?.credentialPoll = nil
+        }
+    }
+
     /// Re-read on every settings refresh, and again while a ceremony is in
     /// flight: the ceremony finishes in a browser this app does not own, so
     /// nothing here is told when it does.
@@ -679,8 +713,19 @@ final class AppModel: ObservableObject {
             // The attempt is let go the moment the shared table stops
             // offering a cancel for it. Holding a finished attempt's id
             // would keep polling a ceremony nobody is waiting on.
-            if CredentialSurface.action(status, calls: self.credentialCalls) != .cancel {
+            if CredentialSurface.action(status, calls: self.credentialCalls) == .cancel {
+                self.startCredentialPollIfNeeded()
+            } else {
+                let wasHeld = self.credentialAttempt != nil
                 self.credentialAttempt = nil
+                // The sign-in landed: everything the key is behind is read
+                // again, as after a write (`submitNearAiCredential`), so the
+                // notices and cards that wait on it go by themselves.
+                if wasHeld, status.state == CredentialSurface.statePresent {
+                    self.refreshSettings()
+                    self.refreshHarnesses()
+                    self.refreshManagedSessions()
+                }
             }
         }
         refreshNearAiBalance()
@@ -725,6 +770,16 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Re-read the sign-in when the app comes forward while an attempt is
+    /// held: the browser is in front during sign-in, so coming back is the
+    /// cue that it may have finished. Answers whether a read was asked for.
+    @discardableResult
+    func refreshCredentialOnActivation() -> Bool {
+        guard credentialAttempt != nil else { return false }
+        refreshNearAiCredential()
+        return true
+    }
+
     func nearAiFunding(expected: FundingDestination?) async -> FundingStatus? {
         guard let client, !credentialBusy else { return nil }
         let result = await Task.detached(priority: .userInitiated) {
@@ -753,6 +808,7 @@ final class AppModel: ObservableObject {
             return nil
         }
         credentialAttempt = attempt
+        startCredentialPollIfNeeded()
         refreshNearAiCredential()
         return URL(string: attempt.browserURL)
     }
@@ -1466,6 +1522,8 @@ final class AppModel: ObservableObject {
         daemonStartup.cancel()
         isStartingDaemon = false
         undoTask?.cancel()
+        credentialPoll?.cancel()
+        credentialPoll = nil
         let subscription = self.subscription
         let daemon = self.daemon
         // Dropped first so no new work can be started from this side while

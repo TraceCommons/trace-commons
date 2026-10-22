@@ -52,14 +52,43 @@ macro_rules! state_dir_env {
     };
 }
 
+/// The app's URL scheme, as a literal so links can be built from it with
+/// `concat!`.
+#[cfg(not(feature = "near-ai-staging"))]
+macro_rules! url_scheme {
+    () => {
+        "tracecommons"
+    };
+}
+#[cfg(feature = "near-ai-staging")]
+macro_rules! url_scheme {
+    () => {
+        "tracecommons-staging"
+    };
+}
+
 /// Whether this build is the staging channel (`near-ai-staging`).
 pub const fn near_ai_staging() -> bool {
     cfg!(feature = "near-ai-staging")
 }
 
+/// The channel's name, as a literal for `concat!`.
+#[cfg(not(feature = "near-ai-staging"))]
+macro_rules! channel_name {
+    () => {
+        "production"
+    };
+}
+#[cfg(feature = "near-ai-staging")]
+macro_rules! channel_name {
+    () => {
+        "staging"
+    };
+}
+
 #[cfg(not(feature = "near-ai-staging"))]
 mod values {
-    pub const CHANNEL: &str = "production";
+    pub const CHANNEL: &str = channel_name!();
 
     pub const STATE_DIR_NAME: &str = "trace-commons";
     pub const OTHER_STATE_DIR_NAME: &str = "trace-commons-staging";
@@ -73,7 +102,7 @@ mod values {
     pub const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
     pub const PASSKEY_RP_ID: &str = "tracecommons.ai";
     pub const PASSKEY_ORIGIN: &str = "https://tracecommons.ai";
-    pub const URL_SCHEME: &str = "tracecommons";
+    pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = "tracecommons.ai";
     pub const PUBLIC_RUNS_PREFIX: &str = "https://tracecommons.ai/runs/";
     pub const INVITE_PLACEHOLDER: &str = "https://issuer.tracecommons.ai/onboard#…";
@@ -82,11 +111,16 @@ mod values {
     pub const NEAR_AI_INFERENCE_BASE: &str = "https://cloud-api.near.ai/v1";
     pub const NEAR_AI_DASHBOARD_ORIGIN: &str = "https://cloud.near.ai";
     pub const NEAR_AI_WALLET_RECIPIENT: &str = "cloud.near.ai";
+
+    pub const IRONWIRE_HOME_ENV: &str = "IRONWIRE_HOME";
+    pub const IRONWIRE_HOME_DIR: &str = ".ironwire";
+    pub const IRONWIRE_CONTROL_PORT: Option<u16> = None;
+    pub const IRONWIRE_READS_POINTER: bool = true;
 }
 
 #[cfg(feature = "near-ai-staging")]
 mod values {
-    pub const CHANNEL: &str = "staging";
+    pub const CHANNEL: &str = channel_name!();
 
     pub const STATE_DIR_NAME: &str = "trace-commons-staging";
     pub const OTHER_STATE_DIR_NAME: &str = "trace-commons";
@@ -100,7 +134,7 @@ mod values {
     pub const NATIVE_ACCOUNT_ORIGIN: &str = concat!("https://ingest.", staging_host!());
     pub const PASSKEY_RP_ID: &str = staging_host!();
     pub const PASSKEY_ORIGIN: &str = concat!("https://", staging_host!());
-    pub const URL_SCHEME: &str = "tracecommons-staging";
+    pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = staging_host!();
     pub const PUBLIC_RUNS_PREFIX: &str = concat!("https://", staging_host!(), "/runs/");
     pub const INVITE_PLACEHOLDER: &str = concat!("https://issuer.", staging_host!(), "/onboard#…");
@@ -112,6 +146,13 @@ mod values {
     /// deployment configuration (nearai/cvm-ansible-playbooks,
     /// `vars/cloud_api_stg.yaml`).
     pub const NEAR_AI_WALLET_RECIPIENT: &str = "cloud-stg.near.ai";
+
+    pub const IRONWIRE_HOME_ENV: &str = "IRONWIRE_STAGING_HOME";
+    pub const IRONWIRE_HOME_DIR: &str = ".ironwire-staging";
+    /// Production's IronWire answers on IronWire's default, 8463. Staging
+    /// takes the next port so both proxies can run at once.
+    pub const IRONWIRE_CONTROL_PORT: Option<u16> = Some(8464);
+    pub const IRONWIRE_READS_POINTER: bool = false;
 }
 
 /// `production` or `staging`.
@@ -151,8 +192,14 @@ pub const NATIVE_ACCOUNT_ORIGIN: &str = values::NATIVE_ACCOUNT_ORIGIN;
 pub const PASSKEY_RP_ID: &str = values::PASSKEY_RP_ID;
 /// The origin a passkey ceremony's client data must carry.
 pub const PASSKEY_ORIGIN: &str = values::PASSKEY_ORIGIN;
-/// The app's URL scheme (the bundle registers it; spec 4.5).
+/// The app's URL scheme (the bundle registers it; spec 4.5). The deep-link
+/// parser accepts only this one, so a staging build never opens a
+/// production link or the reverse.
 pub const URL_SCHEME: &str = values::URL_SCHEME;
+/// What every link in [`URL_SCHEME`] starts with.
+pub const DEEP_LINK_PREFIX: &str = concat!(url_scheme!(), "://");
+/// The link that opens the review queue.
+pub const REVIEW_DEEP_LINK: &str = concat!(url_scheme!(), "://review");
 /// The public site's host, where public run pages live.
 pub const PUBLIC_SITE_HOST: &str = values::PUBLIC_SITE_HOST;
 /// The prefix of a public run page.
@@ -176,6 +223,28 @@ pub const NEAR_AI_PRIVACY_FILTER_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
 pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
+
+/// The environment variable that moves the IronWire home (spec 4.2, S10).
+/// A staging build reads only its own, so a production `IRONWIRE_HOME` never
+/// points it at production's proxy, ledger or token.
+pub const IRONWIRE_HOME_ENV: &str = values::IRONWIRE_HOME_ENV;
+/// The IronWire home's directory name under the user's home, when
+/// [`IRONWIRE_HOME_ENV`] is unset.
+pub const IRONWIRE_HOME_DIR: &str = values::IRONWIRE_HOME_DIR;
+/// The port this build's embedded IronWire binds. `None` is IronWire's own
+/// configuration (production, as before); staging fixes one apart from
+/// production's so the two proxies can run side by side.
+pub const IRONWIRE_CONTROL_PORT: Option<u16> = values::IRONWIRE_CONTROL_PORT;
+/// Whether this build reads the `ironwire` CLI's discovery pointer,
+/// `~/.ironwire/endpoint.json`. That file belongs to production's IronWire
+/// whatever `IRONWIRE_HOME` says, so a staging build never reads it and
+/// accepts only a control URL and token under its own home.
+pub const IRONWIRE_READS_POINTER: bool = values::IRONWIRE_READS_POINTER;
+
+/// What `--version` adds after the build identity: the channel, so the
+/// macOS bundle scripts can check the bundled CLI against the bundle's
+/// Info.plist before signing (spec 4.3).
+pub const VERSION_CHANNEL_SUFFIX: &str = concat!(" channel ", channel_name!());
 
 /// Every host-bearing value of this build, for the ratchet test.
 pub const HOST_VALUES: &[&str] = &[

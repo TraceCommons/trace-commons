@@ -59,6 +59,19 @@ struct FirstRunWindowView: View {
                 .frame(maxHeight: .infinity)
             }
         }
+        // A staging build's label (spec S7, 4.8), as on the Monitor, over
+        // every state of this window: sign-in is where a tester most needs
+        // to tell staging from production. Production has none. It sits at
+        // the left of the top row beside the window's buttons, where the
+        // Monitor puts it, so it stays clear of the step thread the stage
+        // draws across the top centre.
+        .overlay(alignment: .topLeading) {
+            if let label = BuildChannelGate.windowLabel {
+                GlassTag(label)
+                    .padding(.top, GlassTokens.Space.s3)
+                    .padding(.leading, FirstRunProgress.windowButtonsWidth)
+            }
+        }
         .frame(minWidth: FirstRunProgress.minimumSize.width, minHeight: FirstRunProgress.minimumSize.height)
         // A screen's modals and confirmations cover the whole window.
         .glassModalHost()
@@ -107,6 +120,9 @@ struct StartupRefusedBanner: View {
 enum FirstRunProgress {
     /// The smallest window the stage lays out in without scaling down.
     static let minimumSize = CGSize(width: 760, height: 640)
+    /// The width the window's close, minimize and zoom buttons take at the
+    /// top left, which the staging label starts past.
+    static let windowButtonsWidth: CGFloat = 80
     /// The width of the startup notice and of the shell's notices over a
     /// step: Ron's #1030 pane width.
     static let noticeWidth: CGFloat = 450

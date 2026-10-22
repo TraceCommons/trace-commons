@@ -1909,6 +1909,7 @@ mod tests {
 
     /// A proxy the contributor declared and runs themselves is not this
     /// daemon's to sweep after, even on the same port.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_daemon_does_not_repair_against_a_declared_proxy() {
         let shared = daemon_shared();

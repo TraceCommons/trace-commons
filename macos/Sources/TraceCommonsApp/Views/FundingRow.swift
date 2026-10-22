@@ -154,12 +154,24 @@ struct FundingRow: View {
         }
         // Observe individual publications, including a busy true/false pair
         // within one render pass. Coalescing those would miss a credential write.
-        .onReceive(model.$credentialBusy.removeDuplicates().dropFirst()) { _ in
+        //
+        // Each also reloads a visible row once it has cleared it, so a sign-in
+        // or a credential write leaves the account read again and not the
+        // unavailable line. The reload waits one turn: `@Published` sends
+        // before it stores, so the busy flag and the session state read here
+        // are still the old ones.
+        .onReceive(model.$credentialBusy.removeDuplicates().dropFirst()) { busy in
             invalidate()
+            if !busy { reloadAfterPublication() }
         }
         .onReceive(model.$credentialStatus.map(\.sessionState).removeDuplicates().dropFirst()) { _ in
             invalidate()
+            reloadAfterPublication()
         }
+    }
+
+    private func reloadAfterPublication() {
+        Task { @MainActor in load(opening: nil) }
     }
 
     private func invalidate() {

@@ -1011,6 +1011,13 @@ pub enum IronWireDeclaration {
     Off,
 }
 
+/// Whether this build may talk to an IronWire on `port`: any port in
+/// production, only the staging IronWire's fixed port in staging.
+#[must_use]
+pub fn ironwire_port_in_channel(port: u16) -> bool {
+    crate::channel::IRONWIRE_CONTROL_PORT.is_none_or(|own| own == port)
+}
+
 /// The file the proxy writes its control-API token to, inside whichever
 /// directory [`ironwire_token_path`] resolves.
 pub const IRONWIRE_TOKEN_FILE: &str = "control.token";
@@ -1023,10 +1030,18 @@ pub const IRONWIRE_BODIES_SUBDIR: &str = "bodies";
 
 impl IronWireDeclaration {
     /// The port to read, or `None` when the proxy is off.
+    ///
+    /// Also `None` in a staging build for any port but the staging
+    /// IronWire's own ([`crate::channel::IRONWIRE_CONTROL_PORT`]): a
+    /// declaration naming production's proxy reads as no proxy at all, for
+    /// every reader at once (staging design 4.2, S10). Production has no
+    /// fixed port and reads whatever port was declared.
     #[must_use]
     pub fn port(&self) -> Option<u16> {
         match self {
-            IronWireDeclaration::Watch { port, .. } => Some(*port),
+            IronWireDeclaration::Watch { port, .. } => {
+                ironwire_port_in_channel(*port).then_some(*port)
+            }
             IronWireDeclaration::Off => None,
         }
     }
@@ -1072,7 +1087,19 @@ pub(crate) fn ironwire_token_path_with(
     pointer: Option<&super::ironwire_pointer::IronWirePointer>,
 ) -> Option<PathBuf> {
     if let Some(declared) = declared {
-        return Some(declared.join(IRONWIRE_TOKEN_FILE));
+        let token = declared.join(IRONWIRE_TOKEN_FILE);
+        // A staging build reads no token outside its own IronWire home, so a
+        // folder declared in settings cannot reach production's (staging
+        // design 4.2, S10). Canonicalized on both sides, so neither `..` nor
+        // a symlink walks out; a token that is not there resolves nothing,
+        // which is the same "no proxy" state a missing token already is.
+        if crate::channel::near_ai_staging() {
+            return super::ironwire_pointer::confine_token_path(
+                &token,
+                ironwire_default_token_dir()?.as_path(),
+            );
+        }
+        return Some(token);
     }
     // The pointer names a *file*, not a directory, and is used as written.
     // A running daemon's own statement of where it put its token is better
@@ -1129,9 +1156,10 @@ pub(crate) fn ironwire_token_path_with(
 /// sentence cannot name one folder while this function reads another.
 #[must_use]
 pub fn ironwire_default_token_dir() -> Option<PathBuf> {
-    std::env::var_os("IRONWIRE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(super::ironwire_pointer::POINTER_DIR)))
+    // The channel's home: a staging build never names production's folder.
+    // One resolver, so an empty variable means "unset" here exactly as it
+    // does for the home the embedded proxy runs out of.
+    super::private_inference::ironwire_home()
 }
 
 /// Build a routing ledger for a declaration, or nothing.
@@ -2745,6 +2773,7 @@ mod tests {
     ///
     /// Asserts *which* token the ledger was built with. "A ledger was built"
     /// would pass under either precedence and prove nothing.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declared_token_directory_wins_over_the_environment() {
         let declared = token_dir_holding("token-from-settings");
@@ -2767,6 +2796,7 @@ mod tests {
 
     /// The CLI case. `IRONWIRE_HOME` stays supported so an install that
     /// already relies on it keeps working.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_environment_is_still_honoured_when_no_path_is_declared() {
         let environment = token_dir_holding("token-from-environment");
@@ -2828,6 +2858,7 @@ mod tests {
 
     /// And where the directory comes from: the SAME home the token resolved
     /// in, never a second configured path that could disagree with it.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_bodies_directory_is_derived_from_the_declared_proxy_home() {
         let home = token_dir_holding("token");
@@ -3833,6 +3864,7 @@ mod tests {
     ///
     /// Asserts *which* token is resolved. "A path came back" would pass
     /// under either precedence and prove nothing.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declared_directory_wins_over_the_pointer() {
         let declared = token_dir_holding("token-from-settings");
@@ -3846,6 +3878,78 @@ mod tests {
             std::fs::read_to_string(&path).unwrap().trim(),
             "token-from-settings",
         );
+    }
+
+    /// A staging build reads no IronWire outside its own home (staging
+    /// design 4.2, S10). A folder declared in settings is the one path the
+    /// pointer and home rules do not cover, so a declaration naming
+    /// production's folder, or production's port, must read nothing: not
+    /// its token, not its ledger, not its bodies. A folder inside the
+    /// staging home, on the staging port, still reads.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_refuses_a_declared_production_ironwire_folder() {
+        let staging_home = token_dir_holding("token-from-staging");
+        let production = token_dir_holding("token-from-production");
+        let _at = IronWireAt::home(staging_home.path());
+        let staging_port = crate::channel::IRONWIRE_CONTROL_PORT.expect("staging binds a port");
+
+        assert_eq!(
+            ironwire_token_path_with(Some(production.path()), None),
+            None
+        );
+        let declared_production = IronWireDeclaration::Watch {
+            port: staging_port,
+            token_dir: Some(production.path().to_path_buf()),
+        };
+        assert!(ironwire_ledger_for(Some(&declared_production)).is_none());
+        assert!(attested_bodies_dir_for(Some(&declared_production), true).is_none());
+
+        // A path that only walks out of the home through `..` is outside it.
+        let escape = staging_home
+            .path()
+            .join("..")
+            .join(production.path().file_name().expect("a name"));
+        assert_eq!(ironwire_token_path_with(Some(&escape), None), None);
+
+        // Production's port is refused even with the staging folder.
+        let production_port = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: Some(staging_home.path().to_path_buf()),
+        };
+        assert_eq!(production_port.port(), None);
+        assert!(ironwire_ledger_for(Some(&production_port)).is_none());
+
+        // The staging home itself, on the staging port, still reads.
+        let own = IronWireDeclaration::Watch {
+            port: staging_port,
+            token_dir: Some(staging_home.path().to_path_buf()),
+        };
+        assert_eq!(own.port(), Some(staging_port));
+        let path = ironwire_token_path_with(own.token_dir(), None).expect("its own home resolves");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            "token-from-staging",
+        );
+        assert!(ironwire_ledger_for(Some(&own)).is_some());
+    }
+
+    /// Production keeps reading any declared folder on any declared port.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_build_reads_any_declared_ironwire_folder_and_port() {
+        let home = token_dir_holding("token-from-home");
+        let declared = token_dir_holding("token-from-settings");
+        let _at = IronWireAt::home(home.path());
+        assert_eq!(
+            ironwire_token_path_with(Some(declared.path()), None),
+            Some(declared.path().join(IRONWIRE_TOKEN_FILE)),
+        );
+        let elsewhere = IronWireDeclaration::Watch {
+            port: 9000,
+            token_dir: Some(declared.path().to_path_buf()),
+        };
+        assert_eq!(elsewhere.port(), Some(9000));
     }
 
     /// The running daemon's own statement of fact beats an environment
@@ -3929,6 +4033,7 @@ mod tests {
 
     /// End to end through the real entry point, which reads the pointer off
     /// disk. Asserts the token the ledger was actually built with.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_discovered_token_builds_a_reader_for_a_declaration_that_named_no_directory() {
         let d = tempfile::tempdir().expect("tempdir");
@@ -3956,6 +4061,7 @@ mod tests {
     /// crashed daemon naming a live-but-unrelated port would otherwise send
     /// every read somewhere the contributor never named, with settings and
     /// the probe both still agreeing on the declared port.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_pointer_port_never_overrides_a_declared_port() {
         let d = tempfile::tempdir().expect("tempdir");
