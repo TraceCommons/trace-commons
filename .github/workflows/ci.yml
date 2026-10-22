@@ -71,6 +71,16 @@ jobs:
         run: |
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
+      # Seconds, no build. The judgement development features
+      # (`judgement-development-models` in the server, and the daemon's
+      # `judgement-development`) must never reach a release, a shipped
+      # crate's default, or the production judgement image; the unit tests
+      # never read a release workflow or a Dockerfile, so this does. The
+      # self-test seeds each violation and requires a refusal.
+      - name: No shipped build enables a judgement development feature
+        run: |
+          scripts/ci/check-release-judgement-features.sh check
+          scripts/ci/check-release-judgement-features.sh self-test
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
