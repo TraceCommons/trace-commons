@@ -49,8 +49,8 @@ fn facts() -> SessionFacts {
     }
 }
 
-fn prompts(n: usize) -> Vec<Scrubbed> {
-    (0..n).map(|i| Scrubbed(format!("prompt {i}"))).collect()
+fn prompts(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("prompt {i}")).collect()
 }
 
 fn ev(prompt_ix: u32, kind: EventKind) -> EventMarker {
@@ -59,8 +59,8 @@ fn ev(prompt_ix: u32, kind: EventKind) -> EventMarker {
 
 fn input<'a>(
     facts: &'a SessionFacts,
-    prompts: &'a [Scrubbed],
-    final_line: Option<&'a Scrubbed>,
+    prompts: &'a [String],
+    final_message: Option<&'a str>,
     exts: &'a [&'a str],
     events: &'a [EventMarker],
 ) -> DigestInput<'a> {
@@ -68,7 +68,8 @@ fn input<'a>(
         facts,
         series: None,
         prompts,
-        final_line,
+        final_message,
+        scrub: ScrubContext::default(),
         edited_extensions: exts,
         events,
     }
@@ -208,13 +209,9 @@ fn truncation_counts_characters_not_bytes() {
 #[test]
 fn prompts_are_cut_to_240_characters_and_the_final_line_to_160() {
     let facts = facts();
-    let p = vec![
-        Scrubbed("x".repeat(500)),
-        Scrubbed("😀".repeat(300)),
-        Scrubbed("short".to_owned()),
-    ];
-    let fin = Scrubbed(format!("{}\nsecond line never sent", "é".repeat(200)));
-    let built = build_judgement_digest(&input(&facts, &p, Some(&fin), &[], &[])).unwrap();
+    let p = vec!["x".repeat(500), "😀".repeat(300), "short".to_owned()];
+    let fin = format!("{}\nsecond line never sent", "é".repeat(200));
+    let built = build_judgement_digest(&input(&facts, &p, Some(fin.as_str()), &[], &[])).unwrap();
     let ex = &built.digest.excerpts;
     assert_eq!(ex[0].text.chars().count(), PROMPT_EXCERPT_CHARS);
     assert_eq!(ex[1].text, "😀".repeat(240));
@@ -231,8 +228,8 @@ fn prompts_are_cut_to_240_characters_and_the_final_line_to_160() {
 #[test]
 fn only_the_first_line_of_a_short_final_message_is_sent() {
     let facts = facts();
-    let fin = Scrubbed("Done.\r\nDetails follow".to_owned());
-    let built = build_judgement_digest(&input(&facts, &[], Some(&fin), &[], &[])).unwrap();
+    let fin = "Done.\r\nDetails follow".to_owned();
+    let built = build_judgement_digest(&input(&facts, &[], Some(fin.as_str()), &[], &[])).unwrap();
     assert_eq!(built.digest.final_line.as_deref(), Some("Done."));
 }
 
@@ -242,8 +239,8 @@ fn only_the_first_line_of_a_short_final_message_is_sent() {
 fn over_the_cap_whole_excerpts_drop_from_the_middle_out() {
     let facts = facts();
     // Twelve excerpts of 240 four-byte characters: about 11.5 KiB.
-    let p: Vec<Scrubbed> = (0..12)
-        .map(|i| Scrubbed(format!("{i:02}{}", "😀".repeat(300))))
+    let p: Vec<String> = (0..12)
+        .map(|i| format!("{i:02}{}", "😀".repeat(300)))
         .collect();
     let built = build_judgement_digest(&input(&facts, &p, None, &[], &[])).unwrap();
     assert!(
@@ -276,7 +273,7 @@ fn over_the_cap_whole_excerpts_drop_from_the_middle_out() {
 #[test]
 fn under_the_cap_nothing_is_dropped() {
     let facts = facts();
-    let p: Vec<Scrubbed> = (0..12).map(|_| Scrubbed("a".repeat(240))).collect();
+    let p: Vec<String> = (0..12).map(|_| "a".repeat(240)).collect();
     let built = build_judgement_digest(&input(&facts, &p, None, &[], &[])).unwrap();
     assert_eq!(built.digest.excerpts.len(), 12);
     assert_eq!(built.digest.excerpts_dropped, 0);
@@ -316,13 +313,14 @@ fn the_largest_digest_without_excerpts_fits_the_cap() {
     let events: Vec<EventMarker> = (0..500)
         .map(|i| ev(u32::MAX - i, EventKind::Interrupt))
         .collect();
-    let fin = Scrubbed("😀".repeat(400));
+    let fin = "😀".repeat(400);
     let exts = vec!["rs"; 1000];
     let built = build_judgement_digest(&DigestInput {
         facts: &facts,
         series: Some(&series),
         prompts: &[],
-        final_line: Some(&fin),
+        final_message: Some(fin.as_str()),
+        scrub: ScrubContext::default(),
         edited_extensions: &exts,
         events: &events,
     })
@@ -345,7 +343,7 @@ fn the_same_input_gives_the_same_bytes_and_hash() {
     let facts = facts();
     let series = sample_series();
     let p = prompts(20);
-    let fin = Scrubbed("All tests pass.".to_owned());
+    let fin = "All tests pass.".to_owned();
     let exts = ["rs", "md", "toml"];
     let events = [ev(9, EventKind::Denial), ev(3, EventKind::Undo)];
     let make = || {
@@ -353,7 +351,8 @@ fn the_same_input_gives_the_same_bytes_and_hash() {
             facts: &facts,
             series: Some(&series),
             prompts: &p,
-            final_line: Some(&fin),
+            final_message: Some(fin.as_str()),
+            scrub: ScrubContext::default(),
             edited_extensions: &exts,
             events: &events,
         })
@@ -379,7 +378,7 @@ fn a_changed_excerpt_changes_the_hash() {
     let facts = facts();
     let a = prompts(3);
     let mut b = prompts(3);
-    b[1] = Scrubbed("prompt one".to_owned());
+    b[1] = "prompt one".to_owned();
     let ha = build_judgement_digest(&input(&facts, &a, None, &[], &[])).unwrap();
     let hb = build_judgement_digest(&input(&facts, &b, None, &[], &[])).unwrap();
     assert_ne!(ha.sha256, hb.sha256);
@@ -395,7 +394,8 @@ fn counts_sum_models_and_read_the_series() {
         facts: &facts,
         series: Some(&series),
         prompts: &[],
-        final_line: None,
+        final_message: None,
+        scrub: ScrubContext::default(),
         edited_extensions: &["rs", ".md", "src/lib.rs", "Cargo.toml", "tests/a.rs"],
         events: &[],
     })
@@ -493,13 +493,14 @@ fn serialized_bytes_hold_no_path_home_repo_email_or_identifier() {
         "~/acme-secret-repo/notes.md",
         "git@github.com:alice/acme-secret-repo.git",
     ];
-    let p = vec![Scrubbed("fix the failing test".to_owned())];
-    let fin = Scrubbed("Fixed it.".to_owned());
+    let p = vec!["fix the failing test".to_owned()];
+    let fin = "Fixed it.".to_owned();
     let built = build_judgement_digest(&DigestInput {
         facts: &facts,
         series: Some(&series),
         prompts: &p,
-        final_line: Some(&fin),
+        final_message: Some(fin.as_str()),
+        scrub: ScrubContext::default(),
         edited_extensions: &exts,
         events: &[ev(0, EventKind::Denial)],
     })
@@ -651,4 +652,230 @@ fn events_at_one_prompt_serialize_the_same_in_any_input_order() {
     let ba = build_judgement_digest(&input(&facts, &[], None, &[], &a)).unwrap();
     let bb = build_judgement_digest(&input(&facts, &[], None, &[], &b)).unwrap();
     assert_eq!(ba.bytes, bb.bytes);
+}
+
+// ---- the scrub (addendum, "The scrub") ----
+
+const WD: &str = "/Users/alice/code/acme-billing";
+const SCRUB: ScrubContext<'static> = ScrubContext {
+    home_dir: Some("/Users/alice"),
+    working_dir: Some(WD),
+};
+
+fn scrubbed_input<'a>(
+    facts: &'a SessionFacts,
+    prompts: &'a [String],
+    final_message: Option<&'a str>,
+) -> DigestInput<'a> {
+    DigestInput {
+        facts,
+        series: None,
+        prompts,
+        final_message,
+        scrub: SCRUB,
+        edited_extensions: &[],
+        events: &[],
+    }
+}
+
+fn assert_absent(bytes: &[u8], needles: &[&str]) {
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let lower = text.to_lowercase();
+    for needle in needles {
+        assert!(
+            !lower.contains(&needle.to_lowercase()),
+            "{needle:?} leaked into {text}"
+        );
+    }
+}
+
+#[test]
+fn the_masker_covers_emails_urls_paths_names_and_long_numbers() {
+    let repo = repo_terms(Some(WD));
+    let m = |s: &str| mask_excerpt(s, &repo);
+    assert_eq!(m("mail bob@corp.io now"), "mail <email> now");
+    assert_eq!(
+        m("open https://x.example/z?q=1 and www.foo.com, then stop"),
+        "open <url> and <url>, then stop"
+    );
+    assert_eq!(
+        m("edit lib/foo.rs and README.md (and docs\\guide.txt)"),
+        "edit <path:source> and <path:doc> (and <path:doc>)"
+    );
+    assert_eq!(m("see `Cargo.toml`."), "see `<path:config>`.");
+    assert_eq!(m("ask Jane Doe today"), "ask <name> today");
+    assert_eq!(m("Jane Doe asked twice"), "<name> asked twice");
+    assert_eq!(m("Fix it. Then run it"), "Fix it. Then run it");
+    assert_eq!(m("order 1234567 and 12345"), "order <number> and 12345");
+    assert_eq!(m("v0.12 and 3.14 stay"), "v0.12 and 3.14 stay");
+}
+
+#[test]
+fn the_repository_name_and_its_long_parts_are_masked_in_any_case() {
+    let repo = repo_terms(Some(WD));
+    let m = |s: &str| mask_excerpt(s, &repo);
+    assert_eq!(m("the ACME-Billing service"), "the <repo> service");
+    assert_eq!(m("billing is slow"), "<repo> is slow");
+    assert_eq!(m("an acme thing"), "an <repo> thing");
+    // Parts under four characters are kept.
+    let short = repo_terms(Some("/w/ab-cd"));
+    assert_eq!(mask_excerpt("ab and cd", &short), "ab and cd");
+    assert_eq!(mask_excerpt("in ab-cd now", &short), "in <repo> now");
+    assert!(repo_terms(None).is_empty());
+}
+
+#[test]
+fn a_prompt_with_a_found_email_sends_counts_only() {
+    let facts = facts();
+    let p = vec![
+        "fix the refund bug in acme-billing/src/invoices/stripe_refund.rs for Jane Doe <jane@acme.com>"
+            .to_owned(),
+    ];
+    let fin = "Updated `src/payments/refund.rs`";
+    let built = build_judgement_digest(&scrubbed_input(&facts, &p, Some(fin))).unwrap();
+    // The redactor found and removed an email, so the session's residual
+    // risk is not Low and no text is sent at all.
+    assert!(built.digest.excerpts.is_empty());
+    assert_eq!(built.digest.final_line, None);
+    assert_eq!(built.digest.excerpts_dropped, 1);
+    assert_absent(
+        &built.bytes,
+        &[
+            "acme",
+            "billing",
+            "invoices",
+            "stripe_refund",
+            "Jane",
+            "Doe",
+            "jane@acme.com",
+            "src/",
+            "payments",
+            "refund.rs",
+        ],
+    );
+}
+
+#[test]
+fn a_low_risk_prompt_and_final_line_go_out_masked() {
+    let facts = facts();
+    let p = vec![
+        "fix the refund bug in acme-billing/src/invoices/stripe_refund.rs for Jane Doe".to_owned(),
+    ];
+    let fin = "Updated `src/payments/refund.rs`\nsecond line";
+    let built = build_judgement_digest(&scrubbed_input(&facts, &p, Some(fin))).unwrap();
+    assert_eq!(built.digest.excerpts.len(), 1);
+    assert_eq!(
+        built.digest.excerpts[0].text,
+        "fix the refund bug in <path:source> for <name>"
+    );
+    assert_eq!(
+        built.digest.final_line.as_deref(),
+        Some("Updated `<path:source>`")
+    );
+    assert_absent(
+        &built.bytes,
+        &[
+            "acme",
+            "billing",
+            "invoices",
+            "stripe_refund",
+            "Jane",
+            "Doe",
+            "src/",
+            "payments",
+            "refund.rs",
+            "second line",
+        ],
+    );
+}
+
+#[test]
+fn a_secret_straddling_the_cut_leaves_neither_half() {
+    let secret = format!("sk-{}", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3");
+    let head = "word ".repeat(46); // 230 characters
+    let mut prompt = format!("{head}{secret} ");
+    while prompt.chars().count() < 400 {
+        prompt.push_str("tail ");
+    }
+    assert_eq!(prompt.find("sk-"), Some(230));
+    // The scrub alone, before any session gate.
+    let redactor = scrub_redactor(&SCRUB);
+    let repo = repo_terms(SCRUB.working_dir);
+    let scrubbed = scrub_text(&redactor, &repo, &prompt);
+    assert!(!scrubbed.text.contains("sk-"), "{}", scrubbed.text);
+    assert!(!scrubbed.text.contains("Ab1Cd2"), "{}", scrubbed.text);
+    assert!(!scrubbed.text.contains("Yz3"), "{}", scrubbed.text);
+    // And the digest.
+    let facts = facts();
+    let p = vec![prompt];
+    let built = build_judgement_digest(&scrubbed_input(&facts, &p, None)).unwrap();
+    assert_absent(&built.bytes, &["sk-", "Ab1Cd2", "Yz3"]);
+}
+
+#[test]
+fn a_url_with_a_query_and_a_home_path_do_not_leave() {
+    let facts = facts();
+    let p = vec![
+        "see https://example.com/reset?token=abc123&user=bob then /Users/alice/notes/plan.md"
+            .to_owned(),
+    ];
+    let built = build_judgement_digest(&scrubbed_input(&facts, &p, None)).unwrap();
+    // A home path is a `local_path`, which does not raise the risk, so the
+    // excerpt is sent, masked.
+    assert_eq!(built.digest.excerpts.len(), 1);
+    assert!(
+        built.digest.excerpts[0]
+            .text
+            .starts_with("see <url> then <")
+    );
+    assert_absent(
+        &built.bytes,
+        &[
+            "example.com",
+            "token=",
+            "abc123",
+            "bob",
+            "/Users",
+            "alice",
+            "notes",
+            "plan.md",
+        ],
+    );
+}
+
+#[test]
+fn the_residual_gate_drops_text_the_detector_still_flags() {
+    let redactor = scrub_redactor(&SCRUB);
+    assert!(passes_residual_gate(
+        &redactor,
+        "fix <path:source> for <name>"
+    ));
+    assert!(!passes_residual_gate(
+        &redactor,
+        "token ghp_abcdefghijklmnopqrstuvwxyz0123"
+    ));
+}
+
+#[test]
+fn the_builder_constructs_its_redactor_only_through_deterministic_only() {
+    let source = include_str!("judgement_digest.rs");
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(code.contains("DeterministicTraceRedactor::deterministic_only("));
+    for forbidden in [
+        "build_redactor",
+        "DeterministicTraceRedactor::new",
+        "DeterministicTraceRedactor::default",
+        "try_default",
+        "with_known_path_prefixes",
+        "privacy_filter",
+        "PrivacyFilter",
+        "std::env",
+        "env::var",
+    ] {
+        assert!(!code.contains(forbidden), "{forbidden}");
+    }
 }
