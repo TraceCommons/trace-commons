@@ -78,7 +78,10 @@ All dated 2026-10-21. The owner's words are quoted.
 - **(S12) Open sign-up on staging.** "Ideall for staging we don't use
   invites at all. People with near.ai accounts just sign up" (2026-10-22).
   Any staging NEAR AI account can sign up; there is no allow-list and no
-  invite. Supersedes S5.
+  invite. Supersedes S5. Asked how staging opens sign-in without a witness,
+  the owner chose to skip the ledger on staging (2026-10-22): a staging build
+  creates accounts without the admission ledger or witness; production is
+  unchanged.
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -405,7 +408,7 @@ too.
 | `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | the staging set, written by the re-sign tool (5.9) |
 | `TRACE_COMMONS_NEAR_AI_PAYOUT_*` | payout design section 2, step 6; mode starts `dry_run` |
 | `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | `0`, as on the pilot's template |
-| `TRACE_COMMONS_ADMISSION_ENABLED` | `true`, with the ledger's limits and signers; today's code opens NEAR AI sign-in only when it is on (3.12) |
+| `TRACE_COMMONS_ADMISSION_ENABLED` | `false`; a staging build creates NEAR AI accounts without the ledger (3.12) |
 | `TRACE_COMMONS_COMMUNITY_*` | off; staging has no public community page |
 | `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME`, `_REMOTE_OBJECT_STORE_*` | the `tc-staging` key and staging bucket |
 
@@ -455,19 +458,21 @@ The one staging difference is that the NEAR wallet ceremony is refused
 (`staging_wallet_provisioning_closed`) whatever the configuration says, so
 NEAR AI is the only way to make a staging account.
 
-What opens NEAR AI sign-in is the same readiness check as on the pilot
-(`near_ai_login_readiness_named`): `TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true`,
-the account registry database, the account identity
-(`TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER`, `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY`),
-the issuer (`TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL`, `_AUDIENCE`), and
-`near_provisioning_admission_ready`. The last is true only when the
-admission ledger is configured (`TRACE_COMMONS_ADMISSION_ENABLED=true` and
-its limits and signers), and the ledger refuses to start without a pinned
-redaction witness and a durable, RLS-ready database. Staging therefore needs
-the witness (open item 4) before anyone can sign in, or a code change that
-lets a staging build provision NEAR AI logins without the ledger. Tenant
-access grants (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS`) play no part in
-NEAR AI sign-in.
+What opens NEAR AI sign-in is the pilot's readiness check
+(`near_ai_login_readiness_named`) less one control:
+`TRACE_COMMONS_NEAR_PROVISIONING_ENABLED=true`, the account registry
+database, the account identity (`TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER`,
+`TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY`) and the issuer
+(`TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL`, `_AUDIENCE`). A default build
+also requires `near_provisioning_admission_ready`, which needs the admission
+ledger and therefore a pinned redaction witness. A staging build compiles
+that requirement out (S12), so staging runs with the ledger off and no
+witness, and NEAR AI sign-in still opens. Production is unchanged: the
+requirement is a compile-time difference, not a setting.
+`a_staging_build_signs_up_without_the_admission_ledger` and its default-build
+twin `a_default_build_refuses_sign_up_without_the_admission_ledger` hold
+both sides. Tenant access grants (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS`)
+play no part in NEAR AI sign-in.
 
 ## 4. The staging macOS app
 
@@ -902,9 +907,11 @@ tokens.
 **Anyone can use staging.** Anyone can make a staging NEAR AI account
 (S12), so anyone who has the app can sign up, upload traces to our staging
 server, and spend our staging NEAR AI credit through it: Private AI
-inference, scoring and the privacy filter. Rate limits and the admission
-ledger's cost limits bound how fast; nothing bounds who. Staging credit is
+inference, scoring and the privacy filter. Rate limits bound how fast;
+nothing bounds who. Staging credit is
 worth nothing in production and staging shares nothing with it (above).
+Staging also has no per-account cost limits: it runs without the admission
+ledger (S12), so only rate limits bound one account.
 The operator stops all of it by shutting the staging service down; there is
 no per-person switch.
 
@@ -949,11 +956,10 @@ open:
    measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
    whether an API key minted before a redeploy survives the JWT rotation or
    only sessions break.
-4. **Witness and self-hosted filter in staging.** Not built now. NEAR AI
-   sign-in needs the admission ledger, and the ledger needs a pinned witness
-   (3.12), so without a witness nobody can sign in to staging. Either build
-   the witness for staging or change the ingest so a staging build
-   provisions NEAR AI logins without the ledger.
+4. **Witness and self-hosted filter in staging.** Not built now. That no
+   longer blocks sign-in: resolved 2026-10-22, a staging build creates NEAR
+   AI accounts without the admission ledger, which is what needed the
+   witness (S12, 3.12).
 5. **The "Ask me" default** for staging sources.
 6. **Where testers report**: a GitHub issue template labelled staging, or a
    private channel.
