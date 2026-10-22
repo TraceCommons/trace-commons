@@ -19,7 +19,9 @@ enum DaemonHost {
     typealias Resolution = StateDirectory.Resolution
     typealias Refusal = StateDirectory.Refusal
 
-    static func resolveConfigDirectory() throws -> Resolution {
-        try StateDirectory.resolve()
+    /// `channel` is the one `BuildChannelGate` agreed: the directory and its
+    /// override variable are the dylib's.
+    static func resolveConfigDirectory(channel: BuildChannel) throws -> Resolution {
+        try StateDirectory.resolve(channel: channel)
     }
 }

@@ -56,6 +56,10 @@ cat <<PLIST
     <key>CFBundleName</key><string>Near.ai</string>
     <key>CFBundleDisplayName</key><string>Near.ai</string>
     <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
+    <!-- The channel this bundle is. The app compares it with the linked
+         dylib's channel at launch and starts nothing on a mismatch or when
+         this key is missing (staging design, section 4.3). -->
+    <key>TCChannel</key><string>production</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>

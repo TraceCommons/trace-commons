@@ -313,6 +313,25 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  */
 char*       tc_settings_ranges_json(void);
 
+/* This build's channel identity, as a JSON object:
+ *
+ * {"channel":"production","state_dir_name":"trace-commons",
+ *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
+ *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons"}
+ *
+ * channel is "production" or "staging". The macOS app compares it with its
+ * Info.plist TCChannel and starts nothing on a mismatch. No key, secret or
+ * keychain name is in it. Reads nothing and writes nothing. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_build_channel_json(void);
+
+/* The sentence the app shows instead of starting when its bundle and this
+ * library disagree on the channel. Returns an owned string; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_channel_mismatch_line(void);
+
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
  * This is the answer to tc_daemon_start reporting "already-running". That

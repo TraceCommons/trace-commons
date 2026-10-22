@@ -103,9 +103,12 @@ public struct NativePasskeyBegin: Decodable, Sendable {
         case authenticatorAttachment = "authenticator_attachment", residentKey = "resident_key"
     }
 
-    public func validated(for action: NativePasskeyAction) throws -> NativePasskeyRequest {
+    /// `relyingParty` is the dylib's (`BuildChannel.passkeyRelyingParty`):
+    /// options naming any other relying party are refused, and an empty one
+    /// matches nothing.
+    public func validated(for action: NativePasskeyAction, relyingParty: String) throws -> NativePasskeyRequest {
         guard !ceremony.isEmpty, ceremony.utf8.count <= 256,
-              rpID == "tracecommons.ai", (1...600).contains(expiresInSecs),
+              !relyingParty.isEmpty, rpID == relyingParty, (1...600).contains(expiresInSecs),
               ["required", "preferred", "discouraged"].contains(userVerification)
         else { throw NativePasskeyFailure.invalidOptions }
         let challengeBytes = try NativePasskeyEncoding.decode(challenge, maximumBytes: 1_024)
@@ -218,13 +221,19 @@ public protocol NativePasskeyProviding: AnyObject, Sendable {
 public final class NativePasskeyCoordinator {
     private let daemon: any NativePasskeyDaemonCalling
     private let provider: any NativePasskeyProviding
+    private let relyingParty: String
     public private(set) var isRunning = false
     private var explicitlyCancelled = false
     private var runID: UUID?
 
-    public init(daemon: any NativePasskeyDaemonCalling, provider: any NativePasskeyProviding) {
+    /// `relyingParty` is the dylib's (`BuildChannel.passkeyRelyingParty`).
+    public init(
+        daemon: any NativePasskeyDaemonCalling, provider: any NativePasskeyProviding,
+        relyingParty: String
+    ) {
         self.daemon = daemon
         self.provider = provider
+        self.relyingParty = relyingParty
     }
 
     public func cancel() {
@@ -245,7 +254,7 @@ public final class NativePasskeyCoordinator {
         let begin = try await daemon.begin(action, label: label)
         do {
             try checkCancellation()
-            let request = try begin.validated(for: action)
+            let request = try begin.validated(for: action, relyingParty: relyingParty)
             let deadline = ContinuousClock.now.advanced(by: .seconds(request.expiresInSecs))
             let presentedProvider = provider
             let credential = try await withTaskCancellationHandler {

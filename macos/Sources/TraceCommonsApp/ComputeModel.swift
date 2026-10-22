@@ -27,10 +27,18 @@ final class ComputeModel {
 
     func noteQuitRefused() { quitWasRefused = true }
 
+    /// Refuses, as unavailable, when the bundle and the dylib disagree on
+    /// the channel: compute opens the same state directory the daemon does.
     func start() async {
-        do { await start(configDirectory: try StateDirectory.resolveCompute().path) }
+        guard case .agreed(let channel) = BuildChannelGate.current else {
+            fail(ChannelRefused())
+            return
+        }
+        do { await start(configDirectory: try StateDirectory.resolveCompute(channel: channel).path) }
         catch { fail(error) }
     }
+
+    private struct ChannelRefused: Error {}
 
     func retryOpen() async {
         guard !controlsBusy, !closed else { return }

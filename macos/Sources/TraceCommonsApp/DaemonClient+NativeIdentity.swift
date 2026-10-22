@@ -60,8 +60,12 @@ extension DaemonClient {
 
     @MainActor
     func nativePasskeyCoordinator(presentationAnchor: @escaping @MainActor () -> NSWindow?) -> NativePasskeyCoordinator {
+        // The dylib's relying party. A daemon runs only after the channel
+        // gate agreed, so this is never empty in practice; an empty one
+        // refuses every ceremony.
         NativePasskeyCoordinator(daemon: NativeIdentityTransport(client: self),
-                                provider: PlatformPasskeyProvider(presentationAnchor: presentationAnchor))
+                                provider: PlatformPasskeyProvider(presentationAnchor: presentationAnchor),
+                                relyingParty: BuildChannelGate.agreedChannel?.passkeyRelyingParty ?? "")
     }
 
     private func identityCall<T: Decodable>(_ method: String, params: [String: Any] = [:]) throws -> T {
