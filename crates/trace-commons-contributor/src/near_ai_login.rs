@@ -137,9 +137,12 @@ impl BrowserPlan {
     /// - Off macOS and Windows, no `DISPLAY` and no `WAYLAND_DISPLAY` means
     ///   no graphical session, so nothing can open; `xdg-open` would only
     ///   list the text browsers it could not find.
-    /// - `BROWSER` names an opener the person set up, which can work over SSH
-    ///   (an editor's remote terminal forwards it), so it is still tried; the
-    ///   forwarding steps are printed either way.
+    /// - Off macOS and Windows, `BROWSER` names an opener the person set up,
+    ///   which can work over SSH (an editor's remote terminal forwards it),
+    ///   and `xdg-open` falls back to it, so it is still tried; the
+    ///   forwarding steps are printed either way. On macOS and Windows the
+    ///   opener (`open`, `start`) never reads `BROWSER`, so it counts for
+    ///   nothing there.
     pub(crate) fn from_env(
         no_browser: bool,
         graphical_os: bool,
@@ -150,7 +153,7 @@ impl BrowserPlan {
         let display = graphical_os || set("DISPLAY") || set("WAYLAND_DISPLAY");
         let remote = ssh || !display;
         Self {
-            open: !no_browser && (set("BROWSER") || !remote),
+            open: !no_browser && ((!graphical_os && set("BROWSER")) || !remote),
             remote,
         }
     }
@@ -191,7 +194,7 @@ pub(crate) fn print_sign_in_address(
             )?;
             writeln!(
                 out,
-                "       ssh -N -L {port}:127.0.0.1:{port} {REMOTE_HOST_PLACEHOLDER}"
+                "       ssh -N -o ExitOnForwardFailure=yes -L {port}:127.0.0.1:{port} {REMOTE_HOST_PLACEHOLDER}"
             )?;
             writeln!(
                 out,
@@ -758,6 +761,16 @@ mod tests {
             ),
             remote
         );
+        // `open` and `start` never read BROWSER: over SSH into a Mac it
+        // would open on the console's screen, so nothing is opened.
+        assert_eq!(
+            plan(
+                false,
+                true,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            remote
+        );
     }
 
     #[test]
@@ -827,7 +840,7 @@ mod tests {
         assert!(out.contains(REMOTE_INTRO), "{out}");
         assert!(
             out.contains(&format!(
-                "ssh -N -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
+                "ssh -N -o ExitOnForwardFailure=yes -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
             )),
             "{out}"
         );
