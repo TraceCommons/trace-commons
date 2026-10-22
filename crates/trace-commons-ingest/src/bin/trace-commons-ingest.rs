@@ -139,7 +139,7 @@ use trace_commons_server::near_account_identity::{
     NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
 };
 use trace_commons_server::near_attestation::client::{
-    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
+    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL, ATTESTATION_GATEWAY_BASE_URL,
     AttestationClient as NearAttestationClient, AttestedKeyReportClient,
     BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
     MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
@@ -1412,6 +1412,9 @@ pub async fn run_ingest(
     }
 
     let _ = tracing_subscriber::fmt::try_init();
+    // Before any database or network is opened: a NEAR AI host from the
+    // other channel stops the boot (staging design, section 3.9).
+    near_ai_host_coherence_from_lookup(&|name: &str| std::env::var(name).ok())?;
     tracing::info!(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
@@ -13027,6 +13030,10 @@ struct HealthResponse {
     /// The crate version. Reported alongside the commit, never instead of it:
     /// it does not move when a deploy does.
     build_version: &'static str,
+    /// Whether this binary was built with `near-ai-staging`. A build fact, not
+    /// a secret: the deploy script refuses a binary built for the other
+    /// channel by reading it (staging design, section 3.11).
+    near_ai_staging: bool,
 }
 
 async fn health_handler() -> Json<HealthResponse> {
@@ -13036,6 +13043,7 @@ async fn health_handler() -> Json<HealthResponse> {
         build_commit: trace_commons_build_info::COMMIT,
         build_time: trace_commons_build_info::BUILD_TIME,
         build_version: env!("CARGO_PKG_VERSION"),
+        near_ai_staging: trace_commons_server::near_ai_api::near_ai_staging(),
     })
 }
 
@@ -83930,6 +83938,76 @@ fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAtt
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(Some(Arc::new(client)))
+}
+
+/// The boot refusal's control name (staging design, section 3.9).
+const NEAR_AI_STAGING_HOST_COHERENCE_CONTROL: &str = "near_ai_staging_host_coherence";
+
+/// Every NEAR AI host this ingest will call or publish, as each setting
+/// resolves: configured, or its default where an unset setting still names
+/// a host. A setting that is unset and has no default names no host and is
+/// left out.
+fn near_ai_host_settings_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, String)> {
+    let get = |name: &str| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let mut settings = Vec::new();
+    // The scorer: no default; unset, no scorer is built.
+    if let Some(base) = get(TRACE_COMMONS_NEAR_AI_BASE_URL) {
+        settings.push((TRACE_COMMONS_NEAR_AI_BASE_URL, base));
+    }
+    // The attestation registry: unset means the production gateway.
+    settings.push((
+        TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL,
+        get(TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL)
+            .unwrap_or_else(|| ATTESTATION_GATEWAY_BASE_URL.to_string()),
+    ));
+    // The privacy filter: unset means production, which is called only when
+    // the NEAR AI backend is selected. A configured value is checked always.
+    const PRIVACY_BASE: &str = "TRACE_NEAR_AI_PRIVACY_BASE_URL";
+    match get(PRIVACY_BASE) {
+        Some(base) => settings.push((PRIVACY_BASE, base)),
+        None if get("TRACE_PRIVACY_FILTER_BACKEND").as_deref() == Some("near-ai") => {
+            settings.push((
+                PRIVACY_BASE,
+                trace_commons_protocol::privacy_filter_near_ai::DEFAULT_BASE_URL.to_string(),
+            ));
+        }
+        None => {}
+    }
+    // The receipt endpoint published to contributors: no default; unset,
+    // nothing is published.
+    const RECEIPT_ENDPOINT: &str = "TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT";
+    if let Some(endpoint) = get(RECEIPT_ENDPOINT) {
+        settings.push((RECEIPT_ENDPOINT, endpoint));
+    }
+    settings
+}
+
+/// Refuse to boot when a NEAR AI host this ingest will call or publish
+/// belongs to the other channel: a `near-ai-staging` build must name only
+/// the NEAR AI staging host, and a default build must never name it
+/// (staging design, section 3.9). The refusal names the control and the
+/// setting, never the value.
+fn near_ai_host_coherence_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    let settings = near_ai_host_settings_from_lookup(lookup);
+    let pairs = settings
+        .iter()
+        .map(|(setting, url)| (*setting, url.as_str()))
+        .collect::<Vec<_>>();
+    trace_commons_server::near_ai_api::near_ai_host_coherence(&pairs).map_err(|setting| {
+        anyhow::anyhow!(
+            "missing_control:{NEAR_AI_STAGING_HOST_COHERENCE_CONTROL}: {setting} names a \
+             NEAR AI host outside this build's channel (near_ai_staging={})",
+            trace_commons_server::near_ai_api::near_ai_staging()
+        )
+    })
 }
 
 fn trimmed_env(name: &str) -> Option<String> {
