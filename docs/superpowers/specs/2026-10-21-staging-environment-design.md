@@ -69,6 +69,11 @@ All dated 2026-10-21. The owner's words are quoted.
   `tc-staging-artifacts-20261021`, PostgreSQL 16 on the VM, and the DNS
   names `staging.tracecommons.ai`, `ingest.staging.tracecommons.ai` and
   `issuer.staging.tracecommons.ai`. Secret names are in 3.7.
+- **(S10) Staging has its own IronWire home.** "okay new folder"
+  (2026-10-22, on #1546 review finding 6). The staging app's proxy, ledger,
+  admission token and tool connections live apart from production's, so
+  neither app reads the other's inference rows or reconfigures the other's
+  proxy (4.2, IronWire rows).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -484,6 +489,9 @@ app needs.
 | State dir override | `TRACE_COMMONS_CONTRIBUTOR_DIR` | `TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR` | `channel.rs`; a staging build ignores the production variable |
 | Daemon socket | `<state dir>/daemon.sock` (`config.rs:105`) | follows the state directory | none needed |
 | Managed-route homes | under the state directory | follows it | none needed |
+| IronWire home (S10) | `$IRONWIRE_HOME`, else `~/.ironwire` (`private_inference.rs:161`) | `~/.ironwire-staging`; a staging build ignores `IRONWIRE_HOME` and reads `IRONWIRE_STAGING_HOME` instead | `channel.rs`; the daemon passes the home to every IronWire start, ledger read and `connect` |
+| IronWire discovery pointer | `~/.ironwire/endpoint.json`, written there whatever `$IRONWIRE_HOME` says (`ironwire_pointer.rs:14-20`) | not used: a staging build never reads the pointer, and accepts only a control URL and token under its own home | `channel.rs`; a test that a staging build ignores a production pointer |
+| IronWire control port | IronWire's default (8463 in the pointer example) | a fixed staging port, so both proxies can run at once | `channel.rs` |
 | UserDefaults, login item | per bundle id | follow the bundle id | none needed |
 | Log subsystem | `ai.tracecommons.shell` (`WindowBreadcrumb.swift:30`) | the bundle id | read `Bundle.main.bundleIdentifier` |
 | Native account origin | `https://ingest.tracecommons.ai` (`native_identity.rs:86`) | `https://ingest.STAGING_HOST` | `channel.rs` |
