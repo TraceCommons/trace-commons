@@ -59,7 +59,7 @@ All dated 2026-10-21. The owner's words are quoted.
 - **(S6) DMG on a GitHub pre-release.** "GitHub pre-release". A `staging-*`
   pre-release in the public repo, never marked latest (6.1).
 - **(S7) A staging label in the window.** "Yes, a small staging label". Its
-  wording still goes through the copy review in the PR that adds it (4.8).
+  wording, "Staging", was approved on 2026-10-22 (4.8).
 - **(S8) Manual re-signing.** "Manual for now". An operator runs the re-sign
   tool after a NEAR AI staging redeploy (5.4).
 - **(S9) Built infrastructure.** Already created in the pilot project on
@@ -86,6 +86,13 @@ All dated 2026-10-21. The owner's words are quoted.
   the owner chose to skip the ledger on staging (2026-10-22): a staging build
   creates accounts without the admission ledger or witness; production is
   unchanged.
+- **(S13) Staging DMGs on public pre-releases.** "Github pre-relase for
+  straging is fine" (2026-10-22), knowing the repository is public and
+  sign-up is open, so anyone who finds a staging DMG can use staging (6.1).
+- **(S14) No GitHub environment for staging.** "I don't think we need a
+  staging environment right now" (2026-10-22), meaning the GitHub
+  environment and its approval gate. The staging workflow runs on manual
+  dispatch only, with staging-named repository secrets (6.1).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -512,7 +519,7 @@ app needs.
 |---|---|---|---|
 | Bundle id | `ai.tracecommons.shell` (`info-plist.sh:58`) | `ai.tracecommons.shell.staging` | `staging.env` |
 | App and DMG name | `Near.ai` (`info-plist.sh:56-57`, `make-app-bundle.sh:25`, `make-release-dmg.sh:80-81,239`) | `Near.ai Staging` | `staging.env` |
-| Icon | `AppIcon` | a staging variant of the same mark (open item 5) | `staging.env` names the `.icon` |
+| Icon | `AppIcon` | a staging variant of the same mark (open item 2) | `staging.env` names the `.icon` |
 | Keychain access group | `KXSWJN7WY8.ai.tracecommons.shell` (`os_secret_store.rs:21`, `entitlements.plist`) | `KXSWJN7WY8.ai.tracecommons.shell.staging` | the platform crate takes the group as a parameter from `channel.rs`; `macos/entitlements-staging.plist`; the parity test gains a staging twin |
 | Keychain service names | `trace-commons.*` (`os_secret_store.rs:14,36,111`) | `trace-commons-staging.*` | `channel.rs`; belt and braces on top of the group |
 | State directory | `~/Library/Application Support/trace-commons` (`config.rs:900`, `StateDirectory.swift:138`) | `.../trace-commons-staging` | `channel.rs`; Swift asks the FFI |
@@ -615,11 +622,14 @@ path and key name as arguments rather than gaining a staging branch.
 
 Name, Dock and menu-bar icon, and window titles say "Near.ai Staging". The
 daemon's status reports `channel: "staging"` (D9 asks for this; Task 7a
-wires `near_ai_staging()` into `daemon/ipc.rs`). Whether the app also shows a
-persistent label inside its windows is a new notice under
-`docs/ui-copy-guide.md` section 9, so it needs the owner's approval for
-both its existence and its wording (open item 5). Any staging string lives
-in the Rust copy tables (section 8 of the guide), not in Swift.
+wires `near_ai_staging()` into `daemon/ipc.rs`). The staging app also shows
+a label, the one word "Staging", at the left of the Monitor's top row and at
+the top of the first-run window, so it is there from sign-in on. It is a
+notice under `docs/ui-copy-guide.md` section 9: the owner approved it
+existing (S7) and its wording (2026-10-22). It is `health_copy::STAGING_WINDOW_LABEL`, read through
+`tc_channel_window_label`, which answers with an empty string on production,
+so a production build shows nothing. Any staging string lives in the Rust
+copy tables (section 8 of the guide), not in Swift.
 
 ## 5. Signed pins
 
@@ -802,11 +812,13 @@ lists it explicitly instead (6.2).
 - Trigger: `workflow_dispatch` only, with an optional ref input. Never
   `push`, never a tag, never `workflow_call`. Not in
   `release-contributor.yml` or `release-apps.yml`.
-- `environment: staging`, a GitHub environment with the owner as required
-  reviewer, so a run waits for approval. It carries the Developer ID and
-  notary secrets (the same team identity as production; Apple signing has no
-  separate staging identity) and its own WIF provider and publisher SA,
-  whose only bucket role is on the staging bucket.
+- No GitHub environment and no approval gate (S14). The Developer ID and
+  notary secrets are the repository's existing ones (the same team identity
+  as production; Apple signing has no separate staging identity). Its own
+  WIF provider and publisher SA, whose only bucket role is on the staging
+  bucket, and the staging Sparkle key are repository secrets with
+  staging-specific names; the release check refuses production names in
+  staging files.
 - Steps: build the FFI dylib and `near-ai` with the staging channel
   (`TC_CHANNEL=staging`); `swift test`; build, sign with
   `entitlements-staging.plist` and the staging profile, notarize and staple
@@ -828,8 +840,8 @@ lists it explicitly instead (6.2).
 The pre-release is internal in intent but public in fact (the repository is
 public). The DMG is notarized and points only at staging hosts. Since
 sign-up is open (S12), a stranger who installs it and makes a staging NEAR
-AI account can use staging (section 8). Open item 8 asks whether to keep the
-DMG off GitHub and only in the bucket.
+AI account can use staging (section 8). The owner accepted that: staging
+DMGs go on GitHub pre-releases (S13).
 
 ### 6.2 What the release check must allow
 
@@ -972,14 +984,14 @@ The plan breaks this into small PRs. In order:
 ## 10. Open items
 
 Settled on 2026-10-21: the host name, PostgreSQL on the VM, the in-window
-label (wording still to approve), re-signing and where the DMG lives
-(S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12). Still
-open:
+label (wording approved 2026-10-22), re-signing and where the DMG lives
+(S6-S9). Admission was settled on 2026-10-22 as open sign-up (S12), and the
+public pre-release as the DMG's home (S13). The Apple setup is done: the App
+ID `ai.tracecommons.shell.staging` exists and its Developer ID provisioning
+profile is in `macos/` (#1545). Still open:
 
-1. **Apple setup (owner).** A new App ID `ai.tracecommons.shell.staging`
-   with the keychain group and associated domain, and a Developer ID
-   provisioning profile for it.
-2. **The staging icon** and the label's wording.
+1. **Apple setup (owner).** Done (see above).
+2. **The staging icon.**
 3. **NEAR AI facts still needed:** whether staging has per-model completions
    hosts; which registers staging pins (5.2); staging's current
    measurements and the per-model receipt signers for `Qwen/Qwen3.8-27B`;
