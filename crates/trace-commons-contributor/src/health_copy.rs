@@ -237,11 +237,11 @@ pub const READ_UNAVAILABLE: &str =
 /// What the app says instead of starting when its bundle and its core
 /// library come from different builds (staging design, section 4.3): a
 /// staging bundle around a production library, or the reverse, would show
-/// one channel while talking to the other, so the app starts nothing. Draft
-/// wording, awaiting owner approval.
+/// one channel while talking to the other, so the app starts nothing. It
+/// calls the copy damaged rather than naming builds. Approved 2026-10-22.
 pub const CHANNEL_MISMATCH: &str = concat!(
     crate::app_name!(),
-    " can't start because this copy is put together from two different builds. \
+    " can't start because this copy of the app is damaged. \
      Nothing is being watched or sent. Install ",
     crate::app_name!(),
     " again to fix it."
