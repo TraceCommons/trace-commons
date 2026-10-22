@@ -32,6 +32,7 @@ use trace_commons_protocol::insights_judgement::ConfidenceBasis;
 use super::model::{
     DecisionCall, JudgementModel, ModelAnswer, ModelError, ParsedAnswer, RawDecision, TokenUsage,
 };
+use super::prompts::JUDGEMENT_TEMPERATURE;
 
 /// The mock's model id.
 pub const MOCK_MODEL_ID: &str = "trace-commons/mock-judgement-model";
@@ -204,7 +205,8 @@ impl JudgementModel for MockJudgementModel {
                 },
             },
             "max_tokens": call.max_tokens,
-            "temperature": 0,
+            "temperature": serde_json::from_str::<serde_json::Value>(JUDGEMENT_TEMPERATURE)
+                .expect("the temperature is a JSON number"),
             "stream": false,
         });
         serde_json::to_vec(&body).expect("a request body is JSON serializable")

@@ -65,11 +65,11 @@ use super::limiter::{
 };
 use super::model::{DecisionCall, JudgementModel, ModelAnswer, ModelError};
 use super::production::ProductionCheck;
-use super::prompts::{bucket_for_probability, fallback_label, prompt_for};
+use super::prompts::{FALLBACK_CONFIDENCE, bucket_for_probability, fallback_label, prompt_for};
 
-/// The completion-token ceiling for every call: the guard against a
-/// reasoning model spending far past the expected cost.
-pub const JUDGEMENT_MAX_TOKENS: u32 = 64;
+/// The completion-token ceiling, defined with the prompts because it is
+/// hashed into every `prompt_version`.
+pub use super::prompts::JUDGEMENT_MAX_TOKENS;
 /// How long one model call may take, receipt fetch included.
 pub const JUDGEMENT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The tracing target of the latch and over-reservation lines: the
@@ -184,7 +184,7 @@ pub fn label_from_answer(
         (
             fallback_label(kind),
             JudgementConfidence {
-                bucket: ConfidenceBucket::Low,
+                bucket: FALLBACK_CONFIDENCE,
                 basis,
             },
         )

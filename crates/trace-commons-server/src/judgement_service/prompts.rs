@@ -13,7 +13,11 @@
 //! - the choice list, in wire order;
 //! - the chat adapter's output schema;
 //! - the decision adapter's bucket thresholds;
-//! - the user-turn template that wraps the digest.
+//! - the user-turn template that wraps the digest;
+//! - the call settings ([`LABEL_SETTINGS`]): the completion-token ceiling
+//!   (a lower one truncates more answers into the fallback), the
+//!   temperature, the reasoning setting;
+//! - the fallback: the kind's fallback label and the fallback confidence.
 //!
 //! A test pins the expected hash for each `<name>-v<N>`. Editing any of the
 //! above without bumping `N` fails that test; bumping `N` changes the
@@ -28,6 +32,40 @@ pub const HIGH_CONFIDENCE_MIN_PROBABILITY: f64 = 0.8;
 /// Decision adapter: at or above this (and below the high threshold) is
 /// `medium`; below it is `low`.
 pub const MEDIUM_CONFIDENCE_MIN_PROBABILITY: f64 = 0.6;
+
+/// The completion-token ceiling for every call: the guard against a
+/// reasoning model spending far past the expected cost. Hashed into every
+/// `prompt_version`, because a lower ceiling truncates more answers into
+/// the fallback label.
+pub const JUDGEMENT_MAX_TOKENS: u32 = 64;
+/// The sampling temperature every adapter requests, as it is hashed.
+pub const JUDGEMENT_TEMPERATURE: &str = "0";
+/// The reasoning setting every adapter requests, where the model has one.
+pub const JUDGEMENT_REASONING: &str = "off";
+/// The confidence a fallback label carries.
+pub const FALLBACK_CONFIDENCE: ConfidenceBucket = ConfidenceBucket::Low;
+
+/// Everything outside the prompt file and its choices that fixes what a
+/// label means, hashed into each `prompt_version`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabelSettings {
+    pub max_tokens: u32,
+    pub temperature: &'static str,
+    pub reasoning: &'static str,
+    pub fallback_confidence: ConfidenceBucket,
+    pub high_min_probability: f64,
+    pub medium_min_probability: f64,
+}
+
+/// The settings this build calls with.
+pub const LABEL_SETTINGS: LabelSettings = LabelSettings {
+    max_tokens: JUDGEMENT_MAX_TOKENS,
+    temperature: JUDGEMENT_TEMPERATURE,
+    reasoning: JUDGEMENT_REASONING,
+    fallback_confidence: FALLBACK_CONFIDENCE,
+    high_min_probability: HIGH_CONFIDENCE_MIN_PROBABILITY,
+    medium_min_probability: MEDIUM_CONFIDENCE_MIN_PROBABILITY,
+};
 
 /// The opening and closing digest markers in the user turn.
 const DIGEST_OPEN: &str = "<<<DIGEST";
@@ -92,6 +130,15 @@ pub fn fallback_label(kind: JudgementKind) -> JudgementLabel {
     match kind {
         JudgementKind::Task => JudgementLabel::Other,
         JudgementKind::EventKind | JudgementKind::Finished => JudgementLabel::Unclear,
+    }
+}
+
+/// A bucket's wire spelling, as it is hashed.
+fn bucket_wire(bucket: ConfidenceBucket) -> &'static str {
+    match bucket {
+        ConfidenceBucket::High => "high",
+        ConfidenceBucket::Medium => "medium",
+        ConfidenceBucket::Low => "low",
     }
 }
 
@@ -166,7 +213,7 @@ impl Prompt {
 
     /// SHA-256 over everything that fixes a label's meaning, length
     /// prefixed in a fixed order.
-    fn material_sha256(&self) -> [u8; 32] {
+    fn material_sha256(&self, settings: &LabelSettings, fallback: JudgementLabel) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(PROMPT_HASH_DOMAIN);
         let mut field = |bytes: &[u8]| {
@@ -181,18 +228,32 @@ impl Prompt {
             field(label.as_wire().as_bytes());
         }
         field(self.output_schema().as_bytes());
-        field(HIGH_CONFIDENCE_MIN_PROBABILITY.to_string().as_bytes());
-        field(MEDIUM_CONFIDENCE_MIN_PROBABILITY.to_string().as_bytes());
+        field(settings.high_min_probability.to_string().as_bytes());
+        field(settings.medium_min_probability.to_string().as_bytes());
         field(USER_TURN_PREAMBLE.as_bytes());
         field(EVENT_SENTENCE.as_bytes());
         field(DIGEST_OPEN.as_bytes());
         field(DIGEST_CLOSE.as_bytes());
+        field(&settings.max_tokens.to_le_bytes());
+        field(settings.temperature.as_bytes());
+        field(settings.reasoning.as_bytes());
+        field(fallback.as_wire().as_bytes());
+        field(bucket_wire(settings.fallback_confidence).as_bytes());
         hasher.finalize().into()
     }
 
-    /// `<name>-v<N>+sha256:<first 12 hex>`.
+    /// `<name>-v<N>+sha256:<first 12 hex>`, over this build's settings.
     pub fn prompt_version(&self) -> String {
-        let hash = hex::encode(self.material_sha256());
+        self.prompt_version_with(&LABEL_SETTINGS, fallback_label(self.kind))
+    }
+
+    /// The version these settings and this fallback label would give.
+    pub fn prompt_version_with(
+        &self,
+        settings: &LabelSettings,
+        fallback: JudgementLabel,
+    ) -> String {
+        let hash = hex::encode(self.material_sha256(settings, fallback));
         format!("{}-v{}+sha256:{}", self.name, self.version, &hash[..12])
     }
 }
@@ -203,14 +264,18 @@ mod tests {
     use trace_commons_protocol::insights_judgement::JudgeVersion;
 
     /// The pins. A failure here means a prompt, its choices, its schema, the
-    /// thresholds or the user-turn template changed. Do not update the hash
-    /// in place: bump the prompt's version (a new `prompts/<name>-v<N+1>.txt`
-    /// and a new static), so a changed meaning is a new judge version, and
-    /// pin the new version's hash here.
+    /// thresholds, the user-turn template, the call settings or the fallback
+    /// changed. Do not update the hash in place: bump the prompt's version
+    /// (a new `prompts/<name>-v<N+1>.txt` and a new static), so a changed
+    /// meaning is a new judge version, and pin the new version's hash here.
+    ///
+    /// The one exception is a change to what is hashed rather than to any
+    /// value: v1 was re-pinned in place when the call settings and the
+    /// fallback were added to the hash, before any v1 label was served.
     const PINS: [(&Prompt, &str); 3] = [
-        (&TASK_V1, "task-v1+sha256:c95f6a323e41"),
-        (&EVENT_KIND_V1, "event-kind-v1+sha256:719db0c2ce08"),
-        (&FINISHED_V1, "finished-v1+sha256:c921f9d5712c"),
+        (&TASK_V1, "task-v1+sha256:8638a175f575"),
+        (&EVENT_KIND_V1, "event-kind-v1+sha256:2bb523279ac9"),
+        (&FINISHED_V1, "finished-v1+sha256:1274085b4ff8"),
     ];
 
     #[test]
@@ -256,6 +321,53 @@ mod tests {
             ..TASK_V1
         };
         assert_ne!(edited.prompt_version(), TASK_V1.prompt_version());
+    }
+
+    #[test]
+    fn the_hash_covers_the_call_settings_and_the_fallback() {
+        let base = TASK_V1.prompt_version();
+        assert_eq!(
+            TASK_V1.prompt_version_with(&LABEL_SETTINGS, fallback_label(JudgementKind::Task)),
+            base
+        );
+        let changed = [
+            LabelSettings {
+                max_tokens: LABEL_SETTINGS.max_tokens - 1,
+                ..LABEL_SETTINGS
+            },
+            LabelSettings {
+                temperature: "0.2",
+                ..LABEL_SETTINGS
+            },
+            LabelSettings {
+                reasoning: "on",
+                ..LABEL_SETTINGS
+            },
+            LabelSettings {
+                fallback_confidence: ConfidenceBucket::Medium,
+                ..LABEL_SETTINGS
+            },
+            LabelSettings {
+                high_min_probability: 0.9,
+                ..LABEL_SETTINGS
+            },
+            LabelSettings {
+                medium_min_probability: 0.5,
+                ..LABEL_SETTINGS
+            },
+        ];
+        for settings in changed {
+            assert_ne!(
+                TASK_V1.prompt_version_with(&settings, fallback_label(JudgementKind::Task)),
+                base,
+                "{settings:?} must change the version"
+            );
+        }
+        // A changed fallback label changes it too.
+        assert_ne!(
+            TASK_V1.prompt_version_with(&LABEL_SETTINGS, JudgementLabel::Unclear),
+            base
+        );
     }
 
     #[test]
