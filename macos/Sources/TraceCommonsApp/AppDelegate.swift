@@ -130,7 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Connect screen picks the invite up.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            guard let invite = DeepLink.inviteURL(from: url) else { continue }
+            guard let invite = DeepLink.inviteURL(
+                from: url, scheme: BuildChannelGate.agreedChannel?.urlScheme)
+            else { continue }
             PendingInvite.shared.set(invite)
             NSApp.activate(ignoringOtherApps: true)
             OpenMonitor.request()
