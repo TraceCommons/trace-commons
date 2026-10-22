@@ -38,6 +38,15 @@ pub(crate) const OPENING: &str = "Opening near.ai in your browser to sign in.";
 /// Printed with the address, before the browser is asked to open, so a failed
 /// or hung `open` never hides it.
 pub(crate) const OPEN_FALLBACK_PREFIX: &str = "If it doesn't open, go to:";
+/// Printed with the address when no browser is opened here (`--no-browser`).
+pub(crate) const OPEN_PROMPT: &str = "Open this address in your browser to sign in:";
+/// Printed when no browser on this machine can reach the person: over SSH,
+/// or on a Linux machine with no display. The sign-in finishes on a loopback
+/// address, so the browser on their own computer needs the port forwarded.
+pub(crate) const REMOTE_INTRO: &str =
+    "No browser on this machine can reach you, so sign in from your own computer:";
+/// Stands in for the host in the printed `ssh` command.
+pub(crate) const REMOTE_HOST_PLACEHOLDER: &str = "<this-machine>";
 /// The invite route, named wherever the NEAR AI route is taken by default.
 pub(crate) const INVITE_HINT: &str =
     "Have an invite? Run `trace-commons-contributor login --invite <link>`.";
@@ -92,10 +101,128 @@ impl Consent {
     }
 }
 
+/// Where the sign-in's browser is, decided once from the flags and the
+/// environment before anything is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrowserPlan {
+    /// Ask the platform opener to open the address here.
+    pub open: bool,
+    /// No browser here reaches the person: print how to forward the loopback
+    /// port from their own computer.
+    pub remote: bool,
+}
+
+impl BrowserPlan {
+    /// Open a browser here and print the address in case it doesn't.
+    #[cfg(test)]
+    pub(crate) const LOCAL: Self = Self {
+        open: true,
+        remote: false,
+    };
+
+    /// Decide from `--no-browser` and the process environment.
+    pub(crate) fn detect(no_browser: bool) -> Self {
+        Self::from_env(
+            no_browser,
+            cfg!(any(target_os = "macos", target_os = "windows")),
+            &|name| std::env::var_os(name),
+        )
+    }
+
+    /// The decision, with the environment passed in so it is testable.
+    ///
+    /// - An SSH session (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`) is
+    ///   remote: a browser opened here, if any, is not in front of the
+    ///   person. On macOS `open` would put it on the console's screen.
+    /// - Off macOS and Windows, no `DISPLAY` and no `WAYLAND_DISPLAY` means
+    ///   no graphical session, so nothing can open; `xdg-open` would only
+    ///   list the text browsers it could not find.
+    /// - Off macOS and Windows, `BROWSER` names an opener the person set up,
+    ///   which can work over SSH (an editor's remote terminal forwards it),
+    ///   and `xdg-open` falls back to it, so it is still tried; the
+    ///   forwarding steps are printed either way. On macOS and Windows the
+    ///   opener (`open`, `start`) never reads `BROWSER`, so it counts for
+    ///   nothing there.
+    pub(crate) fn from_env(
+        no_browser: bool,
+        graphical_os: bool,
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Self {
+        let set = |name: &str| env(name).is_some_and(|value| !value.is_empty());
+        let ssh = set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY");
+        let display = graphical_os || set("DISPLAY") || set("WAYLAND_DISPLAY");
+        let remote = ssh || !display;
+        Self {
+            open: !no_browser && ((!graphical_os && set("BROWSER")) || !remote),
+            remote,
+        }
+    }
+}
+
+/// The loopback port a sign-in finishes on: the address's own port when it
+/// is `http://127.0.0.1:<port>/...` (the NEAR wallet page), or the port of
+/// its `frontend_callback` (an OAuth provider, which redirects there).
+fn loopback_port(url: &str) -> Option<u16> {
+    fn own_port(parsed: &url::Url) -> Option<u16> {
+        if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+            return None;
+        }
+        parsed.port()
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    own_port(&parsed).or_else(|| {
+        let callback = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "frontend_callback")?
+            .1;
+        own_port(&url::Url::parse(&callback).ok()?)
+    })
+}
+
+/// Print where to finish the sign-in, as `plan` says.
+pub(crate) fn print_sign_in_address(
+    out: &mut dyn Write,
+    plan: BrowserPlan,
+    url: &str,
+) -> std::io::Result<()> {
+    match (plan.remote, loopback_port(url)) {
+        (true, Some(port)) => {
+            writeln!(out, "{REMOTE_INTRO}")?;
+            writeln!(
+                out,
+                "  1. In a terminal on your computer, forward the sign-in port and leave it running:"
+            )?;
+            writeln!(
+                out,
+                "       ssh -N -o ExitOnForwardFailure=yes -L {port}:127.0.0.1:{port} {REMOTE_HOST_PLACEHOLDER}"
+            )?;
+            writeln!(
+                out,
+                "     Put the host you SSH to in place of {REMOTE_HOST_PLACEHOLDER}."
+            )?;
+            writeln!(
+                out,
+                "  2. Open this address in your computer's browser within 5 minutes:"
+            )?;
+            writeln!(out, "       {url}")?;
+        }
+        _ if plan.open => {
+            writeln!(out, "{OPENING}")?;
+            writeln!(out, "{OPEN_FALLBACK_PREFIX} {url}")?;
+        }
+        _ => {
+            writeln!(out, "{OPEN_PROMPT}")?;
+            writeln!(out, "  {url}")?;
+        }
+    }
+    Ok(())
+}
+
 /// Everything the flow touches outside its own logic, so a test can stand in
 /// for the daemon, the browser and the clock.
 pub(crate) struct Ports<'a> {
     pub call: DaemonCaller<'a>,
+    pub browser: BrowserPlan,
     pub open_browser: &'a mut dyn FnMut(&str) -> bool,
     pub sleep: &'a mut dyn FnMut(Duration),
     pub out: &'a mut dyn Write,
@@ -144,6 +271,7 @@ fn answered(response: Result<Response>) -> Option<serde_json::Value> {
 fn sign_in(ports: &mut Ports<'_>, hint: Option<&str>) -> Result<()> {
     let Ports {
         call,
+        browser,
         open_browser,
         sleep,
         out,
@@ -159,14 +287,15 @@ fn sign_in(ports: &mut Ports<'_>, hint: Option<&str>) -> Result<()> {
         ) else {
             bail!(SIGN_IN_UNAVAILABLE)
         };
-        writeln!(out, "{OPENING}")?;
-        writeln!(out, "{OPEN_FALLBACK_PREFIX} {url}")?;
+        print_sign_in_address(&mut **out, *browser, url)?;
         if let Some(hint) = hint {
             writeln!(out, "{hint}")?;
         }
         out.flush()?;
-        // Best effort: the address is already on screen.
-        let _ = open_browser(url);
+        if browser.open {
+            // Best effort: the address is already on screen.
+            let _ = open_browser(url);
+        }
 
         let attempt = serde_json::json!({ "attempt_id": attempt_id });
         let mut waited = Duration::ZERO;
@@ -229,7 +358,7 @@ pub(crate) fn sign_in_and_enroll(mut ports: Ports<'_>, consent: &Consent) -> Res
 /// Which of the two is decided once. A per-call fallback would load the
 /// daemon state (and read the OS credential store) on every poll, and would
 /// ask a fresh in-process state about an attempt a running daemon holds.
-pub(crate) fn run(store: &ConfigStore, consent: &Consent) -> Result<()> {
+pub(crate) fn run(store: &ConfigStore, consent: &Consent, no_browser: bool) -> Result<()> {
     use crate::daemon::client;
     use crate::daemon::ipc::{DaemonShared, handle_local};
 
@@ -256,6 +385,7 @@ pub(crate) fn run(store: &ConfigStore, consent: &Consent) -> Result<()> {
     sign_in_and_enroll(
         Ports {
             call: &mut call,
+            browser: BrowserPlan::detect(no_browser),
             open_browser: &mut open,
             sleep: &mut sleep,
             out: &mut stdout,
@@ -298,6 +428,7 @@ pub(crate) fn run_for_launch(store: &ConfigStore) -> Result<()> {
     let mut stdout = std::io::stdout();
     sign_in_for_launch(Ports {
         call: &mut call,
+        browser: BrowserPlan::detect(false),
         open_browser: &mut open,
         sleep: &mut sleep,
         out: &mut stdout,
@@ -389,6 +520,7 @@ mod tests {
             let mut sleep = |_d: Duration| {};
             let ports = Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: out_ref,
@@ -547,6 +679,7 @@ mod tests {
         sign_in_and_enroll(
             Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: &mut writer,
@@ -555,6 +688,182 @@ mod tests {
         )
         .unwrap();
         assert!(seen_at_open.contains(URL), "{seen_at_open}");
+    }
+
+    fn env_of(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn the_browser_plan_follows_ssh_display_and_the_flag() {
+        let plan = |no_browser, graphical, vars| {
+            BrowserPlan::from_env(no_browser, graphical, &env_of(vars))
+        };
+        let local = BrowserPlan {
+            open: true,
+            remote: false,
+        };
+        let print_only = BrowserPlan {
+            open: false,
+            remote: false,
+        };
+        let remote = BrowserPlan {
+            open: false,
+            remote: true,
+        };
+        // A desktop session opens the browser.
+        assert_eq!(plan(false, true, &[]), local);
+        assert_eq!(plan(false, false, &[("DISPLAY", ":0")]), local);
+        assert_eq!(
+            plan(false, false, &[("WAYLAND_DISPLAY", "wayland-0")]),
+            local
+        );
+        // --no-browser only stops the opener.
+        assert_eq!(plan(true, true, &[]), print_only);
+        // Linux with no display: nothing to open, forward from elsewhere.
+        assert_eq!(plan(false, false, &[]), remote);
+        assert_eq!(plan(false, false, &[("DISPLAY", "")]), remote);
+        // Any SSH session is remote, even with a display (X forwarding) or
+        // on macOS, where `open` would use the console's screen.
+        for ssh in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            let vars: &'static [(&'static str, &'static str)] = match ssh {
+                "SSH_CONNECTION" => &[("SSH_CONNECTION", "1 2 3 4"), ("DISPLAY", "localhost:10")],
+                "SSH_CLIENT" => &[("SSH_CLIENT", "1 2 3")],
+                _ => &[("SSH_TTY", "/dev/pts/0")],
+            };
+            assert_eq!(plan(false, true, vars), remote, "{ssh}");
+            assert_eq!(plan(false, false, vars), remote, "{ssh}");
+        }
+        // A BROWSER the person set up is still tried over SSH, and the
+        // forwarding steps are still printed.
+        assert_eq!(
+            plan(
+                false,
+                false,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            BrowserPlan {
+                open: true,
+                remote: true
+            }
+        );
+        assert_eq!(
+            plan(
+                true,
+                false,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            remote
+        );
+        // `open` and `start` never read BROWSER: over SSH into a Mac it
+        // would open on the console's screen, so nothing is opened.
+        assert_eq!(
+            plan(
+                false,
+                true,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            remote
+        );
+    }
+
+    #[test]
+    fn the_loopback_port_comes_from_the_address_or_its_callback() {
+        assert_eq!(loopback_port(URL), Some(49152));
+        assert_eq!(
+            loopback_port(
+                "https://cloud-api.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
+            ),
+            Some(40001)
+        );
+        assert_eq!(
+            loopback_port("https://cloud-api.near.ai/v1/auth/github"),
+            None
+        );
+        assert_eq!(loopback_port("http://localhost:40001/x"), None);
+        assert_eq!(loopback_port("not a url"), None);
+    }
+
+    /// One fresh sign-in under `plan`: what was printed, and how many times
+    /// the opener was asked.
+    fn fresh_sign_in_with(plan: BrowserPlan) -> (String, usize) {
+        let mut script = Script::new(vec![
+            (
+                "near_ai_credential_status",
+                vec![
+                    ok(json!({"session_state": "absent"})),
+                    ok(json!({"session_state": "present", "attempt_status": "complete"})),
+                ],
+            ),
+            (
+                "near_ai_credential_start",
+                vec![ok(json!({"attempt_id": "a1", "browser_url": URL}))],
+            ),
+        ]);
+        let mut out = Vec::new();
+        let mut opened = 0;
+        {
+            let mut caller = |m: &str, p: Value| script.answer(m, p);
+            let mut open = |_url: &str| {
+                opened += 1;
+                true
+            };
+            let mut sleep = |_d: Duration| {};
+            sign_in_for_launch(Ports {
+                call: &mut caller,
+                browser: plan,
+                open_browser: &mut open,
+                sleep: &mut sleep,
+                out: &mut out,
+            })
+            .unwrap();
+        }
+        (String::from_utf8(out).unwrap(), opened)
+    }
+
+    /// Over SSH the address alone is a dead end: it names this machine's
+    /// loopback. The output says how to forward that port, with the port
+    /// filled in, and no opener runs to print its own failures.
+    #[test]
+    fn a_remote_sign_in_prints_the_port_forward_and_opens_nothing() {
+        let (out, opened) = fresh_sign_in_with(BrowserPlan {
+            open: false,
+            remote: true,
+        });
+        assert_eq!(opened, 0, "{out}");
+        assert!(out.contains(REMOTE_INTRO), "{out}");
+        assert!(
+            out.contains(&format!(
+                "ssh -N -o ExitOnForwardFailure=yes -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
+            )),
+            "{out}"
+        );
+        assert!(out.contains(URL), "{out}");
+        assert!(!out.contains(OPENING), "{out}");
+        // The command comes before the address it makes reachable.
+        assert!(
+            out.find("ssh -N").unwrap() < out.find(URL).unwrap(),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn no_browser_prints_the_address_without_opening_it() {
+        let (out, opened) = fresh_sign_in_with(BrowserPlan {
+            open: false,
+            remote: false,
+        });
+        assert_eq!(opened, 0, "{out}");
+        assert!(out.contains(OPEN_PROMPT), "{out}");
+        assert!(out.contains(URL), "{out}");
+        assert!(!out.contains(OPENING), "{out}");
+        assert!(!out.contains("ssh -N"), "{out}");
     }
 
     /// Fail closed: a commons that does not advertise the NEAR AI login path
@@ -596,6 +905,7 @@ mod tests {
             let mut sleep = |_d: Duration| {};
             sign_in_for_launch(Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: &mut out,

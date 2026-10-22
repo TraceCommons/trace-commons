@@ -113,18 +113,11 @@ pub fn prompt_consent_answers(
         output,
         "How may your submitted traces be used? (you can revoke submitted traces later; credit you have already earned is kept)"
     )?;
-    writeln!(
-        output,
-        "  Debugging and evaluation                 [always on]"
-    )?;
-    writeln!(output, "  Benchmark generation                     [y/N]")?;
-    let benchmark = read_yes_no(input)?;
-    writeln!(output, "  Ranking-model training                   [y/N]")?;
-    let ranking = read_yes_no(input)?;
-    writeln!(output, "  Model training                           [y/N]")?;
-    let training = read_yes_no(input)?;
-    writeln!(output, "  Public attribution of your handle        [y/N]")?;
-    let attribution = read_yes_no(input)?;
+    writeln!(output, "  {:<36} always on", "Debugging and evaluation")?;
+    let benchmark = ask_yes_no("Benchmark generation", input, output)?;
+    let ranking = ask_yes_no("Ranking-model training", input, output)?;
+    let training = ask_yes_no("Model training", input, output)?;
+    let attribution = ask_yes_no("Public attribution of your handle", input, output)?;
 
     Ok(ConsentAnswers {
         benchmark,
@@ -134,14 +127,28 @@ pub fn prompt_consent_answers(
     })
 }
 
-/// Read one line from `input` and interpret it as a yes/no answer: `y`, `Y`,
-/// or `yes` (case-insensitive) is true; anything else (including an empty
-/// line) is false.
-fn read_yes_no(input: &mut impl std::io::BufRead) -> Result<bool> {
+/// Print one question with its `[y/N]` and leave the cursor after it, so
+/// the answer is typed on the same line as the question it answers.
+fn ask_yes_no(
+    label: &str,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) -> Result<bool> {
+    write!(output, "  {label:<36} [y/N] ")?;
+    output.flush()?;
     let mut line = String::new();
-    input.read_line(&mut line)?;
+    if input.read_line(&mut line)? == 0 {
+        // End of input echoes no newline; end the line here instead.
+        writeln!(output)?;
+    }
+    Ok(is_yes(&line))
+}
+
+/// `y`, `Y`, or `yes` (case-insensitive) is true; anything else (including
+/// an empty line) is false.
+fn is_yes(line: &str) -> bool {
     let trimmed = line.trim();
-    Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
+    trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes")
 }
 
 #[cfg(test)]
@@ -181,6 +188,42 @@ mod tests {
         let printed = String::from_utf8(output).unwrap();
         assert!(printed.contains("How may your submitted traces be used?"));
         assert!(printed.contains("Model training"));
+    }
+
+    /// Each `[y/N]` ends its question's line, so a typed answer lands beside
+    /// the question it answers rather than under it, beside the next one.
+    #[test]
+    fn each_question_leaves_the_cursor_after_its_y_n() {
+        let mut input = std::io::Cursor::new(b"y\n\ny\ny\n".to_vec());
+        let mut output = Vec::new();
+        prompt_consent_answers(&mut input, &mut output).unwrap();
+        let printed = String::from_utf8(output).unwrap();
+        for label in [
+            "Benchmark generation",
+            "Ranking-model training",
+            "Model training",
+            "Public attribution of your handle",
+        ] {
+            assert!(
+                printed.contains(&format!("  {label:<36} [y/N] ")),
+                "{label}: {printed}"
+            );
+        }
+        // Questions are not followed by their own newline: with no terminal
+        // echo they run together on one line, which is the point.
+        assert_eq!(printed.matches("[y/N] \n").count(), 0, "{printed}");
+        assert!(printed.contains("always on\n"), "{printed}");
+        assert!(!printed.contains("[always on]"), "{printed}");
+    }
+
+    #[test]
+    fn end_of_input_answers_no_and_ends_the_line() {
+        let mut input = std::io::Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let a = prompt_consent_answers(&mut input, &mut output).unwrap();
+        assert!(!a.benchmark && !a.ranking && !a.training && !a.attribution);
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.ends_with("[y/N] \n"), "{printed:?}");
     }
 
     #[test]
