@@ -94,6 +94,13 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
 
 fn write_enrolled_config(config_dir: &Path) {
     let config = enrolled_config();
+    // An enrolled directory with no channel mark is production's, which a
+    // staging build refuses; mark it for the build under test.
+    std::fs::write(
+        config_dir.join(trace_commons_contributor::config::CHANNEL_FILE),
+        trace_commons_contributor::channel::CHANNEL,
+    )
+    .unwrap();
     std::fs::write(
         config_dir.join("contributor.json"),
         serde_json::to_vec_pretty(&config).unwrap(),
