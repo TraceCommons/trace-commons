@@ -14,7 +14,7 @@
 
 - The payout stack: #1534 (rail contract), #1538 (schema), #1541 (accrual), #1542 (NEAR AI client, `near_ai_api.rs`, the contributor's `near-ai-staging` feature and `scripts/ci/check-release-staging-feature.sh`). Tasks 1, 2 and 7 base on #1542's branch `payout-rail-near-ai-client` until it merges, then rebase on `main`.
 - Payout plan Task 7a (`payout-rail-staging-build`): switches the daemon's NEAR AI hosts and wires `near_ai_staging()` into the daemon status. Task 2 here extends it into the channel module. If Task 7a has not started when Task 2 does, Task 2 does Task 7a's host switch itself and Task 7a is closed as included; agree which with the owner first.
-- NEAR AI facts (spec section 10 item 3): answered on 2026-10-22 are the per-model completions hosts (none; the gateway bundles the model quotes) and the registers to pin (`mrtd`, `rtmr0-2`, `mrconfigid`, not `rtmr3`). Still open: API-key survival across a redeploy. Staging's measurements change on every redeploy and are not recorded in the repo. Nothing in this plan blocks on them; Task 6's `observe` is how the measurements get collected.
+- NEAR AI facts (spec section 10 item 3). The register set is owner decision S16 (2026-10-22): pin `mrtd`, `rtmr0-2` and `mrconfigid`, and replay RTMR3 from the event log against a signed allowlist instead of pinning it; that set ships only together with the replay (Task 6b). The staging gateway serves attestation and is the configured base; whether staging has per-model completions hosts is unconfirmed. Still open: per-model hosts, which record's event log replays the model quote's RTMR3 (Task 6b step 1), a probe across a staging redeploy recording per register whether it changed, and API-key survival across a redeploy. Staging's measurements may change when it redeploys and are not recorded in the repo; Task 6's `observe` is how they get collected.
 - Owner actions (spec section 10): the staging host name and DNS (item 1), the Apple App ID and provisioning profile (item 4), Secret Manager secrets and the `staging` GitHub environment, the staging NEAR AI keys. Tasks 9-11 can merge before these exist; they are needed before the first staging run.
 
 ## Global Constraints
@@ -55,6 +55,7 @@ Repo and process rules (every task):
 | 4 | `staging-signed-pins-format` | `staging-release-check` | signed pin-set format and verifier in the attestation crate, behind its feature |
 | 5 | `staging-pin-source` | `staging-signed-pins-format` + `staging-channel-module` | daemon `PinProvider` reads only the signed set in a staging build; sequence file; status labels |
 | 6 | `staging-pins-tool` | `staging-signed-pins-format` | `trace-commons-staging-pins` observe / sign / verify |
+| 6b | `staging-rtmr3-replay` | `staging-pins-tool` (+ `staging-pin-source`) | RTMR3 replay and signed allowlist in the tool and the app; payload v2; the S16 register set becomes the default (S16) |
 | 7 | `staging-server-guard` | `staging-release-check` | ingest boot guard for NEAR AI host coherence; `/health` `near_ai_staging` |
 | 8 | `staging-ffi-channel` | `staging-state-dir-channel` | `tc_build_channel_json()`; Swift state directory, passkey RP and log subsystem from it; dylib/bundle agreement |
 | 9 | `staging-bundle-channel` | `staging-ffi-channel` | `macos/channels/*.env`, staging entitlements, build scripts read the channel; URL scheme per channel |
@@ -220,13 +221,20 @@ Spec: sections 5.1, 5.3, 5.5, 5.6, 5.7.
 - [ ] **Steps 2-4** as in task 2; also `cargo test -p trace-commons-contributor --features near-ai-staging routing::proof_attestor`.
 - [ ] **Step 5: Commit** — `Take NEAR AI pins only from the signed staging set in a staging build`.
 
+As merged (#1564), the app checks the signed sets' registers only. It does not replay RTMR3; that, and refusing a v1 document once the replay is in, is Task 6b (S16). Until Task 6b lands, a staging pin set must keep production's register form (`mrtd`, `rtmr0-3`).
+
 ---
 
 ### Task 6: The re-sign tool (`staging-pins-tool`, base `staging-signed-pins-format`)
 
 Spec: sections 5.4, 5.9.
 
-Requirements from the 2026-10-22 probe (spec 5.2): the staging channel's default register set is `mrtd`, `rtmr0`, `rtmr1`, `rtmr2` and `mrconfigid`, not `rtmr3`. `observe` re-verifies the quote on every run, because measurements change on each NEAR AI staging redeploy, and never copies `info.tcb_info` into a set. The live report is the gateway's `model_attestations` shape, not a per-model host's single report; the server-side parsing is separate work (branch `staging-gateway-quotes`).
+Requirements from the 2026-10-22 probe and owner decision S16 (spec 5.2, 5.4):
+
+- The register set is S16: `mrtd`, `rtmr0`, `rtmr1`, `rtmr2` and `mrconfigid`, with RTMR3 replayed and checked against an allowlist. In this task (#1563), `DEFAULT_REGISTERS` stays production's `mrtd` and `rtmr0-3`. It changes to the S16 set only in the same PR that lands the replay (Task 6b), never before: `mrtd`, `rtmr0-2` and `mrconfigid` without the replay must never ship, because with staging's v1 MRCONFIGID nothing in that set covers the key provider or any compose action after boot. Point `DEFAULT_REGISTERS`'s doc comment at S16 instead of "section 10, item 6".
+- `observe` emits sets only from `model_attestations[].intel_quote` for the requested model. The gateway quote and the compose-manager quote may be verified but are never emitted as a pin set. #1563's `pin_observe::observe_model` already reads only `model_entry_quotes(&report, model)`; the test below pins that.
+- `observe` re-verifies the quote on every run, because measurements may change when NEAR AI staging redeploys, and never copies `info.tcb_info` into a set.
+- The live report is the gateway's `model_attestations` shape, not a per-model host's single report; the server-side parsing is separate work (branch `staging-gateway-quotes`).
 
 **Files:**
 - Create: `crates/trace-commons-server/src/bin/trace-commons-staging-pins.rs` (AGPL header; `observe`, `sign`, `verify`; keys from stdin only; `sign` refuses a sequence not above the served file's and a TTL above 14 days; `sign` prints the `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=` line for the first set)
@@ -243,10 +251,61 @@ Requirements from the 2026-10-22 probe (spec 5.2): the staging channel's default
 #[test] fn sign_refuses_a_ttl_over_fourteen_days()
 #[test] fn sign_never_reads_a_key_from_argv()
 #[test] fn nothing_logs_a_key_or_a_measurement()
+#[test] fn observe_emits_sets_only_from_the_requested_models_entry_quotes() // a report whose gateway and compose-manager quotes verify and carry other registers: none of their registers appears in the output
 ```
 
 - [ ] **Steps 2-4** as in task 2, with `-p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins`.
 - [ ] **Step 5: Commit** — `Add an operator tool to observe and sign staging NEAR AI pins`.
+
+---
+
+### Task 6b: Replay RTMR3 and check it against an allowlist (`staging-rtmr3-replay`, base `staging-pins-tool`)
+
+Spec: S16, sections 5.2, 5.4, 5.5, 5.6, 5.9.
+
+Owner decision S16: the re-sign tool and the app both replay the RTMR3 event log, require the replay to equal the verified model entry quote's RTMR3, and check app id, key provider and every post-boot compose action against an allowlist carried in the signed payload. This task is where `DEFAULT_REGISTERS` becomes the S16 set (`mrtd`, `rtmr0-2`, `mrconfigid`); the register change and the replay land in one PR, in both the tool and the app, or not at all.
+
+**Files:**
+- Modify: `crates/trace-commons-attestation/src/` (permissive, behind `near-ai-staging`): an RTMR3 replay over a dstack event log, the event digest recomputed from name and payload; the allowlist type and check; payload format `trace-commons-near-ai-pins/v2` with `rtmr3_allowlist`, its own domain-separation prefix, and v1 refused by a replay-aware verifier
+- Modify: `crates/trace-commons-server/src/near_attestation/pin_observe.rs` and `src/bin/trace-commons-staging-pins.rs` (`observe` replays each model entry's log and prints the decoded events for review, never the instance-id value; `sign` reads the allowlist file and embeds it; `DEFAULT_REGISTERS` becomes the S16 set)
+- Create: `deploy/staging-gcp/near-ai-rtmr3-allowlist.json` (the reviewed allowlist; every change is a PR)
+- Modify: `crates/trace-commons-contributor/src/routing/proof_attestor.rs` (after a set matches, replay the log from the same report as the quote and check the allowlist; a key is earned only if all three pass; status labels for each refusal)
+- Modify: `docs/operator/staging-pin-signing.md` (the allowlist review step)
+- Tests: in the attestation crate, `crates/trace-commons-server/tests/staging_pins_tool.rs`, and `proof_attestor.rs`
+
+- [ ] **Step 1: Settle which log replays the model quote's RTMR3.** From an untrimmed staging report captured with a fresh nonce and kept out of the repo: verify the `compose_manager_attestation` quote and compare its `mrtd` and `rtmr0-2` with the model entry quote's (equal registers indicate the same TD); replay the model entry's own log, if it has one, and the compose-manager record's log; record in the spec (5.2) which one reproduces the verified model quote's RTMR3, and the event names the log carries. No register or event value goes into the repo except the allowlist itself. If neither log replays, stop and report: the owner is asked again before anything else in this task is built.
+- [ ] **Step 2: Write the failing tests**
+
+```rust
+// attestation crate
+#[test] fn replay_matching_the_quote_is_accepted()
+#[test] fn replay_mismatch_is_refused()                       // one event altered, dropped or reordered
+#[test] fn an_event_whose_recorded_digest_differs_from_its_payload_is_refused()
+#[test] fn an_unknown_event_is_refused()                      // name not in the allowlist
+#[test] fn an_allowlisted_compose_action_is_accepted()
+#[test] fn a_compose_action_with_an_unlisted_digest_is_refused()
+#[test] fn a_different_app_id_is_refused()
+#[test] fn a_different_key_provider_is_refused()              // the staging KMS only
+#[test] fn the_instance_id_is_accepted_with_any_value()
+#[test] fn a_compose_hash_event_other_than_mrconfigids_is_refused()
+#[test] fn a_v1_document_is_refused_by_a_replay_aware_verifier()
+// re-sign tool
+#[test] fn observe_refuses_a_run_whose_replay_does_not_match()
+#[test] fn observe_never_emits_a_gateway_or_compose_manager_quote_as_a_pin_set()
+#[test] fn observe_never_prints_the_instance_id_value()
+#[test] fn the_default_registers_are_the_s16_set()
+#[test] fn sign_embeds_the_allowlist_file()
+// app
+#[test] fn a_staging_build_earns_a_key_only_when_set_replay_and_allowlist_pass()
+#[test] fn a_staging_build_refuses_an_unknown_event()
+#[test] fn a_staging_build_refuses_a_replay_mismatch()
+#[test] fn a_staging_build_accepts_an_allowlisted_compose_action()
+#[test] fn a_staging_build_never_takes_a_gateway_quote_for_the_model()
+#[test] fn status_names_the_replay_and_allowlist_refusals()
+```
+
+- [ ] **Steps 3-5** as in task 2, for each touched crate with and without `--features near-ai-staging`; `--no-default-features` for the attestation crate; the release check and the marker scan (the v2 format string is a new staging marker).
+- [ ] **Step 6: Commit** — `Replay RTMR3 against a signed allowlist in staging pins`.
 
 ---
 
@@ -373,7 +432,7 @@ The wallet settings (`_WITNESS_JSON`, `_PUBLIC_ORIGIN`) are not needed: a stagin
 
 **Notes from Task 7's boot guard (#1548):**
 - `staging.env.template` must always set `TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL`, even with no scorer configured. Unset, it resolves to the production gateway, and a staging ingest refuses to boot.
-- The guard accepts only the exact staging API host. If NEAR AI staging serves per-model completions hosts (spec open item 3), a staging scorer configured on one is refused at boot. Once that item is answered, either let the staging build accept those hosts, or add their digests to the default build's refusal so a production ingest cannot name them.
+- The guard accepts only the exact staging API host. The staging gateway serves attestation and is the configured base; whether NEAR AI staging also has per-model completions hosts is unconfirmed (spec open item 3). If it does, a staging scorer configured on one is refused at boot. Once that is confirmed, either let the staging build accept those hosts, or add their digests to the default build's refusal so a production ingest cannot name them.
 - `TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL` is not checked. The self-hosted filter is not built for staging (spec open item 4); if it is, the staging build should refuse any NEAR AI host other than staging there too.
 
 ---
