@@ -54,22 +54,22 @@ use trace_commons_attestation::measurements::ExpectedMeasurements;
 /// greps once.
 pub const WITNESS_EXPECTED_MEASUREMENT_CONTROL: &str = "witness_expected_measurement";
 
-/// The 8-byte domain tag at the front of a witness quote's report data.
+/// The 8-byte domain tag at the front of a witness quote's report data, and
+/// the report-data layout around it.
 ///
-/// **Duplicated from `trace_commons_server::witness_service::enclave`**, which
-/// is AGPL and which this permissive crate must not depend on. The layout is
-/// therefore pinned on both sides by tests rather than by a shared constant,
-/// and `the_report_data_layout_matches_the_witness_service` in `verify.rs`
-/// states it explicitly so a change on either side is visible here.
-pub const WITNESS_QUOTE_DOMAIN: &[u8; 8] = b"tcwitns1";
-/// Offset of the signing address within the report data.
-pub const WITNESS_ADDRESS_AT: usize = 8;
-/// Offset of the contributor nonce within the report data.
-pub const WITNESS_NONCE_AT: usize = 28;
-/// The nonce length. 32 bytes, fresh per verification.
-pub const WITNESS_NONCE_LEN: usize = 32;
-/// TDX report data is 64 bytes.
-pub const WITNESS_REPORT_DATA_LEN: usize = 64;
+/// Re-exported from `trace_commons_attestation::report_data`, which holds the
+/// report-data layouts of every attested Trace Commons service (the
+/// witness's `tcwitns1 | address | nonce | zeros`, the Insights judgement
+/// service's `tcjudge1 | boot binding | nonce`) and the rebuild
+/// [`verify::check_quote`] uses. These constants are the witness layout's. The producing side,
+/// `trace_commons_server::witness_service::enclave`, is AGPL and keeps its own
+/// copy, so the layout is still pinned on both sides by literal tests:
+/// `the_report_data_layout_matches_the_witness_service` in `verify.rs` here,
+/// and the enclave's own tests there.
+pub use trace_commons_attestation::report_data::{
+    ADDRESS_AT as WITNESS_ADDRESS_AT, NONCE_AT as WITNESS_NONCE_AT, NONCE_LEN as WITNESS_NONCE_LEN,
+    REPORT_DATA_LEN as WITNESS_REPORT_DATA_LEN, WITNESS_QUOTE_DOMAIN,
+};
 
 /// What the client pins about a witness.
 ///
