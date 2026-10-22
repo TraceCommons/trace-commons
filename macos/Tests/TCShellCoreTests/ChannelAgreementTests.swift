@@ -39,12 +39,16 @@ final class ChannelAgreementTests: XCTestCase {
     }
 
     func testTheDylibJSONDecodes() throws {
-        let json = #"{"channel":"staging","state_dir_name":"trace-commons-staging","state_dir_env":"TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR","passkey_rp_id":"staging.tracecommons.ai","url_scheme":"tracecommons-staging"}"#
+        let json = #"{"channel":"staging","state_dir_name":"trace-commons-staging","state_dir_env":"TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR","passkey_rp_id":"staging.tracecommons.ai","url_scheme":"tracecommons-staging","near_ai_dashboard_origin":"https://cloud-stg.near.ai"}"#
         XCTAssertEqual(BuildChannel.decode(fromJSON: json), BuildChannelFixture.staging)
         XCTAssertNil(BuildChannel.decode(fromJSON: nil))
         XCTAssertNil(BuildChannel.decode(fromJSON: "{}"))
         XCTAssertNil(
             BuildChannel.decode(fromJSON: json.replacingOccurrences(of: #""channel":"staging""#, with: #""channel":"""#)),
             "an empty field is unreadable, not a channel")
+        XCTAssertNil(
+            BuildChannel.decode(fromJSON: json.replacingOccurrences(
+                of: #","near_ai_dashboard_origin":"https://cloud-stg.near.ai""#, with: "")),
+            "a missing dashboard origin is unreadable, not a default")
     }
 }

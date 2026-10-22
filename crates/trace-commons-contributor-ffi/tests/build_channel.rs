@@ -44,6 +44,10 @@ fn the_channel_json_matches_the_channel_module() {
     assert_eq!(field("passkey_rp_id"), channel::PASSKEY_RP_ID);
     assert_eq!(field("url_scheme"), channel::URL_SCHEME);
     assert_eq!(
+        field("near_ai_dashboard_origin"),
+        channel::NEAR_AI_DASHBOARD_ORIGIN
+    );
+    assert_eq!(
         channel::CHANNEL == "staging",
         channel::near_ai_staging(),
         "the channel name follows the feature"
@@ -62,6 +66,7 @@ fn the_channel_json_carries_no_key() {
         "state_dir_env",
         "passkey_rp_id",
         "url_scheme",
+        "near_ai_dashboard_origin",
     ]
     .into_iter()
     .collect();

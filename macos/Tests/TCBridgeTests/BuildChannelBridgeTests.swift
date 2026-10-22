@@ -14,6 +14,7 @@ final class BuildChannelBridgeTests: XCTestCase {
         XCTAssertTrue(channel.stateDirEnv.hasSuffix("CONTRIBUTOR_DIR"))
         XCTAssertFalse(channel.passkeyRelyingParty.isEmpty)
         XCTAssertTrue(channel.urlScheme.hasPrefix("tracecommons"))
+        XCTAssertTrue(channel.nearAiDashboardOrigin.hasPrefix("https://"))
         XCTAssertEqual(
             ChannelAgreement.verdict(plistChannel: channel.channel, dylib: channel), .agreed(channel))
     }

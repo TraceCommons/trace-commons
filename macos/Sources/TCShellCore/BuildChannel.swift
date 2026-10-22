@@ -19,16 +19,19 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
     public let passkeyRelyingParty: String
     /// The URL scheme the bundle registers.
     public let urlScheme: String
+    /// The NEAR AI dashboard the funding row's credits link opens.
+    public let nearAiDashboardOrigin: String
 
     public init(
         channel: String, stateDirName: String, stateDirEnv: String,
-        passkeyRelyingParty: String, urlScheme: String
+        passkeyRelyingParty: String, urlScheme: String, nearAiDashboardOrigin: String
     ) {
         self.channel = channel
         self.stateDirName = stateDirName
         self.stateDirEnv = stateDirEnv
         self.passkeyRelyingParty = passkeyRelyingParty
         self.urlScheme = urlScheme
+        self.nearAiDashboardOrigin = nearAiDashboardOrigin
     }
 
     enum CodingKeys: String, CodingKey {
@@ -37,6 +40,7 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         case stateDirEnv = "state_dir_env"
         case passkeyRelyingParty = "passkey_rp_id"
         case urlScheme = "url_scheme"
+        case nearAiDashboardOrigin = "near_ai_dashboard_origin"
     }
 
     /// The dylib's answer, or nil when it is absent, unreadable, or has an
@@ -47,7 +51,7 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         else { return nil }
         let fields = [
             channel.channel, channel.stateDirName, channel.stateDirEnv,
-            channel.passkeyRelyingParty, channel.urlScheme,
+            channel.passkeyRelyingParty, channel.urlScheme, channel.nearAiDashboardOrigin,
         ]
         return fields.contains(where: \.isEmpty) ? nil : channel
     }
@@ -67,6 +71,9 @@ public enum ChannelAgreement {
     }
 
     public static func verdict(plistChannel: String?, dylib: BuildChannel?) -> Verdict {
+        // `!plistChannel.isEmpty` is belt and braces: `decode` already
+        // refuses an empty dylib channel, so an empty plist value could
+        // never match. It stays so this check does not lean on that one.
         guard let dylib, let plistChannel, !plistChannel.isEmpty, plistChannel == dylib.channel
         else { return .refused }
         return .agreed(dylib)

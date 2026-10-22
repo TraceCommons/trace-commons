@@ -317,9 +317,11 @@ char*       tc_settings_ranges_json(void);
  *
  * {"channel":"production","state_dir_name":"trace-commons",
  *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
- *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons"}
+ *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+ *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
  *
- * channel is "production" or "staging". The macOS app compares it with its
+ * channel is "production" or "staging". near_ai_dashboard_origin is where
+ * the funding row's credits link points. The macOS app compares it with its
  * Info.plist TCChannel and starts nothing on a mismatch. No key, secret or
  * keychain name is in it. Reads nothing and writes nothing. Returns an owned
  * string; free it with tc_string_free. NULL only on a caught panic.

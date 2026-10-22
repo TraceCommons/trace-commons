@@ -790,10 +790,12 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
 /// ```json
 /// {"channel":"production","state_dir_name":"trace-commons",
 ///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
-///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons"}
+///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
 /// ```
 ///
-/// `channel` is `production` or `staging`. The app compares it with its
+/// `channel` is `production` or `staging`. `near_ai_dashboard_origin` is
+/// where the funding row's credits link points. The app compares it with its
 /// Info.plist `TCChannel` and starts nothing on a mismatch. No key, secret
 /// or keychain name is in it. Reads nothing and writes nothing; the same
 /// object for every caller on this build. Returns an owned string; free it
@@ -808,6 +810,7 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
             "state_dir_env": channel::STATE_DIR_ENV,
             "passkey_rp_id": channel::PASSKEY_RP_ID,
             "url_scheme": channel::URL_SCHEME,
+            "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
         });
         Ok(to_owned_cstring(&serde_json::to_string(&json)?))
     })
