@@ -1806,6 +1806,74 @@ pub const FUNDING_REFRESH: &str = "Check account";
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check again.";
 
+// ---- Spending organization (DRAFT, awaiting owner review) ----
+//
+// Owner request, 2026-10-23: a contributor whose NEAR AI account has several
+// organizations chooses which one's balance Private AI spends from, in
+// Settings, and the Private AI screen says so when no choice has been made.
+// That request is the approval for the prompt existing (ui-copy-guide rule
+// 9). The WORDING below is a draft and is not approved.
+
+/// The Settings card's heading. DRAFT.
+pub const SPEND_ORG_TITLE: &str = "Spending organization";
+/// What the card is a choice about. DRAFT.
+pub const SPEND_ORG_WHAT: &str = "Private AI spends from this organization's NEAR AI balance.";
+/// The picker's label, also its accessible name. DRAFT.
+pub const SPEND_ORG_PICKER: &str = "Organization to spend from";
+/// The button that applies the picked organization. DRAFT.
+pub const SPEND_ORG_SWITCH: &str = "Switch";
+/// The button's accessible name, distinct from other Switch controls. DRAFT.
+pub const SPEND_ORG_SWITCH_ACCESSIBILITY: &str = "Switch spending organization";
+/// Shown while a switch is in flight; it takes about ten seconds. DRAFT.
+pub const SPEND_ORG_SWITCHING: &str = "Switching. This takes a few seconds.";
+/// A switch that failed. Every failure changes nothing. DRAFT.
+pub const SPEND_ORG_FAILED: &str = "Couldn't switch. Nothing changed.";
+/// A switch refused because the sign-in ended. DRAFT.
+pub const SPEND_ORG_SESSION_EXPIRED: &str = "Sign in to NEAR AI again, then switch.";
+/// A switch NEAR AI refused for that organization (for example, a role that
+/// may not create access there). DRAFT.
+pub const SPEND_ORG_REFUSED: &str =
+    "NEAR AI didn't allow Private AI to use that organization. Nothing changed.";
+/// The previous organization's access is still being removed. DRAFT.
+pub const SPEND_ORG_REVOKE_PENDING: &str = "Still removing access from the previous organization.";
+/// The Private AI screen's prompt heading. DRAFT.
+pub const SPEND_ORG_PROMPT_TITLE: &str = "Choose an organization";
+/// The prompt's line, over `{organization}`, the current one's name. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE: &str = "Your NEAR AI account has several organizations. Private AI is spending from {organization}. Choose one in Settings.";
+/// The prompt's line when the current organization's name is not known. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE_UNNAMED: &str = "Your NEAR AI account has several organizations. Choose which one Private AI spends from in Settings.";
+/// The prompt's action: it opens Settings, so it says so (rule 2). DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION: &str = "Review settings";
+/// The action's accessible name. DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY: &str = "Review settings to choose an organization";
+
+/// The spending-organization words, carried in the daemon's
+/// `near_ai_spend_organizations` answer so no shell owns a sentence of it.
+/// `current_name` is the current organization's name, when listed.
+#[must_use]
+pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
+    let prompt_line = match current_name {
+        Some(name) => SPEND_ORG_PROMPT_LINE.replace("{organization}", name),
+        None => SPEND_ORG_PROMPT_LINE_UNNAMED.to_owned(),
+    };
+    serde_json::json!({
+        "title": SPEND_ORG_TITLE,
+        "what": SPEND_ORG_WHAT,
+        "picker": SPEND_ORG_PICKER,
+        "switch": SPEND_ORG_SWITCH,
+        "switch_accessibility": SPEND_ORG_SWITCH_ACCESSIBILITY,
+        "switching": SPEND_ORG_SWITCHING,
+        "failed": SPEND_ORG_FAILED,
+        "session_expired": SPEND_ORG_SESSION_EXPIRED,
+        "refused": SPEND_ORG_REFUSED,
+        "revoke_pending": SPEND_ORG_REVOKE_PENDING,
+        "prompt_title": SPEND_ORG_PROMPT_TITLE,
+        "prompt_line": prompt_line,
+        "prompt_action": SPEND_ORG_PROMPT_ACTION,
+        "prompt_action_accessibility": SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
+    })
+}
+
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
     report: &crate::daemon::nearai_credential::funding::FundingReport,

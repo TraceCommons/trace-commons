@@ -679,6 +679,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
+| `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -6665,6 +6667,63 @@ There is no convention here to generalise from: read the contract for the
 field you are touching, and do not carry a habit across from another one.
 A field added later is a fourth answer to a fourth question, not a fourth
 instance of a pattern.
+
+### Choosing the spending organization
+
+Private AI spends from the organization its NEAR AI inference key was minted
+in. A NEAR AI account can belong to several organizations; the sign-in mints
+into the first active one (or, after a choice has been made, into the chosen
+one when the account still has it). These two methods let a contributor
+choose. Most accounts have one organization, and for them nothing changes.
+
+`near_ai_spend_organizations` lists the signed-in account's **active**
+organizations (`GET /v1/organizations?limit=100`, session-authenticated). It
+rides `near_ai_balance`'s lock, cached access token and single re-exchange, so
+it never races a balance read for the rotating refresh token, and like it it
+is cached for a minute (`fresh: true` goes back after five seconds).
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `listed`, or one of `near_ai_balance`'s not-known states (`no_session`, `session_expired`, `no_organization`, `unavailable`). Only `listed` carries organizations. |
+| `organizations[]` | `id`, `name` (control characters removed, at most 80 characters; the id when blank), `role` (`owner`, `admin`, `member`), `current` |
+| `current_organization_id` | the stored key's organization, or `null` with no key |
+| `explicit` | the contributor chose the current organization (the remembered choice equals the key's organization) |
+| `multiple` | `listed` with two or more organizations. An unknown count is never `true`: a page that does not carry every organization is refused as `unavailable`. |
+| `prompt` | `multiple`, a key, and not `explicit`: the Private AI screen asks the contributor to choose in Settings |
+| `revoke_pending` | a key this install replaced could not be revoked yet; it is retried on each listing |
+| `view` | the words: `title`, `what`, `picker`, `switch`, `switch_accessibility`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
+
+`near_ai_spend_organization_select` switches. Its order keeps one working key
+at every step:
+
+1. Mint a key in the chosen organization (`GET /v1/organizations`,
+   `GET /v1/organizations/{id}/workspaces`,
+   `POST /v1/workspaces/{id}/api-keys`). A failure here changes nothing.
+2. Record the old and the new key as revocation candidates (ids only, in the
+   daemon file `near-ai-spend-org.json`).
+3. Wait for the new key to become usable (the service documents up to ten
+   seconds), then publish it beside the stored session and move the IronWire
+   proxy onto it. If publishing fails, the new key is revoked and the old one
+   stays.
+4. Revoke every recorded candidate that is not the active key
+   (`DELETE /v1/workspaces/{id}/api-keys/{key}`). The active key is never
+   revoked. A revoke that fails stays recorded, answers
+   `revoke_pending: true`, and is retried.
+
+Choosing the organization already in use mints nothing; it records the
+choice, which ends the prompt. The call takes about ten seconds when it
+switches.
+
+| Error message | Meaning |
+| --- | --- |
+| `near_ai_spend_org_invalid` (`bad_params`) | `organization_id` missing or not an id |
+| `near_ai_spend_org_no_session` | no NEAR AI sign-in on this machine |
+| `near_ai_spend_org_session_expired` | the sign-in was refused; sign in again |
+| `near_ai_spend_org_no_key` | signed in, but no inference key to replace |
+| `near_ai_spend_org_unknown` | the account is not an active member of that organization |
+| `near_ai_spend_org_refused` | NEAR AI refused a key there (for example, a role that may not create keys) |
+| `near_ai_spend_org_busy` | a sign-in is in flight, or too many replaced keys are still awaiting revocation |
+| `near_ai_spend_org_unavailable` | anything else; nothing changed |
 
 ### `commons_credit_summary`
 

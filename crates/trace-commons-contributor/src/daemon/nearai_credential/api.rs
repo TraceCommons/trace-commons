@@ -54,15 +54,97 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 #[path = "near_wallet_api_tests.rs"]
 mod near_wallet_tests;
 
+#[cfg(test)]
+#[path = "spend_org_api_tests.rs"]
+mod spend_org_tests;
+
 #[derive(Deserialize)]
 struct Organization {
     id: String,
     is_active: bool,
+    /// Present on every `UserOrganizationResponse`; defaulted so a mint never
+    /// fails over a field it does not need.
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
 }
 
 #[derive(Deserialize)]
 struct Organizations {
     organizations: Vec<Organization>,
+    /// The service's count of every organization the account belongs to,
+    /// which is how a page that did not carry all of them is recognised.
+    #[serde(default)]
+    total: Option<i64>,
+}
+
+/// How many organizations one listing asks for. An account with more than
+/// this is refused as unexpected rather than shown half a list.
+const ORGANIZATION_PAGE: usize = 100;
+
+/// The longest organization name this client will hand to a shell, in
+/// characters. Names are the account's own, but they are drawn in a picker
+/// and must not be able to push a window around.
+pub const MAX_ORGANIZATION_NAME_CHARS: usize = 80;
+
+/// One organization the signed-in account is an active member of.
+///
+/// The name is the account's own label for it, shown so a contributor can
+/// tell their organizations apart. Neither field is ever logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOrganization {
+    pub id: String,
+    pub name: String,
+    /// `owner`, `admin` or `member`, as the service reports it.
+    pub role: String,
+}
+
+/// Which organization a mint lands in.
+#[derive(Debug, Clone, Copy)]
+pub enum OrganizationChoice<'a> {
+    /// The first active organization: what the sign-in has always done.
+    FirstActive,
+    /// This one if the account still has it, otherwise the first active.
+    /// The sign-in uses it to honour a remembered choice at no extra cost.
+    Prefer(&'a str),
+    /// This one or nothing. Choosing a spending organization uses it.
+    Exactly(&'a str),
+}
+
+/// What a revoke found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    Revoked,
+    /// The service has no such key: already revoked, which is what was asked.
+    AlreadyGone,
+}
+
+/// Whether a service id may become one path segment.
+pub(crate) fn is_path_segment(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// The name a shell may draw: control characters removed, whitespace
+/// trimmed, bounded, and the id when nothing is left.
+fn display_name(name: &str, id: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_ORGANIZATION_NAME_CHARS)
+        .collect();
+    if cleaned.trim().is_empty() {
+        id.to_owned()
+    } else {
+        cleaned.trim_end().to_owned()
+    }
 }
 
 /// Public organization context returned by the existing Cloud management API.
@@ -438,17 +520,41 @@ impl CloudApi {
         session: &SessionTokens,
         key_name: &str,
     ) -> Result<MintedKey> {
+        self.mint_inference_key_in(session, key_name, OrganizationChoice::FirstActive)
+            .await
+    }
+
+    /// [`Self::mint_inference_key`], in the organization `choice` names.
+    ///
+    /// The organization is always taken from a fresh listing, never from the
+    /// caller's word alone: a target the account is not an active member of
+    /// is `near_ai_credential_no_organization`, and nothing is minted.
+    pub async fn mint_inference_key_in(
+        &self,
+        session: &SessionTokens,
+        key_name: &str,
+        choice: OrganizationChoice<'_>,
+    ) -> Result<MintedKey> {
         if key_name.trim().is_empty() || key_name.len() > 128 {
             bail!("near_ai_credential_invalid")
         }
         let organizations: Organizations = self
             .call(reqwest::Method::GET, "/v1/organizations", session, None)
             .await?;
-        let organization = organizations
+        let mut active = organizations
             .organizations
             .into_iter()
-            .find(|o| o.is_active && !o.id.is_empty())
-            .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))?;
+            .filter(|o| o.is_active && is_path_segment(&o.id));
+        let organization = match choice {
+            OrganizationChoice::FirstActive => active.next(),
+            OrganizationChoice::Exactly(target) => active.find(|o| o.id == target),
+            OrganizationChoice::Prefer(preferred) => {
+                let active: Vec<Organization> = active.collect();
+                let position = active.iter().position(|o| o.id == preferred).unwrap_or(0);
+                active.into_iter().nth(position)
+            }
+        }
+        .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))?;
         let workspaces: Workspaces = self
             .call(
                 reqwest::Method::GET,
@@ -561,6 +667,75 @@ impl CloudApi {
             .find(|o| o.is_active && !o.id.is_empty())
             .map(|o| o.id)
             .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))
+    }
+
+    /// Every organization the account is an active member of, in the
+    /// service's order.
+    ///
+    /// A page that does not carry all of them is refused rather than
+    /// returned: a count taken from half a list is the one wrong answer a
+    /// picker cannot recover from. Ids that could not be a path segment are
+    /// dropped, and names are cleaned before anything can draw them.
+    pub async fn list_organizations(
+        &self,
+        session: &SessionTokens,
+    ) -> Result<Vec<AccountOrganization>> {
+        let organizations: Organizations = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/organizations?limit={ORGANIZATION_PAGE}"),
+                session,
+                None,
+            )
+            .await?;
+        let carried = organizations.organizations.len();
+        if carried > ORGANIZATION_PAGE
+            || organizations
+                .total
+                .is_some_and(|total| total < 0 || total as u64 > carried as u64)
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(organizations
+            .organizations
+            .into_iter()
+            .filter(|o| o.is_active && is_path_segment(&o.id))
+            .map(|o| AccountOrganization {
+                name: display_name(&o.name, &o.id),
+                role: o.role.chars().take(16).collect(),
+                id: o.id,
+            })
+            .collect())
+    }
+
+    /// Revoke one inference key this install minted.
+    ///
+    /// `DELETE /v1/workspaces/{workspace_id}/api-keys/{key_id}`, answered 204.
+    /// A 404 is a key already gone, which is what a revoke wanted. Both ids
+    /// become path segments, so neither leaves this process unless it is one.
+    pub async fn revoke_inference_key(
+        &self,
+        session: &SessionTokens,
+        workspace_id: &str,
+        key_id: &str,
+    ) -> Result<RevokeOutcome> {
+        if !is_path_segment(workspace_id) || !is_path_segment(key_id) {
+            bail!("near_ai_credential_unexpected")
+        }
+        let response = self
+            .http
+            .delete(self.url(&format!("/v1/workspaces/{workspace_id}/api-keys/{key_id}"))?)
+            .bearer_auth(&session.access_token)
+            .send()
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        match response.status() {
+            status if status.is_success() => Ok(RevokeOutcome::Revoked),
+            reqwest::StatusCode::NOT_FOUND => Ok(RevokeOutcome::AlreadyGone),
+            reqwest::StatusCode::UNAUTHORIZED => bail!("near_ai_credential_session_expired"),
+            // The body is never read: label-only, as everywhere in this file.
+            _ => bail!("near_ai_credential_refused"),
+        }
     }
 
     /// Resolve the selected inference key's organization before a credits handoff.
