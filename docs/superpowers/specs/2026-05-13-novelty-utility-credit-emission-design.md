@@ -49,8 +49,9 @@ Predecessors:
 > award under any gate version or cut-over, a $0 or pre-cut-over award
 > never takes the paid id, and the emitter holds a per-tenant lock from the
 > ledger check through the append, so racing evaluations in one process
-> write one award (across processes the database primary key refuses the
-> second row).
+> write one award. The lock is per process; across processes the shared id
+> is the guard, and the database mirror's primary key admits one row under
+> it (the write fails when mirror writes are required).
 
 ## Goal
 

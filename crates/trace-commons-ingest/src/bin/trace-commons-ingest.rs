@@ -60901,9 +60901,9 @@ async fn attempt_emit_novelty_utility_credit(
     // settlement reads agree) is keyed on the submission and
     // `NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF`, so two paid awards for
     // one submission collide on one event id whatever gate version each ran
-    // under, in this process or another. Any other award is keyed on the
-    // submission alone, so a submission holds at most one of those too, and
-    // it never takes the paid id. `external_ref` still records the gate
+    // under (one database row per id, whichever process writes). Any other
+    // award is keyed on the submission alone, so a submission holds at most
+    // one of those too, and it never takes the paid id. `external_ref` still records the gate
     // version that scored it:
     // `novelty_utility:<gate_version_hash>:<submission_id>`. The
     // `decision_id` is not in it -- it is freshly minted on every
@@ -60975,9 +60975,11 @@ const NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF: &str = "paid";
 
 /// Serialises the one-award check and the append of a scoring award within
 /// this process, per tenant ledger, so two evaluations of one submission
-/// cannot both pass the check before either appends. Across processes the
-/// event id is the guard: the database mirror's primary key refuses a second
-/// row under it.
+/// cannot both pass the check before either appends. The lock is per
+/// process, and the file ledger lives on one host's disk; the shared event
+/// id is what reaches further: the database mirror's primary key admits one
+/// row under it, so a second ingest process's write of the same paid award
+/// fails there when mirror writes are required.
 fn novelty_utility_award_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     use std::sync::{Mutex as StdMutex, OnceLock};
     static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
