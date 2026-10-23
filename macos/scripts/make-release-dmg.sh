@@ -254,7 +254,26 @@ rm -f "$DMG"
 # costs nothing in the shipped DMG.
 APP_MB=$(du -sm "$APP" | awk '{print $1}')
 DMG_MB=$(( APP_MB + APP_MB / 4 + 64 ))
-hdiutil create -volname "$TC_BUNDLE_NAME" -srcfolder "$APP" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
+# The image holds the signed app and an `Applications` link to
+# /Applications, so opening it shows the usual drag-to-install pair. `ditto`
+# keeps the signature, extended attributes and the bundle's symlinks intact.
+DMG_ROOT="$WORK/dmg-root"
+rm -rf "$DMG_ROOT"
+mkdir -p "$DMG_ROOT"
+ditto "$APP" "$DMG_ROOT/$(basename "$APP")"
+ln -s /Applications "$DMG_ROOT/Applications"
+hdiutil create -volname "$TC_BUNDLE_NAME" -srcfolder "$DMG_ROOT" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
+rm -rf "$DMG_ROOT"
+# Refuse an image without both, and one whose app no longer verifies.
+DMG_CHECK="$WORK/dmg-check"
+mkdir -p "$DMG_CHECK"
+hdiutil attach -nobrowse -readonly -mountpoint "$DMG_CHECK" "$DMG" >/dev/null
+dmg_ok=1
+[ "$(readlink "$DMG_CHECK/Applications")" = /Applications ] || { echo "FATAL: the DMG has no Applications link" >&2; dmg_ok=0; }
+codesign --verify --deep --strict "$DMG_CHECK/$(basename "$APP")" || { echo "FATAL: the app inside the DMG does not verify" >&2; dmg_ok=0; }
+hdiutil detach "$DMG_CHECK" >/dev/null
+[ "$dmg_ok" = 1 ] || exit 1
+echo "verified: the DMG holds $(basename "$APP") and an Applications link"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"
