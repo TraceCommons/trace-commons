@@ -770,7 +770,7 @@ async fn recovery_without_a_matching_receipt_holds_the_line() {
     mock.seed(recipient_org(1), &linked.program, 5_000);
 
     completed(
-        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+        &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
             .run_once()
             .await,
     );
@@ -781,6 +781,45 @@ async fn recovery_without_a_matching_receipt_holds_the_line() {
     assert_eq!(
         holds(&fixture, &tenant, accounts[0], "near_ai").await,
         vec!["payout_recovery_unmatched".to_string()]
+    );
+
+    // A hold about this account stays: a later pass sends nothing to it.
+    completed(
+        &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.transfers().len(), 1);
+    assert_eq!(lines(&fixture, &tenant, "near_ai").await.len(), 1);
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "near_ai").await,
+        vec!["payout_recovery_unmatched".to_string()]
+    );
+    // Until an operator clears it: the next pass looks at the account
+    // afresh, finds the outside 5000 on the program, and holds it for that
+    // instead, still sending nothing.
+    assert!(
+        fixture
+            .runtime
+            .clear_payout_hold(
+                &tenant,
+                accounts[0],
+                &rail_id("near_ai"),
+                "payout_recovery_unmatched",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.transfers().len(), 1);
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "near_ai").await,
+        vec!["payout_program_total_mismatch".to_string()]
     );
 }
 

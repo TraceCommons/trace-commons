@@ -799,6 +799,20 @@ characters), never a tenant token, a tenant admin's included, and refuse
 every caller (`payout_control_unconfigured`) while it is unset. Audit and
 control rows name the operator by a hash of the token's hash.
 
+Holds an operator clears. A hold about one account (recovery unmatched,
+program total mismatch, link unreadable, amount out of range, owed
+inconsistent, a `HoldLine` or `Failed` refusal on its line, an unpriced
+reversal) stays until an operator clears it with the same token:
+`GET /v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds` lists that
+tenant's open holds on the rail by account id hash and label, and
+`POST .../holds/clear` with `{account_id_hash, label}` clears one, with a
+`hold_cleared` audit row naming the operator by hash. The next pass looks at
+the account afresh. The ceiling hold also lifts itself once owed fits the
+ceiling. A refusal caused by the sender's own limits (credential or org
+transfer limits, rate limits, accounting busy, insufficient posted capacity,
+an unreconciled sender) never holds an account: it retries or stops the
+pass.
+
 ### State and storage
 
 One set of tables serves every rail, each row carrying `rail_id`. New

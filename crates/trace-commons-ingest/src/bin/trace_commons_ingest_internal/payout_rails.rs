@@ -26,6 +26,15 @@
 //!   clear that rail's kill switch. Each appends a control row naming the
 //!   operator by hash; there is no global halt.
 //!
+//! - `GET /v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds` lists
+//!   that tenant's open holds on the rail, each as an account id hash and a
+//!   label, and `POST .../holds/clear` with `{account_id_hash, label}`
+//!   clears one, with an audit row naming the operator by hash. A hold
+//!   about one account stays until it is cleared here; the ceiling hold
+//!   also lifts itself once the account fits the ceiling again. The
+//!   operator token is deployment-wide, so the tenant is named in the path;
+//!   every read and write still runs in that tenant's RLS context.
+//!
 //! Link release moves one link of the caller's own tenant, so it keeps the
 //! admin drill routes' tenant auth (`authenticate_with_tenant_access_grant`,
 //! then `require_admin`):
@@ -42,7 +51,8 @@
 use super::*;
 use axum::extract::Path;
 use trace_commons_server::db::{
-    PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_link_id_hash,
+    PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_account_id_hash,
+    payout_link_id_hash,
 };
 use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
 use trace_commons_server::payout_pass::UnconfiguredRecipientOpener;
@@ -250,6 +260,156 @@ async fn set_payout_rail_control(
     Ok(Json(PayoutRailControlResponse {
         rail_id: entry.rail_id().as_str().to_owned(),
         halted,
+    }))
+}
+
+/// The shape a tenant id takes in a hold route's path.
+fn is_tenant_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+}
+
+/// The database's rule for a hold label (`trace_payout_holds.label`).
+fn is_hold_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+        })
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldView {
+    account_id_hash: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldsResponse {
+    rail_id: String,
+    holds: Vec<PayoutHoldView>,
+}
+
+/// The operator gate, the rail, the tenant shape and the store, in that
+/// order, for both hold routes.
+fn payout_hold_route<'a>(
+    state: &'a AppState,
+    headers: &HeaderMap,
+    rail_id: &str,
+    tenant_id: &str,
+) -> ApiResult<(
+    String,
+    &'a Arc<trace_commons_server::payout_worker::PayoutRailEntry>,
+    &'a Arc<dyn PayoutStore>,
+)> {
+    let actor = require_payout_operator(state, headers)?;
+    let entry = state
+        .payout_rails
+        .get(rail_id)
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, error.label()))?;
+    if !is_tenant_id(tenant_id) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_tenant_id_invalid",
+        ));
+    }
+    let store = state
+        .payout_store
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
+    Ok((actor, entry, store))
+}
+
+pub(crate) async fn payout_holds_list_handler(
+    State(state): State<Arc<AppState>>,
+    Path((rail_id, tenant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PayoutHoldsResponse>> {
+    let (_, entry, store) = payout_hold_route(state.as_ref(), &headers, &rail_id, &tenant_id)?;
+    let holds = store
+        .open_payout_holds(&tenant_id, entry.rail_id())
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?
+        .into_iter()
+        .map(|hold| PayoutHoldView {
+            account_id_hash: payout_account_id_hash(hold.account_id),
+            label: hold.label,
+        })
+        .collect();
+    Ok(Json(PayoutHoldsResponse {
+        rail_id: entry.rail_id().as_str().to_owned(),
+        holds,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PayoutHoldClearRequest {
+    account_id_hash: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldClearResponse {
+    rail_id: String,
+    account_id_hash: String,
+    label: String,
+    cleared: bool,
+}
+
+pub(crate) async fn payout_hold_clear_handler(
+    State(state): State<Arc<AppState>>,
+    Path((rail_id, tenant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<PayoutHoldClearRequest>,
+) -> ApiResult<Json<PayoutHoldClearResponse>> {
+    let (actor, entry, store) = payout_hold_route(state.as_ref(), &headers, &rail_id, &tenant_id)?;
+    if !is_link_id_hash(&request.account_id_hash) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_account_id_hash_invalid",
+        ));
+    }
+    if !is_hold_label(&request.label) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_hold_label_invalid",
+        ));
+    }
+    let not_found = || api_error(StatusCode::NOT_FOUND, "payout_hold_not_found");
+    let account = store
+        .open_payout_holds(&tenant_id, entry.rail_id())
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?
+        .into_iter()
+        .find(|hold| {
+            hold.label == request.label
+                && payout_account_id_hash(hold.account_id) == request.account_id_hash
+        })
+        .map(|hold| hold.account_id)
+        .ok_or_else(not_found)?;
+    let cleared = store
+        .clear_payout_hold(&tenant_id, account, entry.rail_id(), &request.label, &actor)
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
+    if !cleared {
+        return Err(not_found());
+    }
+    tracing::info!(
+        rail = %entry.rail_id(),
+        label = %request.label,
+        "payout hold cleared by an operator"
+    );
+    // The account may be paid now rather than at the next tick.
+    state.payout_rails.notifier().notify_all();
+    Ok(Json(PayoutHoldClearResponse {
+        rail_id: entry.rail_id().as_str().to_owned(),
+        account_id_hash: request.account_id_hash,
+        label: request.label,
+        cleared: true,
     }))
 }
 

@@ -9272,6 +9272,14 @@ fn app(state: Arc<AppState>) -> Router {
             post(payout_rails::payout_rail_resume_handler),
         )
         .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds",
+            get(payout_rails::payout_holds_list_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds/clear",
+            post(payout_rails::payout_hold_clear_handler),
+        )
+        .route(
             "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
             post(payout_rails::payout_link_release_handler),
         )
