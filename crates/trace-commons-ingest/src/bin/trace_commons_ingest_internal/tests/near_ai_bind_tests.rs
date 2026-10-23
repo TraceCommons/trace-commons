@@ -3162,6 +3162,106 @@ mod open_sign_up {
         );
     }
 
+    /// A v2 NEAR AI sign-up, then that account's first upload as the app
+    /// makes it: an issuer-signed upload claim naming the device the sign-up
+    /// bound, and an envelope with no admission evidence. Returns the
+    /// sign-up's tenant and the upload's reply.
+    async fn sign_up_then_upload(h: &Harness) -> (String, Reply) {
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let signed_up = finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_eq!(signed_up.status, StatusCode::OK, "{:?}", signed_up.json());
+        let tenant = signed_up.json()["tenant_id"]
+            .as_str()
+            .expect("tenant")
+            .to_string();
+        assert!(tenant.starts_with("nearai-"), "a new tenant of its own");
+
+        // The upload claim the issuer mints for this device.
+        let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            &device.public_bytes(),
+        );
+        let actor = trace_commons_server::account_trust::device_claim_actor(
+            &tenant,
+            &device_key_id,
+            Some(&trace_commons_protocol::onboarding::user_subject_hash(
+                &subject,
+            )),
+        );
+        let token = eddsa_signed_tenant_token(serde_json::json!({
+            "tenant_id": tenant,
+            "role": "contributor",
+            "sub": actor,
+            "principal_ref": actor,
+            "allowed_consent_scopes": ["debugging_evaluation"],
+            "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp(),
+        }));
+        let mut state = h.state.clone();
+        Arc::make_mut(&mut state).signed_token_verifier = Some(shared_signed_token_verifier(
+            test_eddsa_signed_token_verifier(),
+        ));
+        let envelope = serde_json::to_value(low_risk_envelope().await).expect("envelope");
+        let uploaded = send(&state, "POST", "/v1/traces", Some(&envelope), Some(&token)).await;
+        (tenant, uploaded)
+    }
+
+    /// A staging build admits the first upload of an account its own v2
+    /// NEAR AI sign-up created, with no admission ledger and no witness
+    /// (staging spec S12). Before this, every staging account was refused
+    /// at upload with `legacy_admission_unconfigured`.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_build_admits_the_first_upload_without_the_admission_ledger() {
+        let Some(h) = harness_with_admission(false).await else {
+            return;
+        };
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        assert!(h.state.account_admission.is_none(), "no account admission");
+        assert!(h.state.witness_bypass.is_none(), "no witness");
+        let (_tenant, uploaded) = sign_up_then_upload(&h).await;
+        assert_eq!(uploaded.status, StatusCode::OK, "{:?}", uploaded.json());
+        assert_eq!(
+            uploaded.json()["status"],
+            "accepted",
+            "{:?}",
+            uploaded.json()
+        );
+    }
+
+    /// The default-build twin: the same sign-up and upload with no admission
+    /// ledger is still refused, by the same label it always was. A
+    /// production build never takes the staging admission.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_default_build_refuses_the_first_upload_without_the_admission_ledger() {
+        // Sign-up readiness on; the ledger itself is still absent.
+        let Some(h) = harness_with_admission(true).await else {
+            return;
+        };
+        assert!(h.state.admission.is_none(), "no admission ledger");
+        assert!(h.state.account_admission.is_none(), "no account admission");
+        let (_tenant, uploaded) = sign_up_then_upload(&h).await;
+        assert_eq!(
+            uploaded.status,
+            StatusCode::FORBIDDEN,
+            "{:?}",
+            uploaded.json()
+        );
+        assert_eq!(uploaded.json()["error"], "admission_refused");
+    }
+
     /// One environment variable set for a test and restored when it ends.
     struct EnvVar {
         name: &'static str,

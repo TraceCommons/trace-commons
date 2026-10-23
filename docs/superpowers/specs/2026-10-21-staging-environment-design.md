@@ -85,7 +85,11 @@ All dated 2026-10-21. The owner's words are quoted.
   invite. Supersedes S5. Asked how staging opens sign-in without a witness,
   the owner chose to skip the ledger on staging (2026-10-22): a staging build
   creates accounts without the admission ledger or witness; production is
-  unchanged.
+  unchanged. The same build also admits those accounts' uploads without the
+  ledger (2026-10-23): a `nearai-` tenant whose provisioned device resolves
+  is not sent to the ledger while the ledger is unconfigured
+  (`admission::staging_admits_without_ledger`). Without that, every staging
+  account was refused at its first upload (`legacy_admission_unconfigured`).
 - **(S13) Staging DMGs on public pre-releases.** "Github pre-relase for
   straging is fine" (2026-10-22), knowing the repository is public and
   sign-up is open, so anyone who finds a staging DMG can use staging (6.1).
@@ -657,6 +661,18 @@ requirement is a compile-time difference, not a setting.
 twin `a_default_build_refuses_sign_up_without_the_admission_ledger` hold
 both sides. Tenant access grants (`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS`)
 play no part in NEAR AI sign-in.
+
+Uploads follow sign-in. With the ledger off, `admission::reserve` on a
+staging build lets a `nearai-` tenant's upload through once `admission::anchor`
+has resolved its provisioned device, and only while the ledger is
+unconfigured; an operator who turns the ledger on gets the full path. A
+default build refuses the same upload as before (`legacy_admission_unconfigured`).
+`a_staging_build_admits_the_first_upload_without_the_admission_ledger` and its
+default-build twin `a_default_build_refuses_the_first_upload_without_the_admission_ledger`
+hold both sides, and `a_production_build_never_admits_without_the_ledger`
+holds the compiled-out branch. Staging keeps
+`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=false` from the pilot, which the
+upload path needs, because a staging account has no grant.
 
 ## 4. The staging macOS app
 

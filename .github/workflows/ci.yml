@@ -933,10 +933,11 @@ jobs:
             cargo test --locked -p trace-commons-ingest --features near-ai-staging --lib -- --test-threads=1 2>&1 | tee staging-lib-tests.log
           '
           # The tests that hold the staging rules must have run, not been
-          # filtered or compiled out: open sign-up, sign-up without the
-          # admission ledger, and the wallet refusal.
+          # filtered or compiled out: open sign-up, sign-up and the first
+          # upload without the admission ledger, and the wallet refusal.
           grep -q 'open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite ... ok' staging-lib-tests.log
           grep -q 'open_sign_up::a_staging_build_signs_up_without_the_admission_ledger ... ok' staging-lib-tests.log
+          grep -q 'open_sign_up::a_staging_build_admits_the_first_upload_without_the_admission_ledger ... ok' staging-lib-tests.log
           grep -q 'a_staging_build_never_offers_wallet_provisioning ... ok' staging-lib-tests.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
