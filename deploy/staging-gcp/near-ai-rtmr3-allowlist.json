@@ -1,0 +1,10 @@
+{
+  "rtmr3": {
+    "app_id": "",
+    "mr_kms": "",
+    "os_image_hash": "",
+    "key_provider": "",
+    "markers": []
+  },
+  "compose_actions": []
+}

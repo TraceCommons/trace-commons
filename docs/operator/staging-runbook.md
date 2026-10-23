@@ -85,8 +85,9 @@ is never marked latest.
 ## Re-sign the pin set
 
 See [`./staging-pin-signing.md`](./staging-pin-signing.md). Re-sign when NEAR
-AI staging redeploys a model and its measurements change, and before the
-served set expires (at most 14 days after signing). Signing runs on an
+AI staging redeploys a model and its measurements or allowlisted events
+change, and before the served set expires (at most 14 days after signing).
+A change to the allowlist is a reviewed pull request first. Signing runs on an
 operator machine. The staging host never holds the key.
 
 After a NEAR AI staging redeploy, also check that testers can sign in
@@ -114,9 +115,25 @@ AASA file. Rollback is the pilot's: each install keeps a timestamped
 payout rail stays `disabled` until the ingest reads its settings (payout
 design section 2).
 
-## Serving the first pin set (pending Task 6b)
+## Serving the first pin set
 
-Placeholder. To be filled in when Task 6b lands. Private AI stays off until a
-signed pin set is served. That needs the RTMR3 replay (Task 6b) and the first
-signed pin set. When both exist, this section says how to observe, sign and
-install the first set, using [`./staging-pin-signing.md`](./staging-pin-signing.md).
+Private AI proof marks stay off until a signed pin set is served. The RTMR3
+replay (owner decision S16) is in place, so the first set is made the same
+way as every later one, with
+[`./staging-pin-signing.md`](./staging-pin-signing.md):
+
+1. `observe` every model the staging app uses, with `--review review.json`.
+2. Fill `deploy/staging-gcp/near-ai-rtmr3-allowlist.json` from
+   `review.json`, checking each value, and merge it in a reviewed pull
+   request. As committed it is a placeholder that refuses everything: a set
+   signed with it serves, and earns no key.
+3. `sign --first` with `--allowlist` pointing at the merged file, then
+   `verify` the result.
+4. Copy `current.json` to the staging host's pin directory, and put the
+   printed `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=` line (production's
+   form, from `observe`'s `ingest=` line) in the staging ingest's drop-in.
+
+A tester's daemon status then shows `near_ai_pins: pinned` and, after the
+first attested answer, `near_ai_attestation: attested`; any other
+`near_ai_attestation` value names the check that refused (the refusals table
+in the signing runbook).

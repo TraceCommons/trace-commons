@@ -936,9 +936,12 @@ one report fetched with one nonce, and never combine records from two
 fetches.
 
 **Where the allowlist comes from and how it is reviewed.** `observe`
-prints, for each model entry, the decoded RTMR3 events (name, and the
-payload for every event except `instance-id`, whose value it never prints)
-and the compose-manager `actions` (kind, container, image). The operator
+writes a candidate allowlist to its `--review` file (not stdout, which
+carries the sets file `sign` reads): one value per RTMR3 event, the same
+across every model entry (it refuses the run as `review_entries_disagree`
+when entries differ), with no `instance-id` value, and every compose-manager
+action seen (kind, container, image), in the shape `sign --allowlist`
+reads. The operator
 reviews them and commits the allowlist as a file under
 `deploy/staging-gcp/`, so every change to it is a reviewed pull request. A
 new image or compose action that NEAR AI staging starts using therefore
@@ -999,9 +1002,9 @@ operators run it, nothing ships it) with `required-features = ["near-ai-staging"
   mismatch; verifies the entry's compose-manager quote, requires its
   registers to equal the model quote's and our nonce at
   `report_data[32..64]`, and recomputes `actions_hash` against its
-  `report_data[0..32]`, refusing the run if any of these fails; and prints
-  the decoded RTMR3 events and the compose actions for the allowlist
-  review (5.2).
+  `report_data[0..32]`, refusing the run if any of these fails; and writes
+  the candidate allowlist to its `--review` file for the allowlist review
+  (5.2).
 - `sign --sets <file> --sequence <n> --ttl-days <d>`: read the private key
   from stdin only (never argv, never a file it writes), build the payload,
   sign, and write `current.json`. It refuses a sequence not above the one in

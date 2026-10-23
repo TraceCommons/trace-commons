@@ -3,7 +3,9 @@
 A staging build of the contributor app checks every NEAR AI quote against
 measurement sets it takes from one signed document, served by the staging
 site at `/near-ai-pins/current.json`, and from nowhere else (staging design,
-section 5). This runbook covers the key that signs that document and
+section 5). The document is format `trace-commons-near-ai-pins/v2`: next to
+the sets it carries the RTMR3 and compose-action allowlist (owner decision
+S16), and the app refuses a v1 document (`pins_v1_document`). This runbook covers the key that signs that document and
 `trace-commons-staging-pins`, the tool that observes the measurements and
 signs them. The staging environment runbook, when it lands, links here for
 this step.
@@ -92,21 +94,54 @@ after it was signed; 7 is the default).
    gcloud secrets versions access latest \
        --secret=tc-staging-nearai-inference-key --project <staging project> \
      | trace-commons-staging-pins observe --model <model id> --model <model id> \
-     > observed.txt
+         --review review.json > observed.txt
    ```
 
    Name every model the staging app uses, and name first the model the
    staging ingest's own receipts come from: sets are printed in the order
-   they are first seen (model order, then quote order), and `sign` pins the
-   ingest to the first one. `observe` fetches each model's
-   attestation report from the staging gateway for a fresh nonce, verifies
-   each quote against Intel collateral, requires an `UpToDate` TCB and the
-   nonce bound inside the verified quote, and prints the distinct sets, one
-   per line. If any model fails any check, it prints nothing and exits 1.
-   `--registers` changes which registers a set names; the default is
-   `mrtd,rtmr0,rtmr1,rtmr2,rtmr3`, what production pins.
+   they are first seen (model order, then quote order), and the `ingest=`
+   line is read from the first model's first quote. `observe` fetches each
+   model's attestation report from the staging gateway for a fresh nonce,
+   verifies each quote against Intel collateral, and requires an `UpToDate`
+   TCB and the nonce bound inside the verified quote. Then, for each model
+   entry (owner decision S16):
 
-2. Fetch the document the staging site serves now, so `sign` can refuse a
+   - it replays the entry's own `event_log` with recomputed digests and
+     requires the result to equal the verified quote's RTMR3, its RTMR3
+     events to be the ten dstack events in order (`system-preparing`,
+     `app-id`, `compose-hash`, `instance-id`, `boot-mr-done`, `mr-kms`,
+     `os-image-hash`, `key-provider`, `storage-fs`, `system-ready`), and the
+     `compose-hash` event to equal the compose hash in MRCONFIGID;
+   - it verifies the entry's `compose_manager_attestation` quote the same
+     way, requires its registers to equal the model quote's, our nonce at
+     `report_data[32..64]`, and the SHA-256 of the actions (sorted-key
+     compact JSON) at `report_data[0..32]`.
+
+   It prints the distinct sets, one per line, and one
+   `ingest=<mrtd and rtmr0-3>` line: the staging ingest's own pin, in
+   production's form, because the ingest does not replay RTMR3 (section
+   5.9). It writes `review.json` (never overwriting a file): the values of
+   the replayed events and every compose action it saw, as a candidate
+   allowlist in the shape `sign --allowlist` reads. The per-boot
+   `instance-id` value is never written anywhere. If any model fails any
+   check, or two entries carry different values for one event, it prints
+   nothing, writes no review file and exits 1. `--registers` changes which
+   registers a set names; the default is `mrtd,rtmr0,rtmr1,rtmr2,mrconfigid`
+   (S16), and `sign` refuses a set that does not name at least those.
+
+2. Review the allowlist. Compare `review.json` with
+   `deploy/staging-gcp/near-ai-rtmr3-allowlist.json` (`diff`), check every
+   change -- the app id, the KMS (`mr_kms`, `key_provider`), the OS image,
+   the four progress markers, and each compose action's kind, container and
+   image reference -- and commit the reviewed file in a pull request. Never
+   sign from an unreviewed `review.json`: the allowlist is what decides
+   which post-boot containers a staging app trusts. Values are lower-case
+   hex of each event's payload bytes; `key_provider` is the event's payload
+   as it is (JSON naming the KMS), hex-encoded. As committed, the file is a
+   placeholder with empty values and empty lists, which refuses every
+   entry.
+
+3. Fetch the document the staging site serves now, so `sign` can refuse a
    sequence devices would treat as a rollback:
 
    ```bash
@@ -116,29 +151,32 @@ after it was signed; 7 is the default).
    The very first time, there is nothing to fetch: pass `--first` to `sign`
    instead of `--current`.
 
-3. Sign. The signing key goes in on stdin; no argument takes it:
+4. Sign, from the merged allowlist. The signing key goes in on stdin; no
+   argument takes it:
 
    ```bash
    gcloud secrets versions access latest \
        --secret=tc-staging-nearai-pin-signing-key --project <staging project> \
      | trace-commons-staging-pins sign --sets observed.txt \
+         --allowlist deploy/staging-gcp/near-ai-rtmr3-allowlist.json \
          --sequence <served sequence + 1> --ttl-days 7 --current served.json
    ```
 
    It writes `current.json` (`--out` to change; an existing file is never
-   overwritten), checks it with the same verifier the app runs, and prints
-   one line on stdout:
-   `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=<first set>`. On stderr it
-   prints the sequence, the number of sets, the validity window, the key id
-   and the payload's SHA-256.
+   overwritten) with the allowlist inside the signed payload, checks it
+   with the same verifier the app runs, and prints one line on stdout:
+   `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=<the ingest= line's set>`.
+   On stderr it prints the sequence, the number of sets and compose
+   actions, the validity window, the key id, and the SHA-256 of the
+   allowlist and of the payload.
 
-4. Check it:
+5. Check it:
 
    ```bash
    trace-commons-staging-pins verify current.json --public-key <public key hex>
    ```
 
-5. Install. Copy `current.json` to the staging host's pin directory,
+6. Install. Copy `current.json` to the staging host's pin directory,
    `/var/lib/tracecommons-site/near-ai-pins/current.json` (mode 0644), so the
    staging site serves it. Then rerun `deploy/staging-gcp/render-env.sh` with
    `TC_NEAR_AI_EXPECTED_MEASUREMENTS` set to the value of the printed
@@ -158,10 +196,28 @@ required one) is clap's, and exits 2.
 | `sequence_not_above_served` | `--sequence` is not above the served document's |
 | `served_document_unreadable` | the `--current` file has no readable sequence |
 | `no_sets`, `set_unparseable:line_<n>` | the sets file is empty, or line `n` is not measurement syntax |
+| `set_missing_register:line_<n>` | line `n` does not name `mrtd`, `rtmr0-2` and `mrconfigid` |
+| `ingest_pin_missing`, `ingest_pin_malformed` | the sets file has no `ingest=` line, or more than one, or one that is not exactly `mrtd` and `rtmr0-3` |
+| `allowlist_unreadable`, `allowlist_malformed` | the `--allowlist` file cannot be read, or is not the allowlist shape (lower-case hex, the four marker names at most once each, no repeated action, no other field) |
+| `allowlist_incomplete` | the `--allowlist` file is neither the committed placeholder (every value and list empty) nor filled in completely: an empty app id, KMS, OS image or key provider, or a progress marker not listed. Finish the review from `review.json` |
+| `review_exists` | `observe`'s `--review` file already exists |
 | `signing_key_missing`, `signing_key_malformed` | stdin is empty, or not 64 hex characters |
 | `output_exists` | the `--out` file already exists |
-| `model_<n>:<label>` | `observe` refused the `n`th `--model`; the label names the check (`quote_verification_failed`, `quote_tcb_not_up_to_date`, `report_nonce_mismatch`, `quote_nonce_mismatch`, `report_model_not_attested`, `report_http_status`, ...) |
+| `model_<n>:<label>` | `observe` refused the `n`th `--model`; the label names the check (`quote_verification_failed`, `quote_tcb_not_up_to_date`, `report_nonce_mismatch`, `quote_nonce_mismatch`, `report_model_not_attested`, `report_http_status`, the replay's `rtmr3_log_missing`, `rtmr3_replay_mismatch`, `rtmr3_event_digest_mismatch`, `rtmr3_event_unknown`, `rtmr3_event_sequence`, `rtmr3_compose_hash_mismatch`, the compose-manager record's `compose_manager_missing`, `compose_manager_quote_unverified`, `compose_manager_other_td`, `compose_manager_nonce_mismatch`, `compose_actions_hash_mismatch`, or `review_entries_disagree`, ...) |
 | `pins_*` | `verify`: the app would refuse the document, for the reason named (`pins_expired`, `pins_unknown_key`, `pins_bad_signature`, ...) |
 
 Neither stream ever carries a key or a seed. Measurement sets appear only on
-`observe`'s and `sign`'s stdout, which is their output.
+`observe`'s and `sign`'s stdout, which is their output; allowlist values
+only in `observe`'s review file and the allowlist file itself.
+
+## What the app refuses
+
+A staging app earns a model's key only if the signed set matches its quote,
+the entry's RTMR3 log replays to that quote and carries the allowlisted
+values, and its compose-manager record checks and lists only allowlisted
+actions, all from one report fetched with one nonce. The daemon's status
+reports the last outcome as `near_ai_attestation`: `attested`,
+`not_checked`, or the refusal label (the `rtmr3_*` and `compose_*` labels
+above, plus `rtmr3_app_id_not_allowed`, `rtmr3_mr_kms_not_allowed`,
+`rtmr3_os_image_hash_not_allowed`, `rtmr3_key_provider_not_allowed`,
+`rtmr3_marker_not_allowed` and `compose_action_not_allowed`).

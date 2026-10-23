@@ -10,8 +10,10 @@
 # A binary is refused if any file under the given paths contains:
 #
 #   - the pin-set format name, `trace-commons-near-ai-pins/` followed by any
-#     version (v1 is also the signature's domain prefix, so no verifier
-#     exists without it; a later version is refused the same way);
+#     version (each version is also its signature's domain prefix, so no
+#     verifier exists without it). The verifier reads v2, which carries the
+#     RTMR3 and compose-action allowlist, and spells v1 only to refuse it;
+#     both are caught by the one marker;
 #   - the pin URL path, `near-ai-pins/current.json`;
 #   - a staging pin-signing public key listed in the keys file, as its raw
 #     32 bytes, lower- or upper-case hex, or base64 (standard or URL-safe,
@@ -130,7 +132,8 @@ print(f"no staging pin verifier in {len(files)} file(s); {len(keys)} staging key
 PY
 }
 
-# The verifier's source must spell the format and the signing prefix with
+# The verifier's source must spell the format and the signing prefix --
+# the v2 ones it reads and the v1 ones it recognises to refuse -- with
 # FORMAT_MARKER, so the scan looks for the bytes a staging build carries.
 # The pin URL and the compiled-in key do not exist yet; the change that adds
 # them extends this check (staging plan, Task 5).
@@ -140,7 +143,8 @@ sources_agree() {
     echo "REFUSING: the verifier source $source does not exist" >&2
     return 1
   fi
-  for name in 'FORMAT: &str = "' 'SIGNING_PREFIX: &[u8] = b"'; do
+  for name in 'FORMAT: &str = "' 'SIGNING_PREFIX: &[u8] = b"' \
+    'FORMAT_V1: &str = "' 'SIGNING_PREFIX_V1: &[u8] = b"'; do
     if ! grep -q -F -- "pub const $name$FORMAT_MARKER" "$source"; then
       echo "REFUSING: $source has no 'pub const $name$FORMAT_MARKER...'; the scan's format marker has drifted from the verifier" >&2
       failures=$((failures + 1))
@@ -317,7 +321,9 @@ open(sys.argv[1], "wb").write(data[:mid] + forms[sys.argv[3]] + data[mid:])
   for renamed in \
     's#^pub const FORMAT: &str = "trace-commons-near-ai-pins/#pub const FORMAT: &str = "trace-commons-near-ai-pinset/#m' \
     's#^pub const SIGNING_PREFIX: &\[u8\] = b"trace-commons-near-ai-pins/#pub const SIGNING_PREFIX: &[u8] = b"tc-pins/#m' \
-    's#^pub const FORMAT: .*\n##m'; do
+    's#^pub const FORMAT: .*\n##m' \
+    's#^pub const FORMAT_V1: &str = "trace-commons-near-ai-pins/#pub const FORMAT_V1: &str = "tc-pins/#m' \
+    's#^pub const SIGNING_PREFIX_V1: &\[u8\] = b"trace-commons-near-ai-pins/#pub const SIGNING_PREFIX_V1: &[u8] = b"tc-pins/#m'; do
     cp "$STAGING_PINS_SOURCE" "$scratch/staging_pins.rs"
     perl -0pi -e "$renamed" "$scratch/staging_pins.rs"
     if cmp -s "$STAGING_PINS_SOURCE" "$scratch/staging_pins.rs"; then
