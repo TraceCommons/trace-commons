@@ -12,6 +12,19 @@
 //! Nothing here logs a prompt, a completion, a token, or a body. Fixed
 //! labels, a port, and counts.
 //!
+//! # The home's configuration is the person's -- with one exception
+//!
+//! This daemon does not write, edit or replace `config.toml` in an IronWire
+//! home. The one exception (owner decision, 2026-10-23) is a `near-ai-staging`
+//! build's own home, `~/.ironwire-staging`: when the daemon holds a NEAR AI
+//! key and that home has no `config.toml` at all, the daemon creates one naming the staging NEAR AI
+//! base for the `nearai` backend, and nothing else. IronWire's built-in
+//! base is production's and `EmbedOptions` cannot move it, so without that
+//! file a staging build can never hand its key over (see
+//! [`nearai_key_may_go_to`]) and Private AI answers from no NEAR AI account.
+//! A file that already exists is never touched, whatever it says; a
+//! production build never writes one. See [`seed_staging_nearai_base`].
+//!
 //! # An IronWire this daemon did not start is left alone
 //!
 //! A responding pointer is advisory and causes us to leave that endpoint
@@ -465,7 +478,10 @@ const IRONWIRE_NEARAI_BASE_ENV: &str = "IRONWIRE_NEARAI_BASE_URL";
 ///   entry's `base_url` alone, else the same compiled-in base.
 ///
 /// An empty value counts as unset. `EmbedOptions` cannot set the base, and the
-/// home's configuration is the person's, which this daemon leaves alone. So:
+/// home's configuration is the person's, which this daemon leaves alone --
+/// except that a staging build creates one in its own home when there is none
+/// ([`seed_staging_nearai_base`]), which is what lets this check pass there.
+/// So:
 ///
 /// - a staging build hands over its key only when every one of those bases is
 ///   this channel's; anything else, including a configuration that does not
@@ -514,6 +530,145 @@ pub fn nearai_key_may_go_to(home: &std::path::Path, env_base: Option<&str>) -> b
             .flatten()
             .all(|base| crate::channel::refuse_other_channel_origin(base).is_ok())
     }
+}
+
+/// What [`seed_staging_nearai_base`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedOutcome {
+    /// Not a `near-ai-staging` build: nothing is ever written.
+    NotStaging,
+    /// The home already has a `config.toml`. Left exactly as it is, including
+    /// one that names some other NEAR AI base -- the key is then withheld, as
+    /// before.
+    AlreadyConfigured,
+    /// The home is production's IronWire home. Never written.
+    ProductionHome,
+    /// A `config.toml` naming the staging NEAR AI base was created.
+    Written,
+    /// The file could not be created. Nothing is handed over that would not
+    /// have been: the key check reads the home as it is.
+    Failed,
+}
+
+/// The production IronWire home's directory name, which a staging build's
+/// own constants do not carry.
+const PRODUCTION_IRONWIRE_HOME_DIR: &str = ".ironwire";
+
+/// The whole file a staging build writes: the `nearai` backend on this
+/// channel's base. `kind` is required by IronWire's parser at the pinned rev.
+fn staging_nearai_config() -> String {
+    format!(
+        "# Written by the Trace Commons staging app: NEAR AI on its staging base.\n\
+         [[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"{}\"\n",
+        crate::channel::NEAR_AI_INFERENCE_BASE
+    )
+}
+
+/// On a `near-ai-staging` build, give the staging IronWire home a
+/// `config.toml` naming the staging NEAR AI base, when it has none.
+///
+/// IronWire builds its `nearai` backend on its compiled-in base, production,
+/// unless the home's configuration or the environment names another, and
+/// `EmbedOptions` at the pinned rev cannot set one. [`nearai_key_may_go_to`]
+/// rightly refuses a staging key to that base, so a staging install with no
+/// configuration signed in, minted a key, and still had no NEAR AI account
+/// behind Private AI.
+///
+/// The bounds, each of which is the decision rather than a convenience:
+/// - only a staging build, so production never writes a configuration;
+/// - never production's IronWire home, even if the staging home variable
+///   points at it;
+/// - only when no `config.toml` exists -- an existing one, whatever it says,
+///   is the person's and is not read-modify-written;
+/// - created atomically and owner-only: written in full to a private
+///   temporary file, then linked into place with a call that fails rather
+///   than replaces if a `config.toml` appeared meanwhile.
+///
+/// The key check is unchanged and still runs afterwards on what is on disk.
+pub fn seed_staging_nearai_base(home: &Path) -> SeedOutcome {
+    if !crate::channel::near_ai_staging() {
+        return SeedOutcome::NotStaging;
+    }
+    seed_nearai_base_in(home)
+}
+
+fn seed_nearai_base_in(home: &Path) -> SeedOutcome {
+    let config = home.join("config.toml");
+    if std::fs::symlink_metadata(&config).is_ok() {
+        return SeedOutcome::AlreadyConfigured;
+    }
+    if let Some(production) = dirs::home_dir().map(|h| h.join(PRODUCTION_IRONWIRE_HOME_DIR)) {
+        let same = match (home.canonicalize(), production.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => home == production,
+        };
+        if same {
+            return SeedOutcome::ProductionHome;
+        }
+    }
+    let mut dir = std::fs::DirBuilder::new();
+    dir.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir.mode(0o700);
+    }
+    if dir.create(home).is_err() {
+        return SeedOutcome::Failed;
+    }
+    let staged = home.join(format!(".config.toml.staging-seed.{}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staged)?;
+        std::io::Write::write_all(&mut file, staging_nearai_config().as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        // A hard link fails if the name exists, where a rename would replace
+        // it: a `config.toml` that appeared since the check above wins.
+        std::fs::hard_link(&staged, &config)
+    })();
+    let _ = std::fs::remove_file(&staged);
+    match written {
+        Ok(()) => SeedOutcome::Written,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && config.exists() => {
+            SeedOutcome::AlreadyConfigured
+        }
+        Err(_) => SeedOutcome::Failed,
+    }
+}
+
+/// The key a proxy started out of `home` is handed, if any.
+///
+/// Holding a key is what makes the staging configuration worth writing: a
+/// staging build seeds its home ([`seed_staging_nearai_base`]) only then, and
+/// before the check reads it, so a staging home with no configuration can
+/// pass. A daemon with no key writes nothing, and its proxy probes nothing it
+/// was not already probing. The check itself is unchanged.
+fn credential_for_start(
+    home: &Path,
+    credential: Option<HostSecret>,
+    env_base: Option<&str>,
+) -> Option<HostSecret> {
+    let credential = credential?;
+    match seed_staging_nearai_base(home) {
+        SeedOutcome::Written => tracing::info!(
+            pass = "private_inference",
+            "staging IronWire configuration created"
+        ),
+        SeedOutcome::Failed => tracing::warn!(
+            pass = "private_inference",
+            reason = "staging-ironwire-config-unwritable",
+            "staging IronWire configuration not created"
+        ),
+        _ => {}
+    }
+    nearai_key_may_go_to(home, env_base).then_some(credential)
 }
 
 /// The one environment name this daemon will ever answer for IronWire.
@@ -969,10 +1124,8 @@ impl PrivateInference {
             let home = self.home.clone();
             let port = self.port;
             let env_base = std::env::var(IRONWIRE_NEARAI_BASE_ENV).ok();
-            let credential = self
-                .credential
-                .clone()
-                .filter(|_| nearai_key_may_go_to(&home, env_base.as_deref()));
+            let credential =
+                credential_for_start(&home, self.credential.clone(), env_base.as_deref());
             let capture_enabled = self.token_capture_enabled;
             let attestor = self.signer_attestor.clone();
             self.starting = Some(runtime.spawn(async move {
@@ -1182,6 +1335,143 @@ mod tests {
     }
 
     use super::*;
+
+    /// A fixture key. Never a real credential.
+    fn fixture_key() -> HostSecret {
+        HostSecret::from("sk-fixture-not-a-key".to_string())
+    }
+
+    /// Every name in `home`, sorted.
+    fn names_in(home: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(home)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The staging install that signed in, minted a key, and still answered
+    /// from no NEAR AI account: its home had no configuration, so IronWire's
+    /// NEAR AI base was its built-in production one and the key was rightly
+    /// withheld. With a key in hand, a staging build now creates the one file
+    /// that names the staging base, owner-only and complete, and the
+    /// unchanged check then hands the key over.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_home_with_no_configuration_is_seeded_and_the_key_handed_over() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!nearai_key_may_go_to(home.path(), None));
+        assert!(credential_for_start(home.path(), Some(fixture_key()), None).is_some());
+        let config = home.path().join("config.toml");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            staging_nearai_config()
+        );
+        assert!(staging_nearai_config().contains(crate::channel::NEAR_AI_INFERENCE_BASE));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&config).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "owner-only");
+        }
+        assert_eq!(names_in(home.path()), vec!["config.toml".to_string()]);
+        // A second start finds it and writes nothing more.
+        assert_eq!(
+            seed_staging_nearai_base(home.path()),
+            SeedOutcome::AlreadyConfigured
+        );
+        assert!(credential_for_start(home.path(), Some(fixture_key()), None).is_some());
+    }
+
+    /// A configuration that is already there is the person's, whatever it
+    /// says. It is not rewritten, and one that names no staging base still
+    /// withholds the key.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn an_existing_staging_configuration_is_never_touched() {
+        for existing in [
+            "[[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"https://other.example/v1\"\n",
+            "[updates]\ncheck = true\n",
+            "",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let config = home.path().join("config.toml");
+            std::fs::write(&config, existing).unwrap();
+            assert!(
+                credential_for_start(home.path(), Some(fixture_key()), None).is_none(),
+                "{existing:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), existing);
+            assert_eq!(names_in(home.path()), vec!["config.toml".to_string()]);
+        }
+    }
+
+    /// No key, no file: a staging daemon that holds nothing to hand over
+    /// leaves its home as it found it.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_home_is_not_seeded_without_a_key() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(credential_for_start(home.path(), None, None).is_none());
+        assert!(names_in(home.path()).is_empty());
+    }
+
+    /// The seeded file is one IronWire at the pinned rev accepts, and the
+    /// `nearai` backend it builds from it answers with the key. Probes off so
+    /// no request leaves the machine.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn ironwire_accepts_the_seeded_configuration_and_holds_the_key() {
+        let home = tempfile::tempdir().unwrap();
+        let key = credential_for_start(home.path(), Some(fixture_key()), None)
+            .expect("the key is handed over");
+        let proxy = embed::start_with_options(
+            home.path(),
+            Some(0),
+            embed_options(Some(key)).with_startup_probes(StartupProbes::Off),
+            |_, _| {},
+        )
+        .await
+        .expect("IronWire starts on the seeded configuration");
+        let token = std::fs::read_to_string(home.path().join("control.token")).unwrap();
+        let status: serde_json::Value = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{}/_ironwire/status",
+                proxy.port()
+            ))
+            .header("authorization", format!("Bearer {}", token.trim()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let nearai = status["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == "nearai")
+            .cloned()
+            .expect("a nearai backend");
+        assert_eq!(nearai["authenticated"], true);
+        proxy.shutdown().await;
+    }
+
+    /// A production build never writes an IronWire configuration, key or no
+    /// key, and its key hand-off is what it was.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_build_never_writes_an_ironwire_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            seed_staging_nearai_base(home.path()),
+            SeedOutcome::NotStaging
+        );
+        assert!(credential_for_start(home.path(), Some(fixture_key()), None).is_some());
+        assert!(credential_for_start(home.path(), None, None).is_none());
+        assert!(names_in(home.path()).is_empty());
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
