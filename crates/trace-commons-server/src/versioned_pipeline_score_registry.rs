@@ -3,9 +3,10 @@
 
 //! The Score policy injection point for the versioned pipeline.
 //!
-//! The open build runs two Score families, both built in: the minimal
-//! reference (`trace_commons.score.minimal.v1`) and the compatibility policy
-//! (`trace_commons.score.compatibility.v1`). An embedding binary that holds
+//! The open build runs three Score policies, all built in: the minimal
+//! reference (`trace_commons.score.minimal.v1`), the compatibility policy
+//! (`trace_commons.score.compatibility.v1`), and the substance policy of the
+//! compatibility family (`trace_commons.score.substance.v1`). An embedding binary that holds
 //! a substituted backend supplies its own [`ScorePolicy`] through a
 //! [`ScorePolicyRegistry`]: a factory keyed by the implementation id a
 //! bundle manifest's Score [`PolicyRef`] names. The registry supplies code
@@ -19,7 +20,7 @@
 //! `trace-commons-ingest` binary passes an empty one. A package naming an
 //! implementation id no factory is registered under is refused at bind time
 //! with `bundle_policy_not_runnable`; it never falls back to a built-in
-//! policy. The two built-in ids are reserved and cannot be registered.
+//! policy. The built-in ids are reserved and cannot be registered.
 //!
 //! A registered factory is held only as a trait object, and so are the
 //! policies it builds. Like every other identified dependency, a factory is
@@ -43,6 +44,7 @@ use trace_commons_gate_api::{
 
 use crate::versioned_pipeline_bundle::{MINIMAL_SCORE_IMPLEMENTATION, PipelineTraceCreditEvent};
 use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
+use crate::versioned_pipeline_substance::SUBSTANCE_SCORE_IMPLEMENTATION;
 
 /// Safe label for registering a factory under a built-in implementation id.
 pub const SCORE_POLICY_IMPLEMENTATION_RESERVED_LABEL: &str = "score_policy_implementation_reserved";
@@ -153,7 +155,7 @@ impl ScorePolicyRegistry {
         Self::default()
     }
 
-    /// Registers `factory` under `implementation_id`. The two built-in Score
+    /// Registers `factory` under `implementation_id`. The built-in Score
     /// implementation ids are reserved, an id may be registered once, and an
     /// empty id is refused.
     pub fn with_factory(
@@ -190,4 +192,5 @@ impl ScorePolicyRegistry {
 pub fn is_built_in_score_implementation(implementation_id: &str) -> bool {
     implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION
         || implementation_id == MINIMAL_SCORE_IMPLEMENTATION
+        || implementation_id == SUBSTANCE_SCORE_IMPLEMENTATION
 }

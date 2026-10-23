@@ -3,12 +3,33 @@
 
 //! The model-free substance formula: a deduplicated tool-call projection of an
 //! envelope, and the work, replay and composite terms over it.
+//!
+//! It also holds the substance Score policy (`trace_commons.score.substance.v1`)
+//! and its package builders. Substance is a built-in Score policy of the
+//! compatibility family (SQ-1): the bundle runs the compatibility Admission,
+//! Review and Settle policies, and `MinimalPolicyBundle` binds this Score
+//! policy in its own arm. The policy calls no perplexity scorer. Novelty runs
+//! the compatibility code (`evaluate_novelty`), with each chunk weighted by
+//! the chunker's character estimate ([`estimated_chunk_tokens`]).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use trace_commons_gate_api::pipeline::ScoreWitnessClass;
-use trace_commons_gate_enclave::chunker::{APPROX_CHARS_PER_TOKEN, TraceChunk};
+use trace_commons_gate_api::pipeline::{
+    AtomicUnits, BUNDLE_MANIFEST_FORMAT_VERSION, BundleManifest, BundlePackage, InstrumentAward,
+    InstrumentAwards, InstrumentId, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult, PolicyError,
+    PolicyRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput, ScoreOutput, ScorePolicy,
+    ScoreWitnessClass, SealedIndexCommand,
+};
+use trace_commons_gate_api::{
+    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, ReferenceEmbedder,
+    ReferencePerplexityScorer,
+};
+use trace_commons_gate_enclave::chunker::{
+    APPROX_CHARS_PER_TOKEN, ChunkerConfig, TraceChunk, chunk_envelope_plaintext,
+};
 use trace_commons_protocol::canonical_json::to_canonical_string;
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceContributionEventType, event_carries_result, replay_call_id,
@@ -16,9 +37,32 @@ use trace_commons_protocol::trace_contribution::{
 };
 use uuid::Uuid;
 
+use crate::credit_quality::{
+    CREDIT_QUALITY_VERSION_SUBSTANCE, NoveltyCreditParams, substance_credit_quality,
+};
+use crate::versioned_pipeline_bundle::{
+    PIPELINE_BUNDLE_INVALID_LABEL, PipelineInstrumentAwardConfig, dependency_content_hash,
+};
+use crate::versioned_pipeline_compat::{
+    COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
+    COMPATIBILITY_SETTLE_IMPLEMENTATION, CompatibilityBundleConfig, CompatibilityQualification,
+    NoveltyScoringConfig, evaluate_novelty, novelty_index_command,
+};
+
 pub const SUBSTANCE_SCORE_IMPLEMENTATION: &str = "trace_commons.score.substance.v1";
 pub const SUBSTANCE_SCORE_RULE: &str = "substance_novelty_v1";
 pub const SUBSTANCE_VERSION: u32 = 1;
+/// The Score `policy_id` of a substance package.
+pub const SUBSTANCE_SCORE_POLICY_ID: &str = "trace_commons.score.substance";
+/// Safe label for a reviewed artifact that is not a contribution envelope.
+/// Permanent: a retry reads the same bytes (Review Focus 4).
+pub const SUBSTANCE_ENVELOPE_INVALID_LABEL: &str = "substance_envelope_invalid";
+/// The `NoveltyUtility` delta of [`substance_candidate_package`], the same
+/// delta the compatibility qualification candidate carries.
+pub const SUBSTANCE_CANDIDATE_NOVELTY_UTILITY_MICROCREDITS: u64 = 2_500_000;
+/// The percentile of the pinned corpus that a qualifiable `sub_ceil` comes
+/// from (spec section 6).
+pub const SUBSTANCE_SUB_CEIL_PERCENTILE: u32 = 90;
 
 const MICROS: u32 = 1_000_000;
 
@@ -236,6 +280,475 @@ pub fn composite(terms: &SubstanceTerms, params: &SubstanceParams) -> f64 {
         * graded(terms.v, weight(params.att_floor_mult_micros))
 }
 
+/// Where the substance Score takes the witness class from (SQ-15). This cut
+/// does not read the stored class, so every trace scores as
+/// [`ScoreWitnessClass::Unattested`] (SQ-13). The bundle id hashes the
+/// variant, so a package of this cut keeps its scores when a later variant
+/// reads the stored class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubstanceWitnessSource {
+    NotRead,
+}
+
+impl SubstanceWitnessSource {
+    fn witness_class(self) -> ScoreWitnessClass {
+        match self {
+            Self::NotRead => ScoreWitnessClass::Unattested,
+        }
+    }
+}
+
+/// The novelty half of a substance configuration: the novelty gate, the
+/// index command threshold, the chunk knobs, the novelty parameters of
+/// `cq4`, and the `NoveltyUtility` award with its instrument pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstanceNoveltyConfig {
+    pub projection_id: String,
+    pub index_id: String,
+    pub novelty_floor_micros: u64,
+    pub embed_insert_novelty_micros: u64,
+    pub top_k: u32,
+    pub chunk_target_tokens: u32,
+    pub chunk_max_tokens: u32,
+    pub chunk_cap: u32,
+    pub chunk_min_tokens: u64,
+    pub credit: NoveltyCreditParams,
+    /// The flat `NoveltyUtility` delta, in trace-credit microcredits,
+    /// awarded when both gates pass. `0`: no award.
+    pub novelty_utility_microcredits: u64,
+    /// The instrument the award is pinned against; the package pins
+    /// `trace_credit` to `instrument.descriptor`.
+    pub instrument: PipelineInstrumentAwardConfig,
+}
+
+impl SubstanceNoveltyConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.projection_id.trim().is_empty() && !self.index_id.trim().is_empty(),
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        anyhow::ensure!(
+            self.top_k > 0
+                && self.chunk_target_tokens > 0
+                && self.chunk_max_tokens >= self.chunk_target_tokens
+                && self.chunk_cap > 0
+                && self.chunk_min_tokens > 0,
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        anyhow::ensure!(
+            self.credit.nov_floor_micros >= 0
+                && self.credit.nov_ceil_micros > self.credit.nov_floor_micros
+                && (0..=i64::from(MICROS)).contains(&self.credit.nov_floor_mult_micros),
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        anyhow::ensure!(
+            self.novelty_utility_microcredits <= MAX_TRACE_CREDIT_MICROCREDITS,
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        Ok(())
+    }
+
+    fn novelty_scoring(&self) -> NoveltyScoringConfig {
+        NoveltyScoringConfig {
+            index_id: self.index_id.clone(),
+            projection_id: self.projection_id.clone(),
+            top_k: self.top_k,
+            chunk_min_tokens: self.chunk_min_tokens,
+            embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+        }
+    }
+
+    fn chunker(&self) -> ChunkerConfig {
+        ChunkerConfig {
+            target_tokens: self.chunk_target_tokens as usize,
+            max_tokens: self.chunk_max_tokens as usize,
+            chunk_cap: self.chunk_cap as usize,
+        }
+    }
+}
+
+/// What the offline calibration (`evaluate`) measured the calibrated values
+/// on: the pinned corpus, the report, and the two percentiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstanceCalibration {
+    pub corpus_pin_digest: String,
+    pub report_digest: String,
+    pub sub_ceil_percentile: u32,
+    pub substance_floor_percentile: u32,
+}
+
+/// The values the offline calibration writes, with their provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibratedSubstanceValues {
+    pub sub_ceil_micros: u64,
+    pub substance_floor_micros: u64,
+    pub calibration: SubstanceCalibration,
+}
+
+/// The configuration of the substance Score policy (spec section 8.2). The
+/// bundle id hashes all of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstanceScoreConfig {
+    pub qualification: CompatibilityQualification,
+    pub substance_version: u32,
+    pub witness_source: SubstanceWitnessSource,
+    pub params: SubstanceParams,
+    /// The ceiling of the substance half of `cq4`. Calibrated.
+    pub sub_ceil_micros: u64,
+    /// The substance gate: a trace passes at or above it. Calibrated.
+    pub substance_floor_micros: u64,
+    pub sub_floor_mult_micros: u32,
+    pub calibration: Option<SubstanceCalibration>,
+    pub novelty: SubstanceNoveltyConfig,
+}
+
+impl SubstanceScoreConfig {
+    /// A local, non-qualifiable configuration: the RLVR parameters, an
+    /// uncalibrated ceiling of one whole and a zero floor, and the novelty
+    /// values of [`CompatibilityBundleConfig::local_reference`] with the
+    /// novelty parameters of `cq3`.
+    pub fn local_reference() -> Self {
+        let compatibility = CompatibilityBundleConfig::local_reference();
+        Self {
+            qualification: CompatibilityQualification::LocalSyntheticNonQualifiable,
+            substance_version: SUBSTANCE_VERSION,
+            witness_source: SubstanceWitnessSource::NotRead,
+            params: SubstanceParams::rlvr_v1(),
+            sub_ceil_micros: 1_000_000,
+            substance_floor_micros: 0,
+            sub_floor_mult_micros: 250_000,
+            calibration: None,
+            novelty: SubstanceNoveltyConfig {
+                projection_id: compatibility.projection_id,
+                index_id: compatibility.index_id,
+                novelty_floor_micros: compatibility.novelty_floor_micros,
+                embed_insert_novelty_micros: compatibility.embed_insert_novelty_micros,
+                top_k: compatibility.top_k,
+                chunk_target_tokens: compatibility.chunk_target_tokens,
+                chunk_max_tokens: compatibility.chunk_max_tokens,
+                chunk_cap: compatibility.chunk_cap,
+                chunk_min_tokens: compatibility.chunk_min_tokens,
+                credit: NoveltyCreditParams::cq3(),
+                novelty_utility_microcredits: compatibility.novelty_utility_microcredits,
+                instrument: compatibility.instrument,
+            },
+        }
+    }
+
+    /// This configuration with the calibrated ceiling and floor, and the
+    /// calibration they came from.
+    pub fn with_calibrated(mut self, values: &CalibratedSubstanceValues) -> Self {
+        self.sub_ceil_micros = values.sub_ceil_micros;
+        self.substance_floor_micros = values.substance_floor_micros;
+        self.calibration = Some(values.calibration.clone());
+        self
+    }
+
+    /// Refuses (`bundle_package_invalid`) a configuration the formula
+    /// cannot run safely: invalid parameters (a zero ceiling gives a NaN
+    /// term, which `to_micros` turns into 0), a `sub_ceil` of 0 (the credit
+    /// half would count it as one micro and raise credit) or above one
+    /// whole, a floor or floor multiplier above one whole, another
+    /// `substance_version`, a calibration out of range, or invalid novelty
+    /// values.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.params
+            .validate()
+            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+        anyhow::ensure!(
+            self.substance_version == SUBSTANCE_VERSION,
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        anyhow::ensure!(
+            self.sub_ceil_micros > 0
+                && self.sub_ceil_micros <= u64::from(MICROS)
+                && self.substance_floor_micros <= u64::from(MICROS)
+                && self.sub_floor_mult_micros <= MICROS,
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        if let Some(calibration) = &self.calibration {
+            anyhow::ensure!(
+                !calibration.corpus_pin_digest.trim().is_empty()
+                    && !calibration.report_digest.trim().is_empty()
+                    && calibration.sub_ceil_percentile <= 100
+                    && calibration.substance_floor_percentile <= 100,
+                PIPELINE_BUNDLE_INVALID_LABEL
+            );
+        }
+        self.novelty.validate()
+    }
+
+    /// Whether a runtime that routes or drains tenants may bind this
+    /// configuration: production-compatible, calibrated at the 90th
+    /// percentile, and valid.
+    pub fn is_qualifiable(&self) -> bool {
+        self.qualification == CompatibilityQualification::ProductionCompatible
+            && self.calibration.as_ref().is_some_and(|calibration| {
+                calibration.sub_ceil_percentile == SUBSTANCE_SUB_CEIL_PERCENTILE
+            })
+            && self.validate().is_ok()
+    }
+}
+
+fn permanent(label: &'static str) -> PolicyError {
+    PolicyError::permanent(label).expect("static label")
+}
+
+/// The substance Score policy. Holds its dependencies only as trait
+/// objects, and holds no perplexity scorer: substance calls none. Holds the
+/// bundle manifest it was constructed under, so every decision it builds is
+/// proven pinned (`ScoreDecision::for_bundle`).
+#[derive(Clone)]
+pub struct SubstanceScorePolicy {
+    manifest: BundleManifest,
+    config: SubstanceScoreConfig,
+    embedder: Arc<dyn IdentifiedEmbedder>,
+    index_reader: Arc<dyn IdentifiedIndexReader>,
+}
+
+impl SubstanceScorePolicy {
+    pub fn new(
+        manifest: BundleManifest,
+        config: SubstanceScoreConfig,
+        embedder: Arc<dyn IdentifiedEmbedder>,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> anyhow::Result<Self> {
+        config.validate()?;
+        Ok(Self {
+            manifest,
+            config,
+            embedder,
+            index_reader,
+        })
+    }
+}
+
+#[async_trait]
+impl ScorePolicy for SubstanceScorePolicy {
+    /// The embedder and the index reader are synchronous, so the evaluation
+    /// runs on the blocking pool under the pipeline's bound on Score
+    /// evaluations, as the compatibility Score does. A task that panicked
+    /// or was cancelled is `score_task_failed`.
+    async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        let policy = self.clone();
+        let input = input.clone();
+        crate::versioned_pipeline_blocking::run_score_evaluation(move || policy.evaluate(&input))
+            .await
+            .map_err(|_| permanent("score_task_failed"))?
+    }
+}
+
+impl SubstanceScorePolicy {
+    /// The evaluation `execute` runs on the blocking pool (spec section
+    /// 8.2). `input.operator_review` is ignored, as in the compatibility
+    /// Score: the policy never holds a trace.
+    fn evaluate(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        if input.reviewed_artifact.is_empty() {
+            return Err(permanent("score_input_empty"));
+        }
+        let envelope: TraceContributionEnvelope = serde_json::from_slice(&input.reviewed_artifact)
+            .map_err(|_| permanent(SUBSTANCE_ENVELOPE_INVALID_LABEL))?;
+        let witness = self.config.witness_source.witness_class();
+        let projection = project_tool_calls(&envelope);
+        drop(envelope);
+        let terms = substance_terms(&projection, witness, &self.config.params);
+        let substance_micros = to_micros(composite(&terms, &self.config.params));
+        let substance_passed = substance_micros >= self.config.substance_floor_micros;
+
+        let novelty_config = self.config.novelty.novelty_scoring();
+        let plan =
+            chunk_envelope_plaintext(&input.reviewed_artifact, &self.config.novelty.chunker());
+        // One weight per chunk, over the same chunk slice that
+        // `evaluate_novelty` and `novelty_index_command` read (SQ-3).
+        let token_weights: Vec<u64> = plan.chunks.iter().map(estimated_chunk_tokens).collect();
+        let novelty = evaluate_novelty(
+            self.embedder.as_ref(),
+            self.index_reader.as_ref(),
+            &input.tenant_storage_ref,
+            input.registry_revision_id,
+            &plan.chunks,
+            &token_weights,
+            &novelty_config,
+        )?;
+        let novelty_score_micros = novelty.novelty_score_micros;
+        let novelty_passed = novelty_score_micros >= self.config.novelty.novelty_floor_micros;
+        let credit_quality_micros = substance_credit_quality(
+            substance_micros,
+            i64::try_from(novelty_score_micros).unwrap_or(i64::MAX),
+            self.config.sub_ceil_micros,
+            self.config.sub_floor_mult_micros,
+            &self.config.novelty.credit,
+        );
+        // The compatibility rule, with `substance_passed` in place of
+        // `quality_passed`: index membership and the award need both gates.
+        let eligible = substance_passed && novelty_passed;
+        let command = if eligible {
+            novelty_index_command(
+                &novelty,
+                &plan.chunks,
+                &novelty_config,
+                self.embedder.model_id(),
+                input.registry_revision_id,
+            )?
+        } else {
+            None
+        };
+        let novelty_utility_microcredits = self.config.novelty.novelty_utility_microcredits;
+        let awards = if eligible && novelty_utility_microcredits > 0 {
+            InstrumentAwards::new(vec![
+                InstrumentAward::new(
+                    InstrumentId::trace_credit(),
+                    AtomicUnits::from_raw(u128::from(novelty_utility_microcredits)),
+                )
+                .map_err(|_| permanent("score_output_invalid"))?,
+            ])
+        } else {
+            InstrumentAwards::new(Vec::new())
+        }
+        .map_err(|_| permanent("score_output_invalid"))?;
+
+        let mut evidence = ScoreEvidence::fixed(awards.clone());
+        evidence.embedding_artifact_hash = command
+            .as_ref()
+            .map(SealedIndexCommand::content_hash)
+            .transpose()
+            .map_err(|_| permanent("score_output_invalid"))?;
+        evidence.index_id = Some(self.config.novelty.index_id.clone());
+        evidence.index_snapshot_id = Some(novelty.snapshot.snapshot_id);
+        evidence.index_snapshot_hash = Some(novelty.snapshot.snapshot_hash);
+        evidence.index_cardinality = Some(novelty.snapshot.cardinality);
+        evidence.embedder_model_id = Some(self.embedder.model_id().to_string());
+        evidence.projection_id = Some(self.config.novelty.projection_id.clone());
+        evidence.projection_input_hash = Some(input.source_content_hash.clone());
+        // The legacy gate-decision row needs a perplexity and a tail
+        // fraction; the family runs no scorer, so both are the fixed
+        // sentinel 0 (spec section 8.1), told apart by the credit quality
+        // version.
+        evidence.perplexity_micros = Some(0);
+        evidence.tail_fraction_micros = Some(0);
+        evidence.novelty_score_micros = Some(novelty_score_micros);
+        evidence.peak_novelty_micros = Some(novelty.peak_novelty_micros);
+        evidence.quality_passed = Some(substance_passed);
+        evidence.novelty_passed = Some(novelty_passed);
+        evidence.nearest_neighbor_hash = Some(novelty.nearest_neighbor_hash);
+        evidence.coverage_tokens = Some(
+            token_weights
+                .iter()
+                .fold(0_u64, |total, tokens| total.saturating_add(*tokens)),
+        );
+        let chunk_count =
+            u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
+        evidence.chunk_count = Some(chunk_count);
+        evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
+        evidence.chunks_capped = Some(plan.chunks_capped);
+        evidence.include_eligible = Some(command.is_some());
+        evidence.credit_quality_micros = Some(credit_quality_micros);
+        evidence.credit_quality_version = Some(CREDIT_QUALITY_VERSION_SUBSTANCE);
+        evidence.neighbor_artifact_hash = Some(novelty.neighbor_artifact_hash);
+        evidence.substance_micros = Some(substance_micros);
+        evidence.substance_passed = Some(substance_passed);
+        evidence.substance_version = Some(self.config.substance_version);
+        evidence.substance_work_micros = Some(to_micros(terms.work));
+        evidence.substance_replay_micros = Some(to_micros(terms.replay));
+        evidence.substance_tool_calls = Some(projection.tool_calls);
+        evidence.witness_provenance_class = Some(witness);
+
+        let decision = ScoreDecision::for_bundle(&self.manifest, awards.clone())
+            .map_err(|_| permanent("score_output_invalid"))?;
+        let result = PhaseResult {
+            decision,
+            evidence,
+            evaluation: ScoreEvaluation {
+                rule_id: SUBSTANCE_SCORE_RULE.to_string(),
+                awards,
+            },
+        };
+        ScoreOutput::new(result, command, Some(novelty.neighbor_bytes))
+            .map_err(|_| permanent("score_output_invalid"))
+    }
+}
+
+/// Builds an unsigned substance package naming `config`, `scorer`, and
+/// `embedder` by content hash. As `MinimalPolicyBundle::compatibility_package`:
+/// the compatibility Admission, Review and Settle policies, the substance
+/// Score policy, and `trace_credit` pinned to
+/// `config.novelty.instrument.descriptor`. The package names the scorer so
+/// that it binds with the same runtime dependencies as a compatibility
+/// package; the substance Score never calls it.
+pub fn substance_package(
+    config: &SubstanceScoreConfig,
+    scorer: &dyn IdentifiedPerplexityScorer,
+    embedder: &dyn IdentifiedEmbedder,
+) -> anyhow::Result<BundlePackage> {
+    config.validate()?;
+    let config_bytes = serde_json::to_vec(config)?;
+    let config_hash = dependency_content_hash(&config_bytes);
+    let scorer_descriptor = scorer.content_descriptor();
+    let embedder_descriptor = embedder.content_descriptor();
+    let scorer_hash = dependency_content_hash(&scorer_descriptor);
+    let embedder_hash = dependency_content_hash(&embedder_descriptor);
+
+    let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
+        policy_id: format!("trace_commons.{phase}.compatibility"),
+        implementation_id: implementation_id.to_string(),
+        configuration_hash: config_hash.clone(),
+        data_artifact_hashes: Vec::new(),
+        projection_ids: Vec::new(),
+    };
+
+    let mut instruments = BTreeMap::new();
+    instruments.insert(
+        InstrumentId::trace_credit(),
+        config.novelty.instrument.descriptor.clone(),
+    );
+
+    let manifest = BundleManifest {
+        format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+        admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
+        review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
+        score: PolicyRef {
+            policy_id: SUBSTANCE_SCORE_POLICY_ID.to_string(),
+            implementation_id: SUBSTANCE_SCORE_IMPLEMENTATION.to_string(),
+            configuration_hash: config_hash.clone(),
+            data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
+            projection_ids: vec![config.novelty.projection_id.clone()],
+        },
+        settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
+        instruments,
+    };
+
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(config_hash, config_bytes);
+    artifacts.insert(scorer_hash, scorer_descriptor);
+    artifacts.insert(embedder_hash, embedder_descriptor);
+
+    let package = BundlePackage {
+        bundle_id: manifest.bundle_id()?,
+        manifest,
+        artifacts,
+    };
+    package.validate()?;
+    Ok(package)
+}
+
+/// The substance candidate package: [`SubstanceScoreConfig::local_reference`]
+/// with the `NoveltyUtility` delta of the compatibility qualification
+/// candidate, over the reference scorer and the reference embedder.
+pub fn substance_candidate_package() -> anyhow::Result<BundlePackage> {
+    let mut config = SubstanceScoreConfig::local_reference();
+    config.novelty.novelty_utility_microcredits = SUBSTANCE_CANDIDATE_NOVELTY_UTILITY_MICROCREDITS;
+    substance_package(
+        &config,
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -252,6 +765,23 @@ mod tests {
     };
 
     use super::*;
+    use trace_commons_gate_api::pipeline::SealedIndexEntry;
+    use trace_commons_gate_api::{
+        ChunkPerplexity, PerplexityResult, PerplexityScorer, VectorIndexWriter,
+    };
+    use trace_commons_gate_enclave::chunk_aggregate::aggregate_chunked_novelty;
+    use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
+
+    use crate::versioned_pipeline::{PipelineGateDecisionScoreValues, pipeline_tenant_storage_ref};
+    use crate::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PIPELINE_DEPENDENCY_MISSING_LABEL, PipelineTraceCreditEvent,
+        package_configuration_is_qualifiable, package_substance_config,
+    };
+    use crate::versioned_pipeline_index::IsolatedPipelineIndex;
+    use crate::versioned_pipeline_score_registry::{
+        SCORE_POLICY_IMPLEMENTATION_RESERVED_LABEL, ScorePolicyDependencies, ScorePolicyFactory,
+        ScorePolicyRegistry, is_built_in_score_implementation,
+    };
 
     const CLASSES: [ScoreWitnessClass; 4] = [
         ScoreWitnessClass::ProviderTeeFinalCall,
@@ -641,5 +1171,611 @@ mod tests {
         assert_eq!(estimated_chunk_tokens(&chunk("abcdefgh")), 2);
         // Characters, not bytes: nine two-byte characters are still 3.
         assert_eq!(estimated_chunk_tokens(&chunk("ééééééééé")), 3);
+    }
+
+    // ---- the substance Score policy -----------------------------------
+
+    /// The row-3 golden envelope (`one_paired`) as the reviewed artifact.
+    fn row_three_artifact() -> Vec<u8> {
+        serde_json::to_vec(&one_paired()).unwrap()
+    }
+
+    fn substance_input(bytes: &[u8]) -> ScoreInput {
+        ScoreInput {
+            run_id: Uuid::from_u128(1),
+            tenant_storage_ref: pipeline_tenant_storage_ref("tenant-a"),
+            trace_id: Uuid::from_u128(2),
+            registry_revision_id: Uuid::from_u128(3),
+            source_content_hash: dependency_content_hash(bytes),
+            reviewed_artifact: bytes.to_vec(),
+            operator_review: None,
+        }
+    }
+
+    /// A policy under the manifest `substance_package` builds for `config`,
+    /// so `ScoreDecision::for_bundle` accepts its awards.
+    fn substance_policy(
+        config: &SubstanceScoreConfig,
+        index: Arc<IsolatedPipelineIndex>,
+    ) -> SubstanceScorePolicy {
+        let manifest = substance_package(
+            config,
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .unwrap()
+        .manifest;
+        SubstanceScorePolicy::new(
+            manifest,
+            config.clone(),
+            Arc::new(ReferenceEmbedder::new()),
+            index,
+        )
+        .unwrap()
+    }
+
+    async fn score(
+        config: &SubstanceScoreConfig,
+        bytes: &[u8],
+    ) -> Result<ScoreOutput, PolicyError> {
+        substance_policy(config, IsolatedPipelineIndex::new())
+            .execute(&substance_input(bytes))
+            .await
+    }
+
+    /// A scorer that must never be called: both entry points panic, and a
+    /// panic on the blocking pool fails the Score as `score_task_failed`.
+    struct PanickingScorer;
+
+    impl PerplexityScorer for PanickingScorer {
+        fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            panic!("the substance Score must not call the scorer")
+        }
+
+        fn score_chunk(&self, _chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+            panic!("the substance Score must not call the scorer")
+        }
+    }
+
+    impl IdentifiedPerplexityScorer for PanickingScorer {
+        fn dependency_identity(&self) -> &str {
+            "panicking_scorer_test_only"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"panicking-scorer-test-only.v1".to_vec()
+        }
+    }
+
+    /// Review Focus 4: a reviewed artifact that is not an envelope is a
+    /// permanent failure, never a retry and never a score.
+    #[tokio::test]
+    async fn substance_score_of_a_non_envelope_is_permanent() {
+        let config = SubstanceScoreConfig::local_reference();
+        assert_eq!(
+            score(&config, b"not json").await.err(),
+            Some(PolicyError::permanent("substance_envelope_invalid").unwrap())
+        );
+        assert_eq!(
+            score(&config, br#"{"events":[]}"#).await.err(),
+            Some(PolicyError::permanent("substance_envelope_invalid").unwrap()),
+            "JSON that is not an envelope is not one either"
+        );
+        assert_eq!(
+            score(&config, b"").await.err(),
+            Some(PolicyError::permanent("score_input_empty").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn substance_score_fills_its_evidence() {
+        let config = SubstanceScoreConfig::local_reference();
+        let output = score(&config, &row_three_artifact()).await.unwrap();
+        let result = output.result();
+        let evidence = &result.evidence;
+        assert_eq!(evidence.substance_micros, Some(435_557));
+        assert_eq!(evidence.substance_work_micros, Some(262_788));
+        assert_eq!(evidence.substance_replay_micros, Some(1_000_000));
+        assert_eq!(evidence.substance_tool_calls, Some(1));
+        assert_eq!(evidence.substance_version, Some(1));
+        assert_eq!(
+            evidence.witness_provenance_class,
+            Some(ScoreWitnessClass::Unattested)
+        );
+        assert_eq!(evidence.credit_quality_version, Some(4));
+        assert_eq!(evidence.substance_passed, Some(true));
+        assert_eq!(evidence.quality_passed, evidence.substance_passed);
+        assert_eq!(evidence.perplexity_micros, Some(0));
+        assert_eq!(evidence.tail_fraction_micros, Some(0));
+        assert_eq!(evidence.scorer_model_id, None);
+        assert_eq!(evidence.peak_perplexity_micros, None);
+        assert_eq!(result.evaluation.rule_id, "substance_novelty_v1");
+        let novelty = evidence.novelty_score_micros.expect("novelty is filled");
+        assert_eq!(
+            evidence.credit_quality_micros,
+            Some(substance_credit_quality(
+                435_557,
+                i64::try_from(novelty).unwrap(),
+                config.sub_ceil_micros,
+                config.sub_floor_mult_micros,
+                &config.novelty.credit,
+            ))
+        );
+        assert!(evidence.novelty_passed.is_some());
+        assert!(evidence.nearest_neighbor_hash.is_some());
+        assert!(evidence.index_snapshot_hash.is_some());
+        assert!(evidence.chunk_count.is_some());
+        assert!(evidence.coverage_tokens.is_some());
+        assert_eq!(
+            evidence.include_eligible,
+            Some(output.index_command().is_some())
+        );
+    }
+
+    /// SQ-13: while the witness is not read, every trace scores and records
+    /// as unattested, never with the attested factor.
+    #[tokio::test]
+    async fn substance_score_records_unattested_while_the_witness_is_not_read() {
+        let config = SubstanceScoreConfig::local_reference();
+        assert_eq!(config.witness_source, SubstanceWitnessSource::NotRead);
+        let output = score(&config, &row_three_artifact()).await.unwrap();
+        let evidence = &output.result().evidence;
+        assert_eq!(
+            evidence.witness_provenance_class,
+            Some(ScoreWitnessClass::Unattested)
+        );
+        assert_eq!(evidence.substance_micros, Some(435_557));
+        assert_ne!(evidence.substance_micros, Some(483_952));
+    }
+
+    #[tokio::test]
+    async fn substance_gate_uses_the_floor() {
+        let mut config = SubstanceScoreConfig::local_reference();
+        config.novelty.novelty_utility_microcredits =
+            SUBSTANCE_CANDIDATE_NOVELTY_UTILITY_MICROCREDITS;
+
+        config.substance_floor_micros = 435_557;
+        let passed = score(&config, &row_three_artifact()).await.unwrap();
+        let evidence = &passed.result().evidence;
+        assert_eq!(evidence.substance_passed, Some(true));
+        assert_eq!(evidence.novelty_passed, Some(true));
+        assert!(passed.index_command().is_some());
+        assert!(!passed.result().decision.awards().is_empty());
+
+        config.substance_floor_micros = 435_558;
+        let failed = score(&config, &row_three_artifact()).await.unwrap();
+        let result = failed.result();
+        assert_eq!(result.evidence.substance_passed, Some(false));
+        assert_eq!(result.evidence.quality_passed, Some(false));
+        assert_eq!(result.evidence.novelty_passed, Some(true));
+        assert!(failed.index_command().is_none());
+        assert_eq!(result.evidence.include_eligible, Some(false));
+        assert_eq!(result.evidence.embedding_artifact_hash, None);
+        assert!(result.decision.awards().is_empty());
+        assert!(result.evaluation.awards.is_empty());
+        assert!(result.evidence.fixed_awards.is_empty());
+    }
+
+    /// Spec section 8.3, Settle: the legacy gate-decision row builds from
+    /// substance evidence, with the perplexity sentinel and `cq4`.
+    #[tokio::test]
+    async fn substance_legacy_row_fields_are_complete() {
+        let config = SubstanceScoreConfig::local_reference();
+        let output = score(&config, &row_three_artifact()).await.unwrap();
+        let evidence = &output.result().evidence;
+        let values = PipelineGateDecisionScoreValues::from_evidence(evidence)
+            .expect("the legacy row builds from substance evidence");
+        assert_eq!(values.perplexity_micros, 0);
+        assert_eq!(values.tail_fraction_micros, 0);
+        assert_eq!(
+            values.perplexity_passed,
+            evidence
+                .substance_passed
+                .expect("substance_passed is filled")
+        );
+        assert_eq!(values.credit_quality_version, Some(4));
+    }
+
+    #[tokio::test]
+    async fn substance_score_never_calls_the_scorer() {
+        let config = SubstanceScoreConfig::local_reference();
+        let package = substance_package(&config, &PanickingScorer, &ReferenceEmbedder::new())
+            .expect("a package names the panicking scorer");
+        let bundle = MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            Arc::new(PanickingScorer),
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+        )
+        .expect("the package binds");
+        let output = bundle
+            .score
+            .execute(&substance_input(&row_three_artifact()))
+            .await
+            .expect("the Score never reaches the panicking scorer");
+        assert_eq!(output.result().evidence.substance_micros, Some(435_557));
+    }
+
+    /// Repeated words up to exactly `len` characters.
+    fn text_of(len: usize, words: &str) -> String {
+        words
+            .split(' ')
+            .cycle()
+            .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+            .take(len)
+            .collect()
+    }
+
+    /// SQ-3: the novelty aggregate weights each chunk by the character
+    /// estimate, never by a scorer's token count.
+    #[tokio::test]
+    async fn novelty_weights_come_from_the_character_estimate() {
+        let mut config = SubstanceScoreConfig::local_reference();
+        config.novelty.chunk_target_tokens = 100;
+        config.novelty.chunk_max_tokens = 100;
+        // `user_message: ` (14) + content + `\n` (1): 40 and 400 characters.
+        let mut short = event("short", TraceContributionEventType::UserMessage);
+        short.redacted_content = Some(text_of(25, "alpha beta gamma"));
+        let mut long = event("long", TraceContributionEventType::UserMessage);
+        long.redacted_content = Some(text_of(385, "zulu yankee xray whiskey victor"));
+        let bytes = serde_json::to_vec(&envelope(vec![short, long])).unwrap();
+        let input = substance_input(&bytes);
+
+        let plan = chunk_envelope_plaintext(&bytes, &config.novelty.chunker());
+        assert_eq!(
+            plan.chunks
+                .iter()
+                .map(|chunk| chunk.text.chars().count())
+                .collect::<Vec<_>>(),
+            vec![40, 400]
+        );
+        let weights: Vec<u64> = plan.chunks.iter().map(estimated_chunk_tokens).collect();
+        assert_eq!(weights, vec![10, 100]);
+
+        // Seed the index with the first chunk, so the two chunks' novelty
+        // differ and the weights decide the aggregate.
+        let embedder = ReferenceEmbedder::new();
+        let index = IsolatedPipelineIndex::new();
+        let seed = SealedIndexCommand::new(
+            &config.novelty.index_id,
+            Uuid::from_u128(9),
+            &config.novelty.projection_id,
+            embedder.model_id(),
+            vec![SealedIndexEntry {
+                chunk: 0,
+                content_hash: dependency_content_hash(plan.chunks[0].text.as_bytes()),
+                embedding: embed_chunk_mean_pooled(&embedder, &plan.chunks[0].text).unwrap(),
+            }],
+        )
+        .unwrap();
+        let (key, entry) = seed
+            .keyed_entries(&input.tenant_storage_ref)
+            .next()
+            .unwrap();
+        index
+            .upsert(&key, &entry.embedding, &entry.content_hash)
+            .unwrap();
+
+        let per_chunk = evaluate_novelty(
+            &embedder,
+            index.as_ref(),
+            &input.tenant_storage_ref,
+            input.registry_revision_id,
+            &plan.chunks,
+            &weights,
+            &config.novelty.novelty_scoring(),
+        )
+        .unwrap()
+        .chunk_novelty_micros;
+        assert_ne!(per_chunk[0], per_chunk[1], "the seeded chunk is not novel");
+        let (expected, _) =
+            aggregate_chunked_novelty(&per_chunk, &[10, 100], config.novelty.chunk_min_tokens);
+        let (unweighted, _) =
+            aggregate_chunked_novelty(&per_chunk, &[1, 1], config.novelty.chunk_min_tokens);
+        assert_ne!(expected, unweighted, "the weights must matter");
+
+        let output = substance_policy(&config, index)
+            .execute(&input)
+            .await
+            .unwrap();
+        let evidence = &output.result().evidence;
+        assert_eq!(evidence.novelty_score_micros, Some(expected));
+        assert_eq!(evidence.coverage_tokens, Some(110));
+    }
+
+    #[test]
+    fn substance_config_refuses_out_of_range_values() {
+        let refused = |change: fn(&mut SubstanceScoreConfig)| {
+            let mut config = SubstanceScoreConfig::local_reference();
+            change(&mut config);
+            let error = config.validate().expect_err("the change is refused");
+            assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+            assert!(
+                SubstanceScorePolicy::new(
+                    substance_candidate_package().unwrap().manifest,
+                    config,
+                    Arc::new(ReferenceEmbedder::new()),
+                    IsolatedPipelineIndex::new(),
+                )
+                .is_err(),
+                "the policy refuses what validate refuses"
+            );
+        };
+        refused(|config| config.sub_ceil_micros = 0);
+        refused(|config| config.sub_ceil_micros = 1_000_001);
+        refused(|config| config.substance_floor_micros = 1_000_001);
+        refused(|config| config.sub_floor_mult_micros = 1_000_001);
+        refused(|config| config.substance_version = SUBSTANCE_VERSION + 1);
+        refused(|config| config.params.pc_ceil = 0);
+        refused(|config| config.params.m_work_micros = 0);
+        refused(|config| config.novelty.chunk_target_tokens = 0);
+        refused(|config| config.novelty.credit.nov_ceil_micros = 0);
+        refused(|config| {
+            config.novelty.novelty_utility_microcredits = MAX_TRACE_CREDIT_MICROCREDITS + 1
+        });
+        assert!(SubstanceScoreConfig::local_reference().validate().is_ok());
+    }
+
+    // ---- the substance bundle ------------------------------------------
+
+    fn bind(
+        package: BundlePackage,
+        scorer: Arc<dyn IdentifiedPerplexityScorer>,
+    ) -> anyhow::Result<MinimalPolicyBundle> {
+        MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            scorer,
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn substance_package_binds_with_the_compatibility_stages() {
+        let package = substance_candidate_package().unwrap();
+        let manifest = &package.manifest;
+        assert_eq!(
+            manifest.admission.implementation_id,
+            COMPATIBILITY_ADMISSION_IMPLEMENTATION
+        );
+        assert_eq!(
+            manifest.review.implementation_id,
+            COMPATIBILITY_REVIEW_IMPLEMENTATION
+        );
+        assert_eq!(
+            manifest.settle.implementation_id,
+            COMPATIBILITY_SETTLE_IMPLEMENTATION
+        );
+        assert_eq!(
+            manifest.score.implementation_id,
+            SUBSTANCE_SCORE_IMPLEMENTATION
+        );
+        assert_eq!(manifest.score.policy_id, "trace_commons.score.substance");
+        let config = SubstanceScoreConfig::local_reference();
+        assert_eq!(
+            manifest.score.projection_ids,
+            vec![config.novelty.projection_id.clone()]
+        );
+        assert_eq!(
+            manifest.instruments.get(&InstrumentId::trace_credit()),
+            Some(&config.novelty.instrument.descriptor)
+        );
+
+        let bundle = bind(package.clone(), Arc::new(ReferencePerplexityScorer::new()))
+            .expect("the substance package binds");
+        assert_eq!(
+            bundle.trace_credit_event,
+            PipelineTraceCreditEvent::NoveltyUtility
+        );
+        assert!(bundle.score_runs_under_runtime_controls());
+
+        // The candidate's award flows through under the pinned descriptor.
+        let output = bundle
+            .score
+            .execute(&substance_input(&row_three_artifact()))
+            .await
+            .unwrap();
+        let decision = &output.result().decision;
+        decision
+            .require_bound(&package.manifest)
+            .expect("the award is bound to the package's manifest");
+        assert_eq!(
+            decision
+                .awards()
+                .iter()
+                .map(|award| (
+                    award.instrument_id().as_str().to_string(),
+                    award.atomic_units()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                "trace_credit".to_string(),
+                AtomicUnits::from_raw(u128::from(SUBSTANCE_CANDIDATE_NOVELTY_UTILITY_MICROCREDITS))
+            )]
+        );
+    }
+
+    #[test]
+    fn substance_package_refuses_a_changed_scorer_descriptor() {
+        let error = bind(
+            substance_candidate_package().unwrap(),
+            Arc::new(PanickingScorer),
+        )
+        .err()
+        .expect("a scorer the package does not name must not bind");
+        assert_eq!(error.to_string(), PIPELINE_DEPENDENCY_MISSING_LABEL);
+        assert_eq!(error.to_string(), "bundle_dependency_missing");
+    }
+
+    #[test]
+    fn substance_package_refuses_an_unpinned_trace_credit() {
+        let mut unpinned = substance_candidate_package().unwrap();
+        unpinned
+            .manifest
+            .instruments
+            .remove(&InstrumentId::trace_credit());
+        unpinned.bundle_id = unpinned.manifest.bundle_id().unwrap();
+        let error = bind(unpinned, Arc::new(ReferencePerplexityScorer::new()))
+            .err()
+            .expect("a package with no trace_credit pin must not bind");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+
+        let mut mismatched = substance_candidate_package().unwrap();
+        let mut descriptor = SubstanceScoreConfig::local_reference()
+            .novelty
+            .instrument
+            .descriptor;
+        descriptor.contract = "different-trace-credit.testnet".to_string();
+        mismatched
+            .manifest
+            .instruments
+            .insert(InstrumentId::trace_credit(), descriptor);
+        mismatched.bundle_id = mismatched.manifest.bundle_id().unwrap();
+        let error = bind(mismatched, Arc::new(ReferencePerplexityScorer::new()))
+            .err()
+            .expect("a package pinning another descriptor must not bind");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+    }
+
+    struct NeverBuiltFactory;
+
+    impl ScorePolicyFactory for NeverBuiltFactory {
+        fn dependency_identity(&self) -> &str {
+            "never_built_factory_test_only"
+        }
+
+        fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+            PipelineTraceCreditEvent::NoveltyUtility
+        }
+
+        fn build(
+            &self,
+            _dependencies: ScorePolicyDependencies<'_>,
+        ) -> Result<Arc<dyn ScorePolicy>, &'static str> {
+            Err("never_built_factory_test_only")
+        }
+    }
+
+    /// SQ-1: substance is built in, so no registry can override it.
+    #[test]
+    fn substance_id_cannot_be_registered() {
+        assert!(is_built_in_score_implementation(
+            SUBSTANCE_SCORE_IMPLEMENTATION
+        ));
+        assert_eq!(
+            ScorePolicyRegistry::new()
+                .with_factory(SUBSTANCE_SCORE_IMPLEMENTATION, Arc::new(NeverBuiltFactory))
+                .err(),
+            Some(SCORE_POLICY_IMPLEMENTATION_RESERVED_LABEL)
+        );
+    }
+
+    #[test]
+    fn local_reference_is_not_qualifiable() {
+        let config = SubstanceScoreConfig::local_reference();
+        assert!(config.validate().is_ok());
+        assert!(!config.is_qualifiable());
+        assert!(!package_configuration_is_qualifiable(
+            &substance_candidate_package().unwrap()
+        ));
+    }
+
+    fn calibrated_values() -> CalibratedSubstanceValues {
+        CalibratedSubstanceValues {
+            sub_ceil_micros: 600_000,
+            substance_floor_micros: 300_000,
+            calibration: SubstanceCalibration {
+                corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+                report_digest: format!("sha256:{}", "b".repeat(64)),
+                sub_ceil_percentile: 90,
+                substance_floor_percentile: 25,
+            },
+        }
+    }
+
+    fn production(values: &CalibratedSubstanceValues) -> SubstanceScoreConfig {
+        let mut config = SubstanceScoreConfig::local_reference();
+        config.qualification = CompatibilityQualification::ProductionCompatible;
+        config.with_calibrated(values)
+    }
+
+    #[test]
+    fn a_calibrated_production_config_is_qualifiable() {
+        let values = calibrated_values();
+        let config = production(&values);
+        assert_eq!(config.sub_ceil_micros, 600_000);
+        assert_eq!(config.substance_floor_micros, 300_000);
+        assert_eq!(config.calibration, Some(values.calibration.clone()));
+        assert!(config.is_qualifiable());
+        let package = substance_package(
+            &config,
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .unwrap();
+        assert_eq!(package_substance_config(&package), Some(config.clone()));
+        assert!(package_configuration_is_qualifiable(&package));
+
+        let mut uncalibrated = SubstanceScoreConfig::local_reference();
+        uncalibrated.qualification = CompatibilityQualification::ProductionCompatible;
+        assert!(uncalibrated.validate().is_ok());
+        assert!(!uncalibrated.is_qualifiable());
+
+        let mut other_percentile = values.clone();
+        other_percentile.calibration.sub_ceil_percentile = 80;
+        assert!(!production(&other_percentile).is_qualifiable());
+
+        let mut local = config.clone();
+        local.qualification = CompatibilityQualification::LocalSyntheticNonQualifiable;
+        assert!(!local.is_qualifiable());
+
+        // A substance package whose configuration is missing or does not
+        // decode is not qualifiable: it fails closed.
+        let config_hash = package.manifest.score.configuration_hash.clone();
+        let mut missing = package.clone();
+        missing.artifacts.remove(&config_hash);
+        let mut undecodable = package.clone();
+        undecodable
+            .artifacts
+            .insert(config_hash, br#"{"unknown_field":1}"#.to_vec());
+        for package in [&missing, &undecodable] {
+            assert_eq!(package_substance_config(package), None);
+            assert!(!package_configuration_is_qualifiable(package));
+        }
+    }
+
+    #[test]
+    fn substance_bundle_id_hashes_every_parameter() {
+        let bundle_id = |config: &SubstanceScoreConfig| {
+            substance_package(
+                config,
+                &ReferencePerplexityScorer::new(),
+                &ReferenceEmbedder::new(),
+            )
+            .unwrap()
+            .bundle_id
+        };
+        let base = SubstanceScoreConfig::local_reference();
+        let mut weight = base.clone();
+        weight.params.w_pc_micros += 1;
+        let mut floor = base.clone();
+        floor.substance_floor_micros += 1;
+        assert_ne!(bundle_id(&base), bundle_id(&weight));
+        assert_ne!(bundle_id(&base), bundle_id(&floor));
+        assert_ne!(bundle_id(&weight), bundle_id(&floor));
+        assert_eq!(bundle_id(&base), bundle_id(&base.clone()));
+    }
+
+    #[test]
+    fn the_witness_source_serializes_as_not_read() {
+        let config = SubstanceScoreConfig::local_reference();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""witness_source":"not_read""#));
+        let mut value = serde_json::to_value(&config).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("witness_source")
+            .expect("the field is present");
+        assert!(serde_json::from_value::<SubstanceScoreConfig>(value).is_err());
     }
 }

@@ -236,6 +236,7 @@ pub const CREDIT_QUALITY_VERSION_SUBSTANCE: i32 = 4;
 /// The novelty half's parameters for `cq4`, held in the bundle
 /// configuration instead of a code constant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NoveltyCreditParams {
     pub nov_floor_micros: i64,
     pub nov_ceil_micros: i64,
