@@ -974,6 +974,8 @@ pub enum ContractError {
     InvalidTenantStorageRef,
     #[error("an award adjustment is malformed")]
     InvalidAwardAdjustment,
+    #[error("the substance evidence fields are incomplete or out of range")]
+    InvalidSubstanceEvidence,
     #[error("payout rail identifier is not a bounded safe label")]
     InvalidRailId,
     #[error("payout recipient kind is not a bounded safe label")]
@@ -1786,6 +1788,60 @@ pub struct ScoreEvidence {
     /// bytes (and the stored outcome hash) it had before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_rejected_hold: Option<ReasonCode>,
+    /// The substance Score (`trace_commons.score.substance.v1`) records its
+    /// result in these seven fields. They are all set or all absent, and
+    /// absent fields are not serialized, so evidence without them keeps the
+    /// bytes (and the stored outcome hash) it had before the fields existed.
+    /// The substance value, in micros (`0..=1_000_000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_micros: Option<u64>,
+    /// Whether the substance value met the substance floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_passed: Option<bool>,
+    /// The version of the substance formula.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_version: Option<u32>,
+    /// The tool-work term, in micros (`0..=1_000_000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_work_micros: Option<u64>,
+    /// The replay-sufficiency term, in micros (`0..=1_000_000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_replay_micros: Option<u64>,
+    /// The number of tool calls the substance Score counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance_tool_calls: Option<u64>,
+    /// The witness class the substance Score applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_provenance_class: Option<ScoreWitnessClass>,
+}
+
+/// The one whole, in micros, that a substance term or value does not exceed.
+pub const SUBSTANCE_MICROS_MAX: u64 = 1_000_000;
+
+/// How well a witness attests the final model call of a trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreWitnessClass {
+    ProviderTeeFinalCall,
+    GatewayFinalCall,
+    Unattested,
+    LegacyV1,
+}
+
+impl ScoreWitnessClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderTeeFinalCall => "provider_tee_final_call",
+            Self::GatewayFinalCall => "gateway_final_call",
+            Self::Unattested => "unattested",
+            Self::LegacyV1 => "legacy_v1",
+        }
+    }
+
+    /// True when a witness attests the final model call.
+    pub fn is_attested_final_call(self) -> bool {
+        matches!(self, Self::ProviderTeeFinalCall | Self::GatewayFinalCall)
+    }
 }
 
 /// The most adjustments one Score evidence records.
@@ -1890,6 +1946,20 @@ struct ScoreEvidenceFields {
     award_adjustments: Vec<AwardAdjustment>,
     #[serde(default)]
     operator_rejected_hold: Option<ReasonCode>,
+    #[serde(default)]
+    substance_micros: Option<u64>,
+    #[serde(default)]
+    substance_passed: Option<bool>,
+    #[serde(default)]
+    substance_version: Option<u32>,
+    #[serde(default)]
+    substance_work_micros: Option<u64>,
+    #[serde(default)]
+    substance_replay_micros: Option<u64>,
+    #[serde(default)]
+    substance_tool_calls: Option<u64>,
+    #[serde(default)]
+    witness_provenance_class: Option<ScoreWitnessClass>,
 }
 
 impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
@@ -1925,6 +1995,13 @@ impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
             neighbor_artifact_hash: fields.neighbor_artifact_hash,
             award_adjustments: fields.award_adjustments,
             operator_rejected_hold: fields.operator_rejected_hold,
+            substance_micros: fields.substance_micros,
+            substance_passed: fields.substance_passed,
+            substance_version: fields.substance_version,
+            substance_work_micros: fields.substance_work_micros,
+            substance_replay_micros: fields.substance_replay_micros,
+            substance_tool_calls: fields.substance_tool_calls,
+            witness_provenance_class: fields.witness_provenance_class,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -1962,6 +2039,13 @@ impl ScoreEvidence {
             neighbor_artifact_hash: None,
             award_adjustments: Vec::new(),
             operator_rejected_hold: None,
+            substance_micros: None,
+            substance_passed: None,
+            substance_version: None,
+            substance_work_micros: None,
+            substance_replay_micros: None,
+            substance_tool_calls: None,
+            witness_provenance_class: None,
         }
     }
 
@@ -1991,6 +2075,31 @@ impl ScoreEvidence {
                 || !self.award_adjustments.is_empty())
         {
             return Err(ContractError::ScoreOutputMismatch);
+        }
+        // The seven substance fields are all set or all absent, and the
+        // micros are at most one whole.
+        let substance_set = [
+            self.substance_micros.is_some(),
+            self.substance_passed.is_some(),
+            self.substance_version.is_some(),
+            self.substance_work_micros.is_some(),
+            self.substance_replay_micros.is_some(),
+            self.substance_tool_calls.is_some(),
+            self.witness_provenance_class.is_some(),
+        ];
+        if substance_set.iter().any(|set| *set) && !substance_set.iter().all(|set| *set) {
+            return Err(ContractError::InvalidSubstanceEvidence);
+        }
+        if [
+            self.substance_micros,
+            self.substance_work_micros,
+            self.substance_replay_micros,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|micros| micros > SUBSTANCE_MICROS_MAX)
+        {
+            return Err(ContractError::InvalidSubstanceEvidence);
         }
         Ok(())
     }
@@ -4961,6 +5070,129 @@ mod tests {
             assert_eq!(evidence.operator_rejected_hold, None);
             let value = serde_json::to_value(&evidence).unwrap();
             assert!(value.get("operator_rejected_hold").is_none(), "{value}");
+        }
+    }
+
+    /// The substance fields absent serialize to nothing, so the pinned bytes
+    /// above are unchanged.
+    #[test]
+    fn absent_substance_fields_serialize_as_before() {
+        for (evidence, expected) in [
+            (
+                ScoreEvidence::fixed(InstrumentAwards::default()),
+                "sha256:226dd59f1c1c142d0174366c36ff4e49729dbf98b835e08cfa9e80c0df15614a",
+            ),
+            (
+                populated_score_evidence(),
+                "sha256:7930fb7b78960a1dc25a70b5153d775e9b7f8f73b448c6b5d68a62d3f2b87f3f",
+            ),
+        ] {
+            let value = serde_json::to_value(&evidence).unwrap();
+            for key in [
+                "substance_micros",
+                "substance_passed",
+                "substance_version",
+                "substance_work_micros",
+                "substance_replay_micros",
+                "substance_tool_calls",
+                "witness_provenance_class",
+            ] {
+                assert!(value.get(key).is_none(), "{key}");
+            }
+            let bytes = serde_json::to_vec(&evidence).unwrap();
+            assert_eq!(
+                hash(&bytes),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
+    fn substance_score_evidence() -> ScoreEvidence {
+        let mut evidence = ScoreEvidence::fixed(InstrumentAwards::default());
+        evidence.substance_micros = Some(435_557);
+        evidence.substance_passed = Some(true);
+        evidence.substance_version = Some(1);
+        evidence.substance_work_micros = Some(262_788);
+        evidence.substance_replay_micros = Some(1_000_000);
+        evidence.substance_tool_calls = Some(1);
+        evidence.witness_provenance_class = Some(ScoreWitnessClass::Unattested);
+        evidence
+    }
+
+    #[test]
+    fn substance_fields_round_trip() {
+        let evidence = substance_score_evidence();
+        assert_eq!(evidence.validate(), Ok(()));
+        let value = serde_json::to_value(&evidence).unwrap();
+        assert_eq!(value["substance_micros"], serde_json::json!(435_557));
+        assert_eq!(
+            value["witness_provenance_class"],
+            serde_json::json!("unattested")
+        );
+        let read: ScoreEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(read, evidence);
+    }
+
+    #[test]
+    fn partial_substance_fields_are_refused() {
+        let mut evidence = ScoreEvidence::fixed(InstrumentAwards::default());
+        evidence.substance_micros = Some(435_557);
+        assert_eq!(
+            evidence.validate(),
+            Err(ContractError::InvalidSubstanceEvidence)
+        );
+        let mut missing_class = substance_score_evidence();
+        missing_class.witness_provenance_class = None;
+        assert_eq!(
+            missing_class.validate(),
+            Err(ContractError::InvalidSubstanceEvidence)
+        );
+        let mut stored = serde_json::to_value(substance_score_evidence()).unwrap();
+        stored.as_object_mut().unwrap().remove("substance_passed");
+        assert!(serde_json::from_value::<ScoreEvidence>(stored).is_err());
+    }
+
+    #[test]
+    fn substance_micros_above_one_million_are_refused() {
+        for set in [
+            (|e: &mut ScoreEvidence| e.substance_micros = Some(1_000_001))
+                as fn(&mut ScoreEvidence),
+            |e| e.substance_work_micros = Some(1_000_001),
+            |e| e.substance_replay_micros = Some(1_000_001),
+        ] {
+            let mut evidence = substance_score_evidence();
+            set(&mut evidence);
+            assert_eq!(
+                evidence.validate(),
+                Err(ContractError::InvalidSubstanceEvidence)
+            );
+        }
+    }
+
+    #[test]
+    fn score_witness_class_labels() {
+        for (class, label, attested) in [
+            (
+                ScoreWitnessClass::ProviderTeeFinalCall,
+                "provider_tee_final_call",
+                true,
+            ),
+            (
+                ScoreWitnessClass::GatewayFinalCall,
+                "gateway_final_call",
+                true,
+            ),
+            (ScoreWitnessClass::Unattested, "unattested", false),
+            (ScoreWitnessClass::LegacyV1, "legacy_v1", false),
+        ] {
+            assert_eq!(class.as_str(), label);
+            assert_eq!(class.is_attested_final_call(), attested);
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(label)
+            );
         }
     }
 
