@@ -22,7 +22,9 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
-    @State private var ownProvider = "near"
+    /// The first provider this build offers (the daemon's default): the
+    /// NEAR wallet in production, NEAR AI's Google login in staging.
+    @State private var ownProvider = CredentialSection.offeredProviders.first ?? ""
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
     ///
@@ -43,12 +45,23 @@ struct CredentialSection: View {
         let title: String
     }
 
-    static func providerOptions(_ copy: PrivateInferenceCopy) -> [ProviderOption] {
-        [
-            ProviderOption(tag: "near", title: copy.credentialProviderNear),
-            ProviderOption(tag: "github", title: copy.credentialProviderGithub),
-            ProviderOption(tag: "google", title: copy.credentialProviderGoogle),
-        ]
+    /// The providers this build offers, as the core reports them
+    /// (`tc_build_channel_json`): a staging build offers no NEAR wallet.
+    static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
+
+    /// `offered`, in its order, with the core's title for each. A provider
+    /// this build has no title for is not drawn.
+    static func providerOptions(
+        _ copy: PrivateInferenceCopy, offered: [String] = CredentialSection.offeredProviders
+    ) -> [ProviderOption] {
+        offered.compactMap { tag in
+            switch tag {
+            case "near": return ProviderOption(tag: tag, title: copy.credentialProviderNear)
+            case "github": return ProviderOption(tag: tag, title: copy.credentialProviderGithub)
+            case "google": return ProviderOption(tag: tag, title: copy.credentialProviderGoogle)
+            default: return nil
+            }
+        }
     }
 
     var body: some View {

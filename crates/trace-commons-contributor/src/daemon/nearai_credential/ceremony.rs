@@ -216,6 +216,11 @@ enum BrowserSignIn {
 
 impl BrowserSignIn {
     async fn prepare(api: &CloudApi, provider: &str) -> Result<(String, Self)> {
+        // Only what this build offers (`channel::NEAR_AI_SIGN_IN_PROVIDERS`):
+        // a staging build has no NEAR wallet ceremony to begin.
+        if !crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&provider) {
+            bail!("near_ai_credential_provider_unknown")
+        }
         if provider == "near" {
             let (url, listener) = near_wallet_loopback::bind().await?;
             return Ok((url, Self::Near(listener)));
@@ -865,6 +870,19 @@ mod tests {
         );
     }
 
+    /// The channel gate sits in the ceremony, not only in the IPC handler,
+    /// so no caller in a staging build can begin the NEAR wallet sign-in.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_ceremony_refuses_the_near_wallet() {
+        let (dir, store) = temp_store();
+        assert_eq!(
+            begin(&store, "near").await.unwrap_err().to_string(),
+            "near_ai_credential_provider_unknown"
+        );
+        assert!(status(dir.path(), None).is_none());
+    }
+
     #[test]
     fn a_key_name_is_unique_per_attempt_and_safe_in_a_url_path() {
         let first = key_name(&loopback::random_state().unwrap());
@@ -882,6 +900,9 @@ mod tests {
         }
     }
 
+    /// A staging build begins no NEAR wallet ceremony
+    /// (`a_staging_ceremony_refuses_the_near_wallet`).
+    #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
     async fn near_wallet_start_binds_before_open_and_cancel_releases_the_listener() {
         let (dir, store) = temp_store();

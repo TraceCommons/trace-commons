@@ -55,6 +55,27 @@ fn the_channel_json_matches_the_channel_module() {
     );
 }
 
+/// The sign-in providers the app offers come from the core, in its order:
+/// production's NEAR wallet first, staging's NEAR AI Google login first and
+/// no wallet at all.
+#[test]
+fn the_channel_json_names_the_sign_in_providers_the_daemon_accepts() {
+    let json = channel_json();
+    let providers: Vec<&str> = json
+        .get("near_ai_sign_in_providers")
+        .and_then(|value| value.as_array())
+        .expect("`near_ai_sign_in_providers` is an array")
+        .iter()
+        .map(|value| value.as_str().expect("each provider is a string"))
+        .collect();
+    assert_eq!(providers, channel::NEAR_AI_SIGN_IN_PROVIDERS);
+    if channel::near_ai_staging() {
+        assert_eq!(providers, ["google", "github"]);
+    } else {
+        assert_eq!(providers, ["near", "github", "google"]);
+    }
+}
+
 #[test]
 fn the_channel_json_carries_no_key() {
     let json = channel_json();
@@ -68,6 +89,7 @@ fn the_channel_json_carries_no_key() {
         "passkey_rp_id",
         "url_scheme",
         "near_ai_dashboard_origin",
+        "near_ai_sign_in_providers",
     ]
     .into_iter()
     .collect();
@@ -80,7 +102,12 @@ fn the_channel_json_carries_no_key() {
         keychain.account_service,
         keychain.insights_digest_key_service,
     ];
-    for value in json.values() {
+    // Every field is a string but the provider list, which holds strings.
+    let values = json.values().flat_map(|value| match value.as_array() {
+        Some(list) => list.iter().collect::<Vec<_>>(),
+        None => vec![value],
+    });
+    for value in values {
         let value = value.as_str().expect("every field is a string");
         assert!(!value.is_empty(), "no field is empty");
         for name in withheld {

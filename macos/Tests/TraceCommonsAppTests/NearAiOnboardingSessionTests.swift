@@ -83,7 +83,7 @@ private final class OnboardingSessionDaemon: DaemonCalling {
 /// Holds the credential section's provider choice outside the view, so a test
 /// can see and make the change the picker makes.
 private final class ProviderSelection: ObservableObject {
-    @Published var provider = "near"
+    @Published var provider = LinkedChannel.channel.nearAiSignInProviders.first ?? ""
 }
 
 private struct ProviderSelectionHost: View {
@@ -112,10 +112,23 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             CredentialSurface.action(CredentialStatus(state: model.credentialStatus.sessionState),
                                      calls: model.credentialCalls),
             .obtain)
+        // The picker offers what the linked core offers, in its order:
+        // production's NEAR wallet first, staging's NEAR AI Google login
+        // first and no wallet at all.
         let options = CredentialSection.providerOptions(copy)
-        XCTAssertEqual(options.map(\.title),
-                       [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
-        XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
+        XCTAssertEqual(options.map(\.tag), LinkedChannel.channel.nearAiSignInProviders)
+        if LinkedChannel.isStaging {
+            XCTAssertEqual(options.map(\.title), [copy.credentialProviderGoogle, copy.credentialProviderGithub])
+            XCTAssertEqual(options.map(\.tag), ["google", "github"])
+        } else {
+            XCTAssertEqual(options.map(\.title),
+                           [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
+            XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
+        }
+        // Production chooses the NEAR wallet, as before; staging, which has
+        // none, chooses GitHub over its default Google.
+        let target = LinkedChannel.isStaging ? "github" : "near"
+        let targetTitle = try XCTUnwrap(options.first { $0.tag == target }).title
 
         let selection = ProviderSelection()
         let content = ProviderSelectionHost(selection: selection, copy: copy)
@@ -140,11 +153,11 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         // what must not start a sign-in.
         if let picker = descendants(hosting).compactMap({ $0 as? NSPopUpButton }).first {
             XCTAssertEqual(picker.itemTitles, options.map(\.title))
-            picker.selectItem(at: 2)
+            picker.selectItem(withTitle: targetTitle)
             picker.sendAction(picker.action, to: picker.target)
             await Task.yield()
             hosting.layoutSubtreeIfNeeded()
-            XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
+            XCTAssertEqual(picker.titleOfSelectedItem, targetTitle)
             // The popup's own selection moves, but on the macos-26 runner the
             // action on an offscreen popup did not reach SwiftUI's binding
             // (CI read "github" here), and the version of this test before it
@@ -152,21 +165,21 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             // still has not arrived, make the same change through the
             // binding, so the no-sign-in check below always follows a real
             // change of selection on both render paths.
-            for _ in 0..<10 where selection.provider != "near" {
+            for _ in 0..<10 where selection.provider != target {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.02))
                 await Task.yield()
             }
-            if selection.provider != "near" {
-                selection.provider = "near"
+            if selection.provider != target {
+                selection.provider = target
                 await Task.yield()
                 hosting.layoutSubtreeIfNeeded()
             }
         } else {
-            selection.provider = "near"
+            selection.provider = target
             await Task.yield()
             hosting.layoutSubtreeIfNeeded()
         }
-        XCTAssertEqual(selection.provider, "near")
+        XCTAssertEqual(selection.provider, target)
         // A sign-in the change started would be a Task, not a synchronous
         // call: give it time to reach the daemon before asserting it did not.
         await fulfillment(of: [unexpected], timeout: 0.2)

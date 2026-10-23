@@ -10,7 +10,8 @@ enum BuildChannelFixture {
         stateDirEnv: "TRACE_COMMONS_CONTRIBUTOR_DIR",
         passkeyRelyingParty: "tracecommons.ai",
         urlScheme: "tracecommons",
-        nearAiDashboardOrigin: "https://cloud.near.ai")
+        nearAiDashboardOrigin: "https://cloud.near.ai",
+        nearAiSignInProviders: ["near", "github", "google"])
 
     static let staging = BuildChannel(
         channel: "staging",
@@ -18,5 +19,6 @@ enum BuildChannelFixture {
         stateDirEnv: "TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR",
         passkeyRelyingParty: "staging.tracecommons.ai",
         urlScheme: "tracecommons-staging",
-        nearAiDashboardOrigin: "https://cloud-stg.near.ai")
+        nearAiDashboardOrigin: "https://cloud-stg.near.ai",
+        nearAiSignInProviders: ["google", "github"])
 }
