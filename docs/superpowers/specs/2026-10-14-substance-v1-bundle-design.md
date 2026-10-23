@@ -1,16 +1,12 @@
 # Substance v1: design
 
-Status: design. Not implemented.
+Status: superseded. Not implemented.
 
-> **Superseded in part (2026-10-21).** The model in this design is replaced by
-> [the qualitative substance design](2026-10-21-substance-qualitative-rlvr-design.md).
-> Read that design first. It replaces the framing, the terms, the fit, the
-> acceptance, and the gaming analysis here (sections 1, 2, 4, 7.1, 7.5, 7.6,
-> and 8). The rest still describes how substance plugs into the pipeline: the
-> projection, `cq4`, the bundle, the benchmark tooling that its regression
-> guardrail reuses, Stage 2, the components, and the tests (sections 3, 5, 6,
-> 7.2 to 7.4, and 9 to 12). Where the two designs differ, the qualitative
-> design applies.
+> **Superseded (2026-10-23).**
+> [The qualitative substance design](2026-10-21-substance-qualitative-rlvr-design.md)
+> replaces this design in full: the model, the integration, the guardrail
+> recipe, and the tests. This file is kept only as the record of round 1 of the
+> review on PR #1472. Do not implement from it.
 
 This design is a direction, not the final model. The terms, the parameters, and
 the floors can change once real data runs through the fit. Treat the specific

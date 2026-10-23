@@ -13,8 +13,9 @@ tests on that corpus that show how much each assumption moves the score
 (section 7). A real buyer signal replaces the assumptions later (section 7).
 
 The design targets one buyer: the reinforcement learning lab that post-trains
-agents (the RLVR lab, section 4). It is model-free. It reads only the trace
-envelope and fixed constants. It runs no model and makes no remote call.
+agents (the RLVR lab, section 4). It is model-free. It reads the trace
+envelope, the witness class that the server stored at upload, and fixed
+constants. It runs no model and makes no remote call.
 
 ## 1. Why: substance is a proxy for value
 
@@ -25,16 +26,20 @@ Substance is not a fabrication detector. A scoring formula cannot separate a
 careful fake from real work. A trace that a client builds by hand can set every
 field that substance reads. So substance does not try to prove a trace is real.
 
-Two mechanisms divide the work:
+Three mechanisms divide the work:
 
-- NEAR AI attestation proves that the final model call ran on a pinned model
-  over the context it was shown. It does not prove earlier turns, tool results,
-  or compacted context. It is the robust defense against a falsified trace.
+- NEAR AI attestation proves that NEAR AI served the final model call over the
+  context it was shown. A provider-TEE receipt also proves which pinned model
+  ran it; a gateway receipt does not name the model. Attestation does not prove
+  earlier turns, tool results, or compacted context, and it does not prove that
+  the session made the call. So it defends the final call, not the tool history.
+- Contributor caps and delayed settlement limit what a scripted trace can earn.
 - Substance estimates what the work is worth to a buyer.
 
 This design follows that division. Substance ranks traces by estimated buyer
-value. Attestation enters substance as a light weight, so a trace with proven
-provenance ranks slightly higher (section 5.3).
+value. Attestation enters substance as a light weight, so a trace with an
+attested final call ranks slightly higher (section 5.3). The weight is an
+incentive to use attested inference, not a measure of proven value.
 
 The credit quality seam stays `q = h(substance) * g(novelty)`. The attestation
 weight sits inside substance, so `q` keeps its shape.
@@ -54,22 +59,23 @@ State these limits before the model, so a reader does not over-trust it.
 - Substance does not detect fabrication. A coordinated script can max every
   term with no model call: it emits distinct calls with a nonce argument and a
   short result, and adds an initial prompt. So an unattested trace that is built
-  to look valuable scores as if it were valuable. Only attestation, contributor
-  caps, and delayed settlement defend against this. A regression guardrail
-  (section 7) keeps substance from rewarding obvious garbage, but it is not a
-  fabrication defense.
-- The score depends on the contributor's consent class. Work and replay need
-  tool payloads. A contributor who declines tool payloads scores at the work and
-  replay floors, and likely below `substance_floor`. So credit becomes an
-  incentive to share content classes that carry more residual risk. Attested
-  bodies also travel only under the tool-payload consent flag. Whether to
-  correct this with per-consent-class floors is an open owner decision
-  (section 11). The evidence records the consent class (section 8), so the
-  effect is visible either way.
+  to look valuable scores as if it were valuable. With one real final call
+  through NEAR AI, the same script also earns the attestation weight, because
+  the receipt does not cover the tool history. Only contributor caps and delayed
+  settlement defend against this. A regression guardrail (section 7) keeps
+  substance from rewarding obvious garbage, but it is not a fabrication defense.
+- A trace that withholds tool payloads or message text scores at the floors,
+  because substance has nothing to read: work and replay need tool payloads, and
+  the prompt share of replay needs message text. This is intended for this
+  persona, which cannot use content that the trace does not carry. It means
+  credit rewards the contributor who shares more content, and that content
+  carries more residual risk. The evidence shows when this is the cause of a low
+  score (section 8.1).
 - Attestation covers a subset of traces today. Receipts exist only for
-  inference through NEAR AI. The requirement is off by default, because turning
-  it on would refuse every trace from Claude Code, Codex, Gemini, and Cline. So
-  `v` is 0 for most traces now (section 5.3).
+  inference through NEAR AI, and attested bodies travel only when the
+  contributor shares tool payloads. The requirement is off by default, because
+  turning it on would refuse every trace from Claude Code, Codex, Gemini, and
+  Cline. So `v` is 0 for most traces now (section 5.3).
 - The market numbers are secondary. No primary rate card exists. The research
   reads trade press and vendor pages (section 3). Treat the figures as
   directional.
@@ -144,13 +150,14 @@ link is the designer's inference. Section 7 states how to check it.
 
 ## 5. The model
 
-Substance is a pure function of the envelope. It returns one number in
-`[0, 1]`. It reads one projection of the envelope, not the raw bytes:
+Substance is a pure function of the envelope and the witness class that the
+server stored at upload (section 5.3). It returns one number in `[0, 1]`. It
+reads one projection of the envelope, not the raw bytes:
 
 - Deduplicated tool calls. Each `tool_call`'s arguments serialized as canonical
   JSON, with calls identical by (`tool_name`, arguments) collapsed to one. The
-  work term reads this, so an exact repeat earns nothing extra; a near-duplicate
-  with a varied argument still counts (section 2).
+  work term and the replay shares read this, so an exact repeat earns nothing
+  extra; a near-duplicate with a varied argument still counts (section 2).
 
 Two helper functions, each used below:
 
@@ -201,11 +208,19 @@ replay = w_hp * has_initial_prompt + w_sa * share_args + w_sr * share_results
 ```
 
 `has_initial_prompt` is 1 when the trace holds an initial prompt with content.
-`share_args` is the share of tool calls that carry arguments. `share_results` is
-the share of tool calls that carry results. When the trace has zero tool calls,
-`share_args` and `share_results` are 0, not full credit. So a tool-free trace
-earns at most the prompt share, `w_hp`, on replay. This is deliberate: a trace
-with no tool call cannot replay a trajectory, so it must not earn full replay.
+`share_args` is the share of deduplicated tool calls that carry arguments.
+`share_results` is the share of deduplicated tool calls that carry a result: a
+matching `tool_result` with non-empty content, the same match as a paired call
+(section 5.1). When the trace has zero tool calls, `share_args` and
+`share_results` are 0, not full credit. So a tool-free trace earns at most the
+prompt share, `w_hp`, on replay. This is deliberate: a trace with no tool call
+cannot replay a trajectory, so it must not earn full replay.
+
+A share rises when an incomplete call is removed. So a trace whose interrupted
+tail is cut scores higher on replay than the uncut trace. This is accepted: the
+remaining trajectory is complete, and a complete trajectory replays better. A
+paired call carries arguments and a result, so adding one never lowers either
+share.
 
 This differs from the server's general `ReplaySufficiency::score()`, which
 returns full credit for a trace with zero tool calls. Substance defines replay
@@ -217,16 +232,36 @@ does not zero it.
 
 ### 5.3 Attestation weight
 
-Attestation proves that the final model call ran on a pinned model over the
-context it was shown. It does not prove earlier turns, tool results, or
-compacted context. It enters substance as a light weight, so an attested trace
-ranks slightly higher. With this weight, substance measures worth with a
-provenance premium, not worth alone.
+Attestation proves that NEAR AI served the final model call over the context it
+was shown. It does not prove earlier turns, tool results, or compacted context.
+It enters substance as a light weight, so an attested trace ranks slightly
+higher. With this weight, substance measures worth with a
+provenance premium, not worth alone. The weight is an incentive to use attested
+inference. It is not a measure of proven value, because the receipt covers the
+final call only (section 2).
 
 `v` is 1 when the trace's `witness_provenance_class` is
 `provider_tee_final_call` or `gateway_final_call`, else 0. Both classes are
 final-call receipts verified against pinned signers. `v` is 0 for most traces
 today (section 2).
+
+The two classes prove different things. A provider-TEE receipt comes from the
+Chat Completions API: it names the model, and that model's key signs it. A
+gateway receipt comes from the Responses API: NEAR AI's attested gateway signs
+it, but it does not name the model. The account-trust rule counts only the
+provider-TEE class, for that reason. The score counts both, because the weight
+is an incentive to use attested inference, and Codex reaches NEAR AI only
+through the gateway.
+
+The class is not in the envelope, because a contributor could set a field
+there. The witness signs a certificate that states the class. The contributor's
+client uploads it beside the envelope, and the server verifies it at upload and
+stores the class. The Score stage reads the stored class once per trace, with
+the same read that the provenance labels use. That read returns `unattested`
+for a trace that is revoked, purged, expired, or not accepted, and for a trace
+whose stored envelope no longer matches the certificate. So such a trace loses
+the weight on a rescore. The evidence records the class (section 8.1), so a score
+is reproducible from the envelope, the bundle, and that recorded class.
 
 ```
 attest = graded(v, att_floor_mult)
@@ -236,9 +271,13 @@ attest = graded(v, att_floor_mult)
 `v = 1` raises it only slightly. The weight rewards proven provenance without
 punishing the common unattested trace.
 
-This weight amends the label-only contract of V89 (#1061 decision 5), which
-says the provenance class weights no gate, score, or credit amount. Zaki to
-confirm.
+The score reads the class. This changes the label-only contract of V89 (#1061,
+earned-trust decision 5), which says that the provenance class weights no gate,
+score, or credit amount. Decision 5 is already reversed for account trust
+(2026-10-11), so the contract holds for gates, scores, and credit amounts. This
+design removes scores from it. The comment on `witness_provenance_classes` in
+the ingest service and the contract text in `docs/trace-commons.md` change with
+it.
 
 ### 5.4 Composite, credit quality, and gate
 
@@ -261,8 +300,8 @@ forces substance to 0. The composite only ranks a trace. One threshold gates:
 substance_passed = substance >= substance_floor
 ```
 
-So the pass or fail of an edge case, such as a tool-free trace, is a floor
-decision in calibration (section 7). It is not a property of the formula.
+So the pass or fail of an edge case, such as a tool-free trace, is the floor
+decision of section 11. It is not a property of the formula.
 
 `g(novelty)` is the existing novelty half of credit quality, unchanged.
 
@@ -285,8 +324,9 @@ them today.
 
 ## 6. Parameters
 
-Every parameter has a starting value and a rationale. Parameters fall into two
-classes:
+Every set parameter has a starting value and a rationale. Each calibrated
+parameter has a starting percentile, or an owner decision (section 11).
+Parameters fall into two classes:
 
 - Set. The value is fixed by judgment from the research of section 3 and from
   the baseline work facets already in use. The table gives the value and its
@@ -309,10 +349,10 @@ Every value is provisional: a real buyer signal revises it (section 7).
 | `w_sr` | 0.30 | Results on calls are needed to verify an action. |
 | `m_work` | 0.30 | Work floor. A tool-free trace ranks low, not zero. |
 | `m_rep` | 0.10 | Replay floor, low because replay is near-critical for this buyer. |
-| `sub_ceil` | calibrated | Substance saturation ceiling in `q`. Set at a chosen high percentile of substance over the pinned corpus, so real traces spread across the curve. |
+| `sub_ceil` | calibrated: 90th percentile | Substance saturation ceiling in `q`. At the 90th percentile of substance over the pinned corpus, the top tenth of real traces gets full substance credit, and the rest spread across the curve. The percentile is a judgment. |
 | `sub_floor_mult` | 0.25 | Substance floor in `q`. |
 | `att_floor_mult` | 0.90 | Attestation weight floor inside substance. An attested trace scores about 11 percent above the same trace unattested (1.0 against 0.9): "slightly higher," as the design intends. |
-| `substance_floor` | calibrated | The pass threshold. Set at a chosen percentile of substance over the pinned corpus, so the floor sits where real traces sit. |
+| `substance_floor` | calibrated: owner decision | The pass threshold. The owner sets its percentile from the distribution report (section 11). A floor at percentile p fails p percent of the pinned corpus by construction. |
 
 Every parameter lives in the bundle configuration. The bundle id hashes them.
 The server never changes them at run time. A change to any parameter produces a
@@ -329,26 +369,28 @@ it measures how much each one moves the score, so a reader knows which
 assumptions matter.
 
 Calibrated parameters are defined relative to the score distribution, so
-calibration sets them from it. `sub_ceil` is a chosen high percentile of
-substance over the pinned corpus. `substance_floor` is a chosen percentile of
-substance over the same corpus.
+calibration sets them from it. `sub_ceil` is the 90th percentile of substance
+over the pinned corpus. `substance_floor` is the percentile of substance over
+the same corpus that the owner sets from the distribution report (check 3,
+section 11).
 
 Calibration runs offline. It writes the calibrated values into the bundle
 configuration and produces a calibration report. The report records the corpus
-pin, the calibrated values, and the result of every check below. Four checks
-apply.
+pin, the calibrated values, and the result of every check below. Two commands
+do this. `pipeline.py dataset generate` builds the guardrail fixture of check 1
+from the pinned corpus. `pipeline.py evaluate` scores a dataset with the
+substance bundle and writes the report. Neither runs a model, an embedder, or
+the index. Four checks apply.
 
-1. Fabrication regression guardrail. Reuse the synthetic benchmark of real and
-   fabricated traces. For each vector, no fabricated variant may score above its
-   real base. The check is pairwise and per vector, not a pooled false-positive
-   rate. This is a guardrail against obvious garbage, not a value test, and not
-   a fabrication defense. The regression set holds the fabrication vectors:
-   noise padding, empty scaffold, missing evidence, truncation, duplication,
-   asserted outcome, and template filler. Noise padding, template filler and
-   asserted outcome now tie their base, because substance reads neither prose
-   nor outcome.
-2. Monotonicity and no veto. More real work never lowers substance. Every floor
-   is above 0, so no term vetoes a trace.
+1. Fabrication regression guardrail. A synthetic benchmark pairs real base
+   traces with fabricated variants, one variant per base for each vector. For
+   each pair, the variant must meet its expectation, and no variant may score
+   above its base. The check is pairwise and per vector, not a pooled
+   false-positive rate. This is a guardrail against obvious garbage, not a value
+   test, and not a fabrication defense. Section 7.1 gives the recipe.
+2. Monotonicity and no veto. More paired calls never lower substance: a paired
+   call can only raise work, and it cannot lower either replay share
+   (section 5.2). Every floor is above 0, so no term vetoes a trace.
 3. Real-corpus distribution. Report the distribution of substance and of each
    term over the pinned corpus. This distribution is the input to the
    calibrated parameters. No fit runs, so it makes no generalization claim.
@@ -370,43 +412,98 @@ apply.
    untested, not insensitive. Check 4 does not judge it, and it stays an owner
    decision (section 11).
 
-The regression fixture is synthetic, or it is derived from a licensed public
-corpus and passed through the same redaction and residual-risk pass as a real
-trace. The manifest records which, and records the source licence. No raw,
-unredacted trace is committed.
-
 The first real buyer signal is the trigger to replace judgment with a fit. One
 confirmed price, one ranked preference, or one weight from a real buyer lets a
 later version fit the set parameters. Until then, every parameter stays
 provisional.
 
+### 7.1 The guardrail recipe
+
+A base comes from the pinned corpus. It has at least one paired call, and every
+tool call in it is paired. So a variant that removes events can remove only real
+work, and every base scores above the floors, so a variant can score below it.
+The generator checks this structure; it never runs the score.
+
+| Vector | Transform | Change | Expect |
+|---|---|---|---|
+| Noise padding | `append_noise` | 4 KiB of base64 random bytes appended to the last assistant message | equal |
+| Template filler | `template_filler` | every assistant message replaced by one fixed paragraph, repeated to the original byte length | equal |
+| Empty scaffold | `add_scaffold` | 20 `tool_call` events with no arguments and no results | not above |
+| Truncation | `truncate_half` | the second half of the events removed | not above |
+| Duplication | `duplicate_events` | the event list repeated once | not above |
+| Missing evidence | `strip_results` | every `tool_result` body removed | below |
+| Asserted outcome | `assert_success_no_work` | all tool events removed, `task_success = success` | below |
+
+Noise padding and template filler tie their base, because substance reads no
+prose. Asserted outcome scores below its base, because it also removes every
+tool event. Substance does not read the outcome.
+
+Each pair records the base, the variant, the transform, and the expectation.
+The manifest records the recipe parameters, the corpus pin, and the seed, so a
+run reproduces. A change to any recipe parameter is a new recipe id. The report
+gives, for each transform, the share of pairs that meet the expectation and the
+term that moved most.
+
+The regression fixture is synthetic, or it is derived from a licensed public
+corpus and passed through the same redaction and residual-risk pass as a real
+trace. The manifest records which, and records the source licence. No raw,
+unredacted trace is committed.
+
 ## 8. Evidence and integration
 
-The score evidence records the composite, each term, and the provenance class:
+### 8.1 Evidence
+
+The score evidence records the composite, each term, the tool-call count, and
+the provenance class:
 
 ```
 substance_micros, substance_passed, substance_version,
 substance_work_micros, substance_replay_micros,
-witness_provenance_class, consent_class
+substance_tool_calls, witness_provenance_class
 ```
 
-`witness_provenance_class` records the witness's class for the final call,
-which sets `v` (section 5.3). It lets an audit see which traces carried an
-attested final call.
+`substance_tool_calls` records the number of deduplicated tool calls, paired or
+not. With the work term, it shows why a score is low. A count of 0 means that
+the trace had no tool calls. A count above 0 with work at 0 means that no call
+was paired: the contributor withheld the tool payloads, or the capture lost
+them.
 
-`consent_class` records the contributor's consent class. It makes the
-consent-class effect of section 2 visible, and it is the field a
-per-consent-class floor would read (section 11).
+`witness_provenance_class` records the stored witness class that set `v`
+(section 5.3). It lets an audit see which traces carried an attested final
+call, and it makes a rescore reproducible.
 
-Integration mechanics:
+`credit_quality_micros` and `credit_quality_version` are filled as today. The
+perplexity fields stay empty. The new fields are optional and are skipped when
+empty, so a compatibility outcome serializes byte-identically and stored hashes
+do not move.
 
-- The parameters live in the bundle configuration and are hashed into the bundle
-  id. Calibration runs offline (section 7). The server never fits or
-  re-calibrates.
-- The score is a pure function. It needs no model, GPU, embedder, or remote
-  call. Novelty is computed as it is today.
+### 8.2 The bundle
+
+- Family and ids. Substance changes only the Score stage. The substance bundle
+  is the compatibility family with one new Score id,
+  `trace_commons.score.substance.v1`, and the rule id `substance_novelty_v1`.
+  Admission, review, and settle reuse the compatibility ids.
+- Configuration. `SubstanceScoreConfig` holds the parameters of section 6,
+  `substance_version`, and the novelty configuration, which also gives the
+  novelty half of `q`. The bundle id hashes all of it. Calibration runs offline (section 7). The server never
+  fits or re-calibrates.
+- Score policy. For each trace, in order: parse the reviewed envelope (a parse
+  failure is permanent); read the stored witness class (section 5.3); compute
+  the terms, the composite, and `substance_passed`; compute novelty with the
+  existing compatibility code, moved behind one shared function; compute `q`;
+  apply the compatibility rule for index membership and the award, with
+  `substance_passed` in place of `quality_passed`; fill the evidence.
+- Credit quality. `q` (section 5.4) is a new credit quality version, `cq4`,
+  beside the current `credit_quality` function. Its parameters come from the
+  bundle configuration, not from code constants.
+- Substance needs no model, GPU, embedder, or remote call. Novelty is computed
+  as it is today, with the embedder and the index. Its chunk token counts come
+  from the chunker's own tokenizer, so novelty depends on no scorer.
 - `substance_version` is one label over the formula and the projection. A
   change to any of them bumps the label and the bundle id.
+- New code lives in a new module,
+  `crates/trace-commons-server/src/versioned_pipeline_substance.rs`, with the
+  AGPL header.
 - A pipeline-scored trace is signed as
   `trace_commons.pipeline_score_attestation.v1`, not the legacy
   `trace_commons.score_attestation.v2`, which is built from legacy
@@ -414,11 +511,26 @@ Integration mechanics:
   `decision` already carries `substance_micros`, or needs a schema bump, is a
   plan-time check.
 
+### 8.3 Tests
+
+- Golden tests: fixed envelopes and witness classes with pinned term values and
+  composite, for each `substance_version`. A formula change breaks a pinned
+  value and forces a version bump.
+- The guardrail contract: on the committed fixture, in CI, every pair meets its
+  expectation (section 7.1).
+- The compatibility baseline test
+  (`compatibility_baseline_is_executable_and_detects_drift`) stays green, which
+  shows that the evidence change is byte-neutral for that family.
+- Isolation: the substance-only `evaluate` run builds with no embedder and no
+  index, which shows that substance reads neither.
+- Qualification: the substance package passes `pipeline.py qualify`.
+
 ## 9. Learnings and changes from the earlier substance design
 
 This is the only section that refers to the earlier design: the substance v1
 bundle design, `docs/superpowers/specs/2026-10-14-substance-v1-bundle-design.md`
-on this branch (draft PR #1472). Everything else in this spec stands on its own.
+on this branch (draft PR #1472). This spec supersedes it in full. Everything
+else in this spec stands on its own.
 
 The earlier design framed substance as fabrication detection. It named seven
 attack vectors, generated a synthetic benchmark of real and fabricated traces,
@@ -428,10 +540,11 @@ Acceptance was a pass on that benchmark.
 Learnings:
 
 - Attestation defends; scoring estimates value. A formula cannot separate a
-  careful fake from real work: a fake built with one model call per trace maxes
-  every term. So substance is a proxy for what a buyer would pay, and NEAR AI
-  attestation is the fabrication defense. A receipt proves only the final call,
-  not earlier turns, tool results, or compacted context.
+  careful fake from real work: a script with no model call maxes every term. So
+  substance is a proxy for what a buyer would pay. NEAR AI attestation defends
+  the final call, and contributor caps and delayed settlement defend against a
+  scripted tool history. A receipt proves only the final call, not earlier
+  turns, tool results, or compacted context.
 - No objective measure of value exists. There is no dataset of trace prices, so
   a fit to value is not possible, and a fit to the fabrication benchmark
   optimizes the wrong objective. Parameters are set by judgment from market
@@ -444,7 +557,10 @@ Learnings:
   messages move a per-message median. So compression cannot rank prose quality.
 - A regression guardrail must be passable by construction. A vector that no
   projection can tell apart from real work belongs to attestation, not to the
-  guardrail.
+  guardrail. A share falls when a bad call is added and rises when one is
+  removed, so the guardrail's bases have every tool call paired.
+- Two specs that both stay in force drift apart. This spec holds the whole
+  design, and the earlier one is kept only as the record of round 1.
 
 Changes:
 
@@ -453,19 +569,21 @@ Changes:
   are removed.
 - Replay gives no call-share credit to a trace with no tool calls.
 - Attestation enters substance as a light binary weight from the witness
-  provenance class. This amends the V89 label-only contract.
+  provenance class that the server stored at upload. This removes scores from
+  the V89 label-only contract. It is an incentive to use attested inference.
 - Set parameters are fixed by judgment. Only `sub_ceil` and `substance_floor`
   are calibrated on the pinned corpus, and a sensitivity analysis shows which
   assumptions move the score.
 - The fabrication vectors are a pairwise regression guardrail, not the
   acceptance criterion. The fit, the false-positive gate, the dumb-feature
-  guard, and the outcome join are removed.
-- The evidence records the provenance class and the consent class. The score is
-  signed as `trace_commons.pipeline_score_attestation.v1`.
+  guard, the outcome join, and the `correct_failure` control are removed.
+- The evidence records the provenance class and the tool-call count. The score
+  is signed as `trace_commons.pipeline_score_attestation.v1`.
+- Substance reads one input beyond the envelope: the stored witness class.
 
 What stays the same:
 
-- Substance is a model-free pure function of the envelope.
+- Substance is model-free.
 - Substance is a floored multiplicative composite. No term vetoes a trace, and
   one floor gates.
 - Credit quality keeps the shape `q = h(substance) * g(novelty)`.
@@ -477,28 +595,33 @@ What stays the same:
 - Simulating every kind of buyer. Other personas are documented in the research
   but are out of scope here.
 - A fit to value. There is no value ground truth yet (section 2).
-- A fabrication defense in the formula. Attestation owns that.
+- A fabrication defense in the formula. Attestation, contributor caps, and
+  delayed settlement own that.
 - Scoring the attested share only, or weighting each term by coverage. The
   witness records a final-call class, not a share, so this design uses one light
   binary weight inside substance.
 - Any change to novelty, the embedder, the index, or the award amount.
+- Stage 2: the move of the `q` consumers (contributor points, the contributor
+  cap, the account-trust rule, and the credit-estimate fit) from the legacy gate
+  rows to the pipeline Score evidence. The substance family writes no legacy
+  row, so until that separate change lands, those consumers do not see the `q`
+  of a substance-scored trace.
+- A conditional scorer dependency. The bundle runtime requires every package to
+  name a scorer descriptor, so the substance package names one that it never
+  calls. A separate change makes the dependency depend on the family.
 
 ## 11. Open owner decisions
 
 These decisions change the model and need an owner ruling before the plan.
 
-- Per-consent-class floors. A contributor who declines tool payloads scores at
-  the work and replay floors (section 2). Decide whether that is intended. If it
-  is not, set a floor per consent class, and read `consent_class` from the
-  evidence.
-- Whether a tool-free trace passes the gate. A trace with no tool call ranks low
-  on work and earns at most the prompt share on replay. Whether such a trace
-  passes is the `substance_floor` decision (section 5.4). Decide the floor
-  against the real-corpus distribution (section 7).
+- The `substance_floor` percentile. Set it from the distribution report
+  (section 7, check 3). It also decides whether a tool-free trace passes: such
+  a trace ranks low on work and earns at most the prompt share on replay
+  (section 5.4). A floor at percentile p fails p percent of the pinned corpus by
+  construction.
 - The attestation weight. `att_floor_mult = 0.90` gives an attested trace about
   11 percent more substance. Confirm that this is the intended size, or set
-  another. The weight also needs Zaki's agreement to amend the V89 label-only
-  contract (section 5.3).
+  another.
 - Removal of insensitive terms. The sensitivity analysis lists each term whose
   removal keeps the ranking and the gate within tolerance and still passes the
   guardrail (section 7). Decide whether to remove it in the next bundle version.
