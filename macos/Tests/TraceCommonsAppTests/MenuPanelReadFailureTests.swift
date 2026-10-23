@@ -188,8 +188,13 @@ final class MenuPanelReadFailureTests: XCTestCase {
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
         // No mode pill (owner, 2026-10-19), so no roll-up is drawn.
         XCTAssertFalse(panel.contains("store.modeRollup"))
-        XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown)"))
-        XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown)"))
+        // The legend counts the hovered day only while its read is current
+        // (owner, 2026-10-22: the app's graph, whose legend follows the
+        // pointer).
+        XCTAssertTrue(panel.contains("let shared = store.sharedCount.map { shown?.shared ?? $0 }"))
+        XCTAssertTrue(panel.contains("let kept = store.keptCount.map { shown?.kept ?? $0 }"))
+        XCTAssertTrue(panel.contains("MenuPanelData.countWord(shared, unknown: MonitorWords.unknown)"))
+        XCTAssertTrue(panel.contains("MenuPanelData.countWord(kept, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("stale: store.stale || !store.columnsCurrent"))
         XCTAssertFalse(panel.contains("stale ? \"—\""), "a count is never a bare dash")

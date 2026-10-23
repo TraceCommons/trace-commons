@@ -117,7 +117,9 @@ final class InsightsGlassConventionsTests: XCTestCase {
     /// (owner, 2026-10-20): Overview's Sessions figure, or Patterns' scope
     /// line ("Claude Code traces only"), over the coverage line.
     func test_theWeekPickerHasItsRowAndTheSectionIsUnderIt() throws {
-        for (file, leading) in [("Views/InsightsOverviewTab.swift", "drillButton(\"sessions\") {"),
+        // Overview's Sessions figure no longer drills (owner, 2026-10-22):
+        // its breakdown is always shown under the section.
+        for (file, leading) in [("Views/InsightsOverviewTab.swift", "Text(text(\"analytics_card_sessions\")).insightsEyebrow()"),
                                 ("Views/InsightsPatternsTab.swift", "InsightsScopeLine(source: \"claude_code\", line: line)")] {
             let source = try Self.text(file)
             let start = try XCTUnwrap(source.range(of: "private func header("), file)

@@ -417,6 +417,8 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_migrate",
     "near_ai_balance",
     "near_ai_funding",
+    "near_ai_spend_organizations",
+    "near_ai_spend_organization_select",
     "get_public_profile",
     "get_settings",
     "token_storage_status",
@@ -652,6 +654,11 @@ pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
 /// nothing. `{}`; always followed by `status_changed`. See
 /// `daemon::settlement_estimate`.
 pub const EVENT_SETTLEMENT_ESTIMATE_CHANGED: &str = "settlement_estimate_changed";
+
+/// NEAR AI credit arrived in the organization Private AI spends from: a
+/// shell showing the balance reads it again. `{}`. See
+/// `daemon::nearai_credential::arrivals`.
+pub const EVENT_NEAR_AI_BALANCE_CHANGED: &str = "near_ai_balance_changed";
 
 /// A standalone re-engagement notification (nudge design section 5, "Knowing
 /// a standalone will render"). Opt-in: written only to a connection whose
@@ -3629,6 +3636,14 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("near_ai_funding", "near-ai-funding-requires-async"),
+    (
+        "near_ai_spend_organizations",
+        "near-ai-spend-org-requires-async",
+    ),
+    (
+        "near_ai_spend_organization_select",
+        "near-ai-spend-org-requires-async",
+    ),
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
@@ -3745,7 +3760,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                     "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
-                    EVENT_SETTLEMENT_ESTIMATE_CHANGED,
+                    EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -6547,6 +6562,12 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         }
         "near_ai_balance" => super::nearai_credential::handle_balance(shared, req).await,
         "near_ai_funding" => crate::daemon::nearai_credential::handle_funding(shared, req).await,
+        "near_ai_spend_organizations" => {
+            super::nearai_credential::handle_spend_organizations(shared, req).await
+        }
+        "near_ai_spend_organization_select" => {
+            super::nearai_credential::handle_spend_organization_select(shared, req).await
+        }
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -17728,7 +17749,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 67);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 69);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18216,7 +18237,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 73, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 75, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

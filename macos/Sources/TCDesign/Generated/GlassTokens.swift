@@ -43,8 +43,8 @@ public enum GlassTokens {
         /// A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).
         public static let edgeHighContrast: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 0.4, light: GlassRGBA(0x1D1D1F, alpha: 0.55))
         public static var textOnAccent: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 1), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
-        /// The switch knob while off: white on every track. On, the knob is textOnAccent, as the NEAR AI design system's switch draws it (owner, 2026-10-20: its accent replaces the purple).
-        public static let toggleKnobOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
+        /// The switch knob while off: white on every track (the flat theme's Dark draws it navy, as on). On, the knob is textOnAccent, as the NEAR AI design system's switch draws it (owner, 2026-10-20: its accent replaces the purple).
+        public static var toggleKnobOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 1), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
         public static let textOnStatus: GlassRGBA = GlassRGBA(0x0C0C0E, alpha: 1)
         /// Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.
         public static var textOnSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1)), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
@@ -132,6 +132,16 @@ public enum GlassTokens {
         public static var wellFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06)), flat: GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.
         public static var controlHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84)), flat: GlassRGBA(0x000000, alpha: 0.44, light: GlassRGBA(0xEBEBED, alpha: 0.84))) }
+        /// A control's fill on a menu or popover (owner, 2026-10-22: the control fill, a dark well, all but vanished on the dark menu). A step lighter than the menu in dark, darker in light.
+        public static let controlOnMenu: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0x000000, alpha: 0.08))
+        /// controlOnMenu under the pointer, in its place.
+        public static let controlOnMenuHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.13))
+        /// A control's fill on a selected list row (owner, 2026-10-22): a deeper pill on the selection, its label in textOnAccent, the selected row's own ink, which clears 4.5:1 on it.
+        public static var controlOnSelection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.18)), flat: GlassRGBA(0x071A2E, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.18))) }
+        /// controlOnSelection under the pointer, in its place.
+        public static var controlOnSelectionHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.28, light: GlassRGBA(0x000000, alpha: 0.28)), flat: GlassRGBA(0x071A2E, alpha: 0.26, light: GlassRGBA(0x000000, alpha: 0.28))) }
+        /// A card on a card (owner, 2026-10-22: the session preview's prompt quote matched the card under it): a step lighter than the card in dark, darker in light.
+        public static let cardNested: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.045))
         /// Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.
         public static var cardHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0xFFFFFF, alpha: 0.86)), flat: GlassRGBA(0xFFFFFF, alpha: 0.08, light: GlassRGBA(0xF7F8FB, alpha: 0.8))) }
         /// Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.
@@ -146,7 +156,7 @@ public enum GlassTokens {
         /// The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].
         public static var controlSelectedFloating: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         public static var toggleOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
-        public static let toggleOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
+        public static var toggleOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.38, light: GlassRGBA(0x000000, alpha: 0.16))) }
         public static var toggleOnSettings: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         /// The watch switch's track when on: statusOn in both appearances, as #1146's --tc-watch-on is var(--tc-status-on). The knob is white on it, as #1146 draws it, with switchKnobEdge inside it.
         public static var watchOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
@@ -301,6 +311,11 @@ public enum GlassTokens {
             "inactiveDim": inactiveDim,
             "wellFill": wellFill,
             "controlHover": controlHover,
+            "controlOnMenu": controlOnMenu,
+            "controlOnMenuHover": controlOnMenuHover,
+            "controlOnSelection": controlOnSelection,
+            "controlOnSelectionHover": controlOnSelectionHover,
+            "cardNested": cardNested,
             "cardHover": cardHover,
             "rowHover": rowHover,
             "toolbarExpanded": toolbarExpanded,

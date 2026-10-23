@@ -53,6 +53,7 @@ extension MonitorDestination {
         switch destination {
         case .traces(let idleOnly): self = idleOnly ? .idleSessions : .traces(entryId: nil)
         case .history: self = .home(.history)
+        case .privateAI: self = .inference
         }
     }
 }
