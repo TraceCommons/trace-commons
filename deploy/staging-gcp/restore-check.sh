@@ -109,7 +109,16 @@ trap cleanup EXIT
 
 # The newest complete backup.
 dest="$bucket/$prefix"
-latest="$(gcloud storage ls "$dest/" 2>/dev/null \
+# An empty prefix is "matched no objects"; any other gcloud failure (auth,
+# permission, a broken gcloud) is named as such, not as a missing backup.
+if ! listing="$(gcloud storage ls "$dest/" 2>"$work/ls.err")"; then
+  if ! grep -q 'matched no objects' "$work/ls.err"; then
+    cat "$work/ls.err" >&2
+    refuse "gcloud storage ls of $dest/ failed"
+  fi
+  listing=""
+fi
+latest="$(printf '%s\n' "$listing" \
   | grep -E "^$dest/[0-9]{8}T[0-9]{6}Z\.dump\.sha256\$" | sort | tail -n 1 || true)"
 [ -n "$latest" ] || refuse "no complete backup (no .dump.sha256) under $dest/"
 ts="$(basename "$latest" .dump.sha256)"
