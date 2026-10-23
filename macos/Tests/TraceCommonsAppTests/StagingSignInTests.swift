@@ -35,12 +35,13 @@ final class StagingSignInTests: XCTestCase {
     }
 
     /// The providers the linked core offers: production's NEAR wallet first,
-    /// staging's NEAR AI Google login first and no wallet at all.
+    /// staging's NEAR AI Google login alone (owner: "Google only for now").
     func test_theLinkedCoreOffersOnlyTheNearAiLoginOnStaging() {
         let offered = LinkedChannel.channel.nearAiSignInProviders
         if LinkedChannel.isStaging {
-            XCTAssertEqual(offered, ["google", "github"])
+            XCTAssertEqual(offered, ["google"])
             XCTAssertFalse(offered.contains("near"))
+            XCTAssertFalse(offered.contains("github"))
         } else {
             XCTAssertEqual(offered, ["near", "github", "google"])
         }
@@ -99,6 +100,7 @@ final class StagingSignInTests: XCTestCase {
     /// When a near.ai join is refused, the first run words the daemon's
     /// label with the core's line. On staging none of them offers a wallet;
     /// production's "not offered here" line still does, as it shipped.
+    /// Staging's says only Google is supported (approved 2026-10-23).
     @MainActor
     func test_aRefusedJoinOffersNoWalletOnStaging() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
@@ -115,6 +117,9 @@ final class StagingSignInTests: XCTestCase {
                 XCTAssertFalse(offersWallet, "\(label): \(line)")
             } else {
                 XCTAssertTrue(offersWallet, "production's line changed: \(line)")
+            }
+            if LinkedChannel.isStaging, label == "near_ai_enroll_commons_unsupported" {
+                XCTAssertEqual(line, "Only Google sign-in is supported.")
             }
         }
     }

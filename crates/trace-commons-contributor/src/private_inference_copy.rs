@@ -2755,15 +2755,13 @@ pub const NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE: &str =
 #[cfg(not(feature = "near-ai-staging"))]
 pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str =
     "That commons does not offer joining with a NEAR AI login. You can still join with a wallet.";
-/// Staging has no wallet to fall back on: a NEAR AI login is the only way
-/// in (staging spec S12; owner, 2026-10-23), so the line drops the wallet
-/// sentence and keeps the first, word for word. Still its own sentence, as
-/// every refusal's is.
+/// Staging has no wallet to fall back on: NEAR AI's Google login is the
+/// only way in (staging spec S12, S18), so the line says so. Still its own
+/// sentence, as every refusal's is.
 ///
-/// PROPOSED, pending owner approval.
+/// Approved 2026-10-23 (owner: "say only google is supported").
 #[cfg(feature = "near-ai-staging")]
-pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str =
-    "That commons does not offer joining with a NEAR AI login.";
+pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str = "Only Google sign-in is supported.";
 
 /// `invalid`. A malformed request, which a contributor cannot cause from the
 /// app and cannot act on.
@@ -4652,7 +4650,7 @@ mod tests {
         }
         assert_eq!(
             private_inference_copy().near_ai_enroll_commons_unsupported,
-            "That commons does not offer joining with a NEAR AI login."
+            "Only Google sign-in is supported."
         );
     }
 

@@ -14788,7 +14788,7 @@ mod tests {
     #[tokio::test]
     async fn an_unnamed_cancel_acts_without_disclosing_the_attempt_it_acted_on() {
         let s = shared();
-        let started = crate::daemon::nearai_credential::ceremony::begin(&s.store, "github")
+        let started = crate::daemon::nearai_credential::ceremony::begin(&s.store, "google")
             .await
             .expect("a ceremony to cancel");
         let id = started["attempt_id"].as_str().unwrap().to_string();

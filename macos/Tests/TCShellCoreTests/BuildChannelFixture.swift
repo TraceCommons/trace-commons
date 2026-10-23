@@ -20,5 +20,5 @@ enum BuildChannelFixture {
         passkeyRelyingParty: "staging.tracecommons.ai",
         urlScheme: "tracecommons-staging",
         nearAiDashboardOrigin: "https://cloud-stg.near.ai",
-        nearAiSignInProviders: ["google", "github"])
+        nearAiSignInProviders: ["google"])
 }

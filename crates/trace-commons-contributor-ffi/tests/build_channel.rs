@@ -56,8 +56,7 @@ fn the_channel_json_matches_the_channel_module() {
 }
 
 /// The sign-in providers the app offers come from the core, in its order:
-/// production's NEAR wallet first, staging's NEAR AI Google login first and
-/// no wallet at all.
+/// production's NEAR wallet first, staging's NEAR AI Google login alone.
 #[test]
 fn the_channel_json_names_the_sign_in_providers_the_daemon_accepts() {
     let json = channel_json();
@@ -70,7 +69,7 @@ fn the_channel_json_names_the_sign_in_providers_the_daemon_accepts() {
         .collect();
     assert_eq!(providers, channel::NEAR_AI_SIGN_IN_PROVIDERS);
     if channel::near_ai_staging() {
-        assert_eq!(providers, ["google", "github"]);
+        assert_eq!(providers, ["google"]);
     } else {
         assert_eq!(providers, ["near", "github", "google"]);
     }

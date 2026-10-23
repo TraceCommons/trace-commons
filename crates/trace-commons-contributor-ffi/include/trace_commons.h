@@ -325,8 +325,8 @@ char*       tc_settings_ranges_json(void);
  * its Info.plist TCChannel and starts nothing on a mismatch.
  * near_ai_dashboard_origin is where the funding row's credits link points;
  * it takes no part in that check. near_ai_sign_in_providers is the NEAR AI
- * sign-in providers this build offers, in order; a staging build names no
- * "near" (the NEAR wallet). No key, secret or
+ * sign-in providers this build offers, in order; a staging build names
+ * "google" only. No key, secret or
  * keychain name is in it. Reads nothing and writes nothing. Returns an owned
  * string; free it with tc_string_free. NULL only on a caught panic.
  */

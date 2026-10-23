@@ -114,20 +114,20 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             .obtain)
         // The picker offers what the linked core offers, in its order:
         // production's NEAR wallet first, staging's NEAR AI Google login
-        // first and no wallet at all.
+        // alone.
         let options = CredentialSection.providerOptions(copy)
         XCTAssertEqual(options.map(\.tag), LinkedChannel.channel.nearAiSignInProviders)
         if LinkedChannel.isStaging {
-            XCTAssertEqual(options.map(\.title), [copy.credentialProviderGoogle, copy.credentialProviderGithub])
-            XCTAssertEqual(options.map(\.tag), ["google", "github"])
+            XCTAssertEqual(options.map(\.title), [copy.credentialProviderGoogle])
+            XCTAssertEqual(options.map(\.tag), ["google"])
         } else {
             XCTAssertEqual(options.map(\.title),
                            [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
             XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
         }
         // Production chooses the NEAR wallet, as before; staging, which has
-        // none, chooses GitHub over its default Google.
-        let target = LinkedChannel.isStaging ? "github" : "near"
+        // one provider, chooses Google, its only one.
+        let target = LinkedChannel.isStaging ? "google" : "near"
         let targetTitle = try XCTUnwrap(options.first { $0.tag == target }).title
 
         let selection = ProviderSelection()

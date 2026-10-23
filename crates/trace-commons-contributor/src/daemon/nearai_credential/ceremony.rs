@@ -717,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn a_caller_that_cannot_name_the_attempt_can_still_cancel_it() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
 
@@ -738,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn naming_an_attempt_this_directory_is_not_running_is_still_refused() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
 
         assert!(cancel(dir.path(), Some("some-other-attempt")).is_none());
@@ -769,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn an_unnamed_cancel_after_the_attempt_finished_finds_nothing() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(
             cancel(dir.path(), Some(&attempt_id)).map(|s| s.status),
@@ -791,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn one_ceremony_at_a_time_per_directory_and_a_cancel_frees_it() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(started["status"], "waiting_for_browser");
 
@@ -825,7 +825,7 @@ mod tests {
         // A second attempt in the same directory is refused rather than
         // evicting the first, whose listener is still holding a port.
         assert_eq!(
-            begin(&store, "github").await.unwrap_err().to_string(),
+            begin(&store, "google").await.unwrap_err().to_string(),
             "near_ai_credential_busy"
         );
 
@@ -843,7 +843,7 @@ mod tests {
             "cancelled"
         );
         // And now, and only now, another may begin.
-        assert!(begin(&store, "github").await.is_ok());
+        assert!(begin(&store, "google").await.is_ok());
     }
 
     /// The wallet branch has its own transport; unsupported OAuth names still
@@ -860,7 +860,7 @@ mod tests {
         );
         assert!(status(dir.path(), None).is_none());
         // A refused attempt must not leave the directory looking busy.
-        assert!(begin(&store, "github").await.is_ok());
+        assert!(begin(&store, "google").await.is_ok());
         cancel(
             dir.path(),
             status(dir.path(), None)
@@ -874,13 +874,15 @@ mod tests {
     /// so no caller in a staging build can begin the NEAR wallet sign-in.
     #[cfg(feature = "near-ai-staging")]
     #[tokio::test]
-    async fn a_staging_ceremony_refuses_the_near_wallet() {
+    async fn a_staging_ceremony_refuses_the_near_wallet_and_github() {
         let (dir, store) = temp_store();
-        assert_eq!(
-            begin(&store, "near").await.unwrap_err().to_string(),
-            "near_ai_credential_provider_unknown"
-        );
-        assert!(status(dir.path(), None).is_none());
+        for provider in ["near", "github"] {
+            assert_eq!(
+                begin(&store, provider).await.unwrap_err().to_string(),
+                "near_ai_credential_provider_unknown"
+            );
+            assert!(status(dir.path(), None).is_none());
+        }
     }
 
     #[test]
@@ -918,7 +920,7 @@ mod tests {
         assert_eq!(url.fragment().unwrap().len(), 43);
         let address = ("127.0.0.1", url.port().unwrap());
         assert!(tokio::net::TcpListener::bind(address).await.is_err());
-        assert!(begin(&store, "github").await.is_err());
+        assert!(begin(&store, "google").await.is_err());
         assert!(store.load_config().unwrap().is_none());
         assert_eq!(cancel(dir.path(), Some(id)).unwrap().status, "cancelled");
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -983,7 +985,7 @@ mod tests {
         crate::daemon::cloud_credential_test_support::install_backend(&store, backend.clone());
         let releaser = tokio::spawn(async move { released.store(true, Ordering::SeqCst) });
 
-        let error = begin(&store, "github").await.unwrap_err();
+        let error = begin(&store, "google").await.unwrap_err();
         releaser.await.unwrap();
 
         assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");

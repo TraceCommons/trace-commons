@@ -23,7 +23,7 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
     public let nearAiDashboardOrigin: String
     /// The NEAR AI sign-in providers this build offers, in the order a
     /// picker lists them (the daemon's `provider` values). A staging build
-    /// names no `near`: it signs in through NEAR AI's own login only.
+    /// names `google` only: it signs in through NEAR AI's Google login.
     public let nearAiSignInProviders: [String]
 
     public init(

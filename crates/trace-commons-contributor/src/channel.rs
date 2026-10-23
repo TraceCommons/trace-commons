@@ -149,12 +149,13 @@ mod values {
     /// deployment configuration (nearai/cvm-ansible-playbooks,
     /// `vars/cloud_api_stg.yaml`).
     pub const NEAR_AI_WALLET_RECIPIENT: &str = "cloud-stg.near.ai";
-    /// NEAR AI's own login only, Google first: "In the staging builds the
-    /// sign in needs to be via Google and not your near wallet" (owner,
-    /// 2026-10-23). No NEAR wallet, so the staging ingest's refusal of
-    /// wallet provisioning (`staging_wallet_provisioning_closed`) is never
-    /// the first thing a tester meets.
-    pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = &["google", "github"];
+    /// NEAR AI's Google login only: "In the staging builds the sign in
+    /// needs to be via Google and not your near wallet", and, asked about
+    /// GitHub, "Google only for now" (owner, 2026-10-23). No NEAR wallet, so
+    /// the staging ingest's refusal of wallet provisioning
+    /// (`staging_wallet_provisioning_closed`) is never the first thing a
+    /// tester meets.
+    pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = &["google"];
 
     pub const IRONWIRE_HOME_ENV: &str = "IRONWIRE_STAGING_HOME";
     pub const IRONWIRE_HOME_DIR: &str = ".ironwire-staging";
@@ -240,7 +241,8 @@ pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
 /// (`tc_build_channel_json`) and never keep one of their own.
 pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = values::NEAR_AI_SIGN_IN_PROVIDERS;
 /// The provider a sign-in that names none starts: the first one offered.
-/// Production's is the NEAR wallet; staging's is NEAR AI's Google login.
+/// Production's is the NEAR wallet; staging's is NEAR AI's Google login,
+/// its only one.
 pub const NEAR_AI_DEFAULT_SIGN_IN_PROVIDER: &str = values::NEAR_AI_SIGN_IN_PROVIDERS[0];
 
 /// Where a staging build fetches its signed NEAR AI measurement pins (spec

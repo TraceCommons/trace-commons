@@ -16,9 +16,9 @@ final class BuildChannelBridgeTests: XCTestCase {
         XCTAssertTrue(channel.urlScheme.hasPrefix("tracecommons"))
         XCTAssertTrue(channel.nearAiDashboardOrigin.hasPrefix("https://"))
         // Production offers the NEAR wallet; staging signs in through NEAR
-        // AI's own login only, Google first.
+        // AI's Google login only.
         if channel.channel == "staging" {
-            XCTAssertEqual(channel.nearAiSignInProviders, ["google", "github"])
+            XCTAssertEqual(channel.nearAiSignInProviders, ["google"])
         } else {
             XCTAssertEqual(channel.nearAiSignInProviders, ["near", "github", "google"])
         }

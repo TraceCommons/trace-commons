@@ -190,8 +190,8 @@ pub fn credential_state(shared: &DaemonShared) -> &'static str {
 /// With no `provider` the ceremony is the channel's default
 /// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): in production the NEAR
 /// wallet sign-in (passkey wallets included), with `github` and `google`
-/// still accepted when named; in staging NEAR AI's Google login, with
-/// `github` accepted when named and the NEAR wallet refused.
+/// still accepted when named; in staging NEAR AI's Google login, the only
+/// one, with GitHub and the NEAR wallet refused.
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     let provider = match req.params.get("provider") {
         None => crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER,
@@ -593,17 +593,16 @@ mod tests {
         assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "near");
     }
 
-    /// Staging signs in through NEAR AI's own login only, Google by default
-    /// (owner, 2026-10-23). The NEAR wallet is not offered.
+    /// Staging signs in through NEAR AI's Google login only (owner,
+    /// 2026-10-23: "Google only for now"). Neither the NEAR wallet nor
+    /// GitHub is offered.
     #[cfg(feature = "near-ai-staging")]
     #[test]
-    fn staging_offers_only_the_near_ai_login_with_google_first() {
-        assert_eq!(
-            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
-            ["google", "github"]
-        );
+    fn staging_offers_only_the_near_ai_google_login() {
+        assert_eq!(crate::channel::NEAR_AI_SIGN_IN_PROVIDERS, ["google"]);
         assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "google");
         assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"near"));
+        assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"github"));
     }
 
     /// Every provider a build offers has a ceremony behind it, and the
@@ -675,24 +674,27 @@ mod tests {
         ceremony::cancel(shared.store.dir(), Some(id)).unwrap();
     }
 
-    /// A staging build refuses the NEAR wallet ceremony even when a caller
-    /// names it, and leaves no attempt behind.
+    /// A staging build refuses the NEAR wallet ceremony and NEAR AI's
+    /// GitHub login even when a caller names them, and leaves no attempt
+    /// behind.
     #[cfg(feature = "near-ai-staging")]
     #[tokio::test]
-    async fn a_staging_start_naming_the_near_wallet_is_refused() {
+    async fn a_staging_start_naming_another_provider_is_refused() {
         let (_directory, store) = crate::config::tests_support::temp_store();
         let shared = DaemonShared::load(store).unwrap();
-        let request = Request {
-            id: 23,
-            method: "near_ai_credential_start".into(),
-            params: serde_json::json!({ "provider": "near" }),
-        };
-        let response = handle_start(&shared, &request).await;
-        assert!(response.result.is_none());
-        let error = response.error.expect("refused");
-        assert_eq!(error.code, ERR_UNAVAILABLE);
-        assert_eq!(error.message, "near_ai_credential_unavailable");
-        assert!(ceremony::attempt_status(shared.store.dir()).is_none());
+        for provider in ["near", "github"] {
+            let request = Request {
+                id: 23,
+                method: "near_ai_credential_start".into(),
+                params: serde_json::json!({ "provider": provider }),
+            };
+            let response = handle_start(&shared, &request).await;
+            assert!(response.result.is_none(), "{provider}");
+            let error = response.error.expect("refused");
+            assert_eq!(error.code, ERR_UNAVAILABLE);
+            assert_eq!(error.message, "near_ai_credential_unavailable");
+            assert!(ceremony::attempt_status(shared.store.dir()).is_none());
+        }
     }
 
     #[test]
@@ -942,7 +944,7 @@ mod tests {
             method: "near_ai_credential_cancel".into(),
             params,
         };
-        let started = ceremony::begin(&shared.store, "github").await.unwrap();
+        let started = ceremony::begin(&shared.store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
 
         let running = handle_cancel(&shared, &request(31, serde_json::json!({})));
