@@ -20,7 +20,9 @@
 //! The rail-wide controls are the operator's alone. They accept only the
 //! deployment's payout control token (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`),
 //! never a tenant token -- a tenant admin's included -- and refuse every
-//! caller while it is unset:
+//! caller while it is unset. Boot refuses a `live` rail without it
+//! (`payout_control_token_unconfigured`), so a live rail can always be
+//! halted; `dry_run` sends nothing and boots without it:
 //!
 //! - `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` set and
 //!   clear that rail's kill switch. Each appends a control row naming the
@@ -153,17 +155,48 @@ pub(crate) fn payout_control_token_hash(token: &str) -> String {
     sha256_prefixed(&format!("payout-control-token-v1:{token}"))
 }
 
-/// Reads [`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`] at boot. Unset is `None`
-/// (the controls refuse every caller); a token shorter than 32 characters
-/// refuses the start rather than guarding the kill switch weakly.
-pub(crate) fn payout_control_token_hash_from_env() -> anyhow::Result<Option<String>> {
-    let Some(token) = optional_trimmed_env(TRACE_COMMONS_PAYOUT_CONTROL_TOKEN)? else {
-        return Ok(None);
-    };
-    if token.len() < PAYOUT_CONTROL_TOKEN_MIN_LEN {
-        anyhow::bail!("payout control refused to start: payout_control_token_too_short");
+/// The label boot refuses (any rail `live`) or logs (a rail in `dry_run`)
+/// when [`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`] is unset.
+const PAYOUT_CONTROL_TOKEN_UNCONFIGURED: &str = "payout_control_token_unconfigured";
+
+/// Reads [`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`] at boot, against the modes
+/// the rails booted in. See [`payout_control_token_hash_for_modes`].
+pub(crate) fn payout_control_token_hash_from_env(
+    rails: &PayoutRails,
+) -> anyhow::Result<Option<String>> {
+    let token = optional_trimmed_env(TRACE_COMMONS_PAYOUT_CONTROL_TOKEN)?;
+    payout_control_token_hash_for_modes(token.as_deref(), rails.entries().map(|entry| entry.mode()))
+}
+
+/// The control token's stored hash, checked against the rails' modes. A
+/// token shorter than 32 characters refuses the start rather than guarding
+/// the kill switch weakly. Unset refuses the start when any rail is `live`
+/// (`payout_control_token_unconfigured`): a live rail must be haltable. A
+/// rail in `dry_run` sends nothing, so it boots without one and logs the
+/// label; `disabled` needs nothing. Unset is `None`, and the controls then
+/// refuse every caller.
+pub(crate) fn payout_control_token_hash_for_modes(
+    token: Option<&str>,
+    modes: impl IntoIterator<Item = trace_commons_server::payout_rate::PayoutMode>,
+) -> anyhow::Result<Option<String>> {
+    use trace_commons_server::payout_rate::PayoutMode;
+    if let Some(token) = token {
+        if token.len() < PAYOUT_CONTROL_TOKEN_MIN_LEN {
+            anyhow::bail!("payout control refused to start: payout_control_token_too_short");
+        }
+        return Ok(Some(payout_control_token_hash(token)));
     }
-    Ok(Some(payout_control_token_hash(&token)))
+    let modes: Vec<PayoutMode> = modes.into_iter().collect();
+    if modes.contains(&PayoutMode::Live) {
+        anyhow::bail!("payout control refused to start: {PAYOUT_CONTROL_TOKEN_UNCONFIGURED}");
+    }
+    if modes.contains(&PayoutMode::DryRun) {
+        tracing::warn!(
+            label = PAYOUT_CONTROL_TOKEN_UNCONFIGURED,
+            "payout rail in dry_run without a control token; halt and resume refuse every caller"
+        );
+    }
+    Ok(None)
 }
 
 /// Equal-length comparison that does not stop at the first differing byte.
@@ -545,5 +578,58 @@ mod tests {
         for bad in ["", "Lost", "lost access", "a-b", &"a".repeat(65)] {
             assert!(!is_reason_label(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_live_rail_needs_the_control_token() {
+        use trace_commons_server::payout_rate::PayoutMode;
+        let token = "t".repeat(32);
+        // Live with no token refuses the start: the kill switch would be
+        // unreachable.
+        let error = payout_control_token_hash_for_modes(None, [PayoutMode::Live])
+            .expect_err("live without a token refuses");
+        assert!(
+            error
+                .to_string()
+                .contains("payout_control_token_unconfigured"),
+            "{error}"
+        );
+        let error = payout_control_token_hash_for_modes(
+            None,
+            [PayoutMode::Disabled, PayoutMode::DryRun, PayoutMode::Live],
+        )
+        .expect_err("any live rail refuses");
+        assert!(
+            error
+                .to_string()
+                .contains("payout_control_token_unconfigured"),
+            "{error}"
+        );
+        // A short token refuses whatever the mode.
+        for mode in [PayoutMode::Disabled, PayoutMode::DryRun, PayoutMode::Live] {
+            let error = payout_control_token_hash_for_modes(Some(&"t".repeat(31)), [mode])
+                .expect_err("short token refuses");
+            assert!(
+                error.to_string().contains("payout_control_token_too_short"),
+                "{error}"
+            );
+        }
+        // Dry run and disabled boot without it; the controls refuse callers.
+        for mode in [PayoutMode::Disabled, PayoutMode::DryRun] {
+            assert_eq!(
+                payout_control_token_hash_for_modes(None, [mode]).expect("boots"),
+                None
+            );
+        }
+        assert_eq!(
+            payout_control_token_hash_for_modes(None, []).expect("no rails boot"),
+            None
+        );
+        // Live with a long enough token boots and stores only its hash.
+        let stored = payout_control_token_hash_for_modes(Some(&token), [PayoutMode::Live])
+            .expect("live with a token boots")
+            .expect("hash stored");
+        assert_eq!(stored, payout_control_token_hash(&token));
+        assert!(!stored.contains(&token));
     }
 }

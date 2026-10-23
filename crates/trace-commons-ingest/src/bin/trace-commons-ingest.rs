@@ -4901,6 +4901,10 @@ impl AppState {
             )
             .await?,
         );
+        // Any live rail needs the operator's control token, or its kill
+        // switch would be unreachable.
+        let payout_control_token_hash =
+            payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
         // A finalized pipeline credit batch wakes every enabled rail.
         if let Some(service) = pipeline_service.as_ref() {
             service.attach_payout_notifier(payout_rails.notifier());
@@ -5094,7 +5098,7 @@ impl AppState {
             credit_settlement_table,
             payout_rails,
             payout_store,
-            payout_control_token_hash: payout_rails::payout_control_token_hash_from_env()?,
+            payout_control_token_hash,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
