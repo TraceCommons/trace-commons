@@ -20,6 +20,9 @@ public enum NudgeSurface {
         /// lead and never a card: it reaches a shell as a notification and
         /// as `status.settlement_estimate`.
         case settlementEstimate = "settlement_estimate"
+        /// NEAR AI credit arrived. Never a lead and never a card: it reaches
+        /// a shell as a notification only.
+        case nearAiCredit = "near_ai_credit"
     }
 
     /// Where a card is drawn: Traces leads with the asks, History with the
@@ -88,6 +91,8 @@ public enum NudgeSurface {
         /// Traces, narrowed to the idle sessions when `idleOnly`.
         case traces(idleOnly: Bool)
         case history
+        /// Private AI, where the NEAR AI balance is.
+        case privateAI
     }
 
     /// The request an action sends.
@@ -137,6 +142,8 @@ public enum NudgeSurface {
         case ("not_now", .idleSessions), ("not_now", .reviewBacklog): .notNow(kind)
         case ("review", .settlementEstimate): .review(kind)
         case ("not_now", .settlementEstimate): .notNow(kind)
+        case ("review", .nearAiCredit): .review(kind)
+        case ("not_now", .nearAiCredit): .notNow(kind)
         case ("see_history", .verdictsLanded): .seeHistory
         default: nil
         }
@@ -206,13 +213,17 @@ public enum NudgeSurface {
             // Looking changes nothing and the daemon has no opened stamp for
             // this kind (`nudge_opened` would refuse it): open Traces only.
             Effect(request: .dismissed, destination: .traces(idleOnly: false))
+        case .review(.nearAiCredit):
+            // The balance, where the credit is. Nothing is sent: the daemon
+            // keeps no opened stamp for this kind.
+            Effect(request: .dismissed, destination: .privateAI)
         case .review(let kind):
             Effect(request: .opened(kind), destination: .traces(idleOnly: kind == .idleSessions))
         case .seeHistory:
             Effect(request: .opened(.verdictsLanded), destination: .history)
-        case .notNow(.settlementEstimate):
-            // A plain dismiss: the daemon refuses to decline this kind and
-            // no cooldown exists for it, so nothing is sent.
+        case .notNow(.settlementEstimate), .notNow(.nearAiCredit):
+            // A plain dismiss: the daemon refuses to decline these kinds and
+            // no cooldown exists for them, so nothing is sent.
             Effect(request: .dismissed, destination: nil)
         case .notNow(let kind):
             Effect(request: .declined(kind), destination: nil)

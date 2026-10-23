@@ -32,6 +32,7 @@
 //! and [`balance`] for the rules the reading itself keeps.
 
 pub mod api;
+pub mod arrivals;
 pub mod balance;
 pub mod ceremony;
 pub mod funding;
@@ -526,7 +527,8 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
 /// malformed value, is an ordinary read, because this route never errors.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
-    Response::ok(req.id, balance::read(shared, fresh).await.to_value())
+    let report = balance::read(shared, fresh).await;
+    Response::ok(req.id, arrivals::balance_value(shared, report))
 }
 
 /// The signed-in account's active organizations, which one Private AI spends

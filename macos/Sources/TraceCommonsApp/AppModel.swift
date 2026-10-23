@@ -1561,6 +1561,10 @@ final class AppModel: ObservableObject {
             refreshManagedSessions()
             refreshQueue()
             refreshStatus()
+        case .nearAiBalanceChanged:
+            // The daemon counted credit arriving: the balance it reads next
+            // is the one the Balance tile marks.
+            refreshNearAiBalance()
         case .unknown(let name):
             if name == "managed_changed" { refreshManagedSessions() }
         }

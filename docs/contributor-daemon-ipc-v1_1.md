@@ -678,7 +678,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
-| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at`, `change_24h_nanos`, `change_24h_text`, `received_total_nanos` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
 | `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
@@ -6598,6 +6598,32 @@ shape rather than a bare number:
   seconds instead of a minute. A payment lands through the service's own
   webhook, which nothing here hears about, so this is what lets a client's
   next read show it. Forgetting the account ends the window.
+
+Three additive keys sit beside the figures, `null` in every state but
+`known` and `null` whenever there is nothing to say:
+
+- **`change_24h_nanos`**: what is left now minus what was left about a day
+  ago (the newest sample between 24 and 30 hours old), signed. It goes up
+  when credit arrives and down when Private AI spends. `null` with no sample
+  from about a day ago, or when `remaining_nanos` is `null` -- never `0` for
+  "not known".
+- **`change_24h_text`**: the same change as the core's finished line, e.g.
+  `+$3.20 in the last 24 hours`, floored like every amount here. `null` for
+  no change or a change under a cent, which a client does not say.
+- **`received_total_nanos`**: all NEAR AI credit counted as arriving in the
+  spending organization, from its incoming credit-transfer ledger
+  (`GET /v1/organizations/{org}/credit/transfers?direction=incoming`, an
+  owner-session read), each transfer once by id. `null` until one whole read
+  of the ledger has finished, including for a member who is not an owner of
+  the organization. A client that sees it rise since it last drew the
+  balance animates the arrival.
+
+The daemon reads the ledger and a balance sample every 30 minutes while a
+NEAR AI sign-in with a spending organization is kept, and publishes
+`near_ai_balance_changed` when it counts new credit. What it keeps
+(`near-ai-credit-arrivals.json`: the organization id, 48 hours of samples,
+the totals, recent transfer ids and times) is forgotten with the sign-in and
+reset when Private AI moves to another organization.
 - **`"fresh": true` skips that minute.** It is what a refresh button sends:
   the daemon asks the service again unless its figure is under five seconds
   old, so a double click is still one call. Any other value is an ordinary
@@ -7862,6 +7888,7 @@ relaxation of origin/CORS/CSP controls.
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
 | `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
+| `near_ai_balance_changed` | additive: the daemon's credit poll counted NEAR AI credit that arrived in the organization Private AI spends from (see "`near_ai_balance`"). A client showing the balance reads it again | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's

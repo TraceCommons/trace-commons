@@ -650,6 +650,11 @@ pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
 /// `daemon::settlement_estimate`.
 pub const EVENT_SETTLEMENT_ESTIMATE_CHANGED: &str = "settlement_estimate_changed";
 
+/// NEAR AI credit arrived in the organization Private AI spends from: a
+/// shell showing the balance reads it again. `{}`. See
+/// `daemon::nearai_credential::arrivals`.
+pub const EVENT_NEAR_AI_BALANCE_CHANGED: &str = "near_ai_balance_changed";
+
 /// A standalone re-engagement notification (nudge design section 5, "Knowing
 /// a standalone will render"). Opt-in: written only to a connection whose
 /// `subscribe` named it in `accepts`, so an older shell, which sends no
@@ -3740,7 +3745,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                     "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
-                    EVENT_SETTLEMENT_ESTIMATE_CHANGED,
+                    EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),

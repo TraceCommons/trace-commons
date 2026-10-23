@@ -1526,9 +1526,12 @@ struct HomeAccountTiles: View {
                              systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
-                    HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
-                                 systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
-                                 action: openPrivateAI)
+                    BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
+                        HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
+                                     detail: balance.detail, detailInk: balance.detailInk,
+                                     systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
+                                     action: openPrivateAI)
+                    }
                 } else {
                     Color.clear
                 }
@@ -1631,17 +1634,32 @@ enum HomeFormat {
     /// Signed out, the core's short "Sign in required" sits beside the dash
     /// (`beside`); every other sentence is longer, some carry a recovery,
     /// and they go under it (`detail`). Never a figure the core did not give.
+    ///
+    /// With a figure, the core's line for the change over the last 24 hours
+    /// goes under it (owner, 2026-10-23), up in the status green and down in
+    /// the status red as the Credit tile's change is drawn; with no reading
+    /// from a day ago there is no line, never "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
-    ) -> (value: String, beside: String?, detail: String?) {
+    ) -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
         if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) {
-            return status.state == signedOutBalance ? ("—", sentence, nil) : ("—", nil, sentence)
+            return status.state == signedOutBalance ? ("—", sentence, nil, nil) : ("—", nil, sentence, nil)
         }
-        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil) }
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil, nil) }
         switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
-        case .figure(let amount): return (amount, nil, nil)
-        case .sentence(let sentence): return ("—", nil, sentence)
+        case .figure(let amount):
+            let change = balanceChange(status)
+            return (amount, nil, change?.text, change?.ink)
+        case .sentence(let sentence): return ("—", nil, sentence, nil)
         }
+    }
+
+    /// The Balance tile's 24-hour change: the core's words, inked by the
+    /// sign of the core's figure. Nil without both, or for no change.
+    static func balanceChange(_ status: BalanceStatus) -> (text: String, ink: GlassRGBA)? {
+        guard let text = status.change24hText, !text.isEmpty, let nanos = status.change24hNanos, nanos != 0
+        else { return nil }
+        return (text, nanos > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
     }
 
     /// The daemon's balance label with no NEAR AI sign-in kept here.
