@@ -47,6 +47,12 @@ extension DaemonClient {
         )
     }
 
+    /// `first_run_estimate`: the commons' dollar estimate per accepted
+    /// trace, or no range. Always answers once the daemon runs.
+    func firstRunEstimate() throws -> DaemonData.FirstRunEstimate {
+        try call("first_run_estimate", as: DaemonData.FirstRunEstimate.self)
+    }
+
     /// `invite_lookup`: the issuer and pay range an invite names. The whole
     /// invite goes as `code`; the daemon parses it.
     func inviteLookup(_ invite: String) throws -> DaemonData.InviteLookup {

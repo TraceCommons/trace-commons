@@ -2085,6 +2085,16 @@ char*       tc_onboarding_copy(void);
  */
 char*       tc_first_run_copy_json(void);
 
+/* The first run's Traces estimate, one line, worded and formatted by the
+ * core (first_run_copy::traces_estimate_line). `request` is a JSON object:
+ * {"traces": <found>, "usd_micros_per_accepted_trace": {min,max},
+ * "credit_range": <an invite lookup's>}, each optional. A dollar total when
+ * the commons published a range, else points. Returns an OWNED string; free
+ * with tc_string_free. NULL draws no line: nothing found or counted yet, a
+ * total past range, or a NULL or unreadable request.
+ */
+char*       tc_first_run_estimate_line(const char* request);
+
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
  *

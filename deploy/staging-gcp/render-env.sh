@@ -53,6 +53,12 @@ set +x
 #                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID, _SENDER_ORG, _SOURCE
 #                       and _ACCOUNT_CEILING_NANO, and read the secret
 #                       tc-staging-nearai-reseller-key.
+#   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
+#                       optional, both or neither: the first run's estimated
+#                       NEAR AI credit per accepted trace, in micro-dollars,
+#                       written as TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_*.
+#                       Unset, the app words its first run in points. The
+#                       values are the operator's and are never committed.
 #   TC_RENDER_OUT_DIR   default /etc/tracecommons.
 #   TC_SITE_ROOT        default /var/lib/tracecommons-site.
 #   TC_DEPLOY_DIR       default ~/deploy of the user who ran sudo.
@@ -244,6 +250,16 @@ if [ -n "$pins" ]; then
   [[ "$pins" =~ ^[a-z0-9=,]+$ ]] \
     || refuse "$pins_from is not in the field=<hex>,... form"
   extra+="TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=$pins"$'\n'
+fi
+first_run_min="${TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN:-}"
+first_run_max="${TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX:-}"
+if [ -n "$first_run_min" ] || [ -n "$first_run_max" ]; then
+  # Shape only; the ingest checks the range itself and refuses to boot on a
+  # bad one.
+  [[ "$first_run_min" =~ ^[0-9]+$ && "$first_run_max" =~ ^[0-9]+$ ]] \
+    || refuse "TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN and _MAX must both be set, in digits"
+  extra+="TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=$first_run_min"$'\n'
+  extra+="TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=$first_run_max"$'\n'
 fi
 case "$TC_NEAR_AI_PAYOUT_MODE" in
   disabled) ;;

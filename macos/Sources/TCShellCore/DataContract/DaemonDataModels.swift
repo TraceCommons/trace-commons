@@ -1942,6 +1942,24 @@ extension DaemonData {
         }
     }
 
+    /// Mirrors protocol `first_run_estimate::FirstRunEstimate`: the
+    /// daemon's `first_run_estimate` answer, the commons' dollar estimate
+    /// per accepted trace for the first run's Traces step. No range when the
+    /// commons publishes none; the first run then words its estimate in
+    /// points. Passed back to the core to word, never formatted here.
+    public struct FirstRunEstimate: Codable, Equatable, Sendable {
+        public let usdMicrosPerAcceptedTrace: UsdMicrosRange?
+
+        public struct UsdMicrosRange: Codable, Equatable, Sendable {
+            public let min: UInt64
+            public let max: UInt64
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case usdMicrosPerAcceptedTrace = "usd_micros_per_accepted_trace"
+        }
+    }
+
     /// Mirrors protocol `InviteLookupResponse`.
     public struct InviteLookup: Codable, Equatable, Sendable {
         public let valid: Bool
@@ -2104,7 +2122,7 @@ extension DaemonData {
     }
 
     /// Mirrors `trace_commons_protocol::invite_lookup::CreditRange`: an
-    /// invite operator's estimated credit per accepted trace, not yet settled.
+    /// invite operator's estimated credit per accepted trace.
     public struct CreditRange: Codable, Equatable, Sendable {
         public let min: Int
         public let max: Int

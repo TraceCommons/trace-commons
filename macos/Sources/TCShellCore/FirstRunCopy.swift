@@ -210,12 +210,12 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
         public let onThisMac: String
-        /// `{min}`, `{max}`; then `{min}`.
-        public let points: String
-        public let pointsOne: String
-        /// `{min}`, `{max}`; then `{min}`.
-        public let rate: String
-        public let rateOne: String
+        /// The one estimate line's words. The core fills them
+        /// (`tc_first_run_estimate_line`); a screen shows its answer.
+        public let estimatePoints: String
+        public let estimatePointsOne: String
+        public let estimateUsd: String
+        public let estimateUsdOne: String
         /// The owner's estimate before an invite gives a range, in points
         /// per accepted trace.
         public let estimate: Estimate

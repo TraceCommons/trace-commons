@@ -26,6 +26,19 @@
 //! `commons_*` so a caller preserves provenance rather than converting points
 //! into a near.ai dollar balance. See `daemon::commons_credit` for the IPC half.
 //!
+//! # The one exception: the first run's labelled dollar estimate
+//!
+//! The rule that the app never shows a dollar figure it cannot verify holds
+//! for every figure this module relays, and everywhere else, with one
+//! narrow exception (owner, 2026-10-23): the first run's Traces step may
+//! show "an estimated $X–$Y in NEAR AI credit" for the traces it found,
+//! from the range per accepted trace the commons publishes at
+//! `GET /v1/public/first-run-estimate`
+//! (`crate::first_run_copy::traces_estimate_line`). It is the operator's
+//! published estimate, worded as one, shown on no other screen, and never
+//! read as a balance, an earning or a settled amount. Nothing here relays
+//! it, and nothing here may.
+//!
 //! Never logs or returns a path, a token, or trace content: errors here are
 //! a bare "did this work" (only an exactly-200 response counts), matching
 //! every other boundary in this crate.

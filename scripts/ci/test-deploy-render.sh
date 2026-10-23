@@ -403,6 +403,8 @@ else
   cat "$scratch/render.err" >&2
 fi
 ingest="$out/ingest.env"
+ingest_default="$scratch/ingest-default.env"
+[ -f "$ingest" ] && cp "$ingest" "$ingest_default"
 issuer="$out/issuer.env"
 
 value_of() {
@@ -676,6 +678,46 @@ elif ! refused payout; then
 else
   pass "render-env.sh refuses payout dry_run without its settings"
 fi
+
+# The first run's dollar estimate: unset by default, so the ingest serves no
+# range and the app words its first run in points. Both settings pass
+# through as given; one without the other, or anything but digits, refuses.
+# Synthetic values: not a rate anyone runs with.
+first_run_keys='^TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_(MIN|MAX)='
+if grep -Eq "$first_run_keys" "$ingest_default"; then
+  fail "the default staging render sets the first-run dollar estimate"
+else
+  pass "the default staging render leaves the first-run dollar estimate unset"
+fi
+if render_pilot "$repo/deploy/pilot-gcp/ingest.env.template" | grep -Eq "$first_run_keys"; then
+  fail "the pilot render sets the first-run dollar estimate"
+else
+  pass "the pilot render leaves the first-run dollar estimate unset"
+fi
+if run_render firstrun TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=120000 TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=340000; then
+  expect "$out/ingest.env" TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN 120000
+  expect "$out/ingest.env" TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX 340000
+else
+  fail "render-env.sh failed with a first-run dollar estimate"
+  cat "$scratch/firstrun.err" >&2
+fi
+first_run_refused() {
+  # $1: case name; the rest: NAME=value assignments.
+  local name="$1"
+  shift
+  if run_render "firstrun-$name" "$@"; then
+    fail "render-env.sh accepted a first-run dollar estimate ($name)"
+  elif ! refused "firstrun-$name"; then
+    fail "render-env.sh failed on a first-run dollar estimate ($name) without refusing"
+  else
+    pass "render-env.sh refuses a first-run dollar estimate ($name)"
+  fi
+}
+first_run_refused min-only TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=120000
+first_run_refused max-only TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=340000
+first_run_refused not-digits TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=0.12 TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=340000
+first_run_refused newline TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=120000$'\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' \
+  TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=340000
 
 # Secrets that go into a KEY=value line or a URL have their shape checked
 # by name: a password that would break the database URL, a key that is not

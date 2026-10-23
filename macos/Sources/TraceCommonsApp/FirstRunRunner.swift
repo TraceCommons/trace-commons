@@ -34,6 +34,9 @@ protocol FirstRunDaemon: AnyObject {
     func startDaemon(settingsJSON: String) async -> Bool
     func setSourceSettings(settingsJSON: String) async -> Bool
     func lookupInvite(_ invite: String) async -> FirstRunLookup
+    /// `first_run_estimate`: the commons' dollar estimate per accepted
+    /// trace for Traces. Nil when it could not be asked.
+    func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
     /// The near.ai login: true once the daemon keeps a near.ai session,
@@ -65,6 +68,11 @@ protocol FirstRunDaemon: AnyObject {
     /// the first-run host, with its runner, leaves the screen at the next
     /// render; whoever is told must outlive it.
     func firstRunFinished(notice: String?)
+}
+
+extension FirstRunDaemon {
+    /// A daemon that cannot say: Traces words its estimate in points.
+    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? { nil }
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -111,6 +119,10 @@ final class FirstRunRunner: ObservableObject {
     @Published var failure: FirstRunFailure?
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
+    /// The commons' dollar estimate for Traces, once the started daemon
+    /// answered `first_run_estimate`; nil before, and Traces words points.
+    @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
+    private var dollarEstimateAsked = false
     @Published private(set) var isCommitting = false
     /// The near.ai login without an invite is running, which can wait on
     /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
@@ -210,6 +222,15 @@ final class FirstRunRunner: ObservableObject {
         if point == .leaveTools {
             state = FirstRunNavigation.next(state)
         }
+    }
+
+    /// Ask the running daemon for the commons' dollar estimate, once per
+    /// first run: Traces calls this as it opens. Nothing before the daemon
+    /// starts; an unanswered ask is not repeated, and Traces stays on points.
+    func loadDollarEstimate() async {
+        guard state.daemonStarted, !dollarEstimateAsked else { return }
+        dollarEstimateAsked = true
+        dollarEstimate = await daemon.firstRunEstimate()
     }
 
     /// The commits that send the session roots, and so need a declaration.

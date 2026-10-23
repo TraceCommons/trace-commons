@@ -4,10 +4,11 @@ import TCDesign
 import TCShellCore
 
 /// What Traces shows, apart from the view so it can be tested: the watched
-/// tools' traces counted, and what they could earn, an estimate in the core's
-/// words. The per-trace range is an invite's lookup's when it has one, and
-/// the core's default estimate before (owner, 2026-10-22: 3 to 8 points),
-/// worded as an estimate either way.
+/// tools' traces counted, and what they could earn, one estimated total in
+/// the core's words (owner, 2026-10-23). The core multiplies and formats it
+/// (`tc_first_run_estimate_line`): dollars of NEAR AI credit when the
+/// commons publishes a range per accepted trace, else points from an
+/// invite's range or the core's default (3 to 8, owner, 2026-10-22).
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {
@@ -26,30 +27,30 @@ enum TracesScreenLayout {
         rows.reduce(0) { $0 + $1.traces }
     }
 
-    /// The range per accepted trace: the invite's, in the one unit the
-    /// daemon accepts, or the core's estimate without one.
-    static func range(lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> (min: Int, max: Int) {
-        if let range = lookup?.creditRange, range.unit == JoinScreenLayout.pointsPerAcceptedTrace {
-            return (max(0, range.min), max(0, range.max))
+    /// The traces found, the count the ring shows; nil until discovery has
+    /// answered.
+    static func found(_ state: FirstRunState, discovered: [SourceCandidate]?) -> UInt64? {
+        guard let discovered else { return nil }
+        return total(rows(state, discovered: discovered))
+    }
+
+    /// The one estimate line, as the core words it, or nil for none
+    /// (nothing found or counted yet). The core picks dollars or points.
+    static func estimate(
+        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?
+    ) -> String? {
+        guard let found, found > 0 else { return nil }
+        var request: [String: Any] = ["traces": found]
+        if let range = dollars?.usdMicrosPerAcceptedTrace {
+            request["usd_micros_per_accepted_trace"] = ["min": range.min, "max": range.max]
         }
-        return (copy.estimate.min, copy.estimate.max)
-    }
-
-    /// The headline estimate: the count times the range.
-    static func points(total: UInt64, lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> String {
-        let range = range(lookup: lookup, copy: copy)
-        let low = (total * UInt64(range.min)).formatted()
-        let high = (total * UInt64(range.max)).formatted()
-        if range.min == range.max { return FirstRunCopy.fill(copy.pointsOne, ["min": low]) }
-        return FirstRunCopy.fill(copy.points, ["min": low, "max": high])
-    }
-
-    /// The line under it, which marks the figure as an estimate: the range
-    /// per trace, not yet settled.
-    static func rate(lookup: DaemonData.InviteLookup?, copy: FirstRunCopy.Traces) -> String {
-        let range = range(lookup: lookup, copy: copy)
-        if range.min == range.max { return FirstRunCopy.fill(copy.rateOne, ["min": "\(range.min)"]) }
-        return FirstRunCopy.fill(copy.rate, ["min": "\(range.min)", "max": "\(range.max)"])
+        if let range = lookup?.creditRange {
+            request["credit_range"] = ["min": range.min, "max": range.max, "unit": range.unit]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: request),
+            let json = String(data: data, encoding: .utf8)
+        else { return nil }
+        return TCCoreCopy.firstRunEstimateLine(requestJSON: json)
     }
 
     /// The count rises after the orbs start, over 1.9s.
@@ -108,11 +109,12 @@ struct TracesScreen: View {
         } title: {
             FirstRunTitle(light: copy.traces.titleLight, bold: copy.traces.titleBold)
         } content: {
-            estimate(total: total)
+            estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
         }
         .onAppear {
             openedAt = memory.tracesCounted ? .distantPast : Date()
         }
+        .task { await runner.loadDollarEstimate() }
     }
 
     private func graphic(rows: [TracesScreenLayout.Row], total: UInt64) -> some View {
@@ -213,21 +215,20 @@ struct TracesScreen: View {
         .accessibilityHidden(true)
     }
 
-    private func estimate(total: UInt64) -> some View {
+    /// The one estimated total, or nothing at all when there is none.
+    @ViewBuilder
+    private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
-        return VStack(spacing: GlassTokens.Space.s1) {
-            Text(TracesScreenLayout.points(total: total, lookup: runner.lookup, copy: copy.traces))
+        if let line = TracesScreenLayout.estimate(found: found, lookup: runner.lookup, dollars: runner.dollarEstimate) {
+            Text(line)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)
-            Text(TracesScreenLayout.rate(lookup: runner.lookup, copy: copy.traces))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
+                .fixedSize()
+                .opacity(done ? 1 : 0)
+                .offset(y: done ? 0 : 8)
+                .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
         }
-        .multilineTextAlignment(.center)
-        .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
-        .fixedSize()
-        .opacity(done ? 1 : 0)
-        .offset(y: done ? 0 : 8)
-        .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
     }
 }

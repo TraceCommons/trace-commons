@@ -5561,6 +5561,36 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
     })
 }
 
+/// The first run's Traces estimate, one line
+/// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
+/// `traces` (the traces found), the daemon's `first_run_estimate` range
+/// `usd_micros_per_accepted_trace`, and an invite lookup's `credit_range`,
+/// each optional. The core does the arithmetic and the formatting, so the
+/// shell shows the string as it is.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL draws no
+/// line: nothing found or counted yet, a total past range, a NULL or
+/// unreadable request, or a caught panic.
+///
+/// # Safety
+/// `request`, if non-null, must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_first_run_estimate_line(request: *const c_char) -> *mut c_char {
+    let outcome = guard(|| {
+        if request.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(raw) = (unsafe { borrow_str(request) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::first_run_copy::traces_estimate_line_json(raw) {
+            Some(line) => Ok(to_owned_cstring(&line)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    });
+    outcome.unwrap_or(std::ptr::null_mut())
+}
+
 // ---------------------------------------------------------------------------
 // K3 (#1173): the copy commands that reached only Tauri. Each export below
 // is the C ABI route to a sentence, or a table of them, the contributor core

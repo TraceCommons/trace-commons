@@ -56,6 +56,12 @@
 //!   `frame.step_private_ai` for the two new steps; the Uses graphic's three
 //!   labels and `automatic_after_sign_in`; and the Private AI screen's title
 //!   and tool count. Sign-in moves last, so Join's words are unchanged.
+//! - Traces words one estimate for the traces found, never a per-trace rate
+//!   (owner, 2026-10-23): `traces.estimate_points` from points, or, when the
+//!   commons publishes a dollar range per accepted trace
+//!   (`GET /v1/public/first-run-estimate`), `traces.estimate_usd` in
+//!   dollars of NEAR AI credit instead. [`traces_estimate_line`] does the
+//!   arithmetic and the formatting, so a shell only shows the string.
 //! - Join adds `passkey_unavailable` for a Create passkey whose daemon start
 //!   failed, so the sheets could not open over Join.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
@@ -82,6 +88,11 @@
 //! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
 //! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
 //! `{minutes}`; the shell fills them and adds nothing else.
+
+use trace_commons_protocol::first_run_estimate::{USD_MICROS_PER_CENT, UsdMicrosRange};
+use trace_commons_protocol::invite_lookup::{
+    CREDIT_RANGE_UNIT_POINTS, CreditRange, valid_credit_range,
+};
 
 /// Every placeholder name the table uses, each written `{name}` in a string.
 pub const PLACEHOLDERS: &[&str] = &[
@@ -162,8 +173,12 @@ pub struct JoinCopy {
     /// `{min}`, `{max}`: the invite's range in the one unit the daemon
     /// accepts, `points_per_accepted_trace`. A shell shows `unknown` for any
     /// other unit, never the wire label. Not Ron's words; owner-approved.
+    /// It words the invite's own terms, per accepted trace, not the total
+    /// for the traces found, so it stays per trace; "not yet settled"
+    /// dropped, Approved 2026-10-23.
     pub pay_range_points: &'static str,
-    /// `{min}`: the same, when the range is a single figure.
+    /// `{min}`: the same, when the range is a single figure. Approved
+    /// 2026-10-23.
     pub pay_range_points_one: &'static str,
     pub passkey_eyebrow: &'static str,
     pub passkey_text: &'static str,
@@ -213,28 +228,37 @@ pub struct WelcomeCopy {
     pub start: &'static str,
 }
 
-/// Traces: what the watched tools' traces could earn. Every string is
-/// DRAFT, NEEDS APPROVAL.
+/// Traces: what the watched tools' traces could earn. The titles and
+/// `on_this_mac` are DRAFT, NEEDS APPROVAL; the estimate lines are approved
+/// (2026-10-23).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TracesCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
     /// Under the count of the watched tools' traces.
     pub on_this_mac: &'static str,
-    /// `{min}`, `{max}`: the count times the invite's range, in the one unit
-    /// the daemon accepts (`points_per_accepted_trace`).
-    pub points: &'static str,
-    /// `{min}`: the same, when the range is a single figure.
-    pub points_one: &'static str,
-    /// `{min}`, `{max}`: the range per trace, an estimate: the invite's, or
-    /// `estimate` before one.
-    pub rate: &'static str,
-    /// `{min}`: the same, when the range is a single figure.
-    pub rate_one: &'static str,
-    /// The estimate Traces shows before an invite's lookup gives a range,
-    /// in points per accepted trace (owner, 2026-10-22: 3 to 8, marked as
-    /// an estimate). An invite's own range replaces it. The owner's figure,
-    /// so the DRAFT note above covers this struct's strings only.
+    /// `{min}`, `{max}`: the traces found times the per-trace range in
+    /// points (the invite's, or `estimate` before one), as one total.
+    /// Approved 2026-10-23 (owner: a total, not a per-trace rate, and no
+    /// "not yet settled"). Filled by [`traces_estimate_line`].
+    pub estimate_points: &'static str,
+    /// `{min}`: the same, when the total is a single figure. Approved
+    /// 2026-10-23.
+    pub estimate_points_one: &'static str,
+    /// `{min}`, `{max}`: the traces found times the server's dollar range
+    /// per accepted trace (`trace_commons_protocol::first_run_estimate`),
+    /// as one total; each figure carries its `$`. Approved 2026-10-23 as
+    /// "an estimated $X–$Y in NEAR AI credit"; capitalized here because the
+    /// line opens the card. Shown in place of `estimate_points`, never
+    /// beside it. Filled by [`traces_estimate_line`].
+    pub estimate_usd: &'static str,
+    /// `{min}`: the same, when the total is a single figure ("an estimated
+    /// $X in NEAR AI credit"). Approved 2026-10-23.
+    pub estimate_usd_one: &'static str,
+    /// The per-trace range Traces multiplies before an invite's lookup
+    /// gives one, in points per accepted trace (owner, 2026-10-22: 3 to 8,
+    /// marked as an estimate). An invite's own range replaces it; a server
+    /// dollar range replaces both. The owner's figure.
     pub estimate: EstimateRange,
 }
 
@@ -537,8 +561,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             invite_joined: "Joined {host} · {pay_range}",
             invite_error: "That is not an invite link. It ends in #code.",
             invite_dead: "This invite link is no longer valid. Ask whoever sent it for a new one.",
-            pay_range_points: "an estimated {min}–{max} points per accepted trace, not yet settled",
-            pay_range_points_one: "an estimated {min} points per accepted trace, not yet settled",
+            pay_range_points: "an estimated {min}–{max} points per accepted trace",
+            pay_range_points_one: "an estimated {min} points per accepted trace",
             passkey_eyebrow: "Sign in with a passkey",
             passkey_text: "Create a passkey that can be connected later.",
             passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
@@ -655,10 +679,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "What your traces ",
             title_bold: "could earn",
             on_this_mac: "traces on this Mac",
-            points: "{min}–{max} points",
-            points_one: "{min} points",
-            rate: "An estimated {min}–{max} points per accepted trace, not yet settled.",
-            rate_one: "An estimated {min} points per accepted trace, not yet settled.",
+            estimate_points: "An estimated {min}–{max} points",
+            estimate_points_one: "An estimated {min} points",
+            estimate_usd: "An estimated {min}–{max} in NEAR AI credit",
+            estimate_usd_one: "An estimated {min} in NEAR AI credit",
             estimate: EstimateRange { min: 3, max: 8 },
         },
         passkey: PasskeyCopy {
@@ -703,6 +727,116 @@ pub fn first_run_copy() -> FirstRunCopy {
     }
 }
 
+/// One dollar figure from whole micro-dollars: "$0.40", "$1", "$1.50",
+/// "$1,234.56". Whole dollars drop the cents; anything else shows two places.
+/// A sub-cent remainder is cut, never rounded up, though none reaches here:
+/// the server's range is whole cents (`UsdMicrosRange::is_valid`), and so is
+/// any whole multiple of it.
+#[must_use]
+pub fn usd_figure(usd_micros: u64) -> String {
+    let dollars = group(usd_micros / 1_000_000);
+    let cents = (usd_micros % 1_000_000) / USD_MICROS_PER_CENT;
+    if cents == 0 {
+        format!("${dollars}")
+    } else {
+        format!("${dollars}.{cents:02}")
+    }
+}
+
+/// An integer with a comma between each group of three digits.
+#[must_use]
+pub fn group(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn fill_range(range: &str, one: &str, min: String, max: String) -> String {
+    if min == max {
+        one.replace("{min}", &min)
+    } else {
+        range.replace("{min}", &min).replace("{max}", &max)
+    }
+}
+
+/// Traces' one estimate line: the traces found times a per-trace range, as
+/// a total. `None` draws no line: nothing found yet (`traces` unknown or 0),
+/// or a total past `u64`.
+///
+/// A server dollar range (`usd`, from `GET /v1/public/first-run-estimate`)
+/// that this build would show words the total in dollars of NEAR AI credit,
+/// whatever an invite says. Without one, points as before: the invite's
+/// range when it is in `points_per_accepted_trace` and one the daemon
+/// accepts, else the owner's default ([`TracesCopy::estimate`]). Never both.
+///
+/// The dollar line is the one narrow exception to "the app never shows a
+/// dollar figure it cannot verify" (`crate::commons_credit`): it is
+/// labelled an estimate, shown only on the first run, from the operator's
+/// published configuration, and is never a balance.
+#[must_use]
+pub fn traces_estimate_line(
+    copy: &TracesCopy,
+    traces: Option<u64>,
+    usd: Option<UsdMicrosRange>,
+    points: Option<CreditRange>,
+) -> Option<String> {
+    let traces = traces.filter(|n| *n > 0)?;
+    if let Some(usd) = usd.filter(UsdMicrosRange::is_valid) {
+        let min = traces.checked_mul(usd.min)?;
+        let max = traces.checked_mul(usd.max)?;
+        return Some(fill_range(
+            copy.estimate_usd,
+            copy.estimate_usd_one,
+            usd_figure(min),
+            usd_figure(max),
+        ));
+    }
+    let (per_min, per_max) = points
+        .filter(|r| r.unit == CREDIT_RANGE_UNIT_POINTS && valid_credit_range(r.min, r.max))
+        .and_then(|r| Some((u64::try_from(r.min).ok()?, u64::try_from(r.max).ok()?)))
+        .unwrap_or((u64::from(copy.estimate.min), u64::from(copy.estimate.max)));
+    let min = traces.checked_mul(per_min)?;
+    let max = traces.checked_mul(per_max)?;
+    Some(fill_range(
+        copy.estimate_points,
+        copy.estimate_points_one,
+        group(min),
+        group(max),
+    ))
+}
+
+/// What a shell sends to word Traces' estimate: the traces it found, the
+/// daemon's `first_run_estimate` answer's range, and an invite lookup's
+/// `credit_range`. Every field optional; unknown ones ignored.
+#[derive(Debug, Default, serde::Deserialize)]
+struct EstimateRequest {
+    #[serde(default)]
+    traces: Option<u64>,
+    #[serde(default)]
+    usd_micros_per_accepted_trace: Option<UsdMicrosRange>,
+    #[serde(default)]
+    credit_range: Option<CreditRange>,
+}
+
+/// [`traces_estimate_line`] over a shell's JSON request (`tc_first_run_estimate_line`).
+/// Unreadable JSON is no line.
+#[must_use]
+pub fn traces_estimate_line_json(request: &str) -> Option<String> {
+    let request: EstimateRequest = serde_json::from_str(request).ok()?;
+    traces_estimate_line(
+        &first_run_copy().traces,
+        request.traces,
+        request.usd_micros_per_accepted_trace,
+        request.credit_range,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,12 +849,20 @@ mod tests {
             assert!(!line.contains('_'), "{line}");
             assert!(line.contains("{min}"), "{line}");
             // `InviteLookupResponse`: clients MUST present the range as
-            // estimated credit per accepted trace, not yet settled.
+            // estimated credit per accepted trace. "not yet settled" was
+            // dropped by the owner (2026-10-23).
             assert!(line.contains("estimated"), "{line}");
             assert!(line.contains("per accepted trace"), "{line}");
-            assert!(line.contains("not yet settled"), "{line}");
+            assert!(!line.contains("not yet settled"), "{line}");
         }
-        assert!(join.pay_range_points.contains("{max}"));
+        assert_eq!(
+            join.pay_range_points,
+            "an estimated {min}–{max} points per accepted trace"
+        );
+        assert_eq!(
+            join.pay_range_points_one,
+            "an estimated {min} points per accepted trace"
+        );
     }
 
     #[test]
@@ -1102,16 +1244,33 @@ mod tests {
         ] {
             assert!(!bold.ends_with('.'), "{bold}");
         }
-        for line in [copy.traces.rate, copy.traces.rate_one] {
-            assert!(line.contains("{min}"), "{line}");
-            assert!(line.contains("estimated"), "{line}");
-            assert!(line.contains("per accepted trace"), "{line}");
-            assert!(line.contains("not yet settled"), "{line}");
+        // One total for the traces found, never a per-trace rate, and no
+        // "not yet settled" (owner, 2026-10-23).
+        for line in [
+            copy.traces.estimate_points,
+            copy.traces.estimate_points_one,
+            copy.traces.estimate_usd,
+            copy.traces.estimate_usd_one,
+        ] {
+            assert!(line.starts_with("An estimated {min}"), "{line}");
+            assert!(!line.contains("per accepted trace"), "{line}");
+            assert!(!line.contains("not yet settled"), "{line}");
+            assert!(!line.contains('$'), "the figure carries the sign: {line}");
         }
-        assert!(copy.traces.rate.contains("{max}"));
-        assert!(copy.traces.points.contains("{max}"));
-        // The owner's default before an invite (2026-10-22), worded by the
-        // same estimated, not-yet-settled line as an invite's range.
+        assert_eq!(
+            copy.traces.estimate_points,
+            "An estimated {min}–{max} points"
+        );
+        assert_eq!(copy.traces.estimate_points_one, "An estimated {min} points");
+        assert_eq!(
+            copy.traces.estimate_usd,
+            "An estimated {min}–{max} in NEAR AI credit"
+        );
+        assert_eq!(
+            copy.traces.estimate_usd_one,
+            "An estimated {min} in NEAR AI credit"
+        );
+        // The owner's per-trace default before an invite (2026-10-22).
         assert_eq!(copy.traces.estimate, EstimateRange { min: 3, max: 8 });
         assert!(copy.traces.estimate.min <= copy.traces.estimate.max);
         for line in [copy.private_ai.can_connect, copy.private_ai.can_connect_one] {
@@ -1189,5 +1348,144 @@ mod tests {
         let mut empty = Vec::new();
         empty_leaves(&value, "", &mut empty);
         assert!(empty.is_empty(), "empty first-run strings: {empty:?}");
+    }
+
+    fn usd(min: u64, max: u64) -> Option<UsdMicrosRange> {
+        Some(UsdMicrosRange { min, max })
+    }
+
+    fn points(min: i64, max: i64) -> Option<CreditRange> {
+        Some(CreditRange::points(min, max))
+    }
+
+    #[test]
+    fn dollars_are_whole_dollars_or_two_places_with_grouping() {
+        assert_eq!(usd_figure(400_000), "$0.40");
+        assert_eq!(usd_figure(1_000_000), "$1");
+        assert_eq!(usd_figure(1_500_000), "$1.50");
+        assert_eq!(usd_figure(10_000), "$0.01");
+        assert_eq!(usd_figure(1_234_560_000), "$1,234.56");
+        assert_eq!(usd_figure(1_000_000_000_000), "$1,000,000");
+        // Sub-cent remainders never reach here (the range is whole cents);
+        // were one to, it is cut, never rounded up.
+        assert_eq!(usd_figure(19_999), "$0.01");
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1_000), "1,000");
+        assert_eq!(group(10_920), "10,920");
+    }
+
+    /// The server's range present: one dollar total for the traces found.
+    #[test]
+    fn a_server_range_is_one_dollar_total() {
+        let copy = first_run_copy().traces;
+        assert_eq!(
+            traces_estimate_line(&copy, Some(10), usd(120_000, 340_000), None).as_deref(),
+            Some("An estimated $1.20–$3.40 in NEAR AI credit")
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1), usd(400_000, 1_000_000), None).as_deref(),
+            Some("An estimated $0.40–$1 in NEAR AI credit")
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(3), usd(500_000, 500_000), None).as_deref(),
+            Some("An estimated $1.50 in NEAR AI credit")
+        );
+        // An invite's points never override the server's dollars.
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1365), usd(10_000, 20_000), points(2, 6)).as_deref(),
+            Some("An estimated $13.65–$27.30 in NEAR AI credit")
+        );
+    }
+
+    /// No server range: today's points, as one total, from the invite's
+    /// range or the owner's default.
+    #[test]
+    fn without_a_server_range_the_total_is_points() {
+        let copy = first_run_copy().traces;
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1365), None, None).as_deref(),
+            Some("An estimated 4,095–10,920 points")
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1365), None, points(2, 6)).as_deref(),
+            Some("An estimated 2,730–8,190 points")
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(10), None, points(4, 4)).as_deref(),
+            Some("An estimated 40 points")
+        );
+        // A range in another unit is not points: the default stands.
+        let foreign = CreditRange {
+            min: 1,
+            max: 2,
+            unit: "dollars".into(),
+        };
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1), None, Some(foreign)).as_deref(),
+            Some("An estimated 3–8 points")
+        );
+        // A range the daemon would refuse is not used either.
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1), None, points(-1, 5)).as_deref(),
+            Some("An estimated 3–8 points")
+        );
+        // A server range this build would not show is no range.
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1), usd(10_001, 20_000), None).as_deref(),
+            Some("An estimated 3–8 points")
+        );
+    }
+
+    /// Nothing found, or not counted yet: no line, never "$0" or "0 points".
+    #[test]
+    fn no_traces_is_no_line() {
+        let copy = first_run_copy().traces;
+        for found in [None, Some(0)] {
+            assert_eq!(
+                traces_estimate_line(&copy, found, usd(10_000, 20_000), None),
+                None
+            );
+            assert_eq!(traces_estimate_line(&copy, found, None, None), None);
+        }
+    }
+
+    /// A total past u64 is no line, not a wrapped figure.
+    #[test]
+    fn an_overflowing_total_is_no_line() {
+        let copy = first_run_copy().traces;
+        assert_eq!(
+            traces_estimate_line(&copy, Some(u64::MAX), usd(10_000, 20_000), None),
+            None
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(u64::MAX), None, points(2, 6)),
+            None
+        );
+    }
+
+    /// The shells' wire: a JSON object in, the line or nothing out.
+    #[test]
+    fn the_estimate_request_reads_its_json() {
+        let line = |v: serde_json::Value| traces_estimate_line_json(&v.to_string());
+        assert_eq!(
+            line(serde_json::json!({
+                "traces": 10,
+                "usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000},
+            }))
+            .as_deref(),
+            Some("An estimated $1.20–$3.40 in NEAR AI credit")
+        );
+        assert_eq!(
+            line(serde_json::json!({
+                "traces": 10,
+                "credit_range": {"min": 4, "max": 4, "unit": "points_per_accepted_trace"},
+            }))
+            .as_deref(),
+            Some("An estimated 40 points")
+        );
+        assert_eq!(line(serde_json::json!({"traces": null})), None);
+        assert_eq!(line(serde_json::json!({})), None);
+        assert_eq!(traces_estimate_line_json("not json"), None);
     }
 }
