@@ -1492,6 +1492,12 @@ So `unknown` on a deployed binary points at the build step, not at the host.
   `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` from `0` to the
   configured live value. The gate's scoring award settles like the
   reviewed utility credit types, so a non-zero value is value the next
-  live settlement run batches and pays. Run the settlement as a dry run
-  first: unsettled awards written at a non-zero value before this release
-  are included.
+  live settlement run batches and pays. A delta above `0` refuses to start
+  without two more settings:
+  `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true`, and
+  `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` set to the RFC 3339 time the
+  delta goes live. Only awards written at or after that time settle;
+  awards written before it never do. The production-gate list does not
+  include `enclave_near_ai`, so on that gate every award is withheld as
+  `non_production_gate` until the list changes. Run the settlement as a dry
+  run first.

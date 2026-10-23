@@ -6537,6 +6537,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
         novelty_utility_settle_from: None,
+        scoring_driver_credit_issuer_principal_ref: None,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_unbound_ceiling: Arc::new(
@@ -30660,6 +30661,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
         novelty_utility_settle_from: None,
+        scoring_driver_credit_issuer_principal_ref: None,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_unbound_ceiling: Arc::new(
@@ -72352,11 +72354,14 @@ macro_rules! impl_ingest_test_corpus_store {
             ) -> Result<u64, DatabaseError> {
                 todo!("stub")
             }
+            // The scoring driver mirrors the award it writes (the file
+            // ledger is what these tests read), so a mirror write is accepted
+            // and dropped rather than a stub that panics.
             async fn append_trace_credit_event(
                 &self,
                 _: StorageTraceCreditEventWrite,
             ) -> Result<(), DatabaseError> {
-                todo!("stub")
+                Ok(())
             }
             async fn upsert_trace_utility_attestation(
                 &self,
@@ -72700,12 +72705,14 @@ impl_ingest_test_corpus_store! {
         ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
             Ok(Vec::new())
         }
+        /// The scoring award's credit-mutation audit event looks up no prior
+        /// event by id here: none is held.
         async fn get_trace_audit_event_by_id(
             &self,
             _: &str,
             _: Uuid,
         ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
-            todo!("stub")
+            Ok(None)
         }
 
         async fn upsert_trace_revocation_propagation_item(
@@ -73636,6 +73643,72 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
         (0, 0, 0, 0),
         "second tick must find the backlog already drained: {second:?}"
     );
+}
+
+/// Finding 4 of the #1591 review: the production scoring driver earns the
+/// scoring award through the same path as the gate worker route. A trace the
+/// driver scores (and that allows model training) gets one `NoveltyUtility`
+/// award, written as the gate writes it; a trace whose uses do not allow it
+/// gets none; and the next tick, with nothing left to score, writes none.
+#[tokio::test]
+async fn perplexity_score_driver_tick_earns_the_scoring_award() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 2);
+    let (training, evaluation_only) = {
+        let mut submissions = db.submissions.write().unwrap();
+        let mut ids = submissions.keys().map(|(_, id)| *id).collect::<Vec<_>>();
+        ids.sort();
+        let training = submissions
+            .get_mut(&("tenant-a".to_string(), ids[0]))
+            .expect("seeded submission");
+        training.consent_scopes = vec!["model_training".to_string()];
+        training.allowed_uses = vec!["model_training".to_string()];
+        (ids[0], ids[1])
+    };
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state =
+        test_gate_driver_state(temp.path().to_path_buf(), db_mirror, Some(artifact_store));
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
+
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+    let first = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("first tick succeeds");
+    assert_eq!((first.scored, first.failed), (2, 0), "{first:?}");
+
+    let awards = || {
+        read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit ledger reads")
+            .into_iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            .collect::<Vec<_>>()
+    };
+    let earned = awards();
+    assert_eq!(earned.len(), 1, "one award, for the training trace");
+    assert_eq!(earned[0].submission_id, training);
+    assert_ne!(earned[0].submission_id, evaluation_only);
+    assert_eq!(earned[0].credit_points_delta, 1.0);
+    assert!(is_gate_scoring_award(&earned[0]));
+    assert_eq!(earned[0].actor_role, TokenRole::VectorWorker);
+
+    let second = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("second tick succeeds");
+    assert_eq!(second.scored, 0, "{second:?}");
+    assert_eq!(awards().len(), 1);
 }
 
 /// Test-only gate service whose scoring failure is TRANSIENT: the upstream

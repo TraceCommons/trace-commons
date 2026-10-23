@@ -2093,6 +2093,12 @@ struct AppState {
     /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`): a `NoveltyUtility`
     /// event written before it never settles, and with `None` none does.
     novelty_utility_settle_from: Option<DateTime<Utc>>,
+    /// The principal the scoring driver issues the scoring award as
+    /// (`scoring_driver_credit_issuer`):
+    /// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, the issuer the
+    /// pipeline credits as. `None` falls back to a label no central-issuer
+    /// allowlist can hold.
+    scoring_driver_credit_issuer_principal_ref: Option<String>,
     /// Slice 2 passkeys: the WebAuthn relying party, present only when
     /// `WebauthnConfig` is fully configured. `None` makes the passkey surface
     /// fail closed (its accessor 503s). Wired into ceremony handlers in later
@@ -4198,12 +4204,15 @@ impl AppState {
         ) || pipeline_default_routing_config.is_some();
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
+        // The server's credit issuer: the pipeline's, and the scoring
+        // driver's for the awards it emits.
+        let credit_issuer_principal_ref = parse_pipeline_credit_issuer_principal_ref_from_env()?;
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
         // checks, for a compatibility run's Trace Credit leg, and (Zaki
         // review 1, item 2) `main`'s settlement controls, for the paid leg.
         let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
             central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
-            issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
+            issuer_principal_ref: credit_issuer_principal_ref.clone(),
             require_production_gate: novelty_utility_require_production_gate,
             settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
@@ -5101,6 +5110,7 @@ impl AppState {
             novelty_utility_credit_points_delta,
             novelty_utility_require_production_gate,
             novelty_utility_settle_from,
+            scoring_driver_credit_issuer_principal_ref: credit_issuer_principal_ref,
             account_webauthn,
             account_ceremony_store,
             account_unbound_ceiling,
@@ -60351,7 +60361,57 @@ async fn score_one_submission(
 
     // Branch 3: delegate to the real scorer.
     match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // A scored trace earns its scoring award here, through the same
+            // path as the gate worker route. Only this branch earns:
+            // `Cached` copies a decision scored for a different submission,
+            // and `SkippedDuplicate` never ran the gate. The enumeration
+            // (`list_submissions_needing_gate_decision`) already leaves out a
+            // submission a pipeline run owns, which the route refuses with
+            // `refuse_a_pipeline_submission`.
+            if let GateOutcome::Scored {
+                decision_id,
+                perplexity_passed,
+                novelty_passed,
+                vector_entry_id,
+                gate_policy_version,
+                gate_version_hash,
+                chunks_capped,
+                ..
+            } = &outcome
+            {
+                let issuer = scoring_driver_credit_issuer(state, &item.tenant_id);
+                let award = emit_scoring_award_for_scored_decision(
+                    state,
+                    &issuer,
+                    item.submission_id,
+                    ScoredGateDecision {
+                        decision_id: *decision_id,
+                        perplexity_passed: *perplexity_passed,
+                        novelty_passed: *novelty_passed,
+                        vector_entry_id: *vector_entry_id,
+                        gate_policy_version,
+                        gate_version_hash,
+                        chunks_capped: *chunks_capped,
+                    },
+                )
+                .await;
+                // The trace scored; a failed credit check is the award's, not
+                // the trace's. The decision row already says
+                // `CREDIT_CHECK_ERROR_LABEL`, the attempt counter is left
+                // alone, and the outcome stays `Scored`.
+                if let Err((status, _)) = award {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+                        tenant_hash = %sha256_prefixed(&item.tenant_id),
+                        "Trace Commons scoring driver could not check the scoring award; \
+                         decision recorded, credit withheld"
+                    );
+                }
+            }
+            outcome
+        }
         Err(err) => {
             // `{err:#}` records the full anyhow chain (outer context + inner
             // cause), so a scorer failure surfaces the specific hash-safe label
@@ -60482,21 +60542,129 @@ async fn gate_evaluate_worker_handler(
         }
     };
 
-    // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
-    // credit-ledger event through the same pipeline that the operator-facing
-    // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
-    // overall — the decision row still lands so the operator can audit; we
-    // only annotate `credit_withheld_reason` with a stable label-only string.
+    // Phase A5: if the gate passed, mint the `novelty_utility` scoring award
+    // (`emit_scoring_award_for_scored_decision`, the one path the scoring
+    // driver takes too). ABAC failures do NOT fail gate evaluation overall —
+    // the decision row still lands so the operator can audit; only
+    // `credit_withheld_reason` carries a stable label-only string.
+    let (credit_emitted, credit_withheld_reason) = emit_scoring_award_for_scored_decision(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        ScoredGateDecision {
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version: &gate_policy_version,
+            gate_version_hash: &gate_version_hash,
+            chunks_capped,
+        },
+    )
+    .await?;
+
+    Ok(Json(TraceGateEvaluateWorkerResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        submission_id: body.submission_id,
+        decision_id,
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        credit_emitted,
+        credit_withheld_reason,
+        coverage_explanation: coverage_explanation(
+            ScoreAttestationCoverage::from_decision_columns(
+                Some(chunk_count as i32),
+                Some(total_chunk_count as i32),
+                Some(chunks_capped),
+            ),
+        ),
+    }))
+}
+
+/// The fallback actor of the scoring driver's awards when
+/// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is unset. It is not a
+/// canonical principal ref, so it can never be on the central-issuer
+/// allowlist: with that list set and no issuer configured, every driver
+/// award is withheld as `central_issuer_denied`.
+const SCORING_DRIVER_CREDIT_ACTOR_REF: &str = "trace-commons-perplexity-score-driver";
+
+/// The identity the in-process scoring driver issues the scoring award as.
+/// The gate worker route issues it as its authenticated vector worker; the
+/// driver has no credential, so it issues as the server's credit issuer, the
+/// principal the versioned pipeline issues its credit as
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), with the route's
+/// role (`main`'s readers parse a gate award's actor role). It carries no
+/// scoped uses or consent scopes, as a static worker token does not, so the
+/// tenant policy and the submission's own uses decide.
+fn scoring_driver_credit_issuer(state: &AppState, tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::VectorWorker,
+        principal_ref: state
+            .scoring_driver_credit_issuer_principal_ref
+            .clone()
+            .unwrap_or_else(|| SCORING_DRIVER_CREDIT_ACTOR_REF.to_string()),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// The fields of a `GateOutcome::Scored` that the scoring award reads.
+struct ScoredGateDecision<'a> {
+    decision_id: Uuid,
+    perplexity_passed: bool,
+    novelty_passed: bool,
+    vector_entry_id: Option<Uuid>,
+    gate_policy_version: &'a str,
+    gate_version_hash: &'a str,
+    chunks_capped: bool,
+}
+
+/// The scoring award for one decision `evaluate_and_record_gate` just scored
+/// and recorded: the single path by which a scored trace earns its
+/// `NoveltyUtility` award, for the gate worker route
+/// (`gate_evaluate_worker_handler`) and the scoring driver
+/// (`score_one_submission`) alike. With both floors passed it runs
+/// `attempt_emit_novelty_utility_credit` (production gate, central issuer,
+/// tenant policy, accepted status, allowed uses, one award per submission)
+/// and records a withheld reason on the decision row; with a floor failed it
+/// says why credit is withheld (#444). Returns `(credit_emitted,
+/// credit_withheld_reason)`. On a hard error from the credit checks it
+/// patches the row to `CREDIT_CHECK_ERROR_LABEL` and returns the error.
+async fn emit_scoring_award_for_scored_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    scored: ScoredGateDecision<'_>,
+) -> ApiResult<(bool, Option<String>)> {
     let db = state.db_mirror.as_ref().ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace gate worker requires a configured DB mirror",
         )
     })?;
-    let (credit_emitted, credit_withheld_reason) = if perplexity_passed && novelty_passed {
+    let ScoredGateDecision {
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+        chunks_capped,
+    } = scored;
+    let outcome = if perplexity_passed && novelty_passed {
         let decision = GateDecision {
-            gate_policy_version: gate_policy_version.clone(),
-            gate_version_hash: gate_version_hash.clone(),
+            gate_policy_version: gate_policy_version.to_string(),
+            gate_version_hash: gate_version_hash.to_string(),
             perplexity_micros: 0,
             tail_fraction_micros: 0,
             perplexity_passed,
@@ -60540,13 +60708,8 @@ async fn gate_evaluate_worker_handler(
             vector_index_snapshot_id: None,
             index_cardinality_at_scoring: None,
         };
-        let emit_result = attempt_emit_novelty_utility_credit(
-            state.as_ref(),
-            &tenant,
-            &decision,
-            body.submission_id,
-        )
-        .await;
+        let emit_result =
+            attempt_emit_novelty_utility_credit(state, tenant, &decision, submission_id).await;
         let (emitted, withheld_reason) = match emit_result {
             Ok((emitted, withheld_reason)) => (emitted, withheld_reason),
             Err(err) => {
@@ -60595,29 +60758,10 @@ async fn gate_evaluate_worker_handler(
         // the audit row and to the contributor.
         (false, gate_failure_withheld_reason(Some(chunks_capped)))
     };
-
-    Ok(Json(TraceGateEvaluateWorkerResponse {
-        tenant_id: tenant.tenant_id.clone(),
-        submission_id: body.submission_id,
-        decision_id,
-        gate_policy_version,
-        gate_version_hash,
-        perplexity_passed,
-        novelty_passed,
-        vector_entry_id,
-        credit_emitted,
-        credit_withheld_reason,
-        coverage_explanation: coverage_explanation(
-            ScoreAttestationCoverage::from_decision_columns(
-                Some(chunk_count as i32),
-                Some(total_chunk_count as i32),
-                Some(chunks_capped),
-            ),
-        ),
-    }))
+    Ok(outcome)
 }
 
-/// Phase A5: helper called from `gate_evaluate_worker_handler` when both
+/// Phase A5: helper called from `emit_scoring_award_for_scored_decision` when both
 /// gate floors pass. Routes through the same central-issuer ABAC,
 /// tenant-policy allowed-uses, and idempotent-emit pipeline that
 /// `utility_credit_handler` uses for the operator-facing utility-credit
@@ -60638,7 +60782,9 @@ async fn gate_evaluate_worker_handler(
 /// library has no `AppState` or `TenantAuth`), so it holds its own copy. A
 /// change to the production-gate, central-issuer, tenant-policy or
 /// allowed-use rule here must be made there too, or the two paths credit
-/// differently.
+/// differently. The one-award-per-submission check (7) has no copy there:
+/// a pipeline run's leg is keyed on its run and never settles (Ruling S10),
+/// and the gate route refuses a submission a pipeline run owns.
 async fn attempt_emit_novelty_utility_credit(
     state: &AppState,
     tenant: &TenantAuth,

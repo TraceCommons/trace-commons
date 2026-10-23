@@ -205,8 +205,9 @@ configured, and prints all three assignments in env-file format.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points of the gate's scoring award. Set to `0` during calibration; flip to configured value at cutover. The award is settlement-eligible: a non-zero value settles at the next live settlement run and is paid out, including awards written at a non-zero value before this release. |
-| `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` | R for live | `false` | Refuse to emit novelty-utility credit unless gate is `enclave_local_gpu`. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points of the gate's scoring award. Set to `0` during calibration; flip to configured value at cutover. The award is settlement-eligible: a non-zero value settles at the next live settlement run and is paid out. A value above `0` refuses to start unless `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` is true (`novelty_utility_credit_requires_production_gate`) and `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` is set (`novelty_utility_settle_from_missing`). A submission earns at most one award, whichever gate version scored it, through the gate worker route or the perplexity driver. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` | R for live | `false` | Refuse to emit novelty-utility credit unless the gate is a production gate (`enclave_local_gpu` or `dstack`); any other gate's decision is recorded with `credit_withheld_reason = non_production_gate`. Required when the delta is above `0`. `enclave_near_ai` is not on that list, so on it a paying delta withholds every award. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` | R when delta > 0 | — | RFC 3339 cut-over for the scoring award, for example `2026-11-01T00:00:00Z`. Settlement, the credit risk summary, withdrawal's `credit_retained` and the legacy drain report count a `novelty_utility` event only when it was written at or after this instant; earlier awards (from a test gate, or at a delta nobody meant to pay) never settle. Unset, no scoring award settles. A value that is not RFC 3339 refuses to start (`novelty_utility_settle_from_invalid`). Set it to the time the paying delta goes live. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | R for prod | — | Hard cap per account per settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | R for prod | — | Allowlist of policy versions accepted for settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL` | R for prod | `false` | Require central-issuer approval signature. |
@@ -345,7 +346,7 @@ runbook, including why the floor stays 0.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` | optional | `false` | Toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` | optional | `false` | Toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. A trace the driver scores earns the gate's scoring award as the gate worker route would (cached and skipped-duplicate decisions earn none). The driver issues it as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`; with `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` set and that issuer unset or not listed, every driver award is withheld as `central_issuer_denied`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | optional | `5` | Submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it. Clamped to `[1, 1000]`. |

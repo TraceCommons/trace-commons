@@ -22,6 +22,20 @@ Predecessors:
 > gate mints it. A compatibility pipeline run's `NoveltyUtility` leg is
 > unchanged: the pipeline never batches it, and the legacy settlement
 > leaves it alone.
+>
+> **Review fixes, 2026-10-23.** Because the award now pays: (1) a
+> submission earns at most one award. The event id is keyed on the
+> submission alone, and the emitter skips a submission the ledger already
+> credits under any gate version, so re-scoring under a new
+> `gate_version_hash` does not pay again. (2) A delta above `0` refuses to
+> start unless `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` is
+> true, so a test gate cannot mint payable credit. (3) A delta above `0`
+> also requires `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` (RFC 3339).
+> Settlement, the risk summary, withdrawal and the legacy drain report
+> count an award only at or after it, and none with it unset. (4) The
+> perplexity driver earns the award for the traces it scores through the
+> same path as the worker route (`emit_scoring_award_for_scored_decision`),
+> issuing as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`.
 
 ## Goal
 
