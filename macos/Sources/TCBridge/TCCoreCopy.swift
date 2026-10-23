@@ -166,6 +166,13 @@ public enum TCCoreCopy {
         take(tc_first_run_copy_json())
     }
 
+    /// `tc_first_run_estimate_line`: Traces' one estimate line, worded,
+    /// multiplied and formatted by the core from `requestJSON` (`traces`,
+    /// `usd_micros_per_accepted_trace`, `credit_range`). Nil draws no line.
+    public static func firstRunEstimateLine(requestJSON: String) -> String? {
+        take(requestJSON.withCString { tc_first_run_estimate_line($0) })
+    }
+
     /// `tc_install_guides_json`: each coding tool's setup guide, keyed by
     /// discovery slug. Decoded by `TCShellCore.InstallGuides`.
     public static func installGuidesJSON() -> String? {

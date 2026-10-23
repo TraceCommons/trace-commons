@@ -1713,6 +1713,10 @@ struct AppState {
     /// none is installed; the route then answers 404. No built-in.
     credit_settlement_table:
         Option<Arc<trace_commons_protocol::settlement_estimate::SettlementEstimateTable>>,
+    /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
+    /// serves: from the operator's two settings, validated at boot, or
+    /// empty when neither is set.
+    first_run_estimate: Arc<trace_commons_protocol::first_run_estimate::FirstRunEstimate>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5084,6 +5088,7 @@ impl AppState {
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
             credit_settlement_table,
+            first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8688,6 +8693,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/credit-estimate/table",
             get(credit_estimate::table_handler),
+        )
+        // Same reason: the first run's dollar estimate is public operator
+        // configuration, read before an account exists. `{}` when unset.
+        .route(
+            "/v1/public/first-run-estimate",
+            get(credit_estimate::first_run_estimate_handler),
         )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.

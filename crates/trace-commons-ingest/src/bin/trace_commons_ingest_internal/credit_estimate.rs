@@ -17,6 +17,12 @@
 //! settlement table: with none installed the route answers 404 and clients
 //! draw nothing.
 //!
+//! `GET /v1/public/first-run-estimate` is unauthenticated and outside
+//! tenant context for the same reason. It serves the first run's dollar
+//! estimate per accepted trace, from two operator settings
+//! ([`FIRST_RUN_USD_MIN_ENV`], [`FIRST_RUN_USD_MAX_ENV`]) parsed fail-closed
+//! at boot, or `{}` when neither is set.
+//!
 //! `POST /v1/admin/credit-estimate-eval` returns one label-only row per
 //! labelled decision: the `lef1` features of the stored envelope, the
 //! displayed credit (2 decimals), its calibration version, the withheld
@@ -42,6 +48,7 @@
 use std::path::Path;
 
 use rand::seq::SliceRandom as _;
+use trace_commons_protocol::first_run_estimate::{FirstRunEstimate, UsdMicrosRange};
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
 use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
 use trace_commons_server::credit_estimate_fit::{
@@ -140,6 +147,74 @@ pub(super) async fn settlement_table_handler(
     headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+/// The first run's dollar estimate per accepted trace, in micro-dollars
+/// (`GET /v1/public/first-run-estimate`). Set both or neither. Unset, the
+/// route serves `{}` and clients word the first run in points.
+pub(super) const FIRST_RUN_USD_MIN_ENV: &str = "TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN";
+pub(super) const FIRST_RUN_USD_MAX_ENV: &str = "TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX";
+
+/// Refusal label for a first-run estimate setting that is half set, not
+/// plain digits, or outside [`UsdMicrosRange::is_valid`]. Boot fails with it;
+/// it never carries the value.
+const FIRST_RUN_USD_INVALID: &str = "first_run_usd_estimate_invalid";
+
+pub(super) fn first_run_estimate_from_env() -> anyhow::Result<Arc<FirstRunEstimate>> {
+    let min = std::env::var(FIRST_RUN_USD_MIN_ENV).ok();
+    let max = std::env::var(FIRST_RUN_USD_MAX_ENV).ok();
+    first_run_estimate_from_values(min.as_deref(), max.as_deref()).map(Arc::new)
+}
+
+/// Both unset is no range. Both set must each be plain ASCII digits and
+/// together a range [`UsdMicrosRange::is_valid`] accepts. Anything else,
+/// including one set without the other or an empty value, refuses.
+pub(super) fn first_run_estimate_from_values(
+    min: Option<&str>,
+    max: Option<&str>,
+) -> anyhow::Result<FirstRunEstimate> {
+    let parse = |raw: &str| -> anyhow::Result<u64> {
+        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+            anyhow::bail!(FIRST_RUN_USD_INVALID);
+        }
+        raw.parse::<u64>()
+            .map_err(|_| anyhow::anyhow!(FIRST_RUN_USD_INVALID))
+    };
+    match (min, max) {
+        (None, None) => Ok(FirstRunEstimate::default()),
+        (Some(min), Some(max)) => {
+            let range = UsdMicrosRange {
+                min: parse(min)?,
+                max: parse(max)?,
+            };
+            if !range.is_valid() {
+                anyhow::bail!(FIRST_RUN_USD_INVALID);
+            }
+            Ok(FirstRunEstimate {
+                usd_micros_per_accepted_trace: Some(range),
+            })
+        }
+        _ => anyhow::bail!(FIRST_RUN_USD_INVALID),
+    }
+}
+
+/// Answers `GET /v1/public/first-run-estimate`: unauthenticated, outside
+/// tenant context, public operator configuration. A short cache, so an
+/// operator's change reaches new first runs within minutes.
+pub(super) async fn first_run_estimate_handler(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let mut response = Json(state.first_run_estimate.as_ref().clone()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
     );
     headers.insert(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,

@@ -3794,6 +3794,11 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
+    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? {
+        guard case .success(let estimate) = await firstRunCall({ try $0.firstRunEstimate() }) else { return nil }
+        return estimate
+    }
+
     func lookupInvite(_ invite: String) async -> FirstRunLookup {
         switch await firstRunCall({ try $0.inviteLookup(invite) }) {
         case .success(let lookup) where lookup.valid:

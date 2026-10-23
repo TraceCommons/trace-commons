@@ -6176,6 +6176,39 @@ fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
     assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
 }
 
+/// Traces' estimate line crosses the ABI as the core words it: a dollar
+/// total when the request carries the commons' range, points otherwise, and
+/// NULL for no line (nothing found, unreadable input). Synthetic values.
+#[test]
+fn the_first_run_estimate_line_crosses_the_abi() {
+    use trace_commons_contributor_ffi::tc_first_run_estimate_line;
+    let line = |request: &str| {
+        let request = cstr_str(request);
+        let out = unsafe { tc_first_run_estimate_line(request.as_ptr()) };
+        if out.is_null() {
+            return None;
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        unsafe { tc_string_free(out) };
+        Some(text)
+    };
+    assert_eq!(
+        line(r#"{"traces":10,"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#)
+            .as_deref(),
+        Some("An estimated $1.20–$3.40 in NEAR AI credit")
+    );
+    assert_eq!(
+        line(r#"{"traces":1365}"#).as_deref(),
+        Some("An estimated 4,095–10,920 points")
+    );
+    assert_eq!(line(r#"{"traces":0}"#), None);
+    assert_eq!(line("not json"), None);
+    assert!(unsafe { tc_first_run_estimate_line(std::ptr::null()) }.is_null());
+}
+
 #[test]
 fn the_first_run_copy_crosses_the_abi() {
     use trace_commons_contributor::first_run_copy::first_run_copy;

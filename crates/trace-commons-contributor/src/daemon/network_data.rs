@@ -194,6 +194,50 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
     )
 }
 
+/// `first_run_estimate`: the commons' dollar estimate per accepted trace
+/// for the first run's Traces step (`GET /v1/public/first-run-estimate`),
+/// asked on demand once the first run has started the daemon. It always
+/// answers: the protocol document with the range, or `{}` when the commons
+/// publishes none, cannot be reached, or sends one this build would not
+/// show -- and the first run then words its estimate in points.
+///
+/// The request is anonymous, like the estimate tables'. It goes to the
+/// configured commons, or before any configuration to the channel's account
+/// origin, the commons a first-run sign-in enrolls with (`native_identity`).
+pub(crate) async fn handle_first_run_estimate(shared: &DaemonShared, req: &Request) -> Response {
+    let range = first_run_estimate(shared).await;
+    let doc = trace_commons_protocol::first_run_estimate::FirstRunEstimate {
+        usd_micros_per_accepted_trace: range,
+    };
+    Response::ok(
+        req.id,
+        serde_json::to_value(doc).expect("estimate serializes"),
+    )
+}
+
+async fn first_run_estimate(
+    shared: &DaemonShared,
+) -> Option<trace_commons_protocol::first_run_estimate::UsdMicrosRange> {
+    let (ingest, allowed) = first_run_estimate_target(&shared.store)?;
+    let origin = crate::config::ingest_origin_url(&ingest, "/").ok()?;
+    let client =
+        crate::credit_estimate_table::EstimateTableClient::new(origin.as_str(), allowed.as_deref())
+            .ok()?;
+    client.fetch_first_run_estimate().await.ok().flatten()
+}
+
+/// The configured commons and its host policy, as the estimate table's
+/// fetch asks it; before any configuration, the channel's account origin
+/// under the default policy. `None` when the configuration cannot be read.
+fn first_run_estimate_target(
+    store: &crate::config::ConfigStore,
+) -> Option<(String, Option<String>)> {
+    Some(match store.load_config().ok()? {
+        Some(cfg) => (cfg.ingest_url, cfg.allowed_hosts),
+        None => (crate::channel::NATIVE_ACCOUNT_ORIGIN.to_string(), None),
+    })
+}
+
 fn valid_invite_answer(answer: &InviteLookupResponse) -> bool {
     if answer.valid {
         answer.reason_label.is_none()
@@ -867,5 +911,104 @@ mod tests {
             assert_eq!(response.error.unwrap().message, "invite-lookup-unavailable");
             task.abort();
         }
+    }
+
+    fn configure_origin(s: &DaemonShared, origin: &str) {
+        let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url":"https://issuer.example","ingest_url":origin,"audience":"upload",
+            "tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a",
+            "device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"127.0.0.1"
+        }))
+        .unwrap();
+        s.store.save_config(&cfg).unwrap();
+    }
+
+    async fn first_run_estimate_against(answer: Option<serde_json::Value>) -> serde_json::Value {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let router = match answer {
+            Some(answer) => Router::new().route(
+                trace_commons_protocol::first_run_estimate::FIRST_RUN_ESTIMATE_PATH,
+                get(move |headers: axum::http::HeaderMap| {
+                    let answer = answer.clone();
+                    let calls = observed.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert!(!headers.contains_key("authorization"));
+                        Json(answer)
+                    }
+                }),
+            ),
+            None => Router::new(),
+        };
+        let (port, task) = serve(router).await;
+        let (_dir, s) = shared();
+        configure_origin(&s, &format!("http://127.0.0.1:{port}/v1/traces"));
+        let response = super::super::ipc::handle_request_async(
+            &s,
+            &request("first_run_estimate", serde_json::json!({})),
+        )
+        .await;
+        task.abort();
+        response.result.expect("first_run_estimate always answers")
+    }
+
+    /// The commons' range comes back as the protocol names it; no range,
+    /// an unreachable route or one this build would not show is `{}`, and
+    /// the first run words its estimate in points. Synthetic values.
+    #[tokio::test]
+    async fn first_run_estimate_relays_the_range_or_nothing() {
+        let range =
+            serde_json::json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}});
+        assert_eq!(first_run_estimate_against(Some(range.clone())).await, range);
+        assert_eq!(
+            first_run_estimate_against(Some(serde_json::json!({}))).await,
+            serde_json::json!({})
+        );
+        assert_eq!(
+            first_run_estimate_against(Some(serde_json::json!({
+                "usd_micros_per_accepted_trace": {"min": 0, "max": 340_000}
+            })))
+            .await,
+            serde_json::json!({})
+        );
+        assert_eq!(
+            first_run_estimate_against(None).await,
+            serde_json::json!({})
+        );
+    }
+
+    /// Before enrollment there is no configuration: the first run asks the
+    /// channel's account origin, the commons its sign-in enrolls with.
+    #[test]
+    fn an_unconfigured_first_run_asks_the_channel_commons() {
+        let (_dir, s) = shared();
+        assert_eq!(
+            first_run_estimate_target(&s.store),
+            Some((crate::channel::NATIVE_ACCOUNT_ORIGIN.to_string(), None))
+        );
+        configure_origin(&s, "https://commons.example/v1/traces");
+        assert_eq!(
+            first_run_estimate_target(&s.store),
+            Some((
+                "https://commons.example/v1/traces".to_string(),
+                Some("127.0.0.1".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn first_run_estimate_is_advertised_and_async_only() {
+        assert!(super::super::ipc::METHODS.contains(&"first_run_estimate"));
+        let (_dir, s) = shared();
+        let response = super::super::ipc::handle_request(
+            &s,
+            &request("first_run_estimate", serde_json::json!({})),
+        );
+        assert_eq!(
+            response.error.expect("refused synchronously").message,
+            "first-run-estimate-requires-async"
+        );
     }
 }

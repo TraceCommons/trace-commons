@@ -29,6 +29,14 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
         record(.startDaemon(settingsJSON: settingsJSON))
     }
 
+    /// What `first_run_estimate` answers, and how often it was asked.
+    var estimate: DaemonData.FirstRunEstimate?
+    private(set) var estimateAsks = 0
+    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? {
+        estimateAsks += 1
+        return estimate
+    }
+
     func setSourceSettings(settingsJSON: String) async -> Bool {
         record(.setSourceSettings(settingsJSON: settingsJSON))
     }
@@ -159,6 +167,25 @@ final class FirstRunRunnerTests: XCTestCase {
     /// Create passkey on Join starts the daemon watching nothing and asks for
     /// the sheets there: the step stays on Join, and what the daemon holds is
     /// recorded so Folders sends only what differs.
+    /// Traces asks the started daemon for the commons' dollar estimate
+    /// once, and keeps the answer; before the daemon runs it asks nothing.
+    func test_theCommonsEstimateIsAskedOnceTheDaemonRuns() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.estimate = try JSONDecoder().decode(
+            DaemonData.FirstRunEstimate.self,
+            from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))
+        let runner = FirstRunRunner(state: FirstRunState(step: .traces), daemon: daemon)
+        await runner.loadDollarEstimate()
+        XCTAssertEqual(daemon.estimateAsks, 0, "no daemon, no ask")
+        XCTAssertNil(runner.dollarEstimate)
+
+        runner.state.daemonStarted = true
+        await runner.loadDollarEstimate()
+        await runner.loadDollarEstimate()
+        XCTAssertEqual(daemon.estimateAsks, 1, "asked once")
+        XCTAssertEqual(runner.dollarEstimate, daemon.estimate)
+    }
+
     func test_createPasskeyOnJoinStartsTheDaemonAndOpensTheSheetsOnJoin() async throws {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(step: .join), daemon: daemon)

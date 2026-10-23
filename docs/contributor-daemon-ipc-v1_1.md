@@ -7370,6 +7370,7 @@ error string into `error.message`.
 | `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
 | `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
+| `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; the shell passes the range to `tc_first_run_estimate_line` and shows its answer |
 | Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
 | `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
 
