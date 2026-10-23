@@ -355,6 +355,17 @@ impl PayoutPass {
 
     async fn run_locked(&self, report: &mut PayoutPassReport) -> Step<()> {
         self.check_halt().await?;
+        let tenants = store(
+            self.payouts
+                .tenants_with_live_payout_links(self.rail_id())
+                .await,
+        )?;
+        report.tenants = tenants.len() as u64;
+        // Nothing linked on this rail: no call to the rail at all, so an
+        // idle `live` rail costs one enumeration query per tick.
+        if tenants.is_empty() {
+            return Ok(());
+        }
         let mut budget = None;
         if self.settings.mode == PayoutMode::Live {
             // Capacity once per pass, before any line is written: the
@@ -380,12 +391,6 @@ impl PayoutPass {
                     .map_or(limit, |remaining| remaining.min(limit)),
             });
         }
-        let tenants = store(
-            self.payouts
-                .tenants_with_live_payout_links(self.rail_id())
-                .await,
-        )?;
-        report.tenants = tenants.len() as u64;
         for tenant in tenants {
             self.run_tenant(&tenant, budget.as_mut(), report).await?;
         }
@@ -737,8 +742,51 @@ impl PayoutPass {
             report.skip("payout_recipient_unavailable");
             return Ok(());
         }
-        if let Some(label) = self.standing_hold(tenant, account).await? {
+        let standing = store(self.payouts.payout_account_standing(tenant, account).await)?;
+        if let Some(label) = standing.hold_label() {
             report.skip(label);
+            return Ok(());
+        }
+        let owed = store(
+            self.payouts
+                .payout_owed(tenant, account, self.rail_id())
+                .await,
+        )?;
+        let Some(owed_net) = owed.net() else {
+            return self
+                .hold(tenant, account, "payout_owed_inconsistent", report)
+                .await;
+        };
+        // The lifetime ceiling per account on this rail: everything this
+        // account would have been sent across every link, checked before
+        // any call to the rail. An operator lifts the hold by raising the
+        // setting (spec section 4, "Ceilings"): once owed fits, the next
+        // pass clears the hold, with its audit row, and pays.
+        if owed_net > self.settings.account_ceiling.get() {
+            return self
+                .hold(tenant, account, PAYOUT_OVER_CEILING, report)
+                .await;
+        }
+        if store(
+            self.payouts
+                .clear_payout_hold(
+                    tenant,
+                    account,
+                    self.rail_id(),
+                    PAYOUT_OVER_CEILING,
+                    &self.actor,
+                )
+                .await,
+        )? {
+            report.skip("payout_over_ceiling_cleared");
+        }
+        let rail_holds = store(
+            self.payouts
+                .open_payout_hold_labels(tenant, account, self.rail_id())
+                .await,
+        )?;
+        if !rail_holds.is_empty() {
+            report.skip("payout_account_held");
             return Ok(());
         }
         let Some(recipient) = self.opener.open(link) else {
@@ -762,23 +810,6 @@ impl PayoutPass {
                 .await;
         }
 
-        let owed = store(
-            self.payouts
-                .payout_owed(tenant, account, self.rail_id())
-                .await,
-        )?;
-        let Some(owed_net) = owed.net() else {
-            return self
-                .hold(tenant, account, "payout_owed_inconsistent", report)
-                .await;
-        };
-        // The lifetime ceiling per account on this rail: everything this
-        // account would have been sent across every link.
-        if owed_net > self.settings.account_ceiling.get() {
-            return self
-                .hold(tenant, account, PAYOUT_OVER_CEILING, report)
-                .await;
-        }
         let closed = store(
             self.payouts
                 .payout_closed_links_final_paid(tenant, account, self.rail_id())

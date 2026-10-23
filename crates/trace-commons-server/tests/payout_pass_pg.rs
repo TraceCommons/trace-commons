@@ -1015,13 +1015,107 @@ async fn a_target_over_the_account_ceiling_holds_and_sends_nothing() {
         holds(&fixture, &tenant, accounts[0], "near_ai").await,
         vec!["payout_over_ceiling".to_string()]
     );
-    // Raising the setting does not by itself release the hold.
+    // A second pass under the same ceiling still sends nothing.
+    completed(&pass(&fixture, rail.clone(), &opener, low).run_once().await);
+    assert!(mock.transfers().is_empty());
+    // Spec section 4, "Ceilings": an operator lifts it by raising the
+    // setting. The next pass clears the hold, with its audit row, and pays.
     completed(
         &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
             .run_once()
             .await,
     );
-    assert!(mock.transfers().is_empty());
+    assert!(
+        holds(&fixture, &tenant, accounts[0], "near_ai")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        mock.transfers()
+            .iter()
+            .map(|t| t.amount)
+            .collect::<Vec<_>>(),
+        vec![3_000]
+    );
+    assert!(
+        fixture
+            .runtime
+            .payout_audit_actions(&tenant, &rail_id("near_ai"))
+            .await
+            .unwrap()
+            .contains(&trace_commons_server::db::PayoutAuditAction::HoldCleared)
+    );
+}
+
+#[tokio::test]
+async fn a_live_rail_with_no_linked_tenant_calls_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let keyed = Arc::new(MockKeyedPayoutRail::new());
+    // A rail that answers any call with a stop: the pass must not reach it.
+    keyed.refuse_next(RailRefusal::StopPass("test_should_not_be_called"));
+    let report = pass(
+        &fixture,
+        Arc::new(NoTenantRail(keyed.clone())),
+        &Arc::new(TestOpener::default()),
+        settings(PayoutMode::Live),
+    )
+    .run_once()
+    .await;
+    completed(&report);
+    assert_eq!(report.tenants, 0);
+}
+
+/// The keyed rail under an id no link in the database uses.
+struct NoTenantRail(Arc<MockKeyedPayoutRail>);
+
+static NO_TENANT_DESCRIPTOR: std::sync::OnceLock<RailDescriptor> = std::sync::OnceLock::new();
+
+#[async_trait]
+impl PayoutRail for NoTenantRail {
+    fn descriptor(&self) -> &RailDescriptor {
+        NO_TENANT_DESCRIPTOR.get_or_init(|| RailDescriptor {
+            rail_id: rail_id("test_no_tenant"),
+            ..self.0.descriptor().clone()
+        })
+    }
+    fn adapter_identity(&self) -> &str {
+        self.0.adapter_identity()
+    }
+    fn program_for_link(&self, link_id: Uuid) -> String {
+        self.0.program_for_link(link_id)
+    }
+    async fn preflight(&self) -> Result<RailCapacity, RailRefusal> {
+        self.0.preflight().await
+    }
+    async fn read_total(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<AtomicUnits, RailRefusal> {
+        self.0.read_total(recipient, program).await
+    }
+    async fn send(&self, line: &RailLine<'_>) -> Result<SendOutcome, RailRefusal> {
+        self.0.send(line).await
+    }
+    async fn find_receipt(
+        &self,
+        line: &RailLine<'_>,
+        exclude: &[String],
+    ) -> Result<ReceiptLookup, RailRefusal> {
+        self.0.find_receipt(line, exclude).await
+    }
+    async fn history(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<Vec<RailHistoryEntry>, RailRefusal> {
+        self.0.history(recipient, program).await
+    }
+    async fn probe_recipient(&self, recipient: &RecipientRef) -> Result<(), RailRefusal> {
+        self.0.probe_recipient(recipient).await
+    }
 }
 
 #[tokio::test]
