@@ -51,8 +51,10 @@ set +x
 #   TC_NEAR_AI_PAYOUT_MODE
 #                       default disabled. dry_run or live also require
 #                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID, _SENDER_ORG, _SOURCE
-#                       and _ACCOUNT_CEILING_NANO, and read the secret
-#                       tc-staging-nearai-reseller-key.
+#                       (payment, grant or staking_farm; no default) and
+#                       _ACCOUNT_CEILING_NANO, and read the secret
+#                       tc-staging-nearai-reseller-key, which must be an org
+#                       credential: oc_ and 64 hex characters.
 #   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
 #                       optional, both or neither: the first run's estimated
 #                       NEAR AI credit per accepted trace, in micro-dollars,
@@ -268,10 +270,18 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
       var="TC_NEAR_AI_PAYOUT_$setting"
       [[ "${!var:-}" =~ ^[A-Za-z0-9_-]+$ ]] || refuse "$var is not set (payout $TC_NEAR_AI_PAYOUT_MODE)"
     done
+    # The credit type the sender org sends from. No default: staging's org
+    # holds paid credit (`payment`), and the right one is the operator's call.
+    case "$TC_NEAR_AI_PAYOUT_SOURCE" in
+      payment | grant | staking_farm) ;;
+      *) refuse "TC_NEAR_AI_PAYOUT_SOURCE must be payment, grant or staking_farm" ;;
+    esac
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=$TC_NEAR_AI_PAYOUT_MODE"$'\n'
     reseller_key="$(secret tc-staging-nearai-reseller-key)"
+    # An org credential, as cloud-api issues it and the ingest parses it:
+    # `oc_` and 64 hex. An API key (`sk-...`) is the wrong credential.
     shaped tc-staging-nearai-reseller-key "$reseller_key" \
-      '^[A-Za-z0-9._~+/=:-]+$' "one token of letters, digits and ._~+/=:-"
+      '^oc_[0-9A-Fa-f]{64}$' "an org credential (oc_ and 64 hex characters)"
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL=$reseller_key"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID=$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG=$TC_NEAR_AI_PAYOUT_SENDER_ORG"$'\n'

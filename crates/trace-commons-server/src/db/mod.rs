@@ -3213,6 +3213,42 @@ pub struct PayoutControl {
     pub changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The account state every rail shares (payout spec section 4, "Holds", and
+/// section 6): whether the account is open, and whether a credit hold is
+/// open on it or on any principal linked to it. Each rail checks it itself,
+/// before every send, and holds only its own sends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutAccountStanding {
+    /// The account row exists in this tenant.
+    pub exists: bool,
+    /// `trace_accounts.closed_at` is set.
+    pub closed: bool,
+    /// An open `trace_credit_holds` row names the account's `account:` key
+    /// or a principal actively linked to it.
+    pub credit_held: bool,
+}
+
+/// An account whose row is gone or closed.
+pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
+/// An open credit hold on the account or a principal linked to it.
+pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+
+impl PayoutAccountStanding {
+    /// The shared hold label, if any. A missing account row holds like a
+    /// closed one: nothing is sent to an account this tenant does not have.
+    pub fn hold_label(&self) -> Option<&'static str> {
+        if !self.exists || self.closed {
+            Some(PAYOUT_ACCOUNT_CLOSED)
+        } else if self.credit_held {
+            Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else {
+            None
+        }
+    }
+}
+
+pub use postgres_payout::{PayoutPassLock, link_id_hash as payout_link_id_hash};
+
 /// The payout rail store. Implemented for PostgreSQL in `postgres_payout`.
 #[async_trait]
 pub trait PayoutStore: Send + Sync {
@@ -3506,6 +3542,33 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Vec<String>, DatabaseError>;
+
+    /// The shared account state a rail checks before every send (spec
+    /// section 4, "Holds"). Reads only.
+    async fn payout_account_standing(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<PayoutAccountStanding, DatabaseError>;
+
+    /// The sum of `delta` over the link's `confirmed` lines: what the
+    /// commons has confirmed landing on the link's program.
+    async fn payout_link_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<u128, DatabaseError>;
+
+    /// Takes the rail's single-flight pass lock (spec section 4, "One pass,
+    /// per rail", step 0): a session-level
+    /// `pg_try_advisory_lock(hashtextextended('payout-pass-v1:' || rail, 0))`
+    /// on a connection pinned until [`PayoutPassLock::release`]. `None` when
+    /// another pass of the same rail holds it. Each rail has its own key, so
+    /// passes on two rails never wait on each other.
+    async fn try_acquire_payout_pass_lock(
+        &self,
+        rail: &RailId,
+    ) -> Result<Option<PayoutPassLock>, DatabaseError>;
 }
 
 #[cfg(test)]

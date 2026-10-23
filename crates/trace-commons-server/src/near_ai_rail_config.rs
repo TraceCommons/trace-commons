@@ -29,7 +29,9 @@ pub const NEAR_AI_PAYOUT_CREDENTIAL_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_CR
 pub const NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID";
 /// The commons' reseller org (a UUID).
 pub const NEAR_AI_PAYOUT_SENDER_ORG_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG";
-/// `grant` or `payment`.
+/// `payment`, `grant` or `staking_farm`: the credit type the sender org
+/// sends from. Required outside `disabled`; there is no default, because
+/// the right one depends on how the sender org was funded.
 pub const NEAR_AI_PAYOUT_SOURCE_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE";
 /// The lifetime ceiling per account on this rail, in nano-USD, above zero.
 pub const NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO_ENV: &str =
@@ -262,7 +264,7 @@ mod tests {
                 ),
                 (
                     NEAR_AI_PAYOUT_SOURCE_ENV,
-                    &["", "staking_farm", "Grant", "transfer"],
+                    &["", "Grant", "PAYMENT", "staking-farm", "transfer"],
                 ),
                 (
                     NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO_ENV,
@@ -289,6 +291,35 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The source is the operator's choice among the three #1271 names; the
+    /// staging sender is funded with paid credit, so `payment` must work,
+    /// and nothing picks one when it is unset.
+    #[test]
+    fn the_source_is_configured_with_no_default() {
+        for (value, source) in [
+            ("payment", NearAiCreditSource::Payment),
+            ("grant", NearAiCreditSource::Grant),
+            ("staking_farm", NearAiCreditSource::StakingFarm),
+        ] {
+            let mut vars = complete("live");
+            vars.insert(NEAR_AI_PAYOUT_SOURCE_ENV, value.to_string());
+            let NearAiRailConfig::Enabled(settings) = parse(&vars).unwrap() else {
+                panic!("live is enabled");
+            };
+            assert_eq!(settings.credentials.source, source, "{value}");
+        }
+        for mode in ["dry_run", "live"] {
+            let mut vars = complete(mode);
+            vars.remove(NEAR_AI_PAYOUT_SOURCE_ENV);
+            assert_eq!(
+                parse(&vars).unwrap_err(),
+                NearAiRailConfigError::Missing {
+                    setting: NEAR_AI_PAYOUT_SOURCE_ENV
+                }
+            );
         }
     }
 

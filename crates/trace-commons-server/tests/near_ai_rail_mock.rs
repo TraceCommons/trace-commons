@@ -196,7 +196,10 @@ async fn transfer(
         && !headers.contains_key("idempotency-key");
     if org != sender()
         || org == request.recipient_organization_id
-        || !matches!(request.source_credit_type.as_str(), "grant" | "payment")
+        || !matches!(
+            request.source_credit_type.as_str(),
+            "grant" | "payment" | "staking_farm"
+        )
         || !cumulative_shape
         || request.memo.len() > 2000
     {

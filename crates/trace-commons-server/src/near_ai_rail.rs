@@ -303,6 +303,13 @@ impl PayoutRail for NearAiRail {
         NEAR_AI_ADAPTER_IDENTITY
     }
 
+    /// The real rail, outside a staging build. Readiness ANDs this with the
+    /// rest of the rail's conditions (`live`, a rate epoch, the startup
+    /// capacity probe, not halted).
+    fn production_qualified(&self) -> bool {
+        !crate::near_ai_api::near_ai_staging()
+    }
+
     fn program_for_link(&self, link_id: Uuid) -> String {
         near_ai_program_for_link(link_id)
     }
@@ -469,6 +476,22 @@ mod tests {
         assert_eq!(
             descriptor.wire_max,
             Some(AtomicUnits::from_raw(i64::MAX as u128))
+        );
+    }
+
+    #[test]
+    fn the_rail_is_qualified_only_outside_staging() {
+        let client =
+            NearAiTransferClient::new(crate::near_ai_transfer::NearAiTransferCredentials {
+                token: secrecy::SecretString::from(format!("oc_{}", "ab".repeat(32))),
+                credential_id: Uuid::from_u128(2),
+                sender_org: Uuid::from_u128(1),
+                source: crate::near_ai_transfer::NearAiCreditSource::Payment,
+            })
+            .unwrap();
+        assert_eq!(
+            NearAiRail::new(client).production_qualified(),
+            !crate::near_ai_api::near_ai_staging()
         );
     }
 

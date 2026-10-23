@@ -22,6 +22,7 @@ use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
 use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
 use uuid::Uuid;
 
+use super::PayoutAccountStanding;
 use super::postgres::PgBackend;
 use super::{
     PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutControl,
@@ -39,8 +40,9 @@ const ONE_LINK_PER_STATE: [&str; 2] = [
 ];
 
 /// The audit row's hash of a link id. Hash-only: the link id itself is not
-/// written to the audit table.
-fn link_id_hash(link_id: Uuid) -> String {
+/// written to the audit table. The operator release route names a link by
+/// this hash.
+pub fn link_id_hash(link_id: Uuid) -> String {
     format!(
         "sha256:{:x}",
         Sha256::digest(format!("payout-link-v1:{link_id}").as_bytes())
@@ -1389,5 +1391,148 @@ impl PayoutStore for PgBackend {
             .await?;
         tx.commit().await?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn payout_account_standing(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<PayoutAccountStanding, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // A credit hold names a settlement key (`account:{id}`) or a
+        // principal; either, if it is open and points at this account,
+        // holds every rail (spec section 4, "Holds").
+        let row = tx
+            .query_one(
+                "SELECT
+                     EXISTS (SELECT 1 FROM trace_accounts
+                              WHERE tenant_id = $1 AND account_id = $2),
+                     EXISTS (SELECT 1 FROM trace_accounts
+                              WHERE tenant_id = $1 AND account_id = $2
+                                AND closed_at IS NOT NULL),
+                     EXISTS (SELECT 1 FROM trace_credit_holds h
+                              WHERE h.tenant_id = $1 AND h.released_at IS NULL
+                                AND (lower(h.credit_account_ref) = 'account:' || $2::UUID::TEXT
+                                     OR h.credit_account_ref IN (
+                                         SELECT p.principal_ref FROM trace_account_principals p
+                                          WHERE p.tenant_id = $1 AND p.account_id = $2
+                                            AND p.unlinked_at IS NULL)))",
+                &[&tenant, &account],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(PayoutAccountStanding {
+            exists: row.get(0),
+            closed: row.get(1),
+            credit_held: row.get(2),
+        })
+    }
+
+    async fn payout_link_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<u128, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_one(
+                "SELECT COALESCE(SUM(delta), 0)::TEXT FROM trace_payout_lines
+                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'confirmed'",
+                &[&tenant, &link_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let total: String = row.get(0);
+        parse_units(&total)
+    }
+
+    async fn try_acquire_payout_pass_lock(
+        &self,
+        rail: &RailId,
+    ) -> Result<Option<PayoutPassLock>, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let acquired = client
+            .query_one(PAYOUT_PASS_TRY_LOCK_SQL, &[&rail.as_str()])
+            .await;
+        match acquired {
+            Ok(row) if row.get::<_, bool>(0) => Ok(Some(PayoutPassLock {
+                client: Some(client),
+                rail: rail.as_str().to_owned(),
+            })),
+            // Held by another pass: the connection holds nothing, so it
+            // goes back to the pool.
+            Ok(_) => Ok(None),
+            Err(error) => {
+                // Whether the lock was taken is unknown; close the session
+                // rather than return it to the pool possibly holding it.
+                drop(deadpool_postgres::Object::take(client));
+                Err(error.into())
+            }
+        }
+    }
+}
+
+const PAYOUT_PASS_TRY_LOCK_SQL: &str =
+    "SELECT pg_try_advisory_lock(hashtextextended('payout-pass-v1:' || $1::TEXT, 0))";
+const PAYOUT_PASS_UNLOCK_SQL: &str =
+    "SELECT pg_advisory_unlock(hashtextextended('payout-pass-v1:' || $1::TEXT, 0))";
+
+/// One rail's single-flight pass lock: a session-level advisory lock on a
+/// pooled connection pinned for the whole pass (spec section 4, "One pass,
+/// per rail", step 0). Release it with [`PayoutPassLock::release`]. Dropped
+/// without that (a panic, a cancelled task), it closes its connection
+/// instead of returning it to the pool, so the database ends the session and
+/// the lock with it; a pooled connection must never keep a pass lock.
+pub struct PayoutPassLock {
+    client: Option<deadpool_postgres::Object>,
+    rail: String,
+}
+
+impl std::fmt::Debug for PayoutPassLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutPassLock")
+            .field("rail", &self.rail)
+            .field("held", &self.client.is_some())
+            .finish()
+    }
+}
+
+impl PayoutPassLock {
+    /// Unlocks on the connection that took the lock, then returns the
+    /// connection to the pool. On any doubt (the unlock fails, or reports the
+    /// lock was not held) the connection is closed instead.
+    pub async fn release(mut self) -> Result<(), DatabaseError> {
+        let Some(client) = self.client.take() else {
+            return Ok(());
+        };
+        match client
+            .query_one(PAYOUT_PASS_UNLOCK_SQL, &[&self.rail.as_str()])
+            .await
+        {
+            Ok(row) if row.get::<_, bool>(0) => Ok(()),
+            Ok(_) => {
+                drop(deadpool_postgres::Object::take(client));
+                Err(DatabaseError::Query("payout_pass_lock_not_held".into()))
+            }
+            Err(error) => {
+                drop(deadpool_postgres::Object::take(client));
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Drop for PayoutPassLock {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            tracing::warn!(
+                rail = %self.rail,
+                "payout pass lock dropped without release; closing its connection"
+            );
+            drop(deadpool_postgres::Object::take(client));
+        }
     }
 }

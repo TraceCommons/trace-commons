@@ -44,27 +44,35 @@ pub const NEAR_AI_HISTORY_PAGE_LIMIT: u8 = 100;
 /// largest legitimate reply.
 const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
-/// The credit type the commons sends from. `staking_farm` is never ours.
+/// The credit type the commons sends from: an operator setting
+/// (`TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE`) with no default. Which one is
+/// right depends on how the sender org was funded (paid credit is
+/// `payment`) and what the org's policy and the credential allow, so the
+/// code assumes none of them; the capacity probe reports the maximum per
+/// source, and a source the credential may not use reports 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NearAiCreditSource {
     Grant,
     Payment,
+    StakingFarm,
 }
 
 impl NearAiCreditSource {
+    /// Every source #1271 names, in its own spelling.
+    pub const ALL: [Self; 3] = [Self::Payment, Self::Grant, Self::StakingFarm];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Grant => "grant",
             Self::Payment => "payment",
+            Self::StakingFarm => "staking_farm",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "grant" => Some(Self::Grant),
-            "payment" => Some(Self::Payment),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|source| source.as_str() == value)
     }
 }
 
@@ -709,6 +717,67 @@ mod tests {
             );
         }
         assert!(NearAiTransferClient::new(credentials()).is_ok());
+    }
+
+    #[test]
+    fn every_source_parses_and_nothing_else_does() {
+        for source in NearAiCreditSource::ALL {
+            assert_eq!(NearAiCreditSource::parse(source.as_str()), Some(source));
+        }
+        assert_eq!(
+            NearAiCreditSource::parse("payment"),
+            Some(NearAiCreditSource::Payment)
+        );
+        assert_eq!(
+            NearAiCreditSource::parse("staking_farm"),
+            Some(NearAiCreditSource::StakingFarm)
+        );
+        for refused in ["", "Grant", "PAYMENT", "staking-farm", " grant", "transfer"] {
+            assert_eq!(NearAiCreditSource::parse(refused), None, "{refused:?}");
+        }
+    }
+
+    /// The capacity reply as staging serves it today, with the fields the
+    /// rail does not read (`credits`, the constraints and budgets,
+    /// `recipient_restrictions_apply`, `is_reservation`, and more) beside
+    /// the ones it does. Synthetic values.
+    #[test]
+    fn a_full_capacity_reply_parses_and_picks_the_configured_source() {
+        let body = serde_json::json!({
+            "credits": [
+                {"credit_type": "payment", "currency": "USD", "available": 5_000_000_000_i64},
+                {"credit_type": "grant", "currency": "USD", "available": 0}
+            ],
+            "own_staking_earned_total": 0,
+            "sender_reconciled": true,
+            "sending_enabled": true,
+            "credential_can_transfer": true,
+            "organization_constraints": {"max_amount_per_transfer": null, "allowed_sources": ["payment", "staking_farm"]},
+            "credential_constraints": {"max_amount_per_transfer": 1_000_000_000_i64},
+            "organization_remaining_budget": 5_000_000_000_i64,
+            "credential_remaining_budget": 5_000_000_000_i64,
+            "sends_remaining_in_window": 60,
+            "sources": [
+                {"source_credit_type": "payment", "max_amount_per_transfer": 5_000_000_000_i64},
+                {"source_credit_type": "staking_farm", "max_amount_per_transfer": 0},
+                {"source_credit_type": "grant", "max_amount_per_transfer": 0}
+            ],
+            "recipient_restrictions_apply": true,
+            "is_reservation": false,
+            "a_field_added_later": {"nested": [1, 2, 3]}
+        });
+        let reply: CapacityReply = serde_json::from_value(body).unwrap();
+        let max = |source: NearAiCreditSource| {
+            reply
+                .sources
+                .iter()
+                .find(|entry| entry.source_credit_type == source.as_str())
+                .map(|entry| entry.max_amount_per_transfer)
+        };
+        assert_eq!(max(NearAiCreditSource::Payment), Some(5_000_000_000));
+        assert_eq!(max(NearAiCreditSource::Grant), Some(0));
+        assert_eq!(max(NearAiCreditSource::StakingFarm), Some(0));
+        assert_eq!(reply.sends_remaining_in_window, 60);
     }
 
     #[test]

@@ -678,6 +678,63 @@ elif ! refused payout; then
 else
   pass "render-env.sh refuses payout dry_run without its settings"
 fi
+# With every setting present, the reseller key must have the shape cloud-api
+# issues an org credential in: `oc_` and 64 hex. An API key (`sk-...`) or any
+# other token is refused before anything is written, and the source must be
+# one #1271 names. Synthetic values only.
+payout_settings=(
+  TC_NEAR_AI_PAYOUT_MODE=dry_run
+  TC_NEAR_AI_PAYOUT_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1
+  TC_NEAR_AI_PAYOUT_SENDER_ORG=00000000-0000-4000-8000-0000000000c2
+  TC_NEAR_AI_PAYOUT_SOURCE=payment
+  TC_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO=1000
+)
+payout_key_ok="oc_$(printf 'c3%.0s' $(seq 32))"
+if run_render payout-ok "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE dry_run
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL "$payout_key_ok"
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE payment
+else
+  fail "render-env.sh failed on payout dry_run with every setting"
+  cat "$scratch/payout-ok.err" >&2
+fi
+for source in grant staking_farm; do
+  if run_render "payout-$source" "${payout_settings[@]}" \
+    "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+    "TC_NEAR_AI_PAYOUT_SOURCE=$source"; then
+    expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE "$source"
+  else
+    fail "render-env.sh refused payout source $source"
+  fi
+done
+if run_render payout-upper "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=oc_$(printf 'C3%.0s' $(seq 32))"; then
+  pass "render-env.sh takes an oc_ credential in upper-case hex"
+else
+  fail "render-env.sh refused an oc_ credential in upper-case hex"
+fi
+payout_refused() {
+  # $1: case name; the rest: NAME=value assignments.
+  local name="$1"
+  shift
+  if run_render "payout-$name" "${payout_settings[@]}" "$@"; then
+    fail "render-env.sh accepted payout settings ($name)"
+  elif ! refused "payout-$name"; then
+    fail "render-env.sh failed on payout settings ($name) without refusing"
+  else
+    pass "render-env.sh refuses payout settings ($name)"
+  fi
+}
+payout_refused api-key "TC_SECRET_tc_staging_nearai_reseller_key=sk-$(printf 'c3%.0s' $(seq 32))"
+payout_refused short-hex "TC_SECRET_tc_staging_nearai_reseller_key=oc_$(printf 'c3%.0s' $(seq 31))"
+payout_refused long-hex "TC_SECRET_tc_staging_nearai_reseller_key=${payout_key_ok}c3"
+payout_refused not-hex "TC_SECRET_tc_staging_nearai_reseller_key=oc_$(printf 'g3%.0s' $(seq 32))"
+payout_refused prefix "TC_SECRET_tc_staging_nearai_reseller_key=OC_$(printf 'c3%.0s' $(seq 32))"
+payout_refused source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_PAYOUT_SOURCE=transfer
+payout_refused no-source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_PAYOUT_SOURCE=
 
 # The first run's dollar estimate: unset by default, so the ingest serves no
 # range and the app words its first run in points. Both settings pass
