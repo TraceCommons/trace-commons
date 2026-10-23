@@ -162,6 +162,9 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
 
    `TC_DB_MODE=local` never installs the Cloud SQL proxy and installs both
    units ordered after `postgresql.service` (`TC_PG_UNIT` to change it).
+   Because Ubuntu's `postgresql.service` stays active when the cluster under
+   it has failed, it also requires `pg_isready -h 127.0.0.1 -p 5432` to pass
+   before starting anything.
    `TC_ENV_INSTALL=0` keeps the files `render-env.sh` wrote.
    `TC_EXPECT_STAGING=1` stops the deploy unless the new ingest's `/health`
    reports `near_ai_staging: true`. It ends with `STAGING DEPLOY OK`.

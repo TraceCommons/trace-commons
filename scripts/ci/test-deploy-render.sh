@@ -102,6 +102,12 @@ exit 0
 STUB
   chmod +x "$stubs/$tool"
 done
+cat >"$stubs/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "pg_isready $*" >>"$TRACE"
+exit "${FAKE_PG_READY:-0}"
+STUB
+chmod +x "$stubs/pg_isready"
 cat >"$stubs/curl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "curl $*" >>"$TRACE"
@@ -124,6 +130,7 @@ run_deploy() {
   cp "$repo"/deploy/pilot-gcp/systemd/*.service "$scratch/home/deploy/"
   env -i PATH="$stubs:/usr/bin:/bin" HOME="$scratch/home" TRACE="$trace" \
     INSTALLED="$scratch/installed" FAKE_HEALTH="$health" \
+    FAKE_PG_READY="${FAKE_PG_READY:-0}" \
     TC_PUBLIC_HOST=pilot.example.invalid "$@" \
     bash "$repo/deploy/pilot-gcp/deploy.sh" >"$trace.out" 2>"$trace.err"
 }
@@ -182,6 +189,20 @@ if grep -q 'cloud-sql-proxy' "$scratch/staging.trace"; then
   fail "staging deploy.sh touches the Cloud SQL proxy"
 else
   pass "staging deploy.sh never touches the Cloud SQL proxy"
+fi
+# Ubuntu's postgresql.service is a placeholder that stays active when the
+# cluster under it has failed, so local mode asks the server itself.
+if grep -qx 'pg_isready -h 127.0.0.1 -p 5432' "$scratch/staging.trace"; then
+  pass "staging deploy.sh asks the local PostgreSQL whether it accepts connections"
+else
+  fail "staging deploy.sh does not run pg_isready against 127.0.0.1:5432"
+fi
+if FAKE_PG_READY=2 run_deploy "$scratch/staging-nopg.trace" "$staging_health" "${staging_args[@]}"; then
+  fail "staging deploy.sh carried on with PostgreSQL not accepting connections"
+elif grep -q 'trace-commons-upload-claim-issuer.service' <(grep 'enable' "$scratch/staging-nopg.trace"); then
+  fail "staging deploy.sh started a service with PostgreSQL not accepting connections"
+else
+  pass "staging deploy.sh stops before any service when PostgreSQL is not accepting connections"
 fi
 if grep -qx 'STAGING DEPLOY OK' "$scratch/staging.trace.out"; then
   pass "staging deploy.sh closes with STAGING DEPLOY OK"

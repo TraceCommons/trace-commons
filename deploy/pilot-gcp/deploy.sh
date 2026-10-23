@@ -42,7 +42,8 @@ set -euo pipefail
 #                     Proxy. local: PostgreSQL on this VM; the proxy is never
 #                     installed or started, and both service units are
 #                     installed ordered after TC_PG_UNIT instead of the proxy.
-#   TC_PG_UNIT        the local PostgreSQL unit (default postgresql.service).
+#   TC_PG_UNIT        the local PostgreSQL unit (default postgresql.service);
+#                     local mode also requires pg_isready on 127.0.0.1:5432.
 #   TC_DEPLOY_LABEL   PILOT (default): the closing "<label> DEPLOY OK" line;
 #                     in local mode also the units' "(TraceCommons <label>)".
 #   TC_EXPECT_STAGING unset (default): refuse an ingest whose /health reports
@@ -202,6 +203,13 @@ if [ "$TC_DB_MODE" = cloudsql ]; then
   sudo systemctl is-active cloud-sql-proxy.service
 else
   sudo systemctl is-active "$TC_PG_UNIT"
+  # Ubuntu's postgresql.service is a placeholder that reports active even
+  # when the cluster under it (postgresql@16-main) has failed, so ask the
+  # server itself.
+  if ! pg_isready -h 127.0.0.1 -p 5432; then
+    echo "REFUSING: PostgreSQL on 127.0.0.1:5432 is not accepting connections." >&2
+    exit 1
+  fi
 fi
 
 # 4. Issuer.
