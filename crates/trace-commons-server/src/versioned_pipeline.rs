@@ -10548,10 +10548,25 @@ impl PipelineService {
             .is_some_and(|privacy| privacy.classifies_prose_pii())
     }
 
-    /// Whether the default bundle is the compatibility bundle.
+    /// Whether the default bundle is of the compatibility family: the
+    /// compatibility bundle or the substance bundle, which both award a
+    /// `NoveltyUtility` delta under the compatibility Settle policy
+    /// (`versioned_pipeline_bundle::binds_compatibility_family`).
     pub fn binds_compatibility_bundle(&self) -> bool {
-        crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)
-            .is_some()
+        crate::versioned_pipeline_bundle::binds_compatibility_family(&self.default_package)
+    }
+
+    /// Whether the default bundle holds `main`'s gate configuration
+    /// (`versioned_pipeline_bundle::package_matches_main_gate`): every value
+    /// for a compatibility bundle, the novelty values for a substance bundle.
+    pub fn default_package_matches_main_gate(
+        &self,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+    ) -> bool {
+        crate::versioned_pipeline_bundle::package_matches_main_gate(
+            &self.default_package,
+            main_gate,
+        )
     }
 
     /// The default bundle's compatibility configuration, which ingest
@@ -10922,7 +10937,8 @@ impl PipelineService {
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
     /// a compatibility package holds `main`'s gate configuration
-    /// (`main_gate`) and has the pipeline's credit issuer, and, with
+    /// (`main_gate`), a substance package its novelty values, each has the
+    /// pipeline's credit issuer, and, with
     /// `require_qualifiable`, the package passes the default package's
     /// qualification gate: its own bundle qualification
     /// (`bundle_qualification`, decision P4-D7), every dependency it names
@@ -10973,12 +10989,10 @@ impl PipelineService {
                 PIPELINE_TENANT_BUNDLE_NOT_RUNNABLE_LABEL
             }
         })?;
-        if let Some(config) =
-            crate::versioned_pipeline_bundle::package_compatibility_config(package)
-        {
-            if !config.matches_main_gate(main_gate) {
-                return Err("pipeline_runtime_main_gate_config_mismatch");
-            }
+        // A compatibility package holds every value of `main`'s gate, a
+        // substance package its novelty values.
+        if !crate::versioned_pipeline_bundle::package_matches_main_gate(package, main_gate) {
+            return Err("pipeline_runtime_main_gate_config_mismatch");
         }
         // Keyed on the Trace Credit event the bundle settles under, not on
         // its family: a compatibility bundle settles under `NoveltyUtility`,

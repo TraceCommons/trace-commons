@@ -706,6 +706,7 @@ pub(super) fn production_harness_runtime(
             main_gate: context.main_gate,
             components,
             score_policies: context.score_policies,
+            score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
         },
         crash_point,
     )?))

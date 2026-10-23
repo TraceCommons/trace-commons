@@ -3063,6 +3063,7 @@ fn production_harness_service_for(
             main_gate: pins.main_gate,
             components,
             score_policies: Default::default(),
+            score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
         },
     )?))
 }
@@ -3223,6 +3224,7 @@ async fn production_assembly_is_constructible_from_the_library() {
         },
         components,
         score_policies: Default::default(),
+        score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
     })
     .expect("the production assembly builds over doubles");
     let candidate = service.default_package().clone();

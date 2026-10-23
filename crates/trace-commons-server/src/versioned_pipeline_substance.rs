@@ -42,8 +42,12 @@ use crate::versioned_pipeline_bundle::{
     PIPELINE_BUNDLE_INVALID_LABEL, PipelineInstrumentAwardConfig, compatibility_family_package,
 };
 use crate::versioned_pipeline_compat::{
-    COMPATIBILITY_ZERO_FLOOR_LABEL, CompatibilityBundleConfig, CompatibilityQualification,
-    NoveltyScoringConfig, apply_novelty_rule, evaluate_novelty, novelty_score_output,
+    COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL, COMPATIBILITY_ZERO_FLOOR_LABEL,
+    CompatibilityBundleConfig, CompatibilityQualification, MainGateConfig, NoveltyScoringConfig,
+    apply_novelty_rule, default_trace_credit_instrument, evaluate_novelty, novelty_score_output,
+};
+use crate::versioned_pipeline_production::{
+    PRODUCTION_COMPATIBILITY_INDEX_ID, PRODUCTION_COMPATIBILITY_PROJECTION_ID,
 };
 
 pub const SUBSTANCE_SCORE_IMPLEMENTATION: &str = "trace_commons.score.substance.v1";
@@ -60,6 +64,10 @@ pub const SUBSTANCE_CANDIDATE_NOVELTY_UTILITY_MICROCREDITS: u64 = 2_500_000;
 /// The percentile of the pinned corpus that a qualifiable `sub_ceil` comes
 /// from (spec section 6).
 pub const SUBSTANCE_SUB_CEIL_PERCENTILE: u32 = 90;
+/// The `sub_floor_mult` of spec section 6, in micros: the one value the
+/// local reference, the production configuration and the calibration driver
+/// share.
+pub const SUBSTANCE_SUB_FLOOR_MULT_MICROS: u32 = 250_000;
 
 const MICROS: u32 = 1_000_000;
 
@@ -321,6 +329,39 @@ pub struct SubstanceNoveltyConfig {
 }
 
 impl SubstanceNoveltyConfig {
+    /// The novelty values of the production compatibility package (SQ-18):
+    /// its projection and index ids, and every novelty, chunk and award
+    /// value from the field of `main_gate` that
+    /// [`CompatibilityBundleConfig::production_compatible`] reads, with its
+    /// instrument pin. The novelty half of `cq4` takes the novelty values of
+    /// `cq3`, the calibration in force for the compatibility Score
+    /// (`credit_quality::constants_at`). So the two packages share one
+    /// novelty index, one award and one Settle cap
+    /// (`production_pipeline_caps`).
+    ///
+    /// A gate with no novelty floor gives a floor of 0 here. No caller
+    /// accepts that gate: [`production_substance_config`] refuses it
+    /// (`compatibility_main_gate_floors_missing`), and the runtime check
+    /// (`versioned_pipeline_bundle::package_matches_main_gate`) matches
+    /// nothing against it, as a compatibility package matches nothing
+    /// against a floor `main` has no value for.
+    pub fn from_main_gate(main_gate: &MainGateConfig) -> Self {
+        Self {
+            projection_id: PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+            index_id: PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+            novelty_floor_micros: main_gate.novelty_floor_micros.unwrap_or(0),
+            embed_insert_novelty_micros: main_gate.embed_insert_novelty_micros,
+            top_k: main_gate.top_k,
+            chunk_target_tokens: main_gate.chunk_target_tokens,
+            chunk_max_tokens: main_gate.chunk_max_tokens,
+            chunk_cap: main_gate.chunk_cap,
+            chunk_min_tokens: main_gate.chunk_min_tokens,
+            credit: NoveltyCreditParams::cq3(),
+            novelty_utility_microcredits: main_gate.novelty_utility_microcredits,
+            instrument: default_trace_credit_instrument(),
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.projection_id.trim().is_empty() && !self.index_id.trim().is_empty(),
@@ -420,7 +461,7 @@ impl SubstanceScoreConfig {
             params: SubstanceParams::rlvr_v1(),
             sub_ceil_micros: 1_000_000,
             substance_floor_micros: 0,
-            sub_floor_mult_micros: 250_000,
+            sub_floor_mult_micros: SUBSTANCE_SUB_FLOOR_MULT_MICROS,
             calibration: None,
             novelty: SubstanceNoveltyConfig {
                 projection_id: compatibility.projection_id,
@@ -650,6 +691,43 @@ pub fn substance_package(
         scorer,
         embedder,
     )
+}
+
+/// The production substance configuration (SQ-17, SQ-18): production
+/// compatible, the witness class not read, the RLVR parameters, the
+/// `sub_floor_mult` of spec section 6, the novelty values of `main_gate`
+/// ([`SubstanceNoveltyConfig::from_main_gate`]), and the calibrated values.
+/// Refuses a gate with no novelty floor
+/// (`compatibility_main_gate_floors_missing`), an invalid configuration
+/// with its own label (`compatibility_zero_floor` among them), and any
+/// other configuration that is not qualifiable
+/// (`bundle_configuration_not_qualifiable`).
+pub fn production_substance_config(
+    main_gate: &MainGateConfig,
+    values: &CalibratedSubstanceValues,
+) -> anyhow::Result<SubstanceScoreConfig> {
+    anyhow::ensure!(
+        main_gate.novelty_floor_micros.is_some(),
+        COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL
+    );
+    let config = SubstanceScoreConfig {
+        qualification: CompatibilityQualification::ProductionCompatible,
+        substance_version: SUBSTANCE_VERSION,
+        witness_source: SubstanceWitnessSource::NotRead,
+        params: SubstanceParams::rlvr_v1(),
+        sub_ceil_micros: 0,
+        substance_floor_micros: 0,
+        sub_floor_mult_micros: SUBSTANCE_SUB_FLOOR_MULT_MICROS,
+        calibration: None,
+        novelty: SubstanceNoveltyConfig::from_main_gate(main_gate),
+    }
+    .with_calibrated(values);
+    config.validate()?;
+    anyhow::ensure!(
+        config.is_qualifiable(),
+        crate::versioned_pipeline::PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL
+    );
+    Ok(config)
 }
 
 /// The substance candidate package: [`SubstanceScoreConfig::local_reference`]
@@ -1736,5 +1814,126 @@ mod tests {
             .remove("witness_source")
             .expect("the field is present");
         assert!(serde_json::from_value::<SubstanceScoreConfig>(value).is_err());
+    }
+
+    /// A gate whose every value differs from the others, so a value taken
+    /// from the wrong field shows.
+    const DISTINCT_GATE: MainGateConfig = MainGateConfig {
+        perplexity_floor_micros: Some(11),
+        tail_fraction_floor_micros: Some(12),
+        novelty_floor_micros: Some(400_000),
+        embed_insert_novelty_micros: 60_000,
+        top_k: 7,
+        chunk_target_tokens: 1_000,
+        chunk_max_tokens: 1_500,
+        chunk_cap: 9,
+        chunk_min_tokens: 33,
+        novelty_utility_microcredits: 1_250_000,
+    };
+
+    /// SQ-18: `from_main_gate` takes each value from the field of the gate
+    /// that `CompatibilityBundleConfig::production_compatible` reads, the
+    /// production ids, the `cq3` novelty parameters and the compatibility
+    /// instrument pin. The perplexity and tail floors are not part of it.
+    #[test]
+    fn from_main_gate_takes_the_compatibility_values() {
+        let novelty = SubstanceNoveltyConfig::from_main_gate(&DISTINCT_GATE);
+        let compatibility = CompatibilityBundleConfig::production_compatible(
+            "near_ai:test".to_string(),
+            PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+            PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+            &DISTINCT_GATE,
+        )
+        .unwrap();
+        assert_eq!(novelty.projection_id, compatibility.projection_id);
+        assert_eq!(novelty.index_id, compatibility.index_id);
+        assert_eq!(
+            novelty.novelty_floor_micros,
+            compatibility.novelty_floor_micros
+        );
+        assert_eq!(
+            novelty.embed_insert_novelty_micros,
+            compatibility.embed_insert_novelty_micros
+        );
+        assert_eq!(novelty.top_k, compatibility.top_k);
+        assert_eq!(
+            novelty.chunk_target_tokens,
+            compatibility.chunk_target_tokens
+        );
+        assert_eq!(novelty.chunk_max_tokens, compatibility.chunk_max_tokens);
+        assert_eq!(novelty.chunk_cap, compatibility.chunk_cap);
+        assert_eq!(novelty.chunk_min_tokens, compatibility.chunk_min_tokens);
+        assert_eq!(
+            novelty.novelty_utility_microcredits,
+            compatibility.novelty_utility_microcredits
+        );
+        assert_eq!(novelty.instrument, compatibility.instrument);
+        assert_eq!(novelty.credit, NoveltyCreditParams::cq3());
+        assert_eq!(novelty.novelty_floor_micros, 400_000);
+        assert_eq!(novelty.novelty_utility_microcredits, 1_250_000);
+    }
+
+    /// The production configuration: production compatible, the witness
+    /// class not read, the RLVR parameters, the one `sub_floor_mult`, the
+    /// gate's novelty values and the calibrated values. It is qualifiable,
+    /// and it refuses a gate with no novelty floor, both floors zero, and a
+    /// calibration that is not at the 90th percentile.
+    #[test]
+    fn production_substance_config_holds_the_production_values() {
+        let values = calibrated_values();
+        let config = production_substance_config(&DISTINCT_GATE, &values).unwrap();
+        assert_eq!(
+            config.qualification,
+            CompatibilityQualification::ProductionCompatible
+        );
+        assert_eq!(config.substance_version, SUBSTANCE_VERSION);
+        assert_eq!(config.witness_source, SubstanceWitnessSource::NotRead);
+        assert_eq!(config.params, SubstanceParams::rlvr_v1());
+        assert_eq!(
+            config.sub_floor_mult_micros,
+            SUBSTANCE_SUB_FLOOR_MULT_MICROS
+        );
+        assert_eq!(SUBSTANCE_SUB_FLOOR_MULT_MICROS, 250_000);
+        assert_eq!(
+            SubstanceScoreConfig::local_reference().sub_floor_mult_micros,
+            SUBSTANCE_SUB_FLOOR_MULT_MICROS
+        );
+        assert_eq!(
+            config.novelty,
+            SubstanceNoveltyConfig::from_main_gate(&DISTINCT_GATE)
+        );
+        assert_eq!(config.sub_ceil_micros, values.sub_ceil_micros);
+        assert_eq!(config.substance_floor_micros, values.substance_floor_micros);
+        assert_eq!(config.calibration, Some(values.calibration.clone()));
+        assert!(config.is_qualifiable());
+
+        let label = |main_gate: &MainGateConfig, values: &CalibratedSubstanceValues| {
+            production_substance_config(main_gate, values)
+                .unwrap_err()
+                .to_string()
+        };
+        let mut no_floor = DISTINCT_GATE;
+        no_floor.novelty_floor_micros = None;
+        assert_eq!(
+            label(&no_floor, &values),
+            COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL
+        );
+        let mut zero_floor = DISTINCT_GATE;
+        zero_floor.novelty_floor_micros = Some(0);
+        let mut zero_values = values.clone();
+        zero_values.substance_floor_micros = 0;
+        assert_eq!(
+            label(&zero_floor, &zero_values),
+            COMPATIBILITY_ZERO_FLOOR_LABEL
+        );
+        // Either floor positive is enough.
+        production_substance_config(&zero_floor, &values).unwrap();
+        production_substance_config(&DISTINCT_GATE, &zero_values).unwrap();
+        let mut other_percentile = values.clone();
+        other_percentile.calibration.sub_ceil_percentile = 95;
+        assert_eq!(
+            label(&DISTINCT_GATE, &other_percentile),
+            crate::versioned_pipeline::PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL
+        );
     }
 }

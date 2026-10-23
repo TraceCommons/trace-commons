@@ -109,7 +109,7 @@ pub enum CompatibilityQualification {
 /// a placeholder: this task's Score policy never awards from it directly (it
 /// awards `novelty_utility_microcredits` instead); a later task's bundle
 /// constructor pins the manifest's `trace_credit` descriptor from this value.
-fn default_trace_credit_instrument() -> PipelineInstrumentAwardConfig {
+pub(crate) fn default_trace_credit_instrument() -> PipelineInstrumentAwardConfig {
     PipelineInstrumentAwardConfig {
         instrument_id: TRACE_CREDIT_INSTRUMENT_ID.to_string(),
         atomic_units: AtomicUnits::ZERO,

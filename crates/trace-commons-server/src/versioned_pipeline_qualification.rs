@@ -35,6 +35,7 @@ use crate::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
 };
 use crate::versioned_pipeline_score_registry::ScorePolicyRegistry;
+use crate::versioned_pipeline_substance::SUBSTANCE_SCORE_IMPLEMENTATION;
 
 pub const PIPELINE_CHECK_RESULT_SCHEMA: &str = "trace_commons.pipeline_check_result.v1";
 const PIPELINE_CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
@@ -235,7 +236,7 @@ fn is_safe_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(crate) fn is_sha256(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -1334,8 +1335,10 @@ impl ProductionDependencyProfile {
 }
 
 /// Refuses a package whose four phase implementations are not entirely the
-/// compatibility family, or which carries any development or synthetic
-/// dependency marker: a Score or Settle projection id containing `test` or
+/// compatibility family (the compatibility Score, or the built-in substance
+/// Score with a qualifiable configuration, else
+/// `bundle_configuration_not_qualifiable`), or which carries any
+/// development or synthetic dependency marker: a Score or Settle projection id containing `test` or
 /// `reference`, or an artifact whose bytes contain `local_reference`,
 /// `reference_`, `pipeline-test`, `mock_`, or `synthetic`. The open build's
 /// rule: no Score policy is registered
@@ -1369,7 +1372,17 @@ pub fn validate_production_package_with_score_policies(
     if !compatibility_triple {
         return Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string());
     }
-    if package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+    if package.manifest.score.implementation_id == SUBSTANCE_SCORE_IMPLEMENTATION {
+        // The built-in substance Score (SQ-1): accepted only with a
+        // qualifiable configuration, so an uncalibrated substance package is
+        // never a production package.
+        let configuration_qualifiable =
+            crate::versioned_pipeline_bundle::package_substance_config(package)
+                .is_some_and(|config| config.is_qualifiable());
+        if !configuration_qualifiable {
+            return Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string());
+        }
+    } else if package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
         let factory =
             crate::versioned_pipeline_bundle::registered_score_factory(package, score_policies)
                 .ok_or_else(|| PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())?;
@@ -4257,6 +4270,79 @@ mod tests {
         assert_eq!(
             validate_production_package_with_score_policies(&review, &score_registry(true)),
             Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+    }
+
+    /// The built-in substance Score is production-shaped only with a
+    /// qualifiable configuration: the uncalibrated local reference is
+    /// refused, and so is a production configuration whose `sub_ceil` is
+    /// not from the 90th percentile.
+    #[test]
+    fn an_uncalibrated_substance_package_is_not_production_valid() {
+        use crate::versioned_pipeline_substance::{
+            CalibratedSubstanceValues, SubstanceCalibration, SubstanceScoreConfig,
+            production_substance_config, substance_package,
+        };
+
+        let uncalibrated = substance_package(
+            &SubstanceScoreConfig::local_reference(),
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .expect("the local reference substance package builds");
+        let refusal = validate_production_package(&uncalibrated).unwrap_err();
+        assert!(
+            [
+                PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL,
+                PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL,
+            ]
+            .contains(&refusal.as_str()),
+            "{refusal}"
+        );
+        // A registry cannot make it production-shaped: the substance id is
+        // built in, never looked up.
+        assert_eq!(
+            validate_production_package_with_score_policies(&uncalibrated, &score_registry(true)),
+            Err(refusal)
+        );
+
+        let main_gate = crate::versioned_pipeline_compat::MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(500_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: 0,
+        };
+        let values = CalibratedSubstanceValues {
+            sub_ceil_micros: 600_000,
+            substance_floor_micros: 120_000,
+            calibration: SubstanceCalibration {
+                corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+                report_digest: format!("sha256:{}", "b".repeat(64)),
+                sub_ceil_percentile: 90,
+                substance_floor_percentile: 25,
+            },
+        };
+        let mut other_percentile = production_substance_config(&main_gate, &values).unwrap();
+        other_percentile
+            .calibration
+            .as_mut()
+            .unwrap()
+            .sub_ceil_percentile = 95;
+        let other_percentile = substance_package(
+            &other_percentile,
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .expect("a valid configuration builds");
+        assert_eq!(
+            validate_production_package(&other_percentile),
+            Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string())
         );
     }
 

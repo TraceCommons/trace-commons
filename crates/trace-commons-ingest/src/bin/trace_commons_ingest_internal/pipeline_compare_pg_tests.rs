@@ -73,7 +73,7 @@ use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_product::PipelineProductStore;
 use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, is_safe_label};
 use trace_commons_server::versioned_pipeline_substance::{
-    SubstanceParams, ToolCallProjection, project_tool_calls,
+    SUBSTANCE_SUB_FLOOR_MULT_MICROS, SubstanceParams, ToolCallProjection, project_tool_calls,
 };
 use trace_commons_server::versioned_pipeline_substance_calibration::{EvaluateInputs, evaluate};
 
@@ -2295,9 +2295,6 @@ const SUBSTANCE_EVALUATE_VALUES_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUA
 const SUBSTANCE_EVALUATE_ENVIRONMENT_INCOMPLETE: &str = "substance_evaluate_environment_incomplete";
 const SUBSTANCE_EVALUATE_ENVELOPE_FAILED: &str = "substance_evaluate_envelope_failed";
 
-/// The `sub_floor_mult` of spec section 6, in micros.
-const SUBSTANCE_EVALUATE_SUB_FLOOR_MULT_MICROS: u32 = 250_000;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubstanceEvaluateConfig {
     bootstrap: PathBuf,
@@ -2421,7 +2418,7 @@ async fn substance_evaluate_run() {
         projections,
         corpus_pin_digest: pin.digests["source"].clone(),
         params: SubstanceParams::rlvr_v1(),
-        sub_floor_mult_micros: SUBSTANCE_EVALUATE_SUB_FLOOR_MULT_MICROS,
+        sub_floor_mult_micros: SUBSTANCE_SUB_FLOOR_MULT_MICROS,
         substance_floor_percentile: config.floor_percentile,
     })
     .unwrap_or_else(fail);

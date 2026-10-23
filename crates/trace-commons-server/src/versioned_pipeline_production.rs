@@ -36,6 +36,10 @@ use crate::versioned_pipeline::{
 use crate::versioned_pipeline_authority::{PipelineAuthorityProvider, PipelinePrivacyBoundary};
 use crate::versioned_pipeline_compat::MainGateConfig;
 use crate::versioned_pipeline_qualification::ProductionInfrastructureProfile;
+use crate::versioned_pipeline_substance::{
+    CalibratedSubstanceValues, SUBSTANCE_SUB_CEIL_PERCENTILE, SubstanceCalibration,
+    production_substance_config, substance_package,
+};
 
 /// The identity the pipeline's NEAR AI scorer adapter reports (spec A-D4).
 pub const NEAR_AI_PIPELINE_SCORER_IDENTITY: &str = "near_ai_perplexity_scorer";
@@ -224,6 +228,137 @@ pub fn production_compatibility_package(
     let scorer = NearAiPipelineScorer::new(Arc::new(NotLoaded), scorer_descriptor.clone());
     let embedder = FastEmbedPipelineEmbedder::new(Arc::new(NotLoaded), embedder_descriptor.clone());
     MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+}
+
+/// Selects the deployment's default package (SQ-17): `compatibility`, also
+/// when unset, or `substance`.
+pub const TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE: &str = "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE";
+/// The calibrated values of a substance default package
+/// ([`CalibratedSubstanceValues`]), as the offline calibration writes them
+/// (`docs/operator/substance-calibration.md`).
+pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS: &str =
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS";
+pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS: &str =
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS";
+pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE: &str =
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE";
+pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST: &str =
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST";
+pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST: &str =
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST";
+const SUBSTANCE_CALIBRATION_VARS: [&str; 5] = [
+    TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS,
+    TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS,
+    TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE,
+    TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST,
+    TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST,
+];
+pub const PIPELINE_PRODUCTION_SCORE_INVALID_LABEL: &str = "pipeline_production_score_invalid";
+pub const PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL: &str =
+    "pipeline_substance_calibration_missing";
+pub const PIPELINE_SUBSTANCE_CALIBRATION_UNEXPECTED_LABEL: &str =
+    "pipeline_substance_calibration_unexpected";
+
+/// The Score of the deployment's default package (SQ-17). A tenant runs its
+/// active bundle, so the selection moves no tenant that is already active
+/// (O-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductionScoreSelection {
+    /// [`production_compatibility_package`].
+    Compatibility,
+    /// The substance package with these calibrated values
+    /// ([`production_substance_config`]).
+    Substance(CalibratedSubstanceValues),
+}
+
+/// The selection from `lookup`. `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE`
+/// unset, blank or `compatibility` selects the compatibility package, and
+/// then any calibration variable that is set refuses
+/// (`pipeline_substance_calibration_unexpected`): a value the package would
+/// not hold is never read as if it applied. `substance` needs all five
+/// calibration variables, the two micros and the percentile as
+/// non-negative integers and the two digests as `sha256:<hex>`; a missing
+/// or unparsable one refuses (`pipeline_substance_calibration_missing`).
+/// `sub_ceil_percentile` is always the 90th. Any other selection refuses
+/// (`pipeline_production_score_invalid`).
+pub fn production_score_selection_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<ProductionScoreSelection> {
+    let read = |var: &str| {
+        lookup(var)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    match read(TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE).as_deref() {
+        None | Some("compatibility") => {
+            anyhow::ensure!(
+                SUBSTANCE_CALIBRATION_VARS
+                    .iter()
+                    .all(|var| read(var).is_none()),
+                PIPELINE_SUBSTANCE_CALIBRATION_UNEXPECTED_LABEL
+            );
+            Ok(ProductionScoreSelection::Compatibility)
+        }
+        Some("substance") => {
+            let missing = || anyhow::anyhow!(PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL);
+            let micros = |var: &str| {
+                read(var)
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .ok_or_else(missing)
+            };
+            let digest = |var: &str| {
+                read(var)
+                    .filter(|value| crate::versioned_pipeline_qualification::is_sha256(value))
+                    .ok_or_else(missing)
+            };
+            Ok(ProductionScoreSelection::Substance(
+                CalibratedSubstanceValues {
+                    sub_ceil_micros: micros(TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS)?,
+                    substance_floor_micros: micros(TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS)?,
+                    calibration: SubstanceCalibration {
+                        corpus_pin_digest: digest(
+                            TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST,
+                        )?,
+                        report_digest: digest(TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST)?,
+                        sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+                        substance_floor_percentile: read(
+                            TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE,
+                        )
+                        .and_then(|raw| raw.parse::<u32>().ok())
+                        .ok_or_else(missing)?,
+                    },
+                },
+            ))
+        }
+        Some(_) => anyhow::bail!(PIPELINE_PRODUCTION_SCORE_INVALID_LABEL),
+    }
+}
+
+/// The deployment's default package for `selection`: the
+/// [`production_compatibility_package`], or the substance package of
+/// [`production_substance_config`] over the same descriptors. Like the
+/// compatibility package it reads only the descriptors, so `pipeline.py
+/// package --bundle production` builds it offline; the production builder
+/// builds its default package through this same function, so the two
+/// cannot differ.
+pub fn production_package(
+    scorer_descriptor: &NearAiScorerDescriptor,
+    embedder_descriptor: &FastEmbedDescriptor,
+    main_gate: &MainGateConfig,
+    selection: &ProductionScoreSelection,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    match selection {
+        ProductionScoreSelection::Compatibility => {
+            production_compatibility_package(scorer_descriptor, embedder_descriptor, main_gate)
+        }
+        ProductionScoreSelection::Substance(values) => {
+            let config = production_substance_config(main_gate, values)?;
+            let scorer = NearAiPipelineScorer::new(Arc::new(NotLoaded), scorer_descriptor.clone());
+            let embedder =
+                FastEmbedPipelineEmbedder::new(Arc::new(NotLoaded), embedder_descriptor.clone());
+            substance_package(&config, &scorer, &embedder)
+        }
+    }
 }
 
 /// The NEAR AI scorer as the pipeline names it (spec A-D4). Holds the
@@ -683,7 +818,9 @@ impl PipelineGateComponents {
 /// The Settle caps of the production assembly: `trace_credit` at `main`'s
 /// `NoveltyUtility` delta, the only amount the compatibility Score awards,
 /// so an award above it fails as `credit_cap_exceeded` (Settle refuses a
-/// leg with no cap at all as `settlement_cap_missing`).
+/// leg with no cap at all as `settlement_cap_missing`). The substance Score
+/// awards the same delta (SQ-18), so the caps do not depend on the
+/// [`ProductionScoreSelection`].
 pub fn production_pipeline_caps(main_gate: &MainGateConfig) -> PipelineCaps {
     PipelineCaps {
         per_instrument_atomic_units: BTreeMap::from([(
@@ -714,10 +851,16 @@ pub struct ProductionPipelineInputs {
     /// library entry was started with (`trace_commons_ingest::run`),
     /// empty in the open build.
     pub score_policies: crate::versioned_pipeline_score_registry::ScorePolicyRegistry,
+    /// The Score of the default package (SQ-17): ingest reads it from the
+    /// environment (`production_score_selection_from_lookup`), and a harness
+    /// passes the selection its expected package was built with.
+    pub score_selection: ProductionScoreSelection,
 }
 
-/// The production pipeline assembly (spec A-D10): the compatibility bundle
-/// under `main`'s gate configuration, over the shared NEAR AI scorer,
+/// The production pipeline assembly (spec A-D10): the default package of
+/// the Score selection ([`production_package`]: the compatibility bundle,
+/// or the calibrated substance bundle) under `main`'s gate configuration,
+/// over the shared NEAR AI scorer,
 /// fastembed embedder and usearch pipeline index, the tenant-policy
 /// authority, the classifier privacy boundary, and the internal Trace Credit
 /// adapter. Never enables payout (spec A-D9).
@@ -736,20 +879,18 @@ pub fn production_pipeline_builder(
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<crate::versioned_pipeline::PipelineServiceBuilder> {
     use crate::versioned_pipeline::PipelineServiceBuilder;
-    use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
-    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
     use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
     let (scorer, embedder) = inputs.components.pipeline_adapters();
     let components = inputs.components.parts();
-    let config = CompatibilityBundleConfig::production_compatible(
-        components.scorer_descriptor.compatibility_scorer_model_id(),
-        PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
-        PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+    // The package names the adapters by their descriptors alone, so the
+    // package built over `NotLoaded` is the one these adapters bind.
+    let package = production_package(
+        &components.scorer_descriptor,
+        &components.embedder_descriptor,
         &inputs.main_gate,
+        &inputs.score_selection,
     )?;
-    let package =
-        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())?;
     let registry =
         SettlementAdapterRegistry::new(vec![
             Arc::new(InternalTraceCreditSettlementAdapter::new())
@@ -1291,5 +1432,323 @@ mod tests {
         validate_pipeline_index_root(&into_separate.join("pipeline"), &[&legacy]).unwrap();
         validate_pipeline_index_root(&separate, &[&legacy, &legacy.join("../dedup-index")])
             .unwrap();
+    }
+
+    /// `main`'s gate configuration for the selection tests: the pilot
+    /// template's floors (0, 0, 500000), `main`'s defaults, and a nonzero
+    /// `NoveltyUtility` delta so the award and the cap can be told apart
+    /// from 0.
+    const MAIN_GATE: MainGateConfig = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 2_500_000,
+    };
+
+    fn calibrated_values() -> CalibratedSubstanceValues {
+        CalibratedSubstanceValues {
+            sub_ceil_micros: 600_000,
+            substance_floor_micros: 120_000,
+            calibration: SubstanceCalibration {
+                corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+                report_digest: format!("sha256:{}", "b".repeat(64)),
+                sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+                substance_floor_percentile: 25,
+            },
+        }
+    }
+
+    fn package_for(
+        selection: &ProductionScoreSelection,
+    ) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+        let parts = double_parts();
+        production_package(
+            &parts.scorer_descriptor,
+            &parts.embedder_descriptor,
+            &MAIN_GATE,
+            selection,
+        )
+    }
+
+    /// The compatibility selection builds the package the assembly built
+    /// before the selection existed: `production_compatibility_package`,
+    /// and the compatibility configuration over the adapters, as the
+    /// builder built it. So the compatibility path keeps its bundle id.
+    #[test]
+    fn production_package_is_compatibility_by_default() {
+        use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
+        use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+        let parts = double_parts();
+        let selected = package_for(&ProductionScoreSelection::Compatibility).unwrap();
+        let compatibility = production_compatibility_package(
+            &parts.scorer_descriptor,
+            &parts.embedder_descriptor,
+            &MAIN_GATE,
+        )
+        .unwrap();
+        assert_eq!(selected, compatibility);
+        assert_eq!(selected.bundle_id, compatibility.bundle_id);
+
+        let components = PipelineGateComponents::with_unqualified_adapters(double_parts());
+        let (scorer, embedder) = components.pipeline_adapters();
+        let config = CompatibilityBundleConfig::production_compatible(
+            parts.scorer_descriptor.compatibility_scorer_model_id(),
+            PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+            PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+            &MAIN_GATE,
+        )
+        .unwrap();
+        let before =
+            MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+                .unwrap();
+        assert_eq!(selected.bundle_id, before.bundle_id);
+        assert_eq!(selected, before);
+    }
+
+    /// A calibrated substance selection builds a production package: no
+    /// development marker, a qualifiable configuration, the substance Score,
+    /// and the novelty values of the deployment's gate (SQ-18).
+    #[test]
+    fn a_calibrated_substance_package_is_production_valid() {
+        use crate::versioned_pipeline_bundle::{
+            package_configuration_is_qualifiable, package_substance_config,
+        };
+        use crate::versioned_pipeline_substance::{
+            SUBSTANCE_SCORE_IMPLEMENTATION, SubstanceNoveltyConfig,
+        };
+
+        let package =
+            package_for(&ProductionScoreSelection::Substance(calibrated_values())).unwrap();
+        crate::versioned_pipeline_qualification::validate_production_package(&package)
+            .expect("a calibrated substance package is a production package");
+        assert!(package_configuration_is_qualifiable(&package));
+        assert_eq!(
+            package.manifest.score.implementation_id,
+            SUBSTANCE_SCORE_IMPLEMENTATION
+        );
+        let config = package_substance_config(&package).unwrap();
+        assert_eq!(
+            config.novelty,
+            SubstanceNoveltyConfig::from_main_gate(&MAIN_GATE)
+        );
+        assert_eq!(config.sub_ceil_micros, 600_000);
+        assert_eq!(config.substance_floor_micros, 120_000);
+        assert_eq!(config.calibration, Some(calibrated_values().calibration));
+        // The package names the same scorer and embedder descriptors as the
+        // compatibility package, so it binds the same runtime dependencies.
+        let compatibility = package_for(&ProductionScoreSelection::Compatibility).unwrap();
+        assert_eq!(
+            package.manifest.score.data_artifact_hashes,
+            compatibility.manifest.score.data_artifact_hashes
+        );
+        assert_ne!(package.bundle_id, compatibility.bundle_id);
+    }
+
+    /// `production_score_selection_from_lookup` reads the selection and all
+    /// five calibration variables, and refuses a missing or unparsable
+    /// value, a calibration value with no substance selection, and an
+    /// unknown selection.
+    #[test]
+    fn the_substance_selection_reads_every_calibration_variable() {
+        let select = |pairs: &[(&str, &str)]| {
+            let pairs = pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<Vec<_>>();
+            production_score_selection_from_lookup(&move |var: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key == var)
+                    .map(|(_, value)| value.clone())
+            })
+        };
+        let refusal = |pairs: &[(&str, &str)]| select(pairs).unwrap_err().to_string();
+        let corpus = format!("sha256:{}", "a".repeat(64));
+        let report = format!("sha256:{}", "b".repeat(64));
+        let calibration: Vec<(&str, &str)> = vec![
+            (TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS, "600000"),
+            (TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS, "120000"),
+            (TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE, "25"),
+            (TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST, &corpus),
+            (TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST, &report),
+        ];
+        let mut all = vec![(TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE, "substance")];
+        all.extend(calibration.iter().copied());
+
+        assert_eq!(
+            select(&all).unwrap(),
+            ProductionScoreSelection::Substance(calibrated_values())
+        );
+
+        for missing in SUBSTANCE_CALIBRATION_VARS {
+            let without = all
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != missing)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                refusal(&without),
+                PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL,
+                "{missing}"
+            );
+            let blank = all
+                .iter()
+                .map(|(key, value)| (*key, if *key == missing { "  " } else { *value }))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                refusal(&blank),
+                PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL,
+                "{missing} blank"
+            );
+            let unparsable = all
+                .iter()
+                .map(|(key, value)| (*key, if *key == missing { "x1" } else { *value }))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                refusal(&unparsable),
+                PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL,
+                "{missing} unparsable"
+            );
+        }
+        let bare_digest = all
+            .iter()
+            .map(|(key, value)| {
+                if *key == TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST {
+                    (*key, &value["sha256:".len()..])
+                } else {
+                    (*key, *value)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refusal(&bare_digest),
+            PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL
+        );
+
+        for (key, value) in calibration.iter().copied() {
+            assert_eq!(
+                refusal(&[(key, value)]),
+                PIPELINE_SUBSTANCE_CALIBRATION_UNEXPECTED_LABEL,
+                "{key} with no selection"
+            );
+            assert_eq!(
+                refusal(&[
+                    (TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE, "compatibility"),
+                    (key, value),
+                ]),
+                PIPELINE_SUBSTANCE_CALIBRATION_UNEXPECTED_LABEL,
+                "{key} with the compatibility selection"
+            );
+        }
+
+        for invalid in ["perplexity", "Substance", "substance_v1"] {
+            assert_eq!(
+                refusal(&[(TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE, invalid)]),
+                PIPELINE_PRODUCTION_SCORE_INVALID_LABEL,
+                "{invalid}"
+            );
+        }
+
+        assert_eq!(
+            select(&[]).unwrap(),
+            ProductionScoreSelection::Compatibility
+        );
+        assert_eq!(
+            select(&[(TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE, " ")]).unwrap(),
+            ProductionScoreSelection::Compatibility
+        );
+        assert_eq!(
+            select(&[(TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE, "compatibility")]).unwrap(),
+            ProductionScoreSelection::Compatibility
+        );
+    }
+
+    /// SQ-18: the Settle caps are one service-wide `trace_credit` cap at
+    /// `main`'s `NoveltyUtility` delta, which is the award of both packages,
+    /// so they do not depend on the selection.
+    #[test]
+    fn production_caps_do_not_depend_on_the_selection() {
+        use crate::versioned_pipeline_bundle::{
+            package_compatibility_config, package_substance_config,
+        };
+
+        let caps = production_pipeline_caps(&MAIN_GATE);
+        let trace_credit = trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+            .as_str()
+            .to_string();
+        assert_eq!(
+            caps.per_instrument_atomic_units,
+            BTreeMap::from([(
+                trace_credit,
+                trace_commons_gate_api::pipeline::AtomicUnits::from_raw(u128::from(
+                    MAIN_GATE.novelty_utility_microcredits
+                )),
+            )])
+        );
+
+        let compatibility = package_for(&ProductionScoreSelection::Compatibility).unwrap();
+        let substance =
+            package_for(&ProductionScoreSelection::Substance(calibrated_values())).unwrap();
+        assert_eq!(
+            package_compatibility_config(&compatibility)
+                .unwrap()
+                .novelty_utility_microcredits,
+            MAIN_GATE.novelty_utility_microcredits
+        );
+        let substance_config = package_substance_config(&substance).unwrap();
+        assert_eq!(
+            substance_config.novelty.novelty_utility_microcredits,
+            MAIN_GATE.novelty_utility_microcredits
+        );
+        // Both pin `trace_credit` to the same instrument descriptor.
+        assert_eq!(
+            compatibility.manifest.instruments,
+            substance.manifest.instruments
+        );
+    }
+
+    /// A substance selection the configuration refuses is refused by
+    /// `production_package` with the configuration's label: a gate with no
+    /// novelty floor, both floors zero, and an out-of-range ceiling.
+    #[test]
+    fn production_package_refuses_an_unusable_substance_selection() {
+        let parts = double_parts();
+        let refusal = |main_gate: &MainGateConfig, values: CalibratedSubstanceValues| {
+            production_package(
+                &parts.scorer_descriptor,
+                &parts.embedder_descriptor,
+                main_gate,
+                &ProductionScoreSelection::Substance(values),
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        let mut no_floor = MAIN_GATE;
+        no_floor.novelty_floor_micros = None;
+        assert_eq!(
+            refusal(&no_floor, calibrated_values()),
+            crate::versioned_pipeline_compat::COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL
+        );
+        let mut zero_floor = MAIN_GATE;
+        zero_floor.novelty_floor_micros = Some(0);
+        let mut zero_values = calibrated_values();
+        zero_values.substance_floor_micros = 0;
+        assert_eq!(
+            refusal(&zero_floor, zero_values),
+            crate::versioned_pipeline_compat::COMPATIBILITY_ZERO_FLOOR_LABEL
+        );
+        let mut zero_ceiling = calibrated_values();
+        zero_ceiling.sub_ceil_micros = 0;
+        assert_eq!(
+            refusal(&MAIN_GATE, zero_ceiling),
+            crate::versioned_pipeline_bundle::PIPELINE_BUNDLE_INVALID_LABEL
+        );
     }
 }
