@@ -297,7 +297,7 @@ mod tests {
             "sha256:",
             &format!("sha256:{}", "AB".repeat(32)),
             &format!("sha256:{}", "ab".repeat(31)),
-            &format!("{}", "ab".repeat(32)),
+            &"ab".repeat(32),
             &format!("sha256:{}g", "a".repeat(63)),
         ] {
             assert!(!is_link_id_hash(bad), "{bad}");

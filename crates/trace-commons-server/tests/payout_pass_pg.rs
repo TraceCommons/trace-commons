@@ -1007,11 +1007,7 @@ async fn a_target_over_the_account_ceiling_holds_and_sends_nothing() {
         ..settings(PayoutMode::Live)
     };
 
-    completed(
-        &pass(&fixture, rail.clone(), &opener, low.clone())
-            .run_once()
-            .await,
-    );
+    completed(&pass(&fixture, rail.clone(), &opener, low).run_once().await);
     assert!(mock.transfers().is_empty());
     assert_eq!(mock.posts(), 0, "no read or send for a held account");
     assert!(lines(&fixture, &tenant, "near_ai").await.is_empty());
