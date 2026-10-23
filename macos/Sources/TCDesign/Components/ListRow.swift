@@ -228,6 +228,9 @@ public struct GlassListRow: View {
             .frame(width: 22)
         }
         .foregroundStyle(selected ? Self.selectedInk.color : GlassColor.textPrimary)
+        // A selected row is the selection to its controls, which take the
+        // fill and ink that read on it (owner, 2026-10-22).
+        .transformEnvironment(\.glassGround) { if selected { $0 = .selection } }
         .padding(.leading, Self.leadingInset(depth, root: treeRoot))
         .padding(.trailing, 6)
         .frame(minHeight: GlassTokens.Size.listRow)

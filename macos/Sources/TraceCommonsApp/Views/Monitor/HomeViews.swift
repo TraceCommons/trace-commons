@@ -284,7 +284,6 @@ private struct HomeOverview: View {
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
-        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         // Three groups, each under its title (owner, 2026-10-20): Private
         // AI first, then Traces (Waiting and Contributed, and what is not
         // contributed across both columns), then Account (Credit and the
@@ -309,23 +308,7 @@ private struct HomeOverview: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount) {
-                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                    GridRow {
-                        HomeStatTile(label: HomeFormat.creditPendingWord,
-                                     value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
-                                     detail: delta?.text, detailInk: delta?.ink,
-                                     systemImage: HomeStatIcons.credit, action: openPrivateAI)
-                        if let copy = model.privateInferenceCopy {
-                            let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
-                            HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
-                                         systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
-                                         action: openPrivateAI)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
+                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
             }
         }
     }
@@ -402,10 +385,11 @@ private struct HomeOverview: View {
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
 /// label, the count and size, and the core's call to share (owner,
 /// 2026-10-20), over its icon as a watermark on the right, as the tiles'.
-/// It is on the standard card fill with no border, and a band of light
-/// crosses it from left to right now and then (`GlassCardShimmer`, owner,
-/// 2026-10-20; it had a solid accent border, and before that a turning
-/// glow edge). The whole card is the button.
+/// It is on the standard card fill with no border, and now and then a soft
+/// light turns once round its edge like a lighthouse's beam
+/// (`GlassCardBeacon`, owner, 2026-10-22; before that a band of light
+/// crossed it, before that it had a solid accent border, and before that a
+/// turning glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -445,12 +429,14 @@ private struct HomeNotContributedCard: View {
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // The shimmer over its icon, which is the card's watermark as
-            // the tiles' is, both behind the words (owner, 2026-10-20).
-            .glassCardShimmer()
+            // Its icon is the card's watermark, as the tiles' is, behind
+            // the words (owner, 2026-10-20).
             .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
+            // The light turning round its edge, over the fill (owner,
+            // 2026-10-22).
+            .glassCardBeacon()
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
@@ -1509,6 +1495,46 @@ private struct HistoryPeriodCard: View {
                 .init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack)),
             ])
         }
+    }
+}
+
+/// Home's Account tiles: Credit, the total with its change since the last
+/// day this Mac saw, and the NEAR AI balance beside it (owner, 2026-10-19),
+/// each opening Private AI. Home draws them under Account, and the edge
+/// rail's Private AI peek under the tool buttons (owner, 2026-10-22). A
+/// failed rollup or credit read is a dash, never the store's earlier value.
+struct HomeAccountTiles: View {
+    let store: HomeStore
+    let openPrivateAI: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    private var freshRollup: DaemonData.HistoryRollup? {
+        SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
+    }
+
+    private var freshCredit: DaemonData.CommonsCreditSummary? {
+        SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
+    }
+
+    var body: some View {
+        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: MonitorWords.table?.homeHistory)
+        Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+            GridRow {
+                HomeStatTile(label: HomeFormat.creditPendingWord,
+                             value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
+                             detail: delta?.text, detailInk: delta?.ink,
+                             systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                if let copy = model.privateInferenceCopy {
+                    let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
+                    HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
+                                 systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
+                                 action: openPrivateAI)
+                } else {
+                    Color.clear
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

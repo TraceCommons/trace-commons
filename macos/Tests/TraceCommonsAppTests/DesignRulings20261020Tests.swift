@@ -28,26 +28,22 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(pile.contains("charge > 0 ? GlassTokens.Color.mapOrbShared.color"))
     }
 
-    /// The Not contributed card has no border, and a shimmer crosses it
-    /// from left to right now and then, over its watermark and behind its
-    /// words (owner, 2026-10-20). One pass is one animation; it rests
-    /// between passes, and starts and ends wholly off the card.
-    func test_aShimmerCrossesTheNotContributedCard() throws {
+    /// The Not contributed card has no border. A shimmer crossed it from
+    /// 2026-10-20; since 2026-10-22 a soft light turns round its edge
+    /// instead (`DesignRulings20261022Tests`), over its fill and
+    /// watermark.
+    func test_aLightTurnsRoundTheNotContributedCard() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         let end = try XCTUnwrap(home.range(of: "\n}\n", range: card.upperBound..<home.endIndex))
         let body = home[card.upperBound..<end.lowerBound]
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
-        let shimmer = try XCTUnwrap(body.range(of: ".glassCardShimmer()"))
+        XCTAssertFalse(body.contains("glassCardShimmer"), "the shimmer is back")
         let mark = try XCTUnwrap(body.range(of: ".glassCardWatermark("))
         let tier = try XCTUnwrap(body.range(of: ".glassTier(.card"))
-        XCTAssertLessThan(shimmer.lowerBound, mark.lowerBound, "the shimmer is under the watermark")
+        let beacon = try XCTUnwrap(body.range(of: ".glassCardBeacon()"))
         XCTAssertLessThan(mark.lowerBound, tier.lowerBound)
-        XCTAssertEqual(GlassCardShimmer.duration, 1.4)
-        XCTAssertGreaterThan(GlassCardShimmer.every, .seconds(GlassCardShimmer.duration))
-        let band: CGFloat = 90, width: CGFloat = 200
-        XCTAssertLessThanOrEqual(GlassCardShimmer.x(progress: 0, width: width, band: band) + band, 0)
-        XCTAssertGreaterThanOrEqual(GlassCardShimmer.x(progress: 1, width: width, band: band), width)
+        XCTAssertLessThan(tier.lowerBound, beacon.lowerBound, "the light sits over the card's fill")
     }
 
     /// The card's line is the core's call to share; an older core's plain

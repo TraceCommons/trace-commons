@@ -889,6 +889,40 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
     }
 }
 
+/// The Private AI map (`FlowMapScene.privateAI`): every tool and where its
+/// calls go, laid out for `space`. The window's map pane draws it, and the
+/// edge rail's Private AI peek a small one (owner, 2026-10-22). The one
+/// tool list, while the client has read it and the core still answers;
+/// otherwise nothing is drawn as current.
+struct PrivateAIFlowMap: View {
+    let traces: TracesStore
+    let inference: InferenceStore
+    let label: String
+    /// The core's sentence for a tool's Private AI state.
+    let sentence: (HarnessRow) -> String?
+    let space: CGSize
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let harnesses = PrivateAIInspectorView.liveHarnesses(
+            model.harnesses, read: inference.harnesses, failure: inference.failures["harness_list"])
+        let destinations = inference.failures["tool_destinations"] == nil ? inference.destinations : nil
+        let scene = FlowMapScene.privateAI(
+            harnesses, destinationLabel: label,
+            privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
+            sentence: sentence,
+            state: { HarnessSurface.state($0, calls: model.harnessCalls) },
+            destinations: destinations,
+            space: space)
+            .addingManagedRoutes(destinations)
+        if scene.drawsMap {
+            FlowMapView(scene: scene, legend: [], zoomable: false, accessibilityName: label)
+        } else {
+            Color.clear
+        }
+    }
+}
+
 /// The map (R8): the field, the flow map drawn on it, and the view
 /// selector floating at its upper trailing edge (spec, "Flow map"). The
 /// selector changes the map's view only, never the main tab, consent or
@@ -980,22 +1014,9 @@ private struct MonitorMapPane: View {
                 transferRun: transfers.run, transferCards: showsTransferCards ? transfers.cards : [],
                 onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
         case .privateAI:
-            // The one tool list, while this window's client has read it and
-            // the core still answers; otherwise nothing is drawn as current.
-            let harnesses = PrivateAIInspectorView.liveHarnesses(
-                model.harnesses, read: inference.harnesses, failure: inference.failures["harness_list"])
-            if let privateAILabel, case let scene = FlowMapScene.privateAI(
-                harnesses, destinationLabel: privateAILabel,
-                privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
-                sentence: sentence,
-                state: { HarnessSurface.state($0, calls: model.harnessCalls) },
-                destinations: inference.failures["tool_destinations"] == nil ? inference.destinations : nil,
-                space: space)
-                .addingManagedRoutes(inference.failures["tool_destinations"] == nil ? inference.destinations : nil),
-                scene.drawsMap {
-                FlowMapView(
-                    scene: scene,
-                    legend: [], zoomable: false, accessibilityName: privateAILabel)
+            if let privateAILabel {
+                PrivateAIFlowMap(
+                    traces: traces, inference: inference, label: privateAILabel, sentence: sentence, space: space)
             } else {
                 Color.clear
             }

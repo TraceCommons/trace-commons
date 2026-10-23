@@ -87,8 +87,10 @@ final class HomeViewTests: XCTestCase {
         // (owner, 2026-10-20: it had no fill and a turning glow edge).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
         XCTAssertTrue(home.contains(".glassTier(.card, hover: GlassTokens.Color.cardHover)"))
-        // No border; a shimmer crosses it instead (owner, 2026-10-20).
-        XCTAssertTrue(home.contains(".glassCardShimmer() .glassCardWatermark(HomeStatIcons.uncontributed)"))
+        // No border; a light turns round its edge instead (owner,
+        // 2026-10-22; a shimmer crossed it from 2026-10-20).
+        XCTAssertTrue(home.contains(".glassCardBeacon()"))
+        XCTAssertFalse(home.contains("glassCardShimmer"), "the shimmer is back")
         XCTAssertFalse(home.contains("strokeBorder(Self.border"), "the border is back")
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
         // Its icon is the card's watermark, as the tiles' (owner, 2026-10-20).

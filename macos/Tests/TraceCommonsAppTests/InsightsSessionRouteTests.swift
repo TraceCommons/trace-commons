@@ -270,8 +270,11 @@ final class InsightsSessionRouteTests: XCTestCase {
 
     // MARK: The model
 
+    /// Under feed T the Sessions figure's breakdown is the daemon's counted
+    /// sessions, always there while the week shows (owner, 2026-10-22: no
+    /// chevron), and the core is never asked; no figure drills.
     @MainActor
-    func testUnderFeedTOnlyTheSessionsCardDrillsAndItAsksNobody() async throws {
+    func testUnderFeedTTheSessionsBreakdownIsTheDaemonsAndAsksNobody() async throws {
         let calls = CallCounter()
         let model = InsightsOverviewModel(service: { _ in
             await calls.bump(); throw InsightsError.invalidResponse
@@ -282,52 +285,48 @@ final class InsightsSessionRouteTests: XCTestCase {
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
 
-        XCTAssertTrue(model.drills("sessions"))
-        XCTAssertFalse(model.drills("tokens"), "feed T rows carry no reference for the core's drill")
-        XCTAssertFalse(model.drills("cache_share"))
+        for card in ["sessions", "tokens", "cache_share"] {
+            XCTAssertFalse(model.drills(card), "feed T rows carry no reference for the core's drill: \(card)")
+        }
+        let breakdown = try XCTUnwrap(model.counterSessions)
+        XCTAssertEqual(breakdown.rows.count, 2)
+        XCTAssertEqual(breakdown.column, .shown)
 
         model.showInputs("tokens")
-        XCTAssertNil(model.counterInputs)
-        XCTAssertNil(model.openCard)
         model.showInputs("sessions")
-        let open = try XCTUnwrap(model.counterInputs)
-        XCTAssertEqual(open.rows.count, 2)
-        XCTAssertEqual(open.column, .shown)
-        XCTAssertEqual(model.openCard, "sessions")
+        XCTAssertNil(model.openCard)
         let after = await calls.count
         XCTAssertEqual(after, before, "feed T's rows are the daemon's; the core is not asked")
 
-        model.hideInputs()
-        XCTAssertNil(model.counterInputs)
-        model.showInputs("sessions")
         model.showCounter(nil)
-        XCTAssertNil(model.counterInputs, "going back to the saved week closes feed T's drill")
-        XCTAssertFalse(model.drills("sessions") && model.counter != nil)
+        XCTAssertNil(model.counterSessions, "going back to the saved week drops feed T's rows")
         model.close()
     }
 
+    /// Under feed S the tokens and cache share figures still drill; the
+    /// Sessions figure does not, since its breakdown is always shown.
     @MainActor
-    func testUnderFeedSEveryCardStillDrills() {
+    func testUnderFeedSTheFiguresStillDrill() {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        for card in ["tokens", "cache_share", "sessions"] { XCTAssertTrue(model.drills(card), card) }
+        for card in ["tokens", "cache_share"] { XCTAssertTrue(model.drills(card), card) }
+        XCTAssertFalse(model.drills("sessions"))
     }
 
     @MainActor
-    func testAClosedOverviewOpensNoFeedTDrill() throws {
-        // As under the saved week: nothing opens while the tab is closed.
+    func testAClosedOverviewOpensNoDrill() throws {
+        // Nothing opens while the tab is closed.
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        let week = try Self.decode(Self.recorded())
-        model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
-        model.showInputs("sessions")
-        XCTAssertNil(model.counterInputs)
+        model.showInputs("tokens")
         XCTAssertNil(model.openCard)
+        XCTAssertNil(model.sessionsInputs)
     }
 
     @MainActor
-    func testAFeedTWeekWithoutRowsDoesNotDrill() throws {
+    func testAFeedTWeekWithoutRowsHasNoBreakdown() throws {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: nil)
+        XCTAssertNil(model.counterSessions)
         XCTAssertFalse(model.drills("sessions"))
     }
 

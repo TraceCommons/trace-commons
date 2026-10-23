@@ -24,8 +24,19 @@ final class AppModel: ObservableObject {
     /// a launch on the NEAR AI card, the rest on the sessions card.
     @Published var managedErrorMethod: String?
     /// The last copy table the daemon sent, kept when a later read fails so
-    /// the connecting and failure states still have their words.
-    private var managedCopy: [String: String] = [:]
+    /// the connecting and failure states still have their words. Before the
+    /// first read it is the core's own table, so the connecting card is
+    /// never drawn without them (owner, 2026-10-22: it showed a bare icon).
+    private var managedCopy: [String: String] = AppModel.bundledManagedCopy
+
+    /// The core's managed-sessions table (`tc_managed_copy_json`), read
+    /// without the daemon; empty if it could not be read.
+    static let bundledManagedCopy: [String: String] = {
+        guard let json = TCDiscovery.managedCopyJSON(),
+              let table = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        else { return [:] }
+        return table.compactMapValues { $0 as? String }
+    }()
 
     func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
 

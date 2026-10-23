@@ -14,6 +14,23 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertLessThanOrEqual(GlassDayGraph.height(5, max: 5), GlassDayGraph.plotHeight / 2)
     }
 
+    /// The compact bar graph (the menu-bar popover's, owner, 2026-10-22)
+    /// keeps the full graph's dot pitch across eleven days in the
+    /// popover's width, where the full graph's gaps crowd the dots closer
+    /// than they are apart down the column.
+    func test_theCompactBarGraphKeepsTheDotPitch() {
+        let width: CGFloat = 285 - 2 * GlassTokens.Space.s5
+        let days = 11
+        let pitch = (96 / 2 - 1 - GlassBarGraph.matrixEnd) / CGFloat(GlassBarGraph.rows)
+        func across(_ gaps: (between: CGFloat, inset: CGFloat)) -> CGFloat {
+            let column = (width - gaps.between * CGFloat(days - 1)) / CGFloat(days)
+            return (column - gaps.inset * 2) / 3
+        }
+        XCTAssertGreaterThanOrEqual(across(GlassBarGraph.gaps(thin: false, compact: true)), pitch)
+        XCTAssertLessThan(across(GlassBarGraph.gaps(thin: false, compact: false)), pitch)
+        XCTAssertEqual(GlassBarGraph.gaps(thin: true, compact: true).between, GlassBarGraph.gaps(thin: true, compact: false).between)
+    }
+
     /// The bars fit the item: six steps of two bars make a graph of under
     /// 18pt, centred in the item's height as the mark is, and each kind of
     /// bar's busiest step reaches the graph's edge without crossing it.

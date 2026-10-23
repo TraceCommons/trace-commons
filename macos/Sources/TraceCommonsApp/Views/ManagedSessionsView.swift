@@ -175,19 +175,17 @@ struct ManagedSessionsSection: View {
     }
 
     /// The sessions card while the list has not been read: connecting,
-    /// with Retry.
+    /// with Retry as the card's own re-read icon, as the balance card above
+    /// it draws its refresh (owner, 2026-10-22: it was a wide capsule round
+    /// the glyph, then a larger round button than the balance card's).
     private var connectingCard: some View {
         GlassIconCard(
             systemImage: "terminal", title: model.managedText("title"),
             subtitle: [model.managedText("connecting")],
-            trailing: {
-                Button { model.refreshManagedSessions() } label: {
-                    Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
-                }
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-                .fixedSize()
-                .disabled(model.managedBusy)
-            })
+            refresh: .init(model.managedText("retry"), isDisabled: model.managedBusy) {
+                model.refreshManagedSessions()
+            },
+            content: { EmptyView() })
     }
 
     // MARK: Sessions
