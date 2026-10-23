@@ -2869,9 +2869,16 @@ impl DaemonShared {
         // `pins_unavailable`, or the refusal that pinned nothing, such as
         // `pins_expired`. A label and nothing else: no key, host or
         // measurement. A default build never names the field.
+        //
+        // Beside it, `near_ai_attestation`: the last answer's outcome under
+        // those pins -- `attested`, `not_checked`, or the check that earned
+        // no key, such as `rtmr3_replay_mismatch` or
+        // `compose_action_not_allowed` (owner decision S16). Also a label
+        // and nothing else.
         #[cfg(feature = "near-ai-staging")]
         {
             status["near_ai_pins"] = self.near_ai_pins.status_label().into();
+            status["near_ai_attestation"] = self.near_ai_pins.attestation_label().into();
         }
         status
     }
@@ -16134,6 +16141,7 @@ mod tests {
         );
         s.near_ai_pins = Arc::clone(&provider);
         assert_eq!(s.status_value()["near_ai_pins"], "pins_not_fetched");
+        assert_eq!(s.status_value()["near_ai_attestation"], "not_checked");
         assert!(provider.current(1_800_000_000).await.sets.is_empty());
         assert_eq!(s.status_value()["near_ai_pins"], "pins_malformed");
     }
@@ -16144,6 +16152,7 @@ mod tests {
     #[test]
     fn a_default_build_status_has_no_pin_label() {
         assert!(shared().status_value().get("near_ai_pins").is_none());
+        assert!(shared().status_value().get("near_ai_attestation").is_none());
     }
 
     /// The attestor needs a key and an enrollment, and nothing else: with no
