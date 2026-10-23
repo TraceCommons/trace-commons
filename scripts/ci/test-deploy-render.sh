@@ -746,8 +746,9 @@ payout_refused source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" 
   TC_NEAR_AI_PAYOUT_SOURCE=transfer
 payout_refused no-source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   TC_NEAR_AI_PAYOUT_SOURCE=
-# An enabled rail without a settlement table records no rate and pays
-# nothing, so the render refuses it: unset, relative, or a file that is not
+# An enabled rail without a settlement table has no rate in force: each pass
+# stops with payout_rate_unavailable, even over a rate epoch an earlier boot
+# stored. The render refuses it: unset, relative, or a file that is not
 # there.
 payout_refused no-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   TC_CREDIT_SETTLEMENT_TABLE_PATH=

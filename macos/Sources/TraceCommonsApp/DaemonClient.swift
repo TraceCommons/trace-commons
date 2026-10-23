@@ -548,6 +548,23 @@ final class DaemonClient {
             BalanceSurface.statusMethod, params: fresh ? ["fresh": true] : [:]))
     }
 
+    /// The account's active NEAR AI organizations and which one Private AI
+    /// spends from. Always ok by contract; an unreadable answer degrades to
+    /// `unreported`, which draws nothing -- an unknown count is never
+    /// "several".
+    func nearAiSpendOrganizations(fresh: Bool = false) throws -> SpendOrganizations {
+        SpendOrganizations.parse(fromJSON: try rawResultJSON(
+            "near_ai_spend_organizations", params: fresh ? ["fresh": true] : [:]))
+    }
+
+    /// Switches the organization Private AI spends from. Throws the daemon's
+    /// `near_ai_spend_org_*` label on a refusal, and every refusal changed
+    /// nothing.
+    func nearAiSelectSpendOrganization(_ organizationID: String) throws {
+        _ = try rawResultJSON(
+            "near_ai_spend_organization_select", params: ["organization_id": organizationID])
+    }
+
     func nearAiFunding(expected: FundingDestination?) throws -> FundingStatus {
         let params: [String: Any] = expected.map {
             ["expected_organization_id": $0.organizationID,
@@ -1129,6 +1146,8 @@ enum DaemonEventParser {
                   let due = try? DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: payloadData)
             else { return .unknown(name) }
             return .reengageDue(due)
+        case "near_ai_balance_changed":
+            return .nearAiBalanceChanged
         case "resync_required":
             return .resyncRequired
         case "lagged":

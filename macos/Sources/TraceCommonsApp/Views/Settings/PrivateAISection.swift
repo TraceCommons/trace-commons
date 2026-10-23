@@ -19,8 +19,12 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             PrivateAISettingsPanels(store: store)
-            // NEAR AI credit payout: hides itself unless the commons lists
-            // the rail as enabled.
+            // Which NEAR AI organization Private AI spends from. Drawn only
+            // with two or more organizations.
+            SpendOrganizationCard()
+            // NEAR AI credit payout: which owned organization earned credit
+            // goes to. Hides itself unless the commons lists the rail as
+            // enabled.
             PayoutLinkView()
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
@@ -57,6 +61,9 @@ struct PrivateAISection: View {
         .onAppear { model.refreshRouteDisclosure() }
         // The managed snapshot the terminal picker reads.
         .task { model.refreshManagedSessions() }
+        // Which organization Private AI spends from, read lazily when this
+        // section opens and never on the sign-in.
+        .task { model.refreshSpendOrganizations() }
         // The app's live client, re-attached whenever the daemon restarts
         // or start-up ends (`MonitorWindowView.Attachment`).
         .task(id: MonitorWindowView.Attachment(model)) {

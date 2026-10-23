@@ -697,13 +697,15 @@ async fn each_reply_maps_to_its_refusal() {
             Scripted::Error(409, "sender_not_reconciled"),
             RailRefusal::StopPass("near_ai_sender_not_reconciled"),
         ),
+        // A budget or policy limit on our own credential or org is the
+        // sender's, never the recipient's: stop the rail, hold nobody.
         (
             Scripted::Error(409, "credential_transfer_limit_exceeded"),
-            RailRefusal::HoldLine("near_ai_credential_transfer_limit_exceeded"),
+            RailRefusal::StopPass("near_ai_credential_transfer_limit_exceeded"),
         ),
         (
             Scripted::Error(409, "organization_transfer_limit_exceeded"),
-            RailRefusal::HoldLine("near_ai_organization_transfer_limit_exceeded"),
+            RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded"),
         ),
         (
             Scripted::Error(409, "capacity_overflow"),
@@ -843,6 +845,17 @@ async fn each_reply_maps_to_its_refusal() {
         rail.find_receipt(&line, &[]).await.unwrap_err(),
         RailRefusal::StopPass("near_ai_reply_unexpected")
     );
+    // So does a sender limit on the zero read, which is a send.
+    for code in [
+        "credential_transfer_limit_exceeded",
+        "organization_transfer_limit_exceeded",
+    ] {
+        mock.script(Scripted::Error(409, code));
+        assert!(matches!(
+            rail.read_total(&to, &program).await.unwrap_err(),
+            RailRefusal::StopPass(_)
+        ));
+    }
     // A credential fault on a read stops the pass too.
     mock.script(Scripted::Error(403, "credential_refused"));
     assert_eq!(

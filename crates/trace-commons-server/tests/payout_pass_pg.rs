@@ -45,8 +45,8 @@ use trace_commons_gate_enclave::MockKeyedPayoutRail;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
-    Database, PayoutLineWrite, PayoutLink, PayoutLinkInsert, PayoutLinkState, PayoutLinkWrite,
-    PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
+    Database, PayoutLineResolution, PayoutLineWrite, PayoutLink, PayoutLinkInsert, PayoutLinkState,
+    PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
 };
 use trace_commons_server::near_ai_rail::near_ai_receipt_hash;
 use trace_commons_server::payout_pass::{
@@ -332,6 +332,7 @@ fn settings(mode: PayoutMode) -> PayoutPassSettings {
         mode,
         account_ceiling: AtomicUnits::from_raw(CEILING),
         local_send_limit: 50,
+        rate_in_force: true,
     }
 }
 
@@ -540,6 +541,69 @@ async fn a_linked_account_is_paid_owed_and_an_unlinked_one_accrues_only() {
     assert_eq!(lines(&fixture, &tenant, "near_ai").await.len(), 1);
 }
 
+/// A rail whose rate source is gone pays nothing from stored epochs: the
+/// fixture's epoch `v1` is still recorded, the account is owed and linked,
+/// and the pass accrues nothing, calls nothing and writes nothing, in
+/// `live` and in `dry_run` alike.
+#[tokio::test]
+async fn a_stored_epoch_without_a_current_rate_pays_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    settle(&fixture, &tenant, accounts[0], 3_000).await;
+    link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        rail.as_ref(),
+        &opener,
+        &org(1),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let before = snapshot(&fixture, &tenant, "near_ai").await;
+    for mode in [PayoutMode::Live, PayoutMode::DryRun] {
+        let report = pass(
+            &fixture,
+            rail.clone(),
+            &opener,
+            PayoutPassSettings {
+                rate_in_force: false,
+                ..settings(mode)
+            },
+        )
+        .run_once()
+        .await;
+        assert_eq!(
+            report.outcome,
+            PayoutPassOutcome::Stopped {
+                label: "payout_rate_unavailable"
+            },
+            "{report:?}"
+        );
+        assert_eq!(
+            (report.accrued, report.sent, report.dry_run_accounts),
+            (0, 0, 0)
+        );
+    }
+    assert!(mock.requests().is_empty(), "no call to the rail at all");
+    assert_eq!(
+        fixture
+            .runtime
+            .payout_owed(&tenant, accounts[0], &rail_id("near_ai"))
+            .await
+            .unwrap()
+            .accrual_count,
+        0,
+        "nothing accrued from the stored epoch"
+    );
+    assert_eq!(snapshot(&fixture, &tenant, "near_ai").await, before);
+}
+
 #[tokio::test]
 async fn crash_after_pending_sends_once_on_near_ai() {
     let Some(fixture) = fixture().await else {
@@ -707,7 +771,7 @@ async fn recovery_without_a_matching_receipt_holds_the_line() {
     mock.seed(recipient_org(1), &linked.program, 5_000);
 
     completed(
-        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+        &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
             .run_once()
             .await,
     );
@@ -718,6 +782,45 @@ async fn recovery_without_a_matching_receipt_holds_the_line() {
     assert_eq!(
         holds(&fixture, &tenant, accounts[0], "near_ai").await,
         vec!["payout_recovery_unmatched".to_string()]
+    );
+
+    // A hold about this account stays: a later pass sends nothing to it.
+    completed(
+        &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.transfers().len(), 1);
+    assert_eq!(lines(&fixture, &tenant, "near_ai").await.len(), 1);
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "near_ai").await,
+        vec!["payout_recovery_unmatched".to_string()]
+    );
+    // Until an operator clears it: the next pass looks at the account
+    // afresh, finds the outside 5000 on the program, and holds it for that
+    // instead, still sending nothing.
+    assert!(
+        fixture
+            .runtime
+            .clear_payout_hold(
+                &tenant,
+                accounts[0],
+                &rail_id("near_ai"),
+                "payout_recovery_unmatched",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.transfers().len(), 1);
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "near_ai").await,
+        vec!["payout_program_total_mismatch".to_string()]
     );
 }
 
@@ -944,6 +1047,83 @@ async fn a_credential_refusal_stops_the_rail_and_changes_no_row() {
     );
 }
 
+/// A limit on our own credential or org refuses a send: that is the
+/// sender's budget, not the recipient's standing. The pass stops, holds no
+/// account, and leaves the line pending exactly as written; the next pass
+/// resends it and pays everyone.
+#[tokio::test]
+async fn a_sender_limit_stops_the_rail_and_holds_no_recipient() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    for code in [
+        "credential_transfer_limit_exceeded",
+        "organization_transfer_limit_exceeded",
+    ] {
+        let mock = Mock::start().await;
+        let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+        let opener = Arc::new(TestOpener::default());
+        let (tenant, accounts) = tenant_with_accounts(&fixture, 2).await;
+        for (n, account) in accounts.iter().enumerate() {
+            settle(&fixture, &tenant, *account, 1_000).await;
+            link(
+                &fixture,
+                &tenant,
+                *account,
+                rail.as_ref(),
+                &opener,
+                &org(10 + n as u128),
+                PayoutLinkState::Active,
+            )
+            .await;
+        }
+        // Capacity, the first zero read, then the first send is refused.
+        mock.script(Scripted::Pass);
+        mock.script(Scripted::Pass);
+        mock.script(Scripted::Error(409, code));
+        let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await;
+        assert!(
+            matches!(report.outcome, PayoutPassOutcome::Stopped { .. }),
+            "{code} {report:?}"
+        );
+        assert!(
+            !report
+                .held
+                .contains_key("near_ai_credential_transfer_limit_exceeded")
+                && !report
+                    .held
+                    .contains_key("near_ai_organization_transfer_limit_exceeded"),
+            "{code} {report:?}"
+        );
+        for account in &accounts {
+            assert!(
+                holds(&fixture, &tenant, *account, "near_ai")
+                    .await
+                    .is_empty(),
+                "{code}"
+            );
+        }
+        let rows = lines(&fixture, &tenant, "near_ai").await;
+        assert_eq!(rows.len(), 1, "{code}");
+        assert_eq!(rows[0].state, "pending", "{code}");
+        assert!(mock.transfers().is_empty());
+
+        completed(
+            &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert_eq!(mock.transfers().len(), 2, "{code}");
+        let rows = lines(&fixture, &tenant, "near_ai").await;
+        assert!(
+            rows.iter().all(|row| row.state == "confirmed"),
+            "{code} {rows:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn back_pay_steps_up_by_the_per_send_max() {
     let Some(fixture) = fixture().await else {
@@ -1164,6 +1344,77 @@ async fn a_spent_send_window_writes_no_line_and_waits() {
             .await,
     );
     assert_eq!(mock.transfers().len(), 1);
+}
+
+/// Every write call spends the rail's send window, not just a send: on
+/// `near_ai` the zero read before a new line and the read that closes a
+/// link are POSTs too. A pass never makes more of them than the window it
+/// was given, and the next pass picks up the rest.
+#[tokio::test]
+async fn reads_and_sends_together_stay_inside_the_send_window() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 3).await;
+    for (n, account) in accounts.iter().enumerate() {
+        settle(&fixture, &tenant, *account, 1_000).await;
+        let made = link(
+            &fixture,
+            &tenant,
+            *account,
+            rail.as_ref(),
+            &opener,
+            &org(20 + n as u128),
+            PayoutLinkState::Active,
+        )
+        .await;
+        if n == 2 {
+            // Paid in full already, and unlinking: closing it is one read.
+            mock.seed(recipient_org(22), &made.program, 1_000);
+            fixture
+                .runtime
+                .mark_payout_link_unlink_requested(&tenant, made.link_id, ACTOR)
+                .await
+                .unwrap();
+        }
+    }
+    // Two new lines (a read and a send each) and one close (a read) want
+    // five write calls; the window has three.
+    mock.set_sends_remaining(3);
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert!(
+        mock.posts() <= 3,
+        "{} write calls: {report:?}",
+        mock.posts()
+    );
+    assert!(
+        report.skipped.contains_key("payout_send_window_exhausted"),
+        "{report:?}"
+    );
+    assert!(mock.posts() >= 2, "the window was used: {report:?}");
+
+    // The next passes, each with a fresh window, finish the work.
+    for _ in 0..3 {
+        mock.set_sends_remaining(3);
+        let before = mock.posts();
+        completed(
+            &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert!(mock.posts() - before <= 3);
+    }
+    // Two sends, beside the seeded record on the closed link.
+    assert_eq!(mock.transfers().len(), 3);
+    let rows = lines(&fixture, &tenant, "near_ai").await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.state == "confirmed"), "{rows:?}");
 }
 
 #[tokio::test]
@@ -2040,6 +2291,116 @@ async fn an_unreadable_link_holds_that_rail_only() {
             .await
             .is_empty()
     );
+}
+
+/// A rail that, mid-send, ends its line by another path (as an operator or a
+/// second writer might), so the send commits on a line no longer pending.
+struct ResolveBeforeSend {
+    inner: Arc<MockKeyedPayoutRail>,
+    store: Arc<PgBackend>,
+    tenant: String,
+    link_id: Uuid,
+}
+
+#[async_trait]
+impl PayoutRail for ResolveBeforeSend {
+    fn descriptor(&self) -> &RailDescriptor {
+        self.inner.descriptor()
+    }
+    fn adapter_identity(&self) -> &str {
+        self.inner.adapter_identity()
+    }
+    fn program_for_link(&self, link_id: Uuid) -> String {
+        self.inner.program_for_link(link_id)
+    }
+    async fn preflight(&self) -> Result<RailCapacity, RailRefusal> {
+        self.inner.preflight().await
+    }
+    async fn read_total(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<AtomicUnits, RailRefusal> {
+        self.inner.read_total(recipient, program).await
+    }
+    async fn send(&self, line: &RailLine<'_>) -> Result<SendOutcome, RailRefusal> {
+        let pending = self
+            .store
+            .pending_payout_line_for_link(&self.tenant, self.link_id)
+            .await
+            .unwrap()
+            .expect("the pass wrote the line pending before the send");
+        self.store
+            .resolve_payout_line(&self.tenant, pending.line_id, &PayoutLineResolution::NoOp)
+            .await
+            .unwrap();
+        self.inner.send(line).await
+    }
+    async fn find_receipt(
+        &self,
+        line: &RailLine<'_>,
+        exclude: &[String],
+    ) -> Result<ReceiptLookup, RailRefusal> {
+        self.inner.find_receipt(line, exclude).await
+    }
+    async fn history(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<Vec<RailHistoryEntry>, RailRefusal> {
+        self.inner.history(recipient, program).await
+    }
+    async fn probe_recipient(&self, recipient: &RecipientRef) -> Result<(), RailRefusal> {
+        self.inner.probe_recipient(recipient).await
+    }
+}
+
+/// A send that committed on a line no longer pending moved money no row
+/// records: the pass never drops that receipt silently. It holds the
+/// account for an operator, who finds the record in the rail's history.
+#[tokio::test]
+async fn a_committed_send_on_a_line_no_longer_pending_holds_the_account() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let keyed = Arc::new(MockKeyedPayoutRail::new());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    settle(&fixture, &tenant, accounts[0], 1_000).await;
+    let made = link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        keyed.as_ref(),
+        &opener,
+        "keyed-not-pending",
+        PayoutLinkState::Active,
+    )
+    .await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(ResolveBeforeSend {
+        inner: keyed.clone(),
+        store: fixture.runtime.clone(),
+        tenant: tenant.clone(),
+        link_id: made.link_id,
+    });
+
+    let report = pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(keyed.effects(), 1, "the send moved money");
+    assert_eq!(report.confirmed, 0, "{report:?}");
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "test_keyed").await,
+        vec!["payout_receipt_unrecorded".to_string()]
+    );
+    // And the next pass sends nothing more to it.
+    completed(
+        &pass(&fixture, keyed.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(keyed.effects(), 1);
 }
 
 /// A credit ledger row with the submission it needs, as the owner.

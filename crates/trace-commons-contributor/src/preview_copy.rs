@@ -283,6 +283,9 @@ pub struct MonitorTreeCopy {
     pub submitting: &'static str,
     /// The folder Submit pill's tip.
     pub submit_tip: &'static str,
+    /// A trace's Submit pill's tip: it sends that one trace (owner,
+    /// 2026-10-22: a trace's pill is Submit, in place of Review).
+    pub submit_trace_tip: &'static str,
     /// Beside the core's withheld line under a folder.
     pub eligible_count: &'static str,
     /// A session's pill while its review is open, and the pill's tip.
@@ -560,7 +563,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         residual_risk: "Residual risk",
         personal_information: "Personal information",
         second_look_waiting: "some worth a second look",
-        contribute: "Contribute",
+        // "Submit", the word the Traces tree's pills say (owner,
+        // 2026-10-22: every Contribute button reads Submit).
+        contribute: "Submit",
         keep: customize.keep,
         dismiss: "Not this one",
         undo_contribute: "Undo",
@@ -583,6 +588,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
             submit_tip: "Sends every eligible waiting trace here.",
+            submit_trace_tip: "Sends this trace now.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",

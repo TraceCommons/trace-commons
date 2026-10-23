@@ -55,6 +55,7 @@ struct InsightsOverviewTab: View {
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
                     header(overview)
+                    sessionsBreakdown
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(overview.sources) { source in
                             harnessCard(source, overview: overview)
@@ -65,9 +66,6 @@ struct InsightsOverviewTab: View {
                     }
                     if let inputs = model.inputs {
                         InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
-                    }
-                    if let sessions = model.counterInputs {
-                        InsightsCounterSessionsView(sessions: sessions, copy: copy)
                     }
                     if overview.feed == "counter_pass", let lever = comparisons.comparisons?.lever {
                         leverCard(lever)
@@ -101,20 +99,29 @@ struct InsightsOverviewTab: View {
                                    select: selectWeek)
             }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                drillButton("sessions") {
-                    HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(text("analytics_card_sessions")).insightsEyebrow()
-                            Text(String(overview.sessions)).insightsFigure()
-                        }
-                        Spacer(minLength: 0)
-                        if model.drills("sessions") { GlassChevron() }
-                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(text("analytics_card_sessions")).insightsEyebrow()
+                    Text(String(overview.sessions)).insightsFigure()
                 }
                 InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .insightsSection()
+        }
+    }
+
+    /// The Sessions figure's breakdown, always shown right under it (owner,
+    /// 2026-10-22: it opened from a chevron on the card, and drew below the
+    /// harnesses): the daemon's rows under feed T, the core's under feed S.
+    /// A week with no rows draws none, never an empty card.
+    @ViewBuilder
+    private var sessionsBreakdown: some View {
+        if let sessions = model.counterSessions {
+            if !sessions.rows.isEmpty {
+                InsightsCounterSessionsView(sessions: sessions, copy: copy)
+            }
+        } else if let inputs = model.sessionsInputs, !inputs.sessions.isEmpty {
+            InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
         }
     }
 

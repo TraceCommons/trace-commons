@@ -94,6 +94,20 @@ final class NudgeCopyExportTests: XCTestCase {
         XCTAssertEqual(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: nil)), NudgeEntryTags())
     }
 
+    /// The NEAR AI credit notification's keys decode from the real table,
+    /// and the body keeps its placeholder for the core to fill.
+    func testCopyExportCarriesTheNearAiCreditKeys() throws {
+        let copy = try XCTUnwrap(NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON()))
+        let keys: [NudgeCopy.Key] = [
+            .notifyNearAiCreditTitle, .notifyNearAiCreditBody, .notifyNearAiCreditActionView,
+            .notifyNearAiCreditActionNotNow, .settingNotifyNearAiCredit,
+        ]
+        for key in keys {
+            XCTAssertNotNil(copy[key], key.rawValue)
+        }
+        XCTAssertTrue(try XCTUnwrap(copy[.notifyNearAiCreditBody]).contains("{amount}"))
+    }
+
     /// The settlement estimate's keys all decode from the real table, and
     /// the line keeps its placeholders for the core to fill: a shell never
     /// fills them.

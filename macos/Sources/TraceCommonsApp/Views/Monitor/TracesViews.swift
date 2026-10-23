@@ -671,12 +671,15 @@ struct TracesTreeView: View, Equatable {
             // A review action on it in flight (Contribute, Keep, Dismiss):
             // dimmed, its pill off and turning, until the daemon answers.
             acting: store.acting.contains(entry.entryId),
-            // D10 default: a session's pill opens its review. Focus roves:
-            // only the selected row's pill is a tab stop; Return opens it.
-            pill: selected ? words?.tree.reviewing : words?.review,
+            // A session's pill is Submit (owner, 2026-10-22, in place of
+            // D10's Review): it sends the trace at once, as a folder's
+            // Submit does, and is drawn turned off while it cannot be sent.
+            // Focus roves: only the selected row's pill is a tab stop;
+            // Return still opens the session's review.
+            pill: words?.tree.submit,
             menuLabel: words?.tree.dismissSession ?? "",
             menuOpen: rowMenu == .session(entry.entryId),
-            help: words?.tree.reviewTip ?? "",
+            help: words?.tree.submitTraceTip ?? "",
             // The tool's name for VoiceOver: the tile shows it, the sub line
             // (#1146's size and state) does not.
             toolName: Self.toolName(entry) ?? "",
@@ -686,7 +689,8 @@ struct TracesTreeView: View, Equatable {
             // its own switch.
             tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) },
             onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) },
-            onSubmit: { onReview(entry.entryId) },
+            onSubmit: store.maySubmitSession(entry, folderIgnored: off)
+                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,
             onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
             spoken: $spoken
         )
@@ -1095,7 +1099,8 @@ struct TracesSessionRow: View, Equatable {
     let toolName: String
     let tags: NudgeEntryTags?
     let onSelect: () -> Void
-    let onSubmit: () -> Void
+    /// Nil while the session cannot be sent: the pill is drawn turned off.
+    let onSubmit: (() -> Void)?
     let onMenu: () -> Void
     /// As `TracesFolderRow.spoken`.
     let spoken: AccessibilityFocusState<String?>.Binding
@@ -1106,6 +1111,7 @@ struct TracesSessionRow: View, Equatable {
                 && lhs.flag == rhs.flag && lhs.selected == rhs.selected && lhs.off == rhs.off && lhs.acting == rhs.acting
                 && lhs.pill == rhs.pill && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen
                 && lhs.help == rhs.help && lhs.toolName == rhs.toolName && lhs.tags == rhs.tags
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil)
         }
     }
 
@@ -1233,13 +1239,19 @@ struct TracesMenuPanel<Content: View>: View {
     }
 }
 
-/// One item in a `TracesMenuPanel`: its glyph and the core's words.
+/// One item in a `TracesMenuPanel`: its glyph and the core's words. Under
+/// the pointer it takes the menu's own highlight, the accent with the
+/// menu's hover ink, as every menu row does (owner, 2026-10-22: the control
+/// hover, a dark well, all but vanished on the dark menu).
 struct TracesMenuItem: View {
     let systemImage: String
     let label: String
     let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
+        let lit = GlassHover.shows(hovering: hovering, enabled: isEnabled)
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s3) {
                 Image(systemName: systemImage)
@@ -1249,12 +1261,23 @@ struct TracesMenuItem: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: lit).color)
             .padding(.horizontal, GlassTokens.Space.s4)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
         }
         .buttonStyle(GlassPressStyle())
+    }
+}
+
+/// A Traces menu row's highlight under the pointer: the menu's own, as
+/// `GlassMenuItem` draws it.
+enum TracesMenuHighlight {
+    static let fill = GlassTokens.Color.menuHover
+
+    static func ink(lit: Bool) -> GlassRGBA {
+        lit ? GlassTokens.Color.menuHoverText : GlassTokens.Color.textPrimary
     }
 }
 
@@ -1324,6 +1347,7 @@ struct TracesRowMenuPill: View {
     private let onDismiss: () -> Void
     private let action: () -> Void
     @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     /// Where it sits under the row (#1146 `top-[38px] right-1.5`).
     static let offset = CGSize(width: -6, height: 38)
@@ -1344,10 +1368,11 @@ struct TracesRowMenuPill: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: GlassHover.shows(hovering: hovering, enabled: isEnabled)).color)
             .padding(.horizontal, GlassTokens.Space.s6)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
             .glassSurface(.menu, radius: GlassTokens.Radius.pill, floating: true)
             .fixedSize()
         }

@@ -691,6 +691,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // holds up this tick; it reads and sends nothing but local
                 // files, so pause and dry-run do not hold it back.
                 let _ = settlement_estimate::tick(shared, now);
+                // NEAR AI credit arriving, and a balance sample for the
+                // 24-hour change: on its own schedule, a no-op without a
+                // NEAR AI sign-in. Reads only; sends nothing about traces.
+                nearai_credential::arrivals::poll(shared, now).await;
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.

@@ -1729,6 +1729,11 @@ struct AppState {
     /// The payout store the rails' workers and operator routes use: the
     /// database mirror's PostgreSQL backend, or `None` without one.
     payout_store: Option<Arc<dyn trace_commons_server::db::PayoutStore>>,
+    /// The sha256 of the operator's payout control token
+    /// (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`), the only credential the
+    /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
+    /// when unset: those routes then refuse every caller. Never the token.
+    payout_control_token_hash: Option<String>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -5094,6 +5099,7 @@ impl AppState {
             credit_settlement_table,
             payout_rails,
             payout_store,
+            payout_control_token_hash: payout_rails::payout_control_token_hash_from_env()?,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -9273,6 +9279,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/payout-rails/{rail_id}/resume",
             post(payout_rails::payout_rail_resume_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds",
+            get(payout_rails::payout_holds_list_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds/clear",
+            post(payout_rails::payout_hold_clear_handler),
         )
         .route(
             "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
