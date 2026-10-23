@@ -155,6 +155,10 @@ docs/
 
 ### Build + Test
 
+The [portable Dagger CI guide](docs/dagger-ci.md) covers `dagger check`,
+selecting checks, the two-run cache demo, and Dagger Cloud push setup. Existing
+GitHub Actions retain PostgreSQL, platform, and feature-matrix coverage.
+
 ```bash
 # Minimum: default-features build + tests (no GPU, no external scoring)
 cargo check -p trace-commons-server --bins
