@@ -475,6 +475,136 @@ pub fn all_exports() -> Vec<Export> {
     out
 }
 
+/// The staging channel's accent: an amber that no production surface uses, so
+/// the staging app is told apart from the production one by colour before it
+/// is told apart by shape. Both schemes share it, as the teal does.
+pub const STAGING_AMBER: &str = "#FFB000";
+
+/// The staging marker's dark ink, for stripes and the badge letter.
+pub const STAGING_INK: &str = "#14110A";
+
+/// A candidate look for the staging app icon. Each one is the production glyph
+/// with something added, never the production glyph changed, so the brackets
+/// stay where `make-icon-document.sh` and `verify-icon.swift` look for them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StagingOption {
+    /// A diagonal hazard-striped ribbon across the free top-right corner.
+    Ribbon,
+    /// The whole ground tinted amber (light) or deep amber (dark).
+    Tint,
+    /// A round amber badge carrying an S in the free bottom-left corner.
+    Badge,
+}
+
+impl StagingOption {
+    pub const ALL: [StagingOption; 3] = [
+        StagingOption::Ribbon,
+        StagingOption::Tint,
+        StagingOption::Badge,
+    ];
+
+    /// The look the generated staging assets use.
+    pub const RECOMMENDED: StagingOption = StagingOption::Ribbon;
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StagingOption::Ribbon => "ribbon",
+            StagingOption::Tint => "tint",
+            StagingOption::Badge => "badge",
+        }
+    }
+
+    /// The ground tint of [`StagingOption::Tint`], per scheme.
+    fn tint(scheme: Scheme) -> &'static str {
+        match scheme {
+            Scheme::Light => "#FFC940",
+            Scheme::Dark => "#6B4600",
+        }
+    }
+}
+
+/// The staging marker for `option`, as SVG elements in the 64-unit space.
+fn staging_marker(option: StagingOption) -> String {
+    match option {
+        StagingOption::Ribbon => {
+            // Band: 24 <= x - y <= 50, running off the top and right edges
+            // (the viewBox clips it). Stripes are bands of x + y. Nothing
+            // reaches either bracket: the open one ends at x=28, the close
+            // one starts at y=36 on x=53, and the band is at x=64 by y=30.
+            let corner = |d: f32, u: f32| format!("{},{}", (u + d) / 2.0, (u - d) / 2.0);
+            let band = |lo: f32, hi: f32, fill: &str| {
+                format!(
+                    r#"<polygon points="{} {} {} {}" fill="{fill}"/>"#,
+                    corner(24.0, lo),
+                    corner(50.0, lo),
+                    corner(50.0, hi),
+                    corner(24.0, hi),
+                )
+            };
+            let mut out = band(30.0, 110.0, STAGING_AMBER);
+            let mut lo = 40.0;
+            while lo < 110.0 {
+                out.push_str(&band(lo, lo + 8.0, STAGING_INK));
+                lo += 16.0;
+            }
+            out
+        }
+        StagingOption::Tint => String::new(),
+        StagingOption::Badge => format!(
+            concat!(
+                r#"<circle cx="14" cy="50" r="11" fill="{amber}" stroke="{ink}" stroke-width="2"/>"#,
+                r#"<path d="M19 45H11.5a3 3 0 0 0 0 5.5H16.5a3 3 0 0 1 0 5.5H9" fill="none" "#,
+                r#"stroke="{ink}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
+            ),
+            amber = STAGING_AMBER,
+            ink = STAGING_INK,
+        ),
+    }
+}
+
+/// The staging glyph layer: [`glyph_svg`] plus the marker for `option`. Same
+/// two bracket paths at the same stroke, so the icon pipeline's bracket checks
+/// apply to it unchanged.
+pub fn staging_glyph_svg(option: StagingOption, scheme: Scheme, size: u32) -> String {
+    let ground = match option {
+        StagingOption::Tint => format!(
+            r#"<rect width="{v}" height="{v}" fill="{}"/>"#,
+            StagingOption::tint(scheme),
+            v = VIEW
+        ),
+        _ => String::new(),
+    };
+    let marker = staging_marker(option);
+    let glyph = glyph_svg(scheme, size);
+    // glyph_svg is `<svg ...><path/><path/></svg>`: splice the ground before
+    // the brackets and the marker after them.
+    let open_end = glyph.find('>').expect("svg start tag") + 1;
+    let close_start = glyph.rfind("</svg>").expect("svg end tag");
+    let mut out = String::new();
+    out.push_str(&glyph[..open_end]);
+    out.push_str(&ground);
+    out.push_str(&glyph[open_end..close_start]);
+    out.push_str(&marker);
+    out.push_str(&glyph[close_start..]);
+    out
+}
+
+/// The staging channel's icon documents, for the recommended look. Written to
+/// `assets/mark-staging` under the same file names the `.icon` build reads
+/// from `assets/mark`, so `TC_ICON_SOURCE` is the only switch.
+pub fn staging_exports() -> Vec<Export> {
+    Scheme::ALL
+        .into_iter()
+        .map(|scheme| Export {
+            relative_path: match scheme {
+                Scheme::Light => "mark-glyph-light.svg",
+                Scheme::Dark => "mark-glyph-dark.svg",
+            },
+            contents: staging_glyph_svg(StagingOption::RECOMMENDED, scheme, 1024),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,5 +948,52 @@ mod tests {
             template_svg(Scheme::Light.ink(), 64),
             template_svg(Scheme::Dark.ink(), 64)
         );
+    }
+
+    #[test]
+    fn staging_glyphs_keep_the_production_brackets() {
+        for option in StagingOption::ALL {
+            for scheme in Scheme::ALL {
+                let svg = staging_glyph_svg(option, scheme, 1024);
+                assert!(svg.contains(PATH_BRACKET_OPEN), "{option:?} {scheme:?}");
+                assert!(svg.contains(PATH_BRACKET_CLOSE), "{option:?} {scheme:?}");
+                assert!(svg.contains(scheme.bracket_open()));
+                assert!(svg.contains(&format!(
+                    r#"stroke="{}" stroke-width="{}""#,
+                    scheme.bracket_close(),
+                    STROKE_FRAMED
+                )));
+                assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
+                assert_ne!(svg, glyph_svg(scheme, 1024), "{option:?} adds nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn staging_exports_differ_from_production_and_between_schemes() {
+        let staging = staging_exports();
+        assert_eq!(staging.len(), 2);
+        let production = all_exports();
+        for export in &staging {
+            let prod = production
+                .iter()
+                .find(|p| p.relative_path == export.relative_path)
+                .expect("a production file of the same name");
+            assert_ne!(prod.contents, export.contents);
+            assert!(export.contents.contains(STAGING_AMBER));
+            // Text is rejected by Icon Composer.
+            assert!(!export.contents.contains("<text"));
+        }
+        assert_ne!(staging[0].contents, staging[1].contents);
+    }
+
+    #[test]
+    fn staging_marker_stays_out_of_the_brackets() {
+        // The ribbon's band is x - y in [24, 50]; the open bracket's far end
+        // (28, 11) and the close bracket's top (53, 36) must be outside it.
+        for (x, y) in [(28, 11), (11, 11), (53, 36), (53, 53), (36, 53)] {
+            let d: i32 = x - y;
+            assert!(!(24..=50).contains(&d), "({x},{y}) is under the ribbon");
+        }
     }
 }
