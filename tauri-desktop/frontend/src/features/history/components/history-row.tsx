@@ -1,4 +1,3 @@
-import { Button } from "@/components/ui/button";
 import { isTauriRuntime } from "../../../lib/tauri/core-api";
 import {
   canWithdrawStatus,
@@ -12,6 +11,7 @@ import {
 import type { HistoryRecord, WithdrawalResult } from "../types";
 import { AccountSignInControl } from "./account-sign-in-control";
 import { WithdrawalControl } from "./withdrawal-control";
+import { GlassButton } from "@/design-system";
 
 export function HistoryRow({
   record,
@@ -72,8 +72,8 @@ export function HistoryRow({
         : []
       : visibleExplanations;
   return (
-    <article className="grid grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-border py-3.5">
-      <div className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground bg-blue">
+    <article className="grid grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-b border-tc-hairline py-3.5">
+      <div className="tc-tool-tile tc-tool-tile--lg tc-tool-tile--folder">
         {record.project_label.slice(0, 1).toUpperCase()}
       </div>
       <div className="grid min-w-0 gap-1">
@@ -83,21 +83,20 @@ export function HistoryRow({
         </span>
         {status && <small>Status: {status}</small>}
         {rowExplanations.map((explanation) => (
-          <small className="text-muted-foreground" key={explanation}>
+          <small className="text-tc-secondary" key={explanation}>
             {explanation}
           </small>
         ))}
         {creditLine && <small>{creditLine}</small>}
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        <GlassButton
           type="button"
           onClick={onOpen}
           disabled={!onOpen}
         >
           Open
-        </Button>
+        </GlassButton>
         {canWithdraw && accountSignedIn === true && onWithdrawRequest && onWithdrawConfirm && onWithdrawCancel && (
           <WithdrawalControl
             record={record}

@@ -112,15 +112,15 @@ export function ComparisonTasksPanel({
   const busy = comparison.state === "busy" || comparison.state === "loading";
 
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             COMPARISON TASKS
           </span>
           <h2>Freeze reviewed episode evidence</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           {comparison.tasks.length}
         </span>
       </div>
@@ -130,7 +130,7 @@ export function ComparisonTasksPanel({
         independence evidence are separately reviewed.
       </p>
       {comparison.error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {comparison.error}
         </p>
       )}

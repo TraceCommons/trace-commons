@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { openSystemSettings } from "../../../lib/tauri/platform-api";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
 import { usePlatformCapabilities } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 export function OnboardingDoneStep({
   onboarding,
@@ -24,8 +24,8 @@ export function OnboardingDoneStep({
           ? copy.onboarding_shell.notification_not_asked
           : copy.onboarding_shell.notification_unknown;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         DONE
       </span>
       <h2>{copy?.onboarding.heading ?? "Your first contribution"}</h2>
@@ -35,53 +35,64 @@ export function OnboardingDoneStep({
           <p>{copy.onboarding.review}</p>
           <p>{copy.onboarding.follow_up}</p>
           <p>{copy.onboarding.agent_setup}</p>
-          <section className="grid gap-2 border-t border-border pt-4">
+          <section className="grid gap-2 border-t border-tc-hairline pt-4">
             <h3>{copy.onboarding_shell.notification_heading}</h3>
-            <p className="m-0 text-sm text-muted-foreground">
+            <p className="m-0 text-sm text-tc-secondary">
               {copy.onboarding_shell.notification_purpose}
             </p>
             {notificationState === "requires_approval" && !notificationDismissed && (
               <p className="m-0 text-sm">{copy.onboarding_shell.notification_offer}</p>
             )}
             {notificationText && (
-              <p className="m-0 text-sm text-muted-foreground" role="status">
+              <p className="m-0 text-sm text-tc-secondary" role="status">
                 {notificationText}
               </p>
             )}
             {notificationState === "requires_approval" && !notificationDismissed && (
               <div className="flex flex-wrap gap-2">
-                <Button
+                <GlassButton
                   type="button"
-                  variant="outline"
                   disabled={platform.busy}
                   onClick={() => void platform.requestNotifications()}
                 >
                   {platform.busy
                     ? "Requesting…"
                     : copy.onboarding_shell.notification_allow}
-                </Button>
-                <Button
+                </GlassButton>
+                <GlassButton
                   type="button"
-                  variant="ghost"
                   onClick={() => setNotificationDismissed(true)}
                 >
                   {copy.onboarding_shell.not_now}
-                </Button>
+                </GlassButton>
               </div>
             )}
             {notificationState === "denied" && (
-              <Button
+              <GlassButton
                 type="button"
-                variant="outline"
                 onClick={() => void openSystemSettings("notifications")}
               >
                 {copy.onboarding_shell.system_settings}
-              </Button>
+              </GlassButton>
             )}
           </section>
         </div>
       ) : (
-        <p role="alert">Shared onboarding copy unavailable. Retry loading it.</p>
+        <div className="tc-alert flex flex-wrap items-center gap-2" role="alert">
+          <span>
+            {disclosure.isPending
+              ? "Loading the onboarding copy…"
+              : `Shared onboarding copy unavailable${disclosure.error ? ` (${disclosure.error.message})` : ""}. Retry loading it.`}
+          </span>
+          {disclosure.isPending ? null : (
+            <GlassButton
+              disabled={disclosure.isFetching}
+              onClick={() => void disclosure.refetch()}
+            >
+              {disclosure.isFetching ? "Retrying…" : "Retry"}
+            </GlassButton>
+          )}
+        </div>
       )}
       {onboarding.withdrawn && (
         <p className="m-0 mb-3 text-sm" role="status">
@@ -90,24 +101,22 @@ export function OnboardingDoneStep({
         </p>
       )}
       {onboarding.granted && !onboarding.withdrawn && (
-        <Button
+        <GlassButton
           className="mb-3 mr-2.5"
           type="button"
-          variant="outline"
           onClick={() => void onboarding.withdrawGrant()}
           disabled={onboarding.state === "busy"}
         >
           Turn off automatic contributing
-        </Button>
+        </GlassButton>
       )}
-      <Button
-        className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+      <ButtonPrimary size="sm"
         type="button"
         onClick={onComplete}
         disabled={!copy}
       >
         Done
-      </Button>
+      </ButtonPrimary>
     </section>
   );
 }

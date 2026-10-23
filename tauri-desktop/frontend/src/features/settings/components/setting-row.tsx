@@ -8,7 +8,7 @@ export function SettingRow({
   detail: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 border-t border-border py-[15px] first:mt-5">
+    <div className="flex items-center justify-between gap-6 border-t border-tc-hairline py-[15px] first:mt-5">
       <div>
         <strong>{label}</strong>
         <span>{detail}</span>

@@ -1,5 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -8,6 +6,7 @@ import { ConfirmActionButton } from "../../components/confirm-action-button";
 import { useContributorDisclosureCopy } from "../../lib/tauri/use-contributor-copy";
 import { type MissionImportFormValues, missionImportFormSchema } from "./forms";
 import { useMissionDrafts } from "./hooks/use-mission-drafts";
+import { ButtonPrimary, GlassButton, Input } from "@/design-system";
 
 export function MissionDraftsPage() {
   const drafts = useMissionDrafts();
@@ -19,20 +18,19 @@ export function MissionDraftsPage() {
   });
   const fileField = form.register("file");
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
+    <div className="tc-page">
       <PageHeader
-        eyebrow="LOCAL / EVIDENCE"
-        title="Mission drafts"
+        title="Missions"
         description="Review proposed evidence-bound runs before anything is executed."
-        phase="PHASE 4"
+        titleHidden
       />
       {drafts.error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {drafts.error}
         </p>
       )}
-      <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <section className="tc-card mb-2.5">
+        <span className="mb-1.5 block tc-eyebrow">
           DRAFT INTAKE
         </span>
         <h2>Import local proposal</h2>
@@ -41,23 +39,21 @@ export function MissionDraftsPage() {
           selected file is read locally and is never fetched, executed,
           published, or funded.
         </p>
-        <div className="mt-6 flex gap-2.5">
-          <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        <div className="mt-3 flex flex-wrap gap-2">
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => input.current?.click()}
             disabled={drafts.state === "busy"}
           >
             {drafts.state === "busy" ? "Working…" : "Choose proposal"}
-          </Button>
-          <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          </ButtonPrimary>
+          <GlassButton
             type="button"
             onClick={() => void drafts.refresh()}
             disabled={drafts.state === "busy"}
           >
             Refresh drafts
-          </Button>
+          </GlassButton>
         </div>
         <Input
           {...fileField}
@@ -78,29 +74,29 @@ export function MissionDraftsPage() {
           }}
         />
         {drafts.lastImport && (
-          <p className="mt-[15px] text-[11px] leading-[1.5] text-primary">
+          <p className="mt-2 tc-caption tc-text-accent">
             Draft reviewed locally: {drafts.lastImport.proposal_sha256}. Curator
             review remains required.
           </p>
         )}
       </section>
       {drafts.selected && (
-        <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-          <div className="flex items-start justify-between gap-[18px]">
+        <section className="tc-card mb-2.5">
+          <div className="flex items-start justify-between gap-3">
             <div>
-              <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+              <span className="mb-1.5 block tc-eyebrow">
                 PROPOSAL DETAIL
               </span>
               <h2>{drafts.selected.proposal.title}</h2>
             </div>
-            <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+            <span className="tc-chip tc-chip--glass self-start">
               {drafts.selected.review.status}
             </span>
           </div>
-          <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+          <p className="m-0 tc-caption tc-text-tertiary">
             {drafts.selected.proposal.task}
           </p>
-          <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+          <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
             <span>
               <b>Author</b>
               {drafts.selected.proposal.author_id}
@@ -136,7 +132,7 @@ export function MissionDraftsPage() {
               <p>{drafts.selected.proposal.required_evidence.join(" · ")}</p>
             </div>
           </div>
-          <div className="mt-[18px] flex justify-end gap-[9px]">
+          <div className="mt-3 flex justify-end gap-2">
             <ConfirmActionButton
               label={deleteCopy?.delete}
               title={deleteCopy?.delete_confirm_title}
@@ -151,37 +147,37 @@ export function MissionDraftsPage() {
           </div>
         </section>
       )}
-      <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-        <div className="flex items-start justify-between gap-[18px]">
+      <section className="tc-card">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+            <span className="mb-1.5 block tc-eyebrow">
               LOCAL INBOX
             </span>
             <h2>Mission drafts</h2>
           </div>
-          <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+          <span className="tc-chip tc-chip--glass self-start">
             {drafts.drafts.length}
           </span>
         </div>
         {drafts.state === "loading" ? (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             Reading local inbox…
           </p>
         ) : drafts.drafts.length === 0 ? (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             No local mission drafts.
           </p>
         ) : (
-          <div className="mt-[22px] grid gap-px border-t border-border">
+          <div className="mt-3 grid gap-px">
             {drafts.drafts.map((draft) => (
-              <Button
-                className="grid w-full grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-0 border-b border-border bg-transparent py-3.5 text-left hover:bg-muted"
+              <button
+                className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
                 type="button"
                 key={draft.id}
                 onClick={() => void drafts.open(draft.id)}
                 disabled={drafts.state === "busy"}
               >
-                <span className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground">
+                <span className="tc-tool-tile tc-tool-tile--lg">
                   M
                 </span>
                 <span className="grid min-w-0 gap-1">
@@ -192,13 +188,13 @@ export function MissionDraftsPage() {
                   <strong>{draft.status}</strong>
                   <span>Review required</span>
                 </span>
-              </Button>
+              </button>
             ))}
           </div>
         )}
       </section>
-      <section className="rounded-2xl border border-border bg-card/80 p-[26px] bg-muted/70">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <section className="tc-card bg-tc-tint/70">
+        <span className="mb-1.5 block tc-eyebrow">
           AUTHORITY
         </span>
         <h2>Review is not acceptance</h2>

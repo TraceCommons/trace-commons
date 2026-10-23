@@ -1,4 +1,4 @@
-import { WarningIcon } from "@phosphor-icons/react";
+import { Spinner, WarningGlyph } from "../design-system";
 import {
   type RouteDisclosure,
   routeDisclosureView,
@@ -8,7 +8,6 @@ import {
   useRouteDisclosureUnreadableCopy,
 } from "../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
-import { Spinner } from "./ui/spinner";
 
 // K11: the raw send, both enclaves, and where the witness came from. Every
 // fact is the daemon's (`route_disclosure`) and every sentence is the
@@ -28,18 +27,18 @@ export function RouteDisclosureBody({
       <p className="m-0">{copy.route}</p>
       {copy.local_filter && <p className="m-0">{copy.local_filter}</p>}
       {facts.witness && copy.witness && (
-        <div className="grid gap-2 rounded-md border border-border p-3">
+        <div className="tc-card tc-card--quiet grid gap-2">
           <strong className="text-[12px]">{copy.witness.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.address_label}
             </dt>
             <dd className="m-0 break-all">{facts.witness.url}</dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.signing_label}
             </dt>
             <dd className="m-0 break-all">{facts.witness.signing_address}</dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {copy.witness.measurements_label}
             </dt>
             {facts.witness.pinned_measurements.map((pin) => (
@@ -75,12 +74,12 @@ export function RouteDisclosureUnreadableLine({
 }) {
   return (
     <p
-      className={`m-0 flex items-baseline gap-2 text-destructive ${className}`}
+      className={`m-0 flex items-baseline gap-2 text-tc-outside ${className}`}
       role="alert"
     >
-      <WarningIcon
+      <WarningGlyph
         className="shrink-0 self-center"
-        aria-hidden={line !== undefined}
+        label={line === undefined ? "Warning" : undefined}
       />
       {line}
     </p>
@@ -100,16 +99,16 @@ export function RouteDisclosurePanel() {
   const view = routeDisclosureView(disclosure, core);
   const title = disclosure.data?.copy.title ?? unreadable.data?.title;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
+    <section className="tc-card">
       {title && (
-        <h2 className="m-0 mb-3 block font-mono text-[10px] font-extrabold uppercase leading-none tracking-[.16em] text-primary">
+        <h2 className="m-0 mb-1.5 block tc-eyebrow uppercase">
           {title}
         </h2>
       )}
       {view === "shown" && disclosure.data && (
         <RouteDisclosureBody disclosure={disclosure.data} />
       )}
-      {view === "loading" && <Spinner className="size-3" />}
+      {view === "loading" && <Spinner />}
       {view === "unreadable" && (
         <RouteDisclosureUnreadableLine
           line={unreadable.data?.panel}

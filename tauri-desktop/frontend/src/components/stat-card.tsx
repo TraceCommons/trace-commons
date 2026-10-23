@@ -1,33 +1,22 @@
 type StatCardProps = {
   label: string;
   value: string;
-  detail: string;
+  /**
+   * Accepted for the views the Monitor does not host (Insights, Compute);
+   * the design's stat tile shows label and value only.
+   */
+  detail?: string;
   tone?: "green" | "blue" | "gold";
 };
 
-export function StatCard({
-  label,
-  value,
-  detail,
-  tone = "green",
-}: StatCardProps) {
-  const toneClass =
-    tone === "blue"
-      ? "border-t-[3px] border-t-blue"
-      : tone === "gold"
-        ? "border-t-[3px] border-t-gold"
-        : "border-t-[3px] border-t-green";
-
+/** Stat tile: eyebrow label over an 18px tabular value. */
+export function StatCard({ label, value }: StatCardProps) {
   return (
-    <Card className={`min-h-[122px] border-t-2 ${toneClass}`}>
-      <CardContent className="grid gap-1 p-5">
-        <span className="text-xs text-muted-foreground">{label}</span>
-        <strong className="font-heading text-2xl font-medium tracking-tight">
-          {value}
-        </strong>
-        <small className="text-xs text-muted-foreground">{detail}</small>
-      </CardContent>
-    </Card>
+    <div className="tc-card min-w-0" style={{ padding: "10px 12px" }}>
+      <div className="tc-eyebrow">{label}</div>
+      <div className="truncate text-[18px] font-bold leading-6 tc-tabular">
+        {value}
+      </div>
+    </div>
   );
 }
-import { Card, CardContent } from "./ui/card";

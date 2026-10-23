@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { ResponsiveOverlay } from "../components/responsive-overlay";
-import { Button } from "../components/ui/button";
 import { quitApp } from "../lib/tauri/platform-api";
 import { QUIT_FALLBACK, WORDING_UNREADABLE } from "../lib/copy-unreadable";
 import {
   useQuitConfirmationCopy,
   useShellStatusLines,
 } from "../lib/tauri/use-contributor-copy";
+import { GlassButton } from "@/design-system";
 
 export function QuitConfirmation({
   open,
@@ -36,23 +36,21 @@ export function QuitConfirmation({
       description={copy.data?.body}
       footer={
         <>
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => onOpenChange(false)}
           >
             {copy.data?.cancel ?? QUIT_FALLBACK.cancel}
-          </Button>
-          <Button
+          </GlassButton>
+          <GlassButton className="tc-text-outside"
             type="button"
-            variant="destructive"
             // Wait for the true sentence, but never trap the contributor in
             // the app if it cannot be read.
             disabled={!copy.data && !copy.isError}
             onClick={() => void confirm()}
           >
             {copy.data?.confirm ?? QUIT_FALLBACK.confirm}
-          </Button>
+          </GlassButton>
         </>
       }
     >
@@ -60,10 +58,10 @@ export function QuitConfirmation({
           the shell says only that, and claims nothing about what keeps
           running. */}
       {copy.isError && (
-        <p className="text-sm text-destructive">{WORDING_UNREADABLE}</p>
+        <p className="text-sm text-tc-outside">{WORDING_UNREADABLE}</p>
       )}
       {failed && (
-        <p className="text-sm text-destructive">{lines.requestFailed}</p>
+        <p className="text-sm text-tc-outside">{lines.requestFailed}</p>
       )}
     </ResponsiveOverlay>
   );

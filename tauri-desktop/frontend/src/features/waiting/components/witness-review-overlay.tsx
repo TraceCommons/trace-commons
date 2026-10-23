@@ -1,7 +1,5 @@
 import type { UseMutationResult } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import {
   useRedactionSummary,
@@ -9,6 +7,7 @@ import {
   useWitnessReviewCopy,
 } from "../../../lib/tauri/use-contributor-copy";
 import type { WitnessReview } from "../api/native-review-api";
+import { ButtonPrimary, Checkbox, GlassButton } from "@/design-system";
 
 type WitnessMutation = UseMutationResult<WitnessReview, Error, boolean, unknown>;
 
@@ -49,14 +48,13 @@ export function WitnessReviewOverlay({
       description={copy.data?.disclosure}
       footer={
         <div className="flex justify-end gap-2">
-          <Button
+          <GlassButton
             type="button"
-            variant="outline"
             onClick={() => onOpenChange(false)}
           >
             {copy.data?.cancel ?? "Cancel"}
-          </Button>
-          <Button
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="button"
             onClick={() => mutation.mutate(true)}
             disabled={
@@ -69,23 +67,23 @@ export function WitnessReviewOverlay({
             {mutation.isPending
               ? "Reviewing…"
               : (copy.data?.confirm ?? "Confirm witness review")}
-          </Button>
+          </ButtonPrimary>
         </div>
       }
     >
-      <div className="grid gap-3 text-[12px] text-muted-foreground">
+      <div className="grid gap-3 text-[12px] text-tc-secondary">
         {copy.isPending && <p className="m-0">Loading review disclosure…</p>}
         {copy.isError && (
-          <p className="m-0 text-destructive">
+          <p className="m-0 text-tc-outside">
             Disclosure unavailable. Witness review is disabled.
           </p>
         )}
         {copy.data && <p className="m-0">{copy.data.immutable}</p>}
         {copy.data && (
-          <label className="flex items-start gap-2.5 rounded-[9px] border border-border p-3.5 text-foreground">
+          <label className="tc-card tc-card--quiet flex items-start gap-2.5 text-tc-primary">
             <Checkbox
               checked={confirmed}
-              onCheckedChange={(value) => setConfirmed(value === true)}
+              onChange={(value) => setConfirmed(value === true)}
               disabled={mutation.isPending || (mutation.isSuccess && !busy)}
               aria-label="Confirm sending unredacted trace to witness"
             />
@@ -98,19 +96,19 @@ export function WitnessReviewOverlay({
         {busy && (
           <div
             role="status"
-            className="grid gap-1 rounded-[9px] border border-border px-3.5 py-3 text-foreground"
+            className="tc-card tc-card--quiet grid gap-1 text-tc-primary"
           >
             <p className="m-0">{busy.message ?? copy.data?.failed_busy}</p>
             {busy.retryLine && <p className="m-0">{busy.retryLine}</p>}
           </div>
         )}
         {error && (
-          <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-destructive">
+          <p className="tc-card tc-card--quiet m-0 border-tc-outside/30 text-tc-outside">
             {error}
           </p>
         )}
         {mutation.isSuccess && mutation.data.ready && (
-          <div className="grid gap-2 text-primary">
+          <div className="grid gap-2 text-tc-accent">
             <p className="m-0">
               Reviewed envelope:{" "}
               {mutation.data.summary.would_send_bytes.toLocaleString()} bytes ·{" "}
@@ -122,20 +120,20 @@ export function WitnessReviewOverlay({
               </p>
             ))}
             {redactionSummary.data?.still_present.map((item) => (
-              <p className="m-0 text-destructive" key={item.family}>
+              <p className="m-0 text-tc-outside" key={item.family}>
                 {item.occurrences} {item.display} remain: {item.description}
               </p>
             ))}
             {redactionSummary.isError && (
-              <p className="m-0 text-destructive">
+              <p className="m-0 text-tc-outside">
                 Redaction details unavailable.
               </p>
             )}
             {residualCopy.data && (
-              <p className="m-0 text-destructive">{residualCopy.data}</p>
+              <p className="m-0 text-tc-outside">{residualCopy.data}</p>
             )}
             {residualCopy.isError && !residualCopy.data && (
-              <p className="m-0 text-destructive">
+              <p className="m-0 text-tc-outside">
                 Residual secret warning unavailable.
               </p>
             )}

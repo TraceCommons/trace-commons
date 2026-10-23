@@ -1,7 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import { Button } from "../components/ui/button";
 import { changeProjectMode, settingsKeys } from "../features/settings/public";
 import { acknowledgeGrantVoids } from "../lib/tauri/core-api";
 import {
@@ -14,6 +12,7 @@ import { coreKeys } from "../lib/tauri/query-keys";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 import { useGrantVoidNotice } from "../lib/tauri/use-contributor-copy";
 import { flowPaths } from "./routes";
+import { GlassButton, Notice } from "@/design-system";
 
 /**
  * Every grant the core voided that no shell has shown yet.
@@ -29,12 +28,9 @@ export function GrantVoidNotices({ grantVoids }: { grantVoids: unknown }) {
     voids = parseGrantVoids(grantVoids);
   } catch {
     return (
-      <p
-        className="mx-6 mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-        role="alert"
-      >
-        Automatic contributing may have stopped, but the notice that says
-        where and why could not be read. Check your projects' settings.
+      <p className="tc-alert" role="alert">
+        Automatic contributing may have stopped, but the notice that says where
+        and why could not be read. Check your projects' settings.
       </p>
     );
   }
@@ -76,78 +72,69 @@ function GrantVoidNoticeCard({ grantVoid }: { grantVoid: GrantVoid }) {
   const busy = acknowledge.isPending || rearm.isPending;
 
   return (
-    <Alert className="mx-6 mt-4 w-auto border-amber-500/40 bg-amber-500/10">
+    <Notice tone="ask" title={copy.data ? copy.data.title : undefined}>
       {copy.data ? (
-        <>
-          <AlertTitle>{copy.data.title}</AlertTitle>
-          <AlertDescription className="grid gap-2">
-            <span>{copy.data.body}</span>
-            <span className="font-semibold">{copy.data.reasons_heading}</span>
-            <ul className="m-0 list-disc pl-5">
-              {copy.data.reasons.map((reason) => (
-                <li key={reason}>{reason}</li>
-              ))}
-            </ul>
-            <span>{copy.data.rearm}</span>
-            {regrantOffered(copy.data) && <span>{copy.data.regrant}</span>}
-            <div className="flex flex-wrap gap-2">
-              {/* Both buttons are offered only once the notice is on screen.
+        <div className="grid gap-2">
+          <span>{copy.data.body}</span>
+          <span className="font-semibold">{copy.data.reasons_heading}</span>
+          <ul className="m-0 list-disc pl-5">
+            {copy.data.reasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+          <span>{copy.data.rearm}</span>
+          {regrantOffered(copy.data) && <span>{copy.data.regrant}</span>}
+          <div className="flex flex-wrap gap-2">
+            {/* Both buttons are offered only once the notice is on screen.
                   "Turn back on" sits under the sentence that says pressing
                   it agrees to the new settings. */}
-              {projectId !== null && copy.data.rearm_action && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !copy.data}
-                  onClick={() => rearm.mutate(projectId)}
-                >
-                  {copy.data.rearm_action}
-                </Button>
-              )}
-              {/* The automatic grant is given again only through its own
+            {projectId !== null && copy.data.rearm_action && (
+              <GlassButton
+                type="button"
+                disabled={busy || !copy.data}
+                onClick={() => rearm.mutate(projectId)}
+              >
+                {copy.data.rearm_action}
+              </GlassButton>
+            )}
+            {/* The automatic grant is given again only through its own
                   screens, never in one click here: this button opens them,
                   and giving the grant there clears the notice. */}
-              {regrantOffered(copy.data) && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !copy.data}
-                  onClick={() => navigate(flowPaths["automatic-contributing"])}
-                >
-                  {copy.data.regrant_action}
-                </Button>
-              )}
-              <Button
+            {regrantOffered(copy.data) && (
+              <GlassButton
                 type="button"
-                size="sm"
-                variant="outline"
                 disabled={busy || !copy.data}
-                onClick={() => acknowledge.mutate()}
+                onClick={() => navigate(flowPaths["automatic-contributing"])}
               >
-                {copy.data.acknowledge}
-              </Button>
-            </div>
-            {rearm.isError && copy.data.rearm_failed && (
-              <span className="text-destructive" role="alert">
-                {copy.data.rearm_failed}
-              </span>
+                {copy.data.regrant_action}
+              </GlassButton>
             )}
-            {acknowledge.isError && (
-              <span className="text-destructive" role="alert">
-                This notice could not be dismissed. It will show again.
-              </span>
-            )}
-          </AlertDescription>
-        </>
+            <GlassButton
+              type="button"
+              disabled={busy || !copy.data}
+              onClick={() => acknowledge.mutate()}
+            >
+              {copy.data.acknowledge}
+            </GlassButton>
+          </div>
+          {rearm.isError && copy.data.rearm_failed && (
+            <span className="text-tc-outside" role="alert">
+              {copy.data.rearm_failed}
+            </span>
+          )}
+          {acknowledge.isError && (
+            <span className="text-tc-outside" role="alert">
+              This notice could not be dismissed. It will show again.
+            </span>
+          )}
+        </div>
       ) : (
-        <AlertDescription>
+        <div>
           {copy.isError
             ? "Automatic contributing stopped, but this build could not read the notice that says where and why. Check your projects' settings."
             : "Loading…"}
-        </AlertDescription>
+        </div>
       )}
-    </Alert>
+    </Notice>
   );
 }

@@ -1,12 +1,10 @@
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { RoutingEvidence } from "../api/routing-api";
 import { type RoutingFormValues, routingFormSchema } from "../forms";
+import { ButtonPrimary, Checkbox, GlassButton, Input } from "@/design-system";
 
 export function RoutingControls({
   enabled: initialEnabled,
@@ -67,10 +65,10 @@ export function RoutingControls({
   );
   return (
     <form onSubmit={form.handleSubmit(save)}>
-      <label className="mt-5 flex items-start gap-2.5 text-[12px] font-normal text-foreground">
+      <label className="mt-5 flex items-start gap-2.5 text-[12px] font-normal text-[var(--tc-text-primary)]">
         <Checkbox
           checked={enabled}
-          onCheckedChange={(checked) =>
+          onChange={(checked) =>
             form.setValue("enabled", checked === true, { shouldDirty: true })
           }
           disabled={busy}
@@ -116,28 +114,26 @@ export function RoutingControls({
           />
         </label>
       </div>
-      <div className="mt-6 flex gap-2.5">
-        <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+      <div className="mt-3 flex flex-wrap gap-2">
+        <ButtonPrimary size="sm"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >
           Save routing
-        </Button>
+        </ButtonPrimary>
         {enabled && (
-          <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          <GlassButton
             type="button"
             onClick={() => void check()}
             disabled={busy || !form.formState.isValid}
           >
             Check now
-          </Button>
+          </GlassButton>
         )}
       </div>
       {evidence && (
-        <div className="mt-[22px] grid gap-px border-t border-border">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.08em] text-primary">
+        <div className="mt-3 grid gap-px">
+          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.08em] text-tc-accent">
             PROXY EVIDENCE · {evidence.outcome}
           </span>
           {evidence.tools.map((tool) => (

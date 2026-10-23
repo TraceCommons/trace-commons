@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ResponsiveOverlay } from "./responsive-overlay";
-import { Button } from "./ui/button";
+import { GlassButton } from "@/design-system";
 
 export function ConfirmActionButton({
   label,
@@ -28,17 +28,16 @@ export function ConfirmActionButton({
 
   return (
     <>
-      <Button
-        className="text-destructive"
+      <GlassButton
+        className="text-tc-outside"
         type="button"
-        variant="outline"
         onClick={() => setOpen(true)}
         disabled={busy || !copyReady}
       >
         {label ?? "Loading…"}
-      </Button>
+      </GlassButton>
       {!copyReady && (
-        <span className="text-xs text-destructive" role="alert">
+        <span className="text-xs text-tc-outside" role="alert">
           {unavailableLabel}
         </span>
       )}
@@ -49,16 +48,14 @@ export function ConfirmActionButton({
         description={description}
         footer={
           <div className="flex justify-end gap-2">
-            <Button
+            <GlassButton
               type="button"
-              variant="outline"
               onClick={() => setOpen(false)}
             >
               {cancelLabel ?? ""}
-            </Button>
-            <Button
+            </GlassButton>
+            <GlassButton className="tc-text-outside"
               type="button"
-              variant="destructive"
               disabled={busy || !copyReady}
               onClick={() => {
                 setOpen(false);
@@ -66,7 +63,7 @@ export function ConfirmActionButton({
               }}
             >
               {busy ? workingLabel : confirmLabel}
-            </Button>
+            </GlassButton>
           </div>
         }
       >

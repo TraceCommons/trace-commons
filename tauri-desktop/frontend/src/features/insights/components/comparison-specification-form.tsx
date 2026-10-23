@@ -1,7 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
 import type { ComparisonTaskDetail } from "../comparisons";
 import {
   type ComparisonSpecificationFormValues,
@@ -9,6 +8,7 @@ import {
 } from "../forms";
 import type { ComparisonSpecificationInput } from "../specifications";
 import { ComparisonSpecificationFields } from "./comparison-specification-fields";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 function localDateTimeInputValue(date = new Date()): string {
   const localDate = new Date(
@@ -98,23 +98,21 @@ export function ComparisonSpecificationForm({
   return (
     <>
       <ComparisonSpecificationFields form={form} />
-      <div className="mt-6 flex gap-2.5">
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <div className="mt-3 flex flex-wrap gap-2">
+        <GlassButton
           type="button"
           onClick={() => void preview()}
           disabled={busy || !isValid}
         >
           Preview specification
-        </Button>
-        <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={() => void save()}
           disabled={busy || !isValid}
         >
           Save specification
-        </Button>
+        </ButtonPrimary>
       </div>
     </>
   );

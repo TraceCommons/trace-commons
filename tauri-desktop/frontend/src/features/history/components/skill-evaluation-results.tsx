@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { SkillCopy, SkillEvaluationReport } from "../skill-types";
+import { ButtonPrimary, TertiaryLink } from "@/design-system";
 
 export function SkillEvaluationResults({
   copy,
@@ -19,7 +19,7 @@ export function SkillEvaluationResults({
   );
   return (
     <div className="grid gap-4">
-      <div className="grid gap-[5px] border-l-[3px] border-chart-2 bg-background p-3.5">
+      <div className="grid gap-[5px] tc-card tc-card--quiet">
         <strong>
           {report.install_allowed ? copy.passed_gate : copy.failed_gate}
         </strong>
@@ -35,7 +35,7 @@ export function SkillEvaluationResults({
           items={report.applicability_summaries}
         />
       </div>
-      <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
         <span>
           <b>{copy.model_and_budget}</b>
           {report.served_model}
@@ -50,16 +50,16 @@ export function SkillEvaluationResults({
         </span>
       </div>
       {report.regressions.length > 0 ? (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {copy.regressions}: {report.regressions.join(", ")}
         </p>
       ) : (
-        <p className="mt-[15px] text-[11px] leading-[1.5] text-primary">
+        <p className="mt-2 tc-caption tc-text-accent">
           {copy.no_regressions}
         </p>
       )}
-      <div className="grid gap-px border-t border-border pt-4">
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <div className="grid gap-px pt-2">
+        <span className="mb-1.5 block tc-eyebrow">
           {copy.inspect_runs}
         </span>
         {report.trials.map((trial) => (
@@ -71,16 +71,15 @@ export function SkillEvaluationResults({
               </strong>
               <small>{trial.arm}</small>
             </summary>
-            <div className="grid gap-2 pb-[13px] text-[11px] leading-[1.5] text-muted-foreground">
+            <div className="grid gap-2 pb-[13px] text-[11px] leading-[1.5] text-tc-secondary">
               <p>{trial.task}</p>
               {trial.source_url && (
-                <Button
-                  className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+                <TertiaryLink
                   type="button"
                   onClick={() => onInspect(trial.source_url)}
                 >
                   {copy.open_fixture_source}
-                </Button>
+                </TertiaryLink>
               )}
               {trial.answer && (
                 <>
@@ -93,7 +92,7 @@ export function SkillEvaluationResults({
                 </>
               )}
               {trial.failure_reasons.length > 0 && (
-                <span className="text-destructive">
+                <span className="text-tc-outside">
                   {trial.failure_reasons.join(" · ")}
                 </span>
               )}
@@ -106,15 +105,14 @@ export function SkillEvaluationResults({
         ))}
       </div>
       {report.install_allowed && (
-        <div className="mt-6 flex gap-2.5">
-          <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        <div className="mt-3 flex flex-wrap gap-2">
+          <ButtonPrimary size="sm"
             type="button"
             onClick={onReviewInstall}
             disabled={busy}
           >
             {busy ? copy.preparing : copy.review_install}
-          </Button>
+          </ButtonPrimary>
         </div>
       )}
     </div>
@@ -129,8 +127,8 @@ function ResultGroup({
   items: SkillEvaluationReport["summaries"];
 }) {
   return (
-    <div className="grid gap-px border-t border-border pt-3">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <div className="grid gap-px border-t border-tc-hairline pt-3">
+      <span className="mb-1.5 block tc-eyebrow">
         {title}
       </span>
       {items.map((item) => (

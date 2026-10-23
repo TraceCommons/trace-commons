@@ -1,20 +1,5 @@
 import type { ReactNode } from "react";
-import { useIsMobile } from "../hooks/use-mobile";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerFooter,
-  DrawerHeader,
-  DrawerTitle,
-} from "./ui/drawer";
+import { Modal } from "@/design-system";
 
 type ResponsiveOverlayProps = {
   open: boolean;
@@ -25,6 +10,11 @@ type ResponsiveOverlayProps = {
   footer?: ReactNode;
 };
 
+/**
+ * A confirmation or review raised from inside a pane: the design system's
+ * modal, lifted to cover the whole window. The body scrolls; the footer
+ * holds the actions.
+ */
 export function ResponsiveOverlay({
   open,
   onOpenChange,
@@ -33,33 +23,21 @@ export function ResponsiveOverlay({
   children,
   footer,
 }: ResponsiveOverlayProps) {
-  const isMobile = useIsMobile();
-
-  if (isMobile) {
-    return (
-      <Drawer open={open} onOpenChange={onOpenChange}>
-        <DrawerContent>
-          <DrawerHeader>
-            <DrawerTitle>{title}</DrawerTitle>
-            {description && <DrawerDescription>{description}</DrawerDescription>}
-          </DrawerHeader>
-          <div className="max-h-[70dvh] overflow-y-auto px-4">{children}</div>
-          {footer && <DrawerFooter>{footer}</DrawerFooter>}
-        </DrawerContent>
-      </Drawer>
-    );
-  }
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[min(760px,calc(100vh-2rem))] overflow-y-auto sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          {description && <DialogDescription>{description}</DialogDescription>}
-        </DialogHeader>
-        {children}
-        {footer}
-      </DialogContent>
-    </Dialog>
+    <Modal
+      open={open}
+      onClose={() => onOpenChange(false)}
+      title={title}
+      subtitle={
+        description ? (
+          <span className="whitespace-pre-line">{description}</span>
+        ) : undefined
+      }
+      footer={footer}
+      viewport
+      bodyClassName="flex flex-col gap-3 overflow-y-auto px-[18px] py-3"
+    >
+      {children}
+    </Modal>
   );
 }

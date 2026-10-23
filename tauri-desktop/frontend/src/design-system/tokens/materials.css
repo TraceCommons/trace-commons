@@ -1,0 +1,79 @@
+/* Trace Commons · WYSIWYG glass · materials
+   Tiers follow Apple Liquid Glass / visionOS: one blurred glass sheet per window or pane,
+   then tint layers (no blur) for content, then controls. No glass on glass.
+   Edges are specular highlights, never solid borders (NN/g: light edge + soft shadow reads as glass). */
+:root {
+  /* Blur */
+  --tc-blur-window: blur(30px) saturate(180%);
+  --tc-blur-popover: blur(24px) saturate(170%);
+  --tc-blur-scrim: blur(6px);
+
+  /* Tier 0 · scene */
+  --tc-scene:
+    radial-gradient(60% 80% at 15% 10%, var(--tc-scene-glow-1) 0%, transparent 60%),
+    radial-gradient(50% 60% at 85% 90%, var(--tc-scene-glow-2) 0%, transparent 60%),
+    radial-gradient(40% 50% at 60% 40%, var(--tc-scene-glow-3) 0%, transparent 60%),
+    linear-gradient(160deg, var(--tc-scene-warm), var(--tc-scene-base));
+
+  /* Tier 1 · optional window rim (only when panes sit inside a chrome window; the app itself uses panes as containment) */
+  --tc-rim-window: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.7) 0%,
+    rgba(255, 255, 255, 0.22) 18%,
+    rgba(255, 255, 255, 0.04) 45%,
+    rgba(255, 255, 255, 0.03) 62%,
+    rgba(255, 255, 255, 0.28) 88%,
+    rgba(255, 255, 255, 0.5) 100%
+  );
+  --tc-rim-width: 1.5px;
+  --tc-shadow-window: 0 30px 80px rgba(0, 0, 0, 0.45), inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+
+  /* Tier 2 · pane (blurred glass sheet inside the window) */
+  --tc-pane-fill: linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05) 40%, rgba(255, 255, 255, 0.03));
+  --tc-pane-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 1px 0 0 rgba(255, 255, 255, 0.12), inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 12px 36px rgba(0, 0, 0, 0.3);
+
+  /* Tier 3 · card / tint layer on a pane (no blur) */
+  --tc-card-fill: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.045));
+  --tc-card-edge: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 -1px 0 rgba(0, 0, 0, 0.12);
+  --tc-card-fill-quiet: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.04));
+  --tc-card-edge-quiet: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+  --tc-well-fill: rgba(0, 0, 0, 0.22); /* inset tracks: segmented tab, progress rail */
+  --tc-well-edge: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+
+  /* Tier 4 · controls */
+  --tc-control-fill: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.07));
+  --tc-control-edge: inset 0 1px 0 rgba(255, 255, 255, 0.32), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.18);
+  --tc-control-hover: rgba(255, 255, 255, 0.16);
+  --tc-control-selected: rgba(255, 255, 255, 0.16);
+  --tc-control-selected-edge: inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 -1px 0 rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.25);
+  --tc-cta-fill: linear-gradient(180deg, rgba(138, 61, 255, 0.72), rgba(109, 20, 243, 0.62));
+  --tc-cta-secondary-fill: linear-gradient(180deg, rgba(74, 14, 166, 0.6), rgba(50, 8, 120, 0.55));
+  --tc-toggle-on: #3a7bd5;
+  --tc-toggle-off: rgba(255, 255, 255, 0.18);
+
+  /* Hairlines (rows inside a list only; never around a container) */
+  --tc-hairline: rgba(255, 255, 255, 0.07);
+
+  /* Popover / modal. Overlays float over other glass, so their fill is
+     near-opaque: the blur gives the material, the fill keeps what is
+     behind from reading through (Liquid Glass: no glass on glass). */
+  --tc-popover-fill: rgba(34, 36, 42, 0.94);
+  --tc-popover-edge: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 24px 60px rgba(0, 0, 0, 0.5);
+  --tc-scrim: rgba(0, 0, 0, 0.35);
+
+  /* Radii */
+  --tc-radius-window: 22px;
+  --tc-radius-pane: 16px;
+  --tc-radius-card: 14px;
+  --tc-radius-card-sm: 12px;
+  --tc-radius-control: 8px;
+  --tc-radius-pill: 999px;
+
+  /* Motion */
+  --tc-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --tc-dur-fast: 150ms;
+  --tc-dur: 220ms;
+  --tc-dur-slow: 300ms;
+}

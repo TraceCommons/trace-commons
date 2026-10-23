@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import { scrubDisclosureLines } from "../../../lib/tauri/automatic-grant-copy";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { ButtonPrimary, GlassButton } from "@/design-system";
 
 // K11, first screen: what is removed before an automatic send, and that no
 // one reviews it. The wording is the one the contributor core chose for this
@@ -17,8 +17,8 @@ export function OnboardingScrubDisclosureStep({
   const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
   const copy = grantCopy.data;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         WHAT IS REMOVED
       </span>
       <h2>Before a trace is sent</h2>
@@ -32,7 +32,7 @@ export function OnboardingScrubDisclosureStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-tc-outside" : "text-tc-secondary"}`}
           role={grantCopy.isError ? "alert" : "status"}
         >
           {grantCopy.isError
@@ -40,23 +40,21 @@ export function OnboardingScrubDisclosureStep({
             : "Loading disclosure…"}
         </p>
       )}
-      <div className="mt-6 flex gap-2.5">
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <div className="mt-3 flex flex-wrap gap-2">
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        </GlassButton>
+        <ButtonPrimary size="sm"
           type="button"
           onClick={onboarding.acknowledgeScrubDisclosure}
           disabled={busy || !copy}
         >
           Continue
-        </Button>
+        </ButtonPrimary>
       </div>
     </section>
   );
