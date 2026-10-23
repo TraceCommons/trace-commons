@@ -3556,14 +3556,12 @@ mod tests {
             );
             assert_eq!(bare.pins.attestation_label(), "pins_no_allowlist");
 
-            // The set matches and the replay holds, against the placeholder
-            // allowlist the repository ships: no key.
-            let placeholder = Allowlist::from_json(
-                &serde_json::from_str(include_str!(
-                    "../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
-                ))
-                .unwrap(),
-            )
+            // The set matches and the replay holds, against the
+            // refuse-everything placeholder allowlist: no key.
+            let placeholder = Allowlist::from_json(&serde_json::json!({
+                "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
+                "compose_actions": {"compose_manager_images": [], "compose_files": []},
+            }))
             .unwrap();
             let (report, verify) = good();
             let refusing = run(

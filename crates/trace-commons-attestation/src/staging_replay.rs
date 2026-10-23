@@ -2434,14 +2434,25 @@ mod tests {
             Allowlist::from_json(&placeholder.to_json()),
             Ok(placeholder)
         );
-        // The repository's committed placeholder is exactly this.
+    }
+
+    /// The repository's committed allowlist is the reviewed one (#1578), not
+    /// the placeholder: it parses, every boot value is filled in, all four
+    /// markers are listed, and it allows at least one compose-manager image
+    /// and one compose file.
+    #[test]
+    fn the_committed_allowlist_is_complete() {
         let committed: Value = serde_json::from_str(include_str!(
             "../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
         ))
         .unwrap();
-        let committed = Allowlist::from_json(&committed).expect("the committed placeholder parses");
-        assert!(committed.compose_actions.is_empty());
-        assert!(committed.rtmr3.app_id.is_empty());
+        let committed = Allowlist::from_json(&committed).expect("the committed allowlist parses");
+        assert!(!committed.rtmr3.app_id.is_empty());
+        assert!(!committed.rtmr3.mr_kms.is_empty());
+        assert!(!committed.rtmr3.os_image_hash.is_empty());
+        assert!(!committed.rtmr3.key_provider.is_empty());
+        assert_eq!(committed.rtmr3.markers.len(), 4);
+        assert!(!committed.compose_actions.is_empty());
     }
 
     #[test]

@@ -10,6 +10,14 @@ use trace_commons_attestation::staging_pins::{self, PinRefusal};
 
 use super::*;
 
+/// The refuse-everything placeholder allowlist: the shape the repository
+/// shipped before the reviewed values (#1578), kept here for the tests that
+/// exercise it.
+const PLACEHOLDER_ALLOWLIST: &str = r#"{
+  "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
+  "compose_actions": {"compose_manager_images": [], "compose_files": []}
+}"#;
+
 /// 2026-10-21T18:00:00Z.
 const NOW: u64 = 1_792_605_600;
 const DAY: u64 = 86_400;
@@ -546,9 +554,7 @@ fn sign_embeds_the_allowlist_file() {
     // The placeholder the repository ships signs: it is the one allowlist
     // with values missing that `sign` accepts, and it refuses every entry.
     let req = SignRequest {
-        allowlist_text: include_str!(
-            "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
-        ),
+        allowlist_text: PLACEHOLDER_ALLOWLIST,
         ..request(&sets, 9, None)
     };
     assert!(sign(seed.as_bytes(), &req).is_ok());
@@ -569,10 +575,8 @@ fn sign_embeds_the_allowlist_file() {
         .unwrap()
         .pop();
     partial.push(three_markers);
-    let mut placeholder_with_actions: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
-    ))
-    .unwrap();
+    let mut placeholder_with_actions: serde_json::Value =
+        serde_json::from_str(PLACEHOLDER_ALLOWLIST).unwrap();
     placeholder_with_actions["compose_actions"] = full["compose_actions"].clone();
     partial.push(placeholder_with_actions);
     // RTMR3 filled in, a compose list left empty: every live record has a
@@ -582,10 +586,8 @@ fn sign_embeds_the_allowlist_file() {
         case["compose_actions"][list] = serde_json::json!([]);
         partial.push(case);
     }
-    let mut placeholder_with_one_image: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
-    ))
-    .unwrap();
+    let mut placeholder_with_one_image: serde_json::Value =
+        serde_json::from_str(PLACEHOLDER_ALLOWLIST).unwrap();
     placeholder_with_one_image["compose_actions"]["compose_manager_images"] =
         full["compose_actions"]["compose_manager_images"].clone();
     partial.push(placeholder_with_one_image);
