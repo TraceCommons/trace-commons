@@ -11,8 +11,13 @@ Files for the internal staging environment
   values and every post-boot compose action is listed here.
 
   **As committed it is a placeholder that refuses everything**: its values
-  are empty and its lists are empty, so no replayed log and no compose
-  action matches it, and a pin set signed with it earns no key. The
+  are empty and its lists are empty. An empty value matches no event (not
+  even one with an empty payload), no progress marker is listed and no
+  compose action is listed, so every replayed log and every compose-manager
+  record is refused and a pin set signed with it earns no key. `sign`
+  accepts this placeholder or a fully filled-in allowlist (all four values
+  and all four markers) and refuses anything in between as
+  `allowlist_incomplete`. The
   operator fills it from the `--review` file of an `observe` run against
   NEAR AI staging, in a reviewed pull request, after checking each value
   (app id, KMS, OS image, key provider, the four progress markers, and

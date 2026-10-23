@@ -94,7 +94,7 @@ use trace_commons_attestation::quote::verify_quote;
 use trace_commons_attestation::staging_pins::{
     self, CHANNEL, FORMAT, MAX_LIFETIME_SECS, REQUIRED_REGISTERS,
 };
-use trace_commons_attestation::staging_replay::Allowlist;
+use trace_commons_attestation::staging_replay::{Allowlist, MARKER_EVENTS};
 use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
 use trace_commons_server::near_attestation::client::{
     AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,
@@ -332,11 +332,43 @@ fn allowlist_sha256(allowlist: &Allowlist) -> String {
     hex::encode(Sha256::digest(allowlist.to_json().to_string().as_bytes()))
 }
 
-/// The reviewed allowlist file, parsed as the app parses the payload's.
+/// The reviewed allowlist file, parsed as the app parses the payload's, and
+/// either the committed placeholder or filled in completely.
 fn parse_allowlist(text: &str) -> Result<Allowlist, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|_| "allowlist_malformed".to_string())?;
-    Allowlist::from_json(&value).map_err(|_| "allowlist_malformed".to_string())
+    let allowlist = Allowlist::from_json(&value).map_err(|_| "allowlist_malformed".to_string())?;
+    if !allowlist_is_placeholder(&allowlist) && !allowlist_is_complete(&allowlist) {
+        return Err("allowlist_incomplete".to_string());
+    }
+    Ok(allowlist)
+}
+
+/// The refuse-everything placeholder the repository ships: every value
+/// empty and every list empty.
+fn allowlist_is_placeholder(allowlist: &Allowlist) -> bool {
+    let rtmr3 = &allowlist.rtmr3;
+    rtmr3.app_id.is_empty()
+        && rtmr3.mr_kms.is_empty()
+        && rtmr3.os_image_hash.is_empty()
+        && rtmr3.key_provider.is_empty()
+        && rtmr3.markers.is_empty()
+        && allowlist.compose_actions.is_empty()
+}
+
+/// Filled in from a review: app id, KMS, OS image and key provider all
+/// present, and every progress marker listed (a marker's payload may be
+/// empty). Anything between this and the placeholder is a half-finished
+/// review, which would refuse every entry while looking signed.
+fn allowlist_is_complete(allowlist: &Allowlist) -> bool {
+    let rtmr3 = &allowlist.rtmr3;
+    !rtmr3.app_id.is_empty()
+        && !rtmr3.mr_kms.is_empty()
+        && !rtmr3.os_image_hash.is_empty()
+        && !rtmr3.key_provider.is_empty()
+        && MARKER_EVENTS
+            .iter()
+            .all(|name| rtmr3.markers.iter().any(|marker| marker.name == *name))
 }
 
 /// The bare host of the compiled-in staging NEAR AI base: what a staging

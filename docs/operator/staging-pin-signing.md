@@ -197,6 +197,7 @@ required one) is clap's, and exits 2.
 | `set_missing_register:line_<n>` | line `n` does not name `mrtd`, `rtmr0-2` and `mrconfigid` |
 | `ingest_pin_missing`, `ingest_pin_malformed` | the sets file has no `ingest=` line, or more than one, or one that is not exactly `mrtd` and `rtmr0-3` |
 | `allowlist_unreadable`, `allowlist_malformed` | the `--allowlist` file cannot be read, or is not the allowlist shape (lower-case hex, the four marker names at most once each, no repeated action, no other field) |
+| `allowlist_incomplete` | the `--allowlist` file is neither the committed placeholder (every value and list empty) nor filled in completely: an empty app id, KMS, OS image or key provider, or a progress marker not listed. Finish the review from `review.json` |
 | `review_exists` | `observe`'s `--review` file already exists |
 | `signing_key_missing`, `signing_key_malformed` | stdin is empty, or not 64 hex characters |
 | `output_exists` | the `--out` file already exists |

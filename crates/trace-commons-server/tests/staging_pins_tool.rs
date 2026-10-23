@@ -871,7 +871,12 @@ fn synthetic_allowlist() -> serde_json::Value {
             "mr_kms": "3b".repeat(48),
             "os_image_hash": "05".repeat(32),
             "key_provider": "6b6d73",
-            "markers": [{"name": "system-ready", "payload": "00"}],
+            "markers": [
+                {"name": "system-preparing", "payload": ""},
+                {"name": "boot-mr-done", "payload": ""},
+                {"name": "storage-fs", "payload": "00"},
+                {"name": "system-ready", "payload": "00"},
+            ],
         },
         "compose_actions": [
             {"action": "compose_up", "container": "model", "image": "registry.example/model"},

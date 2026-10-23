@@ -58,7 +58,12 @@ const ALLOWLIST: &str = r#"{
     "mr_kms": "3b3b",
     "os_image_hash": "0505",
     "key_provider": "6b6d73",
-    "markers": [{"name": "system-ready", "payload": "00"}]
+    "markers": [
+      {"name": "system-preparing", "payload": ""},
+      {"name": "boot-mr-done", "payload": ""},
+      {"name": "storage-fs", "payload": "00"},
+      {"name": "system-ready", "payload": "00"}
+    ]
   },
   "compose_actions": [
     {"action": "compose_up", "container": "model", "image": "registry.example/model"}
@@ -522,6 +527,51 @@ fn sign_embeds_the_allowlist_file() {
     let file: serde_json::Value = serde_json::from_str(ALLOWLIST).unwrap();
     assert_eq!(verified.allowlist.to_json(), file);
     assert!(signed.summary.contains("allowlist_sha256=sha256:"));
+
+    // The placeholder the repository ships signs: it is the one allowlist
+    // with values missing that `sign` accepts, and it refuses every entry.
+    let req = SignRequest {
+        allowlist_text: include_str!(
+            "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
+        ),
+        ..request(&sets, 9, None)
+    };
+    assert!(sign(seed.as_bytes(), &req).is_ok());
+
+    // An allowlist filled in only in part signs nothing: an empty value or
+    // an unlisted marker would refuse every entry the operator meant to
+    // allow, and nothing else in the signed document would say why.
+    let full: serde_json::Value = serde_json::from_str(ALLOWLIST).unwrap();
+    let mut partial: Vec<serde_json::Value> = Vec::new();
+    for field in ["app_id", "mr_kms", "os_image_hash", "key_provider"] {
+        let mut case = full.clone();
+        case["rtmr3"][field] = serde_json::json!("");
+        partial.push(case);
+    }
+    let mut three_markers = full.clone();
+    three_markers["rtmr3"]["markers"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    partial.push(three_markers);
+    let mut placeholder_with_actions: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
+    ))
+    .unwrap();
+    placeholder_with_actions["compose_actions"] = full["compose_actions"].clone();
+    partial.push(placeholder_with_actions);
+    for case in partial {
+        let text = case.to_string();
+        let req = SignRequest {
+            allowlist_text: &text,
+            ..request(&sets, 9, None)
+        };
+        assert_eq!(
+            sign(seed.as_bytes(), &req).err().as_deref(),
+            Some("allowlist_incomplete"),
+            "{case}"
+        );
+    }
 
     // A file that is not an allowlist signs nothing.
     for (text, label) in [
