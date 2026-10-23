@@ -38,6 +38,7 @@ use crate::versioned_pipeline::{
     live_submission_sql, phase_from_db, sha256_prefixed,
 };
 use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
+use crate::versioned_pipeline_substance::SUBSTANCE_SCORE_IMPLEMENTATION;
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 /// The most items one export snapshot holds. V106 bounds its items'
@@ -1693,35 +1694,54 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
 }
 
 /// Ruling T15-7: `Some` for a run whose bound bundle's Score policy is the
-/// compatibility one, with the shadow credit quality its committed Score
-/// recorded, once it has one.
+/// compatibility one or the substance one (both record a shadow credit
+/// quality), with the shadow credit quality its committed Score recorded,
+/// once it has one.
 fn compatibility_status_from_row(
     row: &Row,
 ) -> Result<Option<PipelineCompatibilityStatus>, DatabaseError> {
-    if row
-        .get::<_, Option<String>>("score_implementation_id")
-        .as_deref()
-        != Some(COMPATIBILITY_SCORE_IMPLEMENTATION)
-    {
+    let count = |column: &str| row.get::<_, Option<i64>>(column);
+    compatibility_status_from_columns(
+        row.get::<_, Option<String>>("score_implementation_id")
+            .as_deref(),
+        row.get("score_credit_quality_micros"),
+        row.get("score_credit_quality_version"),
+        count("score_chunk_count"),
+        count("score_total_chunk_count"),
+        row.get("score_chunks_capped"),
+    )
+}
+
+/// The columns of `compatibility_status_from_row`, read; apart from it so a
+/// unit test can run the logic without a database row.
+fn compatibility_status_from_columns(
+    score_implementation_id: Option<&str>,
+    credit_quality_micros: Option<i64>,
+    credit_quality_version: Option<i32>,
+    chunk_count: Option<i64>,
+    total_chunk_count: Option<i64>,
+    chunks_capped: Option<bool>,
+) -> Result<Option<PipelineCompatibilityStatus>, DatabaseError> {
+    if !matches!(
+        score_implementation_id,
+        Some(COMPATIBILITY_SCORE_IMPLEMENTATION) | Some(SUBSTANCE_SCORE_IMPLEMENTATION)
+    ) {
         return Ok(None);
     }
     let malformed =
         || DatabaseError::Serialization("pipeline score evidence is malformed".to_string());
-    let count = |column: &str| {
-        row.get::<_, Option<i64>>(column)
+    let count = |value: Option<i64>| {
+        value
             .map(|value| u32::try_from(value).map_err(|_| malformed()))
             .transpose()
     };
-    let credit_quality = match (
-        row.get::<_, Option<i64>>("score_credit_quality_micros"),
-        row.get::<_, Option<i32>>("score_credit_quality_version"),
-    ) {
+    let credit_quality = match (credit_quality_micros, credit_quality_version) {
         (Some(micros), Some(version)) => Some(PipelineShadowCreditQuality {
             credit_quality_micros: u64::try_from(micros).map_err(|_| malformed())?,
             credit_quality_version: version,
-            chunk_count: count("score_chunk_count")?,
-            total_chunk_count: count("score_total_chunk_count")?,
-            chunks_capped: row.get("score_chunks_capped"),
+            chunk_count: count(chunk_count)?,
+            total_chunk_count: count(total_chunk_count)?,
+            chunks_capped,
         }),
         _ => None,
     };
@@ -1992,6 +2012,41 @@ fn count_from_row(row: &Row, column: &str) -> Result<u64, DatabaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A substance row shows its shadow credit quality as a compatibility
+    /// row does, under the substance credit quality version (4).
+    #[test]
+    fn substance_status_shows_its_shadow_credit_quality() {
+        let status = compatibility_status_from_columns(
+            Some(SUBSTANCE_SCORE_IMPLEMENTATION),
+            Some(420_000),
+            Some(4),
+            Some(2),
+            Some(3),
+            Some(false),
+        )
+        .unwrap()
+        .expect("a substance run has a status");
+        let credit_quality = status.credit_quality.expect("the Score recorded one");
+        assert_eq!(credit_quality.credit_quality_version, 4);
+        assert_eq!(credit_quality.credit_quality_micros, 420_000);
+        assert_eq!(credit_quality.chunk_count, Some(2));
+        assert_eq!(credit_quality.total_chunk_count, Some(3));
+        assert_eq!(credit_quality.chunks_capped, Some(false));
+        assert!(
+            compatibility_status_from_columns(
+                Some("trace_commons.score.other.v1"),
+                Some(1),
+                Some(4),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .is_none(),
+            "another Score implementation has no status"
+        );
+    }
 
     #[test]
     fn safe_export_request_metadata_is_bounded() {

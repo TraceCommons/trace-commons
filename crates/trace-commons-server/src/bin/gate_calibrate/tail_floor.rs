@@ -269,6 +269,8 @@ impl DecisionsFetcher for PgDecisionsFetcher {
                 .with_context(|| "TailFloorDb: sidecar submission_id is not a UUID")?;
             uuids.push(u);
         }
+        // SQ-11: a substance row (credit quality version 4) holds the
+        // sentinel 0 in `tail_fraction_micros`, not a measured tail fraction.
         // For each submission_id we want the latest decision row's
         // tail_fraction_micros. The `idx_trace_gate_decisions_submission`
         // index is `(tenant_id, submission_id, decided_at DESC)`, which is
@@ -279,6 +281,7 @@ impl DecisionsFetcher for PgDecisionsFetcher {
                 "SELECT DISTINCT ON (submission_id) submission_id, tail_fraction_micros \
                  FROM trace_gate_decisions \
                  WHERE submission_id = ANY($1) \
+                 AND credit_quality_calibration_version IS DISTINCT FROM 4 \
                  ORDER BY submission_id, decided_at DESC",
                 &[&uuids],
             )
@@ -543,5 +546,64 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].submission_id, "a");
         assert_eq!(rows[1].source_domain_tag, "math");
+    }
+
+    /// SQ-11: a substance row (credit quality version 4) holds the sentinel
+    /// 0 as its tail fraction, so the read skips it. Needs a role that reads
+    /// `trace_gate_decisions` across tenants, as the subcommand does.
+    #[tokio::test]
+    async fn tail_floor_reads_skip_substance_rows() {
+        let Ok(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL") else {
+            eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL not configured");
+            return;
+        };
+        let fetcher = PgDecisionsFetcher::connect(&url).await.expect("connect");
+        let tenant = format!("tail-floor-{}", uuid::Uuid::new_v4());
+        let substance = uuid::Uuid::new_v4();
+        let perplexity = uuid::Uuid::new_v4();
+        fetcher
+            .client
+            .execute(
+                "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+                &[&tenant],
+            )
+            .await
+            .expect("insert tenant");
+        let hash = "a".repeat(64);
+        for (submission, tail, version) in [(substance, 0_i64, 4_i32), (perplexity, 250_000, 1)] {
+            fetcher
+                .client
+                .execute(
+                    "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                        gate_policy_version,gate_version_hash,perplexity_micros,
+                        tail_fraction_micros,perplexity_passed,novelty_score_micros,
+                        nearest_neighbor_hash,novelty_passed,embedding_evidence_hash,
+                        attestation_chain_hash,credit_quality_calibration_version)
+                     VALUES($1,$2,$3,'gate-fixture',$4,$5,$5,TRUE,1,$4,TRUE,$4,$4,$6)",
+                    &[
+                        &tenant,
+                        &uuid::Uuid::new_v4(),
+                        &submission,
+                        &hash,
+                        &tail,
+                        &version,
+                    ],
+                )
+                .await
+                .expect("insert gate decision");
+        }
+        let found = fetcher
+            .fetch_tail_fraction_micros(&[substance.to_string(), perplexity.to_string()])
+            .await
+            .expect("fetch");
+        assert_eq!(
+            found,
+            BTreeMap::from([(perplexity.to_string(), 250_000_i64)])
+        );
+        fetcher
+            .client
+            .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+            .await
+            .expect("remove the fixture tenant");
     }
 }

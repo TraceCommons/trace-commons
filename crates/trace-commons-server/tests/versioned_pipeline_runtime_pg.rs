@@ -52325,3 +52325,72 @@ async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
         .expect("the run");
     assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
 }
+
+/// SQ-11, spec 8.1: a substance run completes Settle and writes its legacy
+/// row with the sentinel perplexity 0, the evidence `substance_passed` as
+/// its `perplexity_passed`, and credit quality version 4.
+#[tokio::test]
+async fn a_substance_run_settles_and_writes_its_legacy_row() {
+    use trace_commons_server::credit_quality::CREDIT_QUALITY_VERSION_SUBSTANCE;
+    use trace_commons_server::versioned_pipeline_substance::substance_candidate_package;
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let package = substance_candidate_package().expect("build the substance package");
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
+    .with_novelty_utility_checks(issuing_checks())
+    .build()
+    .expect("build a pipeline service over the substance package");
+    let tenant = format!("substance-row-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let score = score_outcome_of(&service, &tenant, run.run_id).await;
+    let evidence: ScoreEvidence = serde_json::from_value(score.evidence.clone()).unwrap();
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.source, "pipeline_settle");
+    assert_eq!(row.perplexity_micros, 0);
+    assert_eq!(row.tail_fraction_micros, 0);
+    assert_eq!(
+        Some(row.perplexity_passed),
+        evidence.substance_passed,
+        "the legacy pass flag is the substance gate"
+    );
+    assert_eq!(
+        row.credit_quality_calibration_version,
+        Some(CREDIT_QUALITY_VERSION_SUBSTANCE)
+    );
+    assert_eq!(row.credit_quality_calibration_version, Some(4));
+}
