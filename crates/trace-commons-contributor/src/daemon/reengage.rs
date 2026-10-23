@@ -72,6 +72,9 @@ struct Prepared {
     /// A pricing change too small to announce: the `pricing_version` to
     /// write onto the last announcement record.
     settlement_adopt_pricing: Option<Option<String>>,
+    /// NEAR AI credit an announcement would carry: the amount since the last
+    /// one, and the received total it brings the baseline to.
+    credit: Option<(i64, i64)>,
     settings: NotifySettings,
     log: Vec<AttentionEntry>,
 }
@@ -87,7 +90,10 @@ impl Prepared {
                 .verdicts
                 .as_ref()
                 .map(nudge_render::digest_verdict_sentence),
-            Kind::InsightsTip | Kind::WeeklyRecap | Kind::SettlementEstimate => None,
+            Kind::InsightsTip
+            | Kind::WeeklyRecap
+            | Kind::SettlementEstimate
+            | Kind::NearAiCredit => None,
         }
     }
 
@@ -104,6 +110,9 @@ impl Prepared {
             Kind::SettlementEstimate => self.settlement.as_ref().map(|(shown, pricing)| {
                 nudge_render::settlement_notification(&shown.total, *pricing)
             }),
+            Kind::NearAiCredit => self
+                .credit
+                .map(|(amount, _)| nudge_render::near_ai_credit_notification(amount)),
             Kind::InsightsTip | Kind::WeeklyRecap => None,
         }
     }
@@ -183,7 +192,12 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         && settings.settlement_estimate
         && suggestions_on
         && shown_estimate.is_some();
-    let closed = !(wants_idle || wants_verdicts || wants_settlement)
+    // N6: read from memory, and only while it could be announced.
+    let credit = (settings.master && settings.near_ai_credit)
+        .then(|| super::nearai_credential::arrivals::pending_notification(&shared.store))
+        .flatten();
+    let wants_credit = credit.is_some();
+    let closed = !(wants_idle || wants_verdicts || wants_settlement || wants_credit)
         || shared.is_paused(now)
         || !shared.logged_in()
         || {
@@ -198,6 +212,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         settlement: None,
         settlement_seed: None,
         settlement_adopt_pricing: None,
+        credit: None,
         settings,
         log,
     };
@@ -325,6 +340,21 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             }
         }
     }
+
+    // N6: NEAR AI credit received, past the 25%-and-$1 rule. Not held by the
+    // settlement estimate's switches or health gate: it is about money that
+    // already arrived, not an estimate.
+    if let Some((amount, total)) = credit {
+        prepared.candidates.push(Candidate {
+            kind: Kind::NearAiCredit,
+            foldable: false,
+            resolves: Fact::CreditAnnounced,
+            since: now,
+            ttl: None,
+            caps: Kind::NearAiCredit.default_caps(Duration::zero()),
+        });
+        prepared.credit = Some((amount, total));
+    }
     prepared
 }
 
@@ -424,6 +454,14 @@ fn apply(
         announced.push((kind, Route::Standalone));
         Some(kind)
     });
+
+    // The credit baseline moves before any other lock is taken: it takes the
+    // credential commit lock, which is never taken under the state lock.
+    if standalone == Some(Kind::NearAiCredit) {
+        if let Some((_, total)) = prepared.credit {
+            super::nearai_credential::arrivals::mark_notified(shared, total);
+        }
+    }
 
     // What is still pending, for pruning the announced set: read under the
     // queue lock and released before the state lock.
@@ -904,6 +942,125 @@ mod tests {
             .with_timezone(&Utc);
         s.state.lock().unwrap().last_history_poll_at = Some(late);
         assert_eq!(tick(&s, late, &Utc, digest(false, 1)).standalone, None);
+    }
+
+    // ---- N6: NEAR AI credit received ----
+
+    const DOLLAR: i64 = 1_000_000_000;
+
+    fn with_near_ai_session(s: &DaemonShared) {
+        s.settings.lock().unwrap().near_ai_session = Some(crate::daemon::settings::NearAiSession {
+            refresh_token: "rt_synthetic".into(),
+            refresh_token_expires_at: None,
+            stored_at: noon(),
+            user_agent: "Mozilla/5.0 Test".into(),
+        });
+    }
+
+    fn received(s: &DaemonShared, total: i64, notified: Option<i64>) {
+        use super::super::nearai_credential::arrivals::{ArrivalsRecord, set_for_test};
+        set_for_test(
+            &s.store,
+            ArrivalsRecord {
+                organization_id: Some("org-1".into()),
+                scanned: true,
+                received_total_nanos: total,
+                notified_received_total_nanos: notified,
+                ..Default::default()
+            },
+        );
+    }
+
+    fn notified_total(s: &DaemonShared) -> Option<i64> {
+        super::super::nearai_credential::arrivals::snapshot(&s.store).notified_received_total_nanos
+    }
+
+    fn credit_frames(
+        rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+    ) -> Vec<serde_json::Value> {
+        reengage_frames(rx)
+            .into_iter()
+            .filter(|f| f["kind"] == "near_ai_credit")
+            .collect()
+    }
+
+    /// The first credit posts; more credit waits for 25% and $1 of what was
+    /// announced, then posts and moves the baseline.
+    #[test]
+    fn near_ai_credit_posts_the_first_arrival_then_only_past_25_percent_and_a_dollar() {
+        let s = live();
+        digest_off(&s);
+        with_near_ai_session(&s);
+        let _r = renderer(&s);
+        let mut rx = s.events.subscribe();
+
+        received(&s, 2 * DOLLAR, None);
+        let got = tick(&s, noon(), &Utc, digest(false, 0));
+        assert_eq!(got.standalone, Some(Kind::NearAiCredit));
+        let frames = credit_frames(&mut rx);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(
+            frames[0]["title"],
+            crate::nudge_copy::NOTIFY_NEAR_AI_CREDIT_TITLE
+        );
+        assert_eq!(
+            frames[0]["body"],
+            "$2.00 of NEAR AI credit arrived in your account."
+        );
+        assert_eq!(frames[0]["actions"][0]["id"], nudge_render::ACTION_REVIEW);
+        assert_eq!(frames[0]["actions"][1]["id"], nudge_render::ACTION_NOT_NOW);
+        assert_eq!(notified_total(&s), Some(2 * DOLLAR));
+
+        // Days later, $0.40 more: 20%, under both bars. Nothing.
+        let later = noon() + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        received(&s, 2 * DOLLAR + 400_000_000, Some(2 * DOLLAR));
+        assert_eq!(tick(&s, later, &Utc, digest(false, 0)).standalone, None);
+        assert!(credit_frames(&mut rx).is_empty());
+
+        // $1 more in all: 50% and a dollar. Announced, and the baseline moves.
+        let later = later + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        received(&s, 3 * DOLLAR, Some(2 * DOLLAR));
+        assert_eq!(
+            tick(&s, later, &Utc, digest(false, 0)).standalone,
+            Some(Kind::NearAiCredit)
+        );
+        let frames = credit_frames(&mut rx);
+        assert_eq!(
+            frames[0]["body"],
+            "$1.00 of NEAR AI credit arrived in your account."
+        );
+        assert_eq!(notified_total(&s), Some(3 * DOLLAR));
+        // And nothing again at once.
+        let later = later + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        assert_eq!(tick(&s, later, &Utc, digest(false, 0)).standalone, None);
+    }
+
+    /// The master switch and the kind's own switch each hold it, and the
+    /// baseline does not move while held.
+    #[test]
+    fn muted_near_ai_credit_posts_nothing_and_keeps_its_baseline() {
+        for mute in ["master", "kind"] {
+            let s = live();
+            digest_off(&s);
+            with_near_ai_session(&s);
+            let _r = renderer(&s);
+            let mut rx = s.events.subscribe();
+            match mute {
+                "master" => s.settings.lock().unwrap().notifications_enabled = false,
+                _ => s.settings.lock().unwrap().notify.near_ai_credit = false,
+            }
+            received(&s, 2 * DOLLAR, None);
+            assert_ne!(
+                tick(&s, noon(), &Utc, digest(false, 0)).standalone,
+                Some(Kind::NearAiCredit),
+                "{mute}"
+            );
+            assert!(credit_frames(&mut rx).is_empty(), "{mute}");
+            assert_eq!(notified_total(&s), None, "{mute}");
+        }
     }
 
     // ---- N5: the settlement estimate ----

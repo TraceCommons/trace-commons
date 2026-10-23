@@ -357,12 +357,12 @@ final class MenuPanelStore {
 
     /// Shared in the graph's days, from `list_history`; nil when unknown.
     var sharedCount: Int? {
-        current(.history) ? columns.reduce(0) { $0 + $1.up } : nil
+        current(.history) ? buckets.reduce(0) { $0 + $1.shared } : nil
     }
 
     /// Kept in the graph's days, from `list_kept`; nil when unknown.
     var keptCount: Int? {
-        current(.kept) ? columns.reduce(0) { $0 + $1.down } : nil
+        current(.kept) ? buckets.reduce(0) { $0 + $1.kept } : nil
     }
 
     /// "Worth a second look", from `list_pending`; nil when unknown.
@@ -370,16 +370,20 @@ final class MenuPanelStore {
         current(.pending) ? MenuPanelData.flagged(pending) : nil
     }
 
-    /// Whether the graph's bars are current: both of the reads they are
-    /// drawn from answered. Otherwise they are drawn grey, as when paused.
+    /// Whether the trace bars are current: both of the reads they are
+    /// drawn from answered. Otherwise the menu-bar item draws them as
+    /// unavailable.
     var columnsCurrent: Bool { current(.history) && current(.kept) }
 
-    /// The graph's columns: contributed (shared) and kept, per day.
-    var columns: [GlassDayColumn] {
-        MenuPanelData.days(
-            shared: history.compactMap(\.submittedAt),
-            kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
-            ending: Date())
+    /// The graph's buckets: shared and kept per day over the Traces graph's
+    /// default days, counted as that graph counts them (`TracesGraphModel`,
+    /// owner, 2026-10-22: the popover's graph matches the app's). A read
+    /// that is not current draws no bars, never its last ones.
+    var buckets: [TracesGraphModel.Bucket] {
+        TracesGraphModel.buckets(
+            shared: current(.history) ? TracesGraphModel.sharedTimes(history, tool: nil) : [],
+            kept: current(.kept) ? TracesGraphModel.keptTimes(kept, tool: nil) : [],
+            offset: 0, now: Date(), range: .days)
     }
 
     /// The menu-bar item's Private AI segments: verified calls (up) over
@@ -542,27 +546,15 @@ enum MenuPanelData {
         return copy.autoPartial
     }
 
-    /// The graph's span in days, and so its number of columns.
-    static let days = 36
-
-    /// One column per day, oldest first, ending today: how many sessions
-    /// were contributed (up) and kept (down) that day. Counts per day, from
-    /// the history and the kept list; the daemon reports no byte rates.
-    static func days(
-        shared: [Date], kept: [Date], ending now: Date, count: Int = days, calendar: Calendar = .current
-    ) -> [GlassDayColumn] {
-        let today = calendar.startOfDay(for: now)
-        func index(_ date: Date) -> Int? {
-            let day = calendar.startOfDay(for: date)
-            guard let back = calendar.dateComponents([.day], from: day, to: today).day,
-                  back >= 0, back < count else { return nil }
-            return count - 1 - back
+    /// The popover graph's bars: the Traces graph's (`TracesGraphFooter.bar`),
+    /// with every other day's label left out, counting back from today's,
+    /// so the weekdays fit under the popover's narrower columns.
+    static func bars(_ buckets: [TracesGraphModel.Bucket], words: MonitorTracesGraphCopy?) -> [GlassBarBucket] {
+        buckets.enumerated().map { index, bucket in
+            var bucket = bucket
+            if (buckets.count - 1 - index) % 2 != 0 { bucket.label = "" }
+            return TracesGraphFooter.bar(bucket, words: words)
         }
-        var up = Array(repeating: 0, count: count)
-        var down = Array(repeating: 0, count: count)
-        for date in shared { if let i = index(date) { up[i] += 1 } }
-        for date in kept { if let i = index(date) { down[i] += 1 } }
-        return (0 ..< count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
     }
 
     /// The menu-bar item's span: `count` steps of `stepHours`, the last

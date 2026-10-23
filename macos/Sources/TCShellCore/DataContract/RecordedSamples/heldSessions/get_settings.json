@@ -24,7 +24,8 @@
     "verdicts_landed": true,
     "weekly_recap": false,
     "insights_tip": false,
-    "settlement_estimate": true
+    "settlement_estimate": true,
+    "near_ai_credit": true
   },
   "opencode_source_mode": "unset",
   "claude_source_mode": "watch",

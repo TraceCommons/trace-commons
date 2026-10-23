@@ -26,11 +26,12 @@ use super::PayoutAccountStanding;
 use super::postgres::PgBackend;
 use super::{
     PayoutAccountLinkView, PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction,
-    PayoutControl, PayoutLine, PayoutLineResolution, PayoutLineResolve, PayoutLineState,
-    PayoutLineWrite, PayoutLink, PayoutLinkAction, PayoutLinkClose, PayoutLinkConfirm,
-    PayoutLinkConfirmWrite, PayoutLinkInsert, PayoutLinkRequest, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition, PayoutLinkWrite, PayoutOwed,
-    PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
+    PayoutControl, PayoutHold, PayoutLine, PayoutLineResolution, PayoutLineResolve,
+    PayoutLineState, PayoutLineWrite, PayoutLink, PayoutLinkAction, PayoutLinkClose,
+    PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkInsert, PayoutLinkRequest,
+    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition,
+    PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore,
+    PendingPayoutLineInsert, SealedRecipient,
 };
 use crate::error::DatabaseError;
 
@@ -52,7 +53,8 @@ pub fn link_id_hash(link_id: Uuid) -> String {
 /// The audit row's hash of an account id, domain-separated from the link
 /// hash. Account ids are random UUIDs, so, like the link hash, it joins audit
 /// rows to an account only for someone who already holds the account id.
-fn account_id_hash(account: Uuid) -> String {
+/// The operator hold routes name an account by this hash.
+pub fn account_id_hash(account: Uuid) -> String {
     format!(
         "sha256:{:x}",
         Sha256::digest(format!("payout-account-v1:{account}").as_bytes())
@@ -1087,6 +1089,31 @@ impl PayoutStore for PgBackend {
             .await?;
         tx.commit().await?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn open_payout_holds(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutHold>, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT account_id, label FROM trace_payout_holds
+                  WHERE tenant_id = $1 AND rail_id = $2 AND cleared_at IS NULL
+                  ORDER BY account_id, label",
+                &[&tenant, &rail.as_str()],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .iter()
+            .map(|row| PayoutHold {
+                account_id: row.get(0),
+                label: row.get(1),
+            })
+            .collect())
     }
 
     async fn insert_payout_link_request(

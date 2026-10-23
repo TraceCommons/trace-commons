@@ -24,8 +24,19 @@ final class AppModel: ObservableObject {
     /// a launch on the NEAR AI card, the rest on the sessions card.
     @Published var managedErrorMethod: String?
     /// The last copy table the daemon sent, kept when a later read fails so
-    /// the connecting and failure states still have their words.
-    private var managedCopy: [String: String] = [:]
+    /// the connecting and failure states still have their words. Before the
+    /// first read it is the core's own table, so the connecting card is
+    /// never drawn without them (owner, 2026-10-22: it showed a bare icon).
+    private var managedCopy: [String: String] = AppModel.bundledManagedCopy
+
+    /// The core's managed-sessions table (`tc_managed_copy_json`), read
+    /// without the daemon; empty if it could not be read.
+    static let bundledManagedCopy: [String: String] = {
+        guard let json = TCDiscovery.managedCopyJSON(),
+              let table = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        else { return [:] }
+        return table.compactMapValues { $0 as? String }
+    }()
 
     func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
 
@@ -746,6 +757,61 @@ final class AppModel: ObservableObject {
         ) { status in
             self.publishIfChanged(\.balanceStatus, status)
         }
+    }
+
+    // MARK: - The organization Private AI spends from
+
+    /// The account's organizations, as the daemon last listed them. Seeded
+    /// unreported, which draws nothing: most accounts have one organization,
+    /// and an unknown count is never "several".
+    @Published private(set) var spendOrganizations: SpendOrganizations = .unreported
+
+    /// A switch is in flight. It takes about ten seconds: the daemon waits
+    /// for the new key to become usable before moving Private AI onto it.
+    @Published private(set) var spendOrganizationSwitching = false
+
+    /// The last switch's refusal, in the daemon's words. Every refusal
+    /// changed nothing.
+    @Published private(set) var spendOrganizationFailure: String?
+
+    /// Read lazily -- when the Private AI tab or the Private AI section of
+    /// Settings appears, and after a switch -- never on the sign-in or the
+    /// key hand-off. The daemon caches it with the balance.
+    ///
+    /// Not `perform`: a daemon too old to know the method answers
+    /// `unknown_method`, which is "nothing to show", not an error to raise.
+    func refreshSpendOrganizations(fresh: Bool = false) {
+        guard let client else { return }
+        Task.detached(priority: .utility) {
+            let status = (try? client.nearAiSpendOrganizations(fresh: fresh)) ?? .unreported
+            await MainActor.run {
+                guard self.client === client else { return }
+                self.publishIfChanged(\.spendOrganizations, status)
+            }
+        }
+    }
+
+    func selectSpendOrganization(_ organizationID: String) async {
+        guard let client, !spendOrganizationSwitching, !credentialBusy else { return }
+        spendOrganizationSwitching = true
+        spendOrganizationFailure = nil
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result { try client.nearAiSelectSpendOrganization(organizationID) }
+        }.value
+        guard self.client === client else { return }
+        spendOrganizationSwitching = false
+        switch outcome {
+        case .success:
+            // The choice is recorded, so the prompt ends now, not on the
+            // re-read below.
+            publishIfChanged(\.spendOrganizations, spendOrganizations.withPromptEnded())
+        case .failure(let error):
+            let label = (error as? DaemonClient.Failure)?.message ?? ""
+            spendOrganizationFailure = spendOrganizations.failureLine(for: label)
+        }
+        // The key moved, so the balance and billing it is read with did too.
+        refreshNearAiBalance(fresh: true)
+        refreshSpendOrganizations(fresh: true)
     }
 
     /// Whether billing has opened in the browser during this run.
@@ -1495,6 +1561,10 @@ final class AppModel: ObservableObject {
             refreshManagedSessions()
             refreshQueue()
             refreshStatus()
+        case .nearAiBalanceChanged:
+            // The daemon counted credit arriving: the balance it reads next
+            // is the one the Balance tile marks.
+            refreshNearAiBalance()
         case .unknown(let name):
             if name == "managed_changed" { refreshManagedSessions() }
         }

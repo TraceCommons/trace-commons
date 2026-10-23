@@ -678,7 +678,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
-| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at`, `change_24h_nanos`, `change_24h_text`, `received_total_nanos` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
+| `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -6596,6 +6598,32 @@ shape rather than a bare number:
   seconds instead of a minute. A payment lands through the service's own
   webhook, which nothing here hears about, so this is what lets a client's
   next read show it. Forgetting the account ends the window.
+
+Three additive keys sit beside the figures, `null` in every state but
+`known` and `null` whenever there is nothing to say:
+
+- **`change_24h_nanos`**: what is left now minus what was left about a day
+  ago (the newest sample between 24 and 30 hours old), signed. It goes up
+  when credit arrives and down when Private AI spends. `null` with no sample
+  from about a day ago, or when `remaining_nanos` is `null` -- never `0` for
+  "not known".
+- **`change_24h_text`**: the same change as the core's finished line, e.g.
+  `+$3.20 in the last 24 hours`, floored like every amount here. `null` for
+  no change or a change under a cent, which a client does not say.
+- **`received_total_nanos`**: all NEAR AI credit counted as arriving in the
+  spending organization, from its incoming credit-transfer ledger
+  (`GET /v1/organizations/{org}/credit/transfers?direction=incoming`, an
+  owner-session read), each transfer once by id. `null` until one whole read
+  of the ledger has finished, including for a member who is not an owner of
+  the organization. A client that sees it rise since it last drew the
+  balance animates the arrival.
+
+The daemon reads the ledger and a balance sample every 30 minutes while a
+NEAR AI sign-in with a spending organization is kept, and publishes
+`near_ai_balance_changed` when it counts new credit. What it keeps
+(`near-ai-credit-arrivals.json`: the organization id, 48 hours of samples,
+the totals, recent transfer ids and times) is forgotten with the sign-in and
+reset when Private AI moves to another organization.
 - **`"fresh": true` skips that minute.** It is what a refresh button sends:
   the daemon asks the service again unless its figure is under five seconds
   old, so a double click is still one call. Any other value is an ordinary
@@ -6665,6 +6693,64 @@ There is no convention here to generalise from: read the contract for the
 field you are touching, and do not carry a habit across from another one.
 A field added later is a fourth answer to a fourth question, not a fourth
 instance of a pattern.
+
+### Choosing the spending organization
+
+Private AI spends from the organization its NEAR AI inference key was minted
+in. A NEAR AI account can belong to several organizations; the sign-in mints
+into the first active one (or, after a choice has been made, into the chosen
+one when the account still has it). These two methods let a contributor
+choose. Most accounts have one organization, and for them nothing changes.
+
+`near_ai_spend_organizations` lists the signed-in account's **active**
+organizations (`GET /v1/organizations?limit=100`, session-authenticated). It
+rides `near_ai_balance`'s lock, cached access token and single re-exchange, so
+it never races a balance read for the rotating refresh token, and like it it
+is cached for a minute (`fresh: true` goes back after five seconds).
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `listed`, or one of `near_ai_balance`'s not-known states (`no_session`, `session_expired`, `no_organization`, `unavailable`). Only `listed` carries organizations. |
+| `organizations[]` | `id`, `name` (control characters removed, at most 80 characters; the id when blank), `role` (`owner`, `admin`, `member`), `current` |
+| `current_organization_id` | the stored key's organization, or `null` with no key |
+| `explicit` | the contributor chose the current organization (the remembered choice equals the key's organization) |
+| `chosen` | a choice has been recorded for this sign-in, whatever the key's organization is now. Cleared only by forgetting the sign-in. |
+| `multiple` | `listed` with two or more organizations. An unknown count is never `true`: a page that does not carry every organization is refused as `unavailable`. |
+| `prompt` | `multiple`, a key, and not `chosen`: the Private AI screen asks the contributor to choose in Settings. Once anything is chosen it is never `true` again for this sign-in, even if a later sign-in mints elsewhere. |
+| `revoke_pending` | a key this install replaced could not be revoked yet; it is retried on each listing |
+| `view` | the words: `title`, `what`, `picker`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
+
+`near_ai_spend_organization_select` switches. Its order keeps one working key
+at every step:
+
+1. Mint a key in the chosen organization (`GET /v1/organizations`,
+   `GET /v1/organizations/{id}/workspaces`,
+   `POST /v1/workspaces/{id}/api-keys`). A failure here changes nothing.
+2. Record the old and the new key as revocation candidates (ids only, in the
+   daemon file `near-ai-spend-org.json`).
+3. Wait for the new key to become usable (the service documents up to ten
+   seconds), then publish it beside the stored session and move the IronWire
+   proxy onto it. If publishing fails, the new key is revoked and the old one
+   stays.
+4. Revoke every recorded candidate that is not the active key
+   (`DELETE /v1/workspaces/{id}/api-keys/{key}`). The active key is never
+   revoked. A revoke that fails stays recorded, answers
+   `revoke_pending: true`, and is retried.
+
+Choosing the organization already in use mints nothing; it records the
+choice, which ends the prompt. The call takes about ten seconds when it
+switches.
+
+| Error message | Meaning |
+| --- | --- |
+| `near_ai_spend_org_invalid` (`bad_params`) | `organization_id` missing or not an id |
+| `near_ai_spend_org_no_session` | no NEAR AI sign-in on this machine |
+| `near_ai_spend_org_session_expired` | the sign-in was refused; sign in again |
+| `near_ai_spend_org_no_key` | signed in, but no inference key to replace |
+| `near_ai_spend_org_unknown` | the account is not an active member of that organization |
+| `near_ai_spend_org_refused` | NEAR AI refused a key there (for example, a role that may not create keys) |
+| `near_ai_spend_org_busy` | a sign-in is in flight, or too many replaced keys are still awaiting revocation |
+| `near_ai_spend_org_unavailable` | anything else; nothing changed |
 
 ### `commons_credit_summary`
 
@@ -7802,6 +7888,7 @@ relaxation of origin/CORS/CSP controls.
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
 | `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
+| `near_ai_balance_changed` | additive: the daemon's credit poll counted NEAR AI credit that arrived in the organization Private AI spends from (see "`near_ai_balance`"). A client showing the balance reads it again | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's

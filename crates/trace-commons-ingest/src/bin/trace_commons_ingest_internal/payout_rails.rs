@@ -9,15 +9,36 @@
 //! `live` with a setting missing or malformed refuses the start), records
 //! the rail's rate epoch, builds the rails, and probes each `live` rail's
 //! capacity once; a failed probe marks the rail unqualified in readiness and
-//! does not refuse the start. Every rail defaults to `disabled`, which needs
-//! nothing and runs nothing.
+//! does not refuse the start. An enabled rail whose rate source has no rate
+//! (no settlement table, or one without a positive rate) does not refuse the
+//! start either: refusing would take every route down for one rail. It runs
+//! no rate instead -- its pass stops as `payout_rate_unavailable` before
+//! accrual or any call, and readiness reports it unqualified with that
+//! reason -- whatever epochs an earlier boot stored. Every rail defaults to
+//! `disabled`, which needs nothing and runs nothing.
 //!
-//! The operator routes are admin-only and copy the admin drill routes' auth
-//! shape (`authenticate_with_tenant_access_grant`, then `require_admin`):
+//! The rail-wide controls are the operator's alone. They accept only the
+//! deployment's payout control token (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`),
+//! never a tenant token -- a tenant admin's included -- and refuse every
+//! caller while it is unset:
 //!
 //! - `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` set and
 //!   clear that rail's kill switch. Each appends a control row naming the
 //!   operator by hash; there is no global halt.
+//!
+//! - `GET /v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds` lists
+//!   that tenant's open holds on the rail, each as an account id hash and a
+//!   label, and `POST .../holds/clear` with `{account_id_hash, label}`
+//!   clears one, with an audit row naming the operator by hash. A hold
+//!   about one account stays until it is cleared here; the ceiling hold
+//!   also lifts itself once the account fits the ceiling again. The
+//!   operator token is deployment-wide, so the tenant is named in the path;
+//!   every read and write still runs in that tenant's RLS context.
+//!
+//! Link release moves one link of the caller's own tenant, so it keeps the
+//! admin drill routes' tenant auth (`authenticate_with_tenant_access_grant`,
+//! then `require_admin`):
+//!
 //! - `POST /v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release`
 //!   moves one of the operator tenant's active links on that rail to
 //!   `closing` (for example after a contributor reports lost access to the
@@ -30,11 +51,14 @@
 use super::*;
 use axum::extract::Path;
 use trace_commons_server::db::{
-    PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_link_id_hash,
+    PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_account_id_hash,
+    payout_link_id_hash,
 };
 use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
 use trace_commons_server::payout_pass::{PayoutRecipientOpener, UnconfiguredRecipientOpener};
-use trace_commons_server::payout_rate::{NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot};
+use trace_commons_server::payout_rate::{
+    NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot, near_ai_rate_version_in_force,
+};
 use trace_commons_server::payout_recipient_seal::SealedRecipientOpener;
 use trace_commons_server::payout_worker::PayoutRails;
 
@@ -67,24 +91,22 @@ pub(crate) async fn payout_rails_from_env(
     }
     let rails = PayoutRails::from_config(&near_ai)
         .map_err(|error| anyhow::anyhow!("near_ai payout refused to start: {}", error.label()))?;
-    if let Some(store) = payout_store {
-        for entry in rails.entries() {
-            if entry.mode() == trace_commons_server::payout_rate::PayoutMode::Disabled {
-                continue;
-            }
-            // The version label of the latest epoch, for readiness; never
-            // the rate.
-            let latest = store
-                .payout_rate_epochs(entry.rail_id())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("near_ai payout refused to start: payout_rate_epoch_unread")
-                })?
-                .into_iter()
-                .max_by_key(|epoch| epoch.observed_at)
-                .map(|epoch| epoch.rate.version().to_owned());
-            rails.set_rate_epoch(entry.rail_id().as_str(), latest);
+    // The version of the rate in force now, from the rate source this boot
+    // recorded, for readiness and for the pass. Never the latest stored
+    // epoch: a rail whose source is gone must not keep paying on a rate an
+    // earlier boot left behind (it stops as `payout_rate_unavailable`).
+    if near_ai.mode() != trace_commons_server::payout_rate::PayoutMode::Disabled {
+        let version = near_ai_rate_version_in_force(settlement_table).map_err(|error| {
+            anyhow::anyhow!("near_ai payout refused to start: {}", error.label())
+        })?;
+        if version.is_none() {
+            tracing::warn!(
+                rail = NEAR_AI_PAYOUT_RAIL_LABEL,
+                label = trace_commons_server::payout_pass::PAYOUT_RATE_UNAVAILABLE,
+                "payout rail has no rate in force; it accrues and sends nothing"
+            );
         }
+        rails.set_rate_epoch(NEAR_AI_PAYOUT_RAIL_LABEL, version);
     }
     rails.startup_probe().await;
     for entry in rails.entries() {
@@ -138,10 +160,75 @@ pub(crate) fn spawn_payout_rail_workers(state: &Arc<AppState>) -> Vec<tokio::tas
         .spawn_workers(payouts, corpus, recipient_opener(state))
 }
 
-/// The operator's hash on control and audit rows. Hash-only: never the
-/// principal or the token.
+/// The operator's hash on audit rows a tenant admin's action writes (link
+/// release). Hash-only: never the principal or the token.
 fn operator_actor_hash(auth: &TenantAuth) -> String {
     sha256_prefixed(&format!("payout-operator-v1:{}", auth.principal_ref))
+}
+
+/// The setting holding the operator's payout control token: the one
+/// credential the rail-wide controls accept. It is deployment-wide, not a
+/// tenant token, so no tenant (and no tenant admin) can mint it.
+pub(crate) const TRACE_COMMONS_PAYOUT_CONTROL_TOKEN: &str = "TRACE_COMMONS_PAYOUT_CONTROL_TOKEN";
+
+/// The shortest control token boot accepts.
+const PAYOUT_CONTROL_TOKEN_MIN_LEN: usize = 32;
+
+/// The stored form of a control token: its sha256, never the token.
+pub(crate) fn payout_control_token_hash(token: &str) -> String {
+    sha256_prefixed(&format!("payout-control-token-v1:{token}"))
+}
+
+/// Reads [`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`] at boot. Unset is `None`
+/// (the controls refuse every caller); a token shorter than 32 characters
+/// refuses the start rather than guarding the kill switch weakly.
+pub(crate) fn payout_control_token_hash_from_env() -> anyhow::Result<Option<String>> {
+    let Some(token) = optional_trimmed_env(TRACE_COMMONS_PAYOUT_CONTROL_TOKEN)? else {
+        return Ok(None);
+    };
+    if token.len() < PAYOUT_CONTROL_TOKEN_MIN_LEN {
+        anyhow::bail!("payout control refused to start: payout_control_token_too_short");
+    }
+    Ok(Some(payout_control_token_hash(&token)))
+}
+
+/// Equal-length comparison that does not stop at the first differing byte.
+fn same_digest(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+/// The gate on every rail-wide payout control (halt, resume, hold list and
+/// clear): the operator's control token and nothing else. It never consults
+/// tenant tokens, so a tenant admin is refused like anyone else. Unset
+/// refuses every caller (`payout_control_unconfigured`). Returns the
+/// operator's actor hash for audit rows: a hash of the token's hash.
+fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+    let Some(expected) = state.payout_control_token_hash.as_deref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payout_control_unconfigured",
+        ));
+    };
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+    let presented = payout_control_token_hash(token);
+    if !same_digest(&presented, expected) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "payout_control_token_required",
+        ));
+    }
+    Ok(sha256_prefixed(&format!("payout-operator-v2:{expected}")))
 }
 
 #[derive(Debug, Serialize)]
@@ -172,8 +259,7 @@ async fn set_payout_rail_control(
     headers: HeaderMap,
     halted: bool,
 ) -> ApiResult<Json<PayoutRailControlResponse>> {
-    let auth = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_admin(&auth)?;
+    let actor = require_payout_operator(state.as_ref(), &headers)?;
     let entry = state
         .payout_rails
         .get(&rail_id)
@@ -188,12 +274,7 @@ async fn set_payout_rail_control(
         PAYOUT_RESUME_LABEL
     };
     store
-        .set_payout_control(
-            entry.rail_id(),
-            halted,
-            Some(label),
-            &operator_actor_hash(&auth),
-        )
+        .set_payout_control(entry.rail_id(), halted, Some(label), &actor)
         .await
         .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_control_unrecorded"))?;
     entry.record_halted(halted);
@@ -205,6 +286,156 @@ async fn set_payout_rail_control(
     Ok(Json(PayoutRailControlResponse {
         rail_id: entry.rail_id().as_str().to_owned(),
         halted,
+    }))
+}
+
+/// The shape a tenant id takes in a hold route's path.
+fn is_tenant_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+}
+
+/// The database's rule for a hold label (`trace_payout_holds.label`).
+fn is_hold_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+        })
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldView {
+    account_id_hash: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldsResponse {
+    rail_id: String,
+    holds: Vec<PayoutHoldView>,
+}
+
+/// The operator gate, the rail, the tenant shape and the store, in that
+/// order, for both hold routes.
+fn payout_hold_route<'a>(
+    state: &'a AppState,
+    headers: &HeaderMap,
+    rail_id: &str,
+    tenant_id: &str,
+) -> ApiResult<(
+    String,
+    &'a Arc<trace_commons_server::payout_worker::PayoutRailEntry>,
+    &'a Arc<dyn PayoutStore>,
+)> {
+    let actor = require_payout_operator(state, headers)?;
+    let entry = state
+        .payout_rails
+        .get(rail_id)
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, error.label()))?;
+    if !is_tenant_id(tenant_id) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_tenant_id_invalid",
+        ));
+    }
+    let store = state
+        .payout_store
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
+    Ok((actor, entry, store))
+}
+
+pub(crate) async fn payout_holds_list_handler(
+    State(state): State<Arc<AppState>>,
+    Path((rail_id, tenant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PayoutHoldsResponse>> {
+    let (_, entry, store) = payout_hold_route(state.as_ref(), &headers, &rail_id, &tenant_id)?;
+    let holds = store
+        .open_payout_holds(&tenant_id, entry.rail_id())
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?
+        .into_iter()
+        .map(|hold| PayoutHoldView {
+            account_id_hash: payout_account_id_hash(hold.account_id),
+            label: hold.label,
+        })
+        .collect();
+    Ok(Json(PayoutHoldsResponse {
+        rail_id: entry.rail_id().as_str().to_owned(),
+        holds,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PayoutHoldClearRequest {
+    account_id_hash: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PayoutHoldClearResponse {
+    rail_id: String,
+    account_id_hash: String,
+    label: String,
+    cleared: bool,
+}
+
+pub(crate) async fn payout_hold_clear_handler(
+    State(state): State<Arc<AppState>>,
+    Path((rail_id, tenant_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<PayoutHoldClearRequest>,
+) -> ApiResult<Json<PayoutHoldClearResponse>> {
+    let (actor, entry, store) = payout_hold_route(state.as_ref(), &headers, &rail_id, &tenant_id)?;
+    if !is_link_id_hash(&request.account_id_hash) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_account_id_hash_invalid",
+        ));
+    }
+    if !is_hold_label(&request.label) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "payout_hold_label_invalid",
+        ));
+    }
+    let not_found = || api_error(StatusCode::NOT_FOUND, "payout_hold_not_found");
+    let account = store
+        .open_payout_holds(&tenant_id, entry.rail_id())
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?
+        .into_iter()
+        .find(|hold| {
+            hold.label == request.label
+                && payout_account_id_hash(hold.account_id) == request.account_id_hash
+        })
+        .map(|hold| hold.account_id)
+        .ok_or_else(not_found)?;
+    let cleared = store
+        .clear_payout_hold(&tenant_id, account, entry.rail_id(), &request.label, &actor)
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
+    if !cleared {
+        return Err(not_found());
+    }
+    tracing::info!(
+        rail = %entry.rail_id(),
+        label = %request.label,
+        "payout hold cleared by an operator"
+    );
+    // The account may be paid now rather than at the next tick.
+    state.payout_rails.notifier().notify_all();
+    Ok(Json(PayoutHoldClearResponse {
+        rail_id: entry.rail_id().as_str().to_owned(),
+        account_id_hash: request.account_id_hash,
+        label: request.label,
+        cleared: true,
     }))
 }
 
@@ -328,6 +559,14 @@ mod tests {
         ] {
             assert!(!is_link_id_hash(bad), "{bad}");
         }
+        assert!(same_digest("sha256:ab", "sha256:ab"));
+        assert!(!same_digest("sha256:ab", "sha256:ac"));
+        assert!(!same_digest("sha256:ab", "sha256:abc"));
+        assert_ne!(
+            payout_control_token_hash("a"),
+            payout_control_token_hash("b")
+        );
+        assert!(!payout_control_token_hash("secret-token").contains("secret-token"));
         assert!(is_reason_label("contributor_lost_org_access"));
         for bad in ["", "Lost", "lost access", "a-b", &"a".repeat(65)] {
             assert!(!is_reason_label(bad), "{bad}");

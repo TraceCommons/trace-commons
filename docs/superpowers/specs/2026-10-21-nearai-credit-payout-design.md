@@ -786,7 +786,7 @@ Each rail has its own mode setting; for `near_ai` it is
   written.
 - `live`: as specified below.
 
-The kill switch is runtime, not boot-time, and per rail: an admin route
+The kill switch is runtime, not boot-time, and per rail: an operator route
 `POST /v1/admin/payout-rails/{rail_id}/halt` sets that rail's row in
 `trace_payout_control` (with an audit row: rail id, actor hash, time,
 label), and `.../resume` clears it. The rail's pass reads it before each
@@ -794,7 +794,26 @@ send, under its single-flight lock, and stops at once when it is set.
 Lines already `pending` stay `pending`; recovery resumes them after
 `resume`. Readiness reports `payout_halted` for that rail. Halting one rail
 does not touch another; there is no global halt (an operator halts each
-rail).
+rail). The switch is rail-wide, so it is not a tenant control: halt, resume
+and hold clearing accept only the deployment's payout control token
+(`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`, stored as a hash, at least 32
+characters), never a tenant token, a tenant admin's included, and refuse
+every caller (`payout_control_unconfigured`) while it is unset. Audit and
+control rows name the operator by a hash of the token's hash.
+
+Holds an operator clears. A hold about one account (recovery unmatched,
+program total mismatch, link unreadable, amount out of range, owed
+inconsistent, a `HoldLine` or `Failed` refusal on its line, an unpriced
+reversal) stays until an operator clears it with the same token:
+`GET /v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds` lists that
+tenant's open holds on the rail by account id hash and label, and
+`POST .../holds/clear` with `{account_id_hash, label}` clears one, with a
+`hold_cleared` audit row naming the operator by hash. The next pass looks at
+the account afresh. The ceiling hold also lifts itself once owed fits the
+ceiling. A refusal caused by the sender's own limits (credential or org
+transfer limits, rate limits, accounting busy, insufficient posted capacity,
+an unreconciled sender) never holds an account: it retries or stops the
+pass.
 
 ### State and storage
 
@@ -935,7 +954,7 @@ line first, which the rail contract makes safe:
 |---|---|---|---|
 | 429 `transfer_rate_limited`, 503 `transfer_unavailable` / `accounting_busy`, timeout | `Retry` | stays `pending` | retried next pass, same target |
 | 409 `insufficient_posted_capacity`, `sender_not_reconciled` | `StopPass` | stays `pending` | operator: fund or reconcile the sender |
-| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` | `HoldLine` | `held` | budget or recipient restriction; compare with `capacity` |
+| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` (on a send or a zero read) | `StopPass` | stays `pending` | a limit on our own credential or org (budget, source, or recipient list, which the link probe already checked); never the recipient's standing, so no account is held. Raise the limit; the next pass resends the line |
 | 409 `capacity_overflow` | `HoldLine` | `held` | the recipient's incoming total would overflow `i64`; operator review |
 | 404 `organization_unavailable` on a send | `RecipientUnavailable` | `held`, link marked `recipient_unavailable` | contributor must relink; #1271 raises this code for the recipient only |
 | 404 with any other code, or no JSON body | `StopPass` (`near_ai_route_unavailable`) | unchanged | a wrong route, a proxy page or a host without #1271; never marks a link |

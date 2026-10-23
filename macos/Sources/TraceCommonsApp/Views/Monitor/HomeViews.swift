@@ -284,7 +284,6 @@ private struct HomeOverview: View {
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
-        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         // Three groups, each under its title (owner, 2026-10-20): Private
         // AI first, then Traces (Waiting and Contributed, and what is not
         // contributed across both columns), then Account (Credit and the
@@ -309,23 +308,7 @@ private struct HomeOverview: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount) {
-                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                    GridRow {
-                        HomeStatTile(label: HomeFormat.creditPendingWord,
-                                     value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
-                                     detail: delta?.text, detailInk: delta?.ink,
-                                     systemImage: HomeStatIcons.credit, action: openPrivateAI)
-                        if let copy = model.privateInferenceCopy {
-                            let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
-                            HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
-                                         systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
-                                         action: openPrivateAI)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
+                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
             }
         }
     }
@@ -402,10 +385,11 @@ private struct HomeOverview: View {
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
 /// label, the count and size, and the core's call to share (owner,
 /// 2026-10-20), over its icon as a watermark on the right, as the tiles'.
-/// It is on the standard card fill with no border, and a band of light
-/// crosses it from left to right now and then (`GlassCardShimmer`, owner,
-/// 2026-10-20; it had a solid accent border, and before that a turning
-/// glow edge). The whole card is the button.
+/// It is on the standard card fill with no border, and now and then a soft
+/// light turns once round its edge like a lighthouse's beam
+/// (`GlassCardBeacon`, owner, 2026-10-22; before that a band of light
+/// crossed it, before that it had a solid accent border, and before that a
+/// turning glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -445,12 +429,14 @@ private struct HomeNotContributedCard: View {
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // The shimmer over its icon, which is the card's watermark as
-            // the tiles' is, both behind the words (owner, 2026-10-20).
-            .glassCardShimmer()
+            // Its icon is the card's watermark, as the tiles' is, behind
+            // the words (owner, 2026-10-20).
             .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
+            // The light turning round its edge, over the fill (owner,
+            // 2026-10-22).
+            .glassCardBeacon()
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
@@ -1512,6 +1498,49 @@ private struct HistoryPeriodCard: View {
     }
 }
 
+/// Home's Account tiles: Credit, the total with its change since the last
+/// day this Mac saw, and the NEAR AI balance beside it (owner, 2026-10-19),
+/// each opening Private AI. Home draws them under Account, and the edge
+/// rail's Private AI peek under the tool buttons (owner, 2026-10-22). A
+/// failed rollup or credit read is a dash, never the store's earlier value.
+struct HomeAccountTiles: View {
+    let store: HomeStore
+    let openPrivateAI: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    private var freshRollup: DaemonData.HistoryRollup? {
+        SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
+    }
+
+    private var freshCredit: DaemonData.CommonsCreditSummary? {
+        SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
+    }
+
+    var body: some View {
+        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: MonitorWords.table?.homeHistory)
+        Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+            GridRow {
+                HomeStatTile(label: HomeFormat.creditPendingWord,
+                             value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
+                             detail: delta?.text, detailInk: delta?.ink,
+                             systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                if let copy = model.privateInferenceCopy {
+                    let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
+                    BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
+                        HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
+                                     detail: balance.detail, detailInk: balance.detailInk,
+                                     systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
+                                     action: openPrivateAI)
+                    }
+                } else {
+                    Color.clear
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 /// One of Home's and History's three counts (Ron's `StatCard`): a full
 /// card, 10 by 12 inside, its eyebrow word over an 18pt-class bold tabular
 /// figure. The word wraps at a space, never inside a word.
@@ -1605,17 +1634,32 @@ enum HomeFormat {
     /// Signed out, the core's short "Sign in required" sits beside the dash
     /// (`beside`); every other sentence is longer, some carry a recovery,
     /// and they go under it (`detail`). Never a figure the core did not give.
+    ///
+    /// With a figure, the core's line for the change over the last 24 hours
+    /// goes under it (owner, 2026-10-23), up in the status green and down in
+    /// the status red as the Credit tile's change is drawn; with no reading
+    /// from a day ago there is no line, never "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
-    ) -> (value: String, beside: String?, detail: String?) {
+    ) -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
         if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) {
-            return status.state == signedOutBalance ? ("—", sentence, nil) : ("—", nil, sentence)
+            return status.state == signedOutBalance ? ("—", sentence, nil, nil) : ("—", nil, sentence, nil)
         }
-        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil) }
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil, nil) }
         switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
-        case .figure(let amount): return (amount, nil, nil)
-        case .sentence(let sentence): return ("—", nil, sentence)
+        case .figure(let amount):
+            let change = balanceChange(status)
+            return (amount, nil, change?.text, change?.ink)
+        case .sentence(let sentence): return ("—", nil, sentence, nil)
         }
+    }
+
+    /// The Balance tile's 24-hour change: the core's words, inked by the
+    /// sign of the core's figure. Nil without both, or for no change.
+    static func balanceChange(_ status: BalanceStatus) -> (text: String, ink: GlassRGBA)? {
+        guard let text = status.change24hText, !text.isEmpty, let nanos = status.change24hNanos, nanos != 0
+        else { return nil }
+        return (text, nanos > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
     }
 
     /// The daemon's balance label with no NEAR AI sign-in kept here.
