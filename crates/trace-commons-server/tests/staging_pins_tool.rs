@@ -619,6 +619,92 @@ async fn observe_refuses_a_run_whose_replay_does_not_match() {
     .await
     .expect_err("a log missing its key-provider event yields no set");
     assert_eq!(refusal.label, "rtmr3_event_sequence");
+
+    // All ten, each once, but out of order: refused, though the quote
+    // really measured this order. `observe` checks no allowlist, so this
+    // is the replay's own order check.
+    let mut reordered = ten_events();
+    reordered.swap(5, 6);
+    let (report, nonce) = report_with(&reordered, &actions());
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::over(reordered, actions());
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("a reordered log yields no set");
+    assert_eq!(refusal.model_position, 1);
+    assert_eq!(refusal.label, "rtmr3_event_sequence");
+}
+
+#[tokio::test]
+async fn observe_refuses_entries_whose_values_disagree() {
+    // Two entries for the model, each with a log that replays to its own
+    // quote. The allowlist holds one value per event, so a run whose
+    // entries carry different ones must say so rather than keep the first.
+    let (report, nonce) = synthetic_ed25519_report();
+    let mut document = json(&report);
+    let first = document["model_attestations"][0].clone();
+    document["model_attestations"]
+        .as_array_mut()
+        .unwrap()
+        .push(first);
+    let two = document.to_string();
+
+    // The control: two entries that agree are observed.
+    let (_server, gateway) = gateway_serving(&two, &nonce).await;
+    let staged = Staged::new();
+    let observed = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce.clone()),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect("two agreeing entries are observed");
+    assert_eq!(observed.sets.len(), 1);
+
+    // The second entry under another KMS, then another progress marker.
+    for (name, payload) in [
+        ("mr-kms", "4c".repeat(48)),
+        ("storage-fs", hex::encode("another fs")),
+    ] {
+        let other: Vec<(String, String)> = ten_events()
+            .into_iter()
+            .map(|(n, p)| {
+                if n == name {
+                    (n, payload.clone())
+                } else {
+                    (n, p)
+                }
+            })
+            .collect();
+        let mut document = json(&two);
+        document["model_attestations"][1]["event_log"] = event_log(&other);
+        let (_server, gateway) = gateway_serving(&document.to_string(), &nonce).await;
+        let other_rtmr3 = replayed(&other);
+        let staged = Staged::new().altering(move |n, quote| {
+            if n == 1 {
+                quote.rtmr[3] = other_rtmr3.clone();
+            }
+        });
+        let refusal = observe_measurement_sets(
+            &[&gateway],
+            &FixedNonce(nonce.clone()),
+            FIXTURE_CAPTURED_AT,
+            &DEFAULT_REGISTERS,
+            &staged_verify(&staged),
+        )
+        .await
+        .expect_err("entries that disagree yield no allowlist");
+        assert_eq!(refusal.model_position, 1, "{name}");
+        assert_eq!(refusal.label, "review_entries_disagree", "{name}");
+    }
 }
 
 #[tokio::test]
