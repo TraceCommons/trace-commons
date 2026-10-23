@@ -2204,7 +2204,16 @@ impl DaemonShared {
         let Some(ledger) = self.routing_ledger() else {
             return;
         };
+        // The refresh also re-reads which account answers, and that moves
+        // the Private AI label (`private_inference_value`) without any
+        // reconcile to publish it. A shell re-reads status on
+        // `status_changed`, so a moved label has to say so here, or the
+        // "not known" it read when the proxy came up stays on screen.
+        let label_before = self.private_inference_label();
         ledger.refresh().await;
+        if self.private_inference_label() != label_before {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
         // The route tallies, from the snapshot the refresh above committed.
         // Not from `take_added_rows`: that baselines after a restart and
         // hands out nothing for the window, so calls would go uncounted.
@@ -10509,6 +10518,64 @@ mod tests {
             s.source_roots_with_routing().is_routed(),
             "the ledger stays attached even though it has nothing to say"
         );
+    }
+
+    /// Which account answers is read off the proxy's status object on the
+    /// poll tick, after the proxy came up -- so the label a shell read when
+    /// it started is "not known", and the tick is the first time it can be
+    /// anything else. A shell re-reads status on `status_changed`; without
+    /// one here, the Private AI tab went on saying it could not tell which
+    /// account answers long after the proxy had said.
+    #[tokio::test]
+    async fn a_routing_refresh_that_learns_the_destination_publishes_status() {
+        let router = axum::Router::new()
+            .route(
+                "/_ironwire/log",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({ "exchanges": [] })) }),
+            )
+            .route(
+                "/_ironwire/status",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "balance": {},
+                        "backends": [{ "id": "nearai", "authenticated": false }],
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let s = shared();
+        *s.private_inference_state.lock().unwrap() =
+            crate::daemon::private_inference::PrivateInferenceState::Running { port };
+        s.routing.write().unwrap().ledger = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
+        assert_eq!(
+            s.private_inference_label(),
+            crate::daemon::private_inference::LABEL_RUNNING_DESTINATION_UNKNOWN
+        );
+        let mut rx = s.events.subscribe();
+
+        s.refresh_routing().await;
+        assert_eq!(
+            s.private_inference_label(),
+            crate::daemon::private_inference::LABEL_RUNNING_ANSWERED_ELSEWHERE
+        );
+        let mut published = false;
+        while let Ok(event) = rx.try_recv() {
+            published |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(published, "the label moved and no status_changed said so");
+
+        // The next tick learns nothing new and says nothing.
+        s.refresh_routing().await;
+        let mut again = false;
+        while let Ok(event) = rx.try_recv() {
+            again |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(!again, "an unchanged label is not a status change");
     }
 
     /// `has_rows` only gets reported when it changes, not on every poll.

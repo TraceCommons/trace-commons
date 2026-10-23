@@ -306,6 +306,9 @@ async fn enroll_prepared(
 pub(super) struct Prepared {
     commons: trace_commons_operator_client::Client,
     session: super::settings::NearAiSession,
+    /// Which sign-in `session` came from, read under the same lock. See
+    /// [`exchange_following_rotation`].
+    login: Option<Login>,
     issuer_url: String,
     audience: String,
     /// `None` only in a `near-ai-staging` build: see
@@ -344,13 +347,16 @@ async fn prepare_on(
     commons: trace_commons_operator_client::Client,
     ingest_url: &str,
 ) -> Result<Prepared> {
-    let session = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .near_ai_session
-        .clone()
-        .ok_or_else(|| anyhow!("near_ai_enroll_no_session"))?;
+    let (session, login) = {
+        let settings = shared.settings.lock().expect("settings lock");
+        (
+            settings
+                .near_ai_session
+                .clone()
+                .ok_or_else(|| anyhow!("near_ai_enroll_no_session"))?,
+            Login::of(&settings),
+        )
+    };
 
     // Fetched after the session presence check above, which is a local read
     // that spends nothing: a contributor who never logged in should be told
@@ -386,6 +392,7 @@ async fn prepare_on(
     Ok(Prepared {
         commons,
         session,
+        login,
         issuer_url: capability.issuer_url,
         audience: capability.audience,
         witness: capability.witness,
@@ -404,6 +411,7 @@ pub(super) async fn provision(
     let Prepared {
         commons,
         session,
+        login,
         issuer_url,
         audience,
         witness,
@@ -434,7 +442,7 @@ pub(super) async fn provision(
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
-    let access_token = super::nearai_credential::exchange(shared, api, &session)
+    let access_token = exchange_following_rotation(shared, api, &session, login.as_ref())
         .await
         .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
 
@@ -463,6 +471,72 @@ pub(super) async fn provision(
         receipt_endpoint,
         finished,
     })
+}
+
+/// Which sign-in a retained session belongs to: the inference key that
+/// sign-in minted beside it. A rotation replaces the session and keeps the
+/// key; a new sign-in replaces both. Ids and a timestamp only -- never the key.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Login {
+    key_id: String,
+    minted_at: chrono::DateTime<Utc>,
+}
+
+impl Login {
+    fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
+        settings.near_ai_inference.as_ref().map(|key| Self {
+            key_id: key.key_id.clone(),
+            minted_at: key.minted_at,
+        })
+    }
+}
+
+/// The token exchange, following one rotation of the same login.
+///
+/// A session snapshot can go stale between `prepare` and the exchange. The
+/// shell reads the balance the moment a sign-in lands, and that read
+/// exchanges -- rotating the refresh token -- while the first run is already
+/// enrolling. `exchange` then refuses the snapshot with
+/// `near_ai_credential_session_changed`, **before sending it anywhere**: the
+/// retired token is never presented. Enrollment used to end there, which is
+/// the "start answered, finish never sent, a second click worked" failure.
+///
+/// So on that one refusal, the current session is read and exchanged once,
+/// but only when it is the same login rotated: an inference key on both
+/// sides, and the same one. A session from a different sign-in, a session
+/// gone, or a login with no key to compare is refused as before -- a ceremony
+/// prepared for one login never spends another's token. Every other error,
+/// and a second refusal, is returned as is: this is bounded at one retry.
+///
+/// Rotation-safe by construction: the retry presents the token the rotation
+/// stored, and the rotation the retry produces is persisted inside
+/// `exchange` before its JWT is used, exactly as for the first attempt.
+async fn exchange_following_rotation(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    session: &super::settings::NearAiSession,
+    login: Option<&Login>,
+) -> Result<super::nearai_credential::session::SessionAccess> {
+    match super::nearai_credential::exchange(shared, api, session).await {
+        Err(error) if error.to_string() == "near_ai_credential_session_changed" => {
+            let current = {
+                let settings = shared
+                    .settings
+                    .lock()
+                    .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+                let same_login = login.is_some() && Login::of(&settings).as_ref() == login;
+                same_login
+                    .then(|| settings.near_ai_session.clone())
+                    .flatten()
+                    .filter(|current| current.user_agent == session.user_agent)
+            };
+            let Some(current) = current else {
+                return Err(error);
+            };
+            super::nearai_credential::exchange(shared, api, &current).await
+        }
+        other => other,
+    }
 }
 
 /// The account a ceremony provisioned `identity` into, for a caller that is
@@ -1156,9 +1230,10 @@ async fn bind_prepared(
     {
         bail!("account-session-changed");
     }
-    let token = super::nearai_credential::exchange(shared, api, &prepared.session)
-        .await
-        .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    let token =
+        exchange_following_rotation(shared, api, &prepared.session, prepared.login.as_ref())
+            .await
+            .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
     let result = authenticated(shared,origin,&mut account,Method::POST,"/v1/account/near-ai/provision/bind/finish",Some(&json!({
         "ceremony_id":started.ceremony_id,"code_verifier":verifier,"device_public_key":identity.public_key_b64,
         "device_signature":signature,"access_token":token.access_token,
@@ -1390,7 +1465,7 @@ mod native_bind_tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:Some(serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap()),receipt_endpoint:None};
+            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,login:None,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:Some(serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap()),receipt_endpoint:None};
             let result = bind_prepared(
                 &shared,
                 &CloudApi::for_test(&origin).unwrap(),
@@ -1505,12 +1580,19 @@ mod route_tests {
     struct Stub {
         origin: String,
         requests: Arc<Mutex<Vec<String>>>,
+        /// The refresh token each exchange presented, in order. Fixture
+        /// values, never a real credential.
+        spent: Arc<Mutex<Vec<String>>>,
         server: tokio::task::JoinHandle<()>,
     }
 
     impl Stub {
         fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
+        }
+
+        fn spent(&self) -> Vec<String> {
+            self.spent.lock().unwrap().clone()
         }
     }
 
@@ -1530,6 +1612,7 @@ mod route_tests {
 
     async fn stub(commons: Commons, device: DeviceIdentity) -> Stub {
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let spent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let challenge = Arc::new(Mutex::new(String::new()));
         let nonce = [7u8; 32];
         let expires = Utc::now().timestamp() + 300;
@@ -1661,12 +1744,35 @@ mod route_tests {
             .route(account_onboarding_v2::FINISH, axum::routing::post(finish))
             .route(
                 EXCHANGE,
-                axum::routing::post(|| async {
-                    axum::Json(json!({
-                        "access_token": "near-access",
-                        "refresh_token": "rt_rotated",
-                        "refresh_token_expiration": Utc::now() + chrono::Duration::days(1),
-                    }))
+                axum::routing::post({
+                    let spent = Arc::clone(&spent);
+                    move |headers: axum::http::HeaderMap| {
+                        // Each exchange rotates: the first hands back
+                        // `rt_rotated`, later ones `rt_rotated_<n>`.
+                        let presented = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.strip_prefix("Bearer "))
+                            .unwrap_or_default()
+                            .to_string();
+                        let n = {
+                            let mut spent = spent.lock().unwrap();
+                            spent.push(presented);
+                            spent.len()
+                        };
+                        let rotated = if n == 1 {
+                            "rt_rotated".to_string()
+                        } else {
+                            format!("rt_rotated_{n}")
+                        };
+                        async move {
+                            axum::Json(json!({
+                                "access_token": "near-access",
+                                "refresh_token": rotated,
+                                "refresh_token_expiration": Utc::now() + chrono::Duration::days(1),
+                            }))
+                        }
+                    }
                 }),
             )
             .layer(axum::middleware::from_fn(
@@ -1681,6 +1787,7 @@ mod route_tests {
         Stub {
             origin,
             requests,
+            spent,
             server,
         }
     }
@@ -1854,6 +1961,131 @@ mod route_tests {
                 .any(|r| r.ends_with(LEGACY_START) || r.ends_with(LEGACY_FINISH)),
             "a staging build asked the old routes"
         );
+        assert!(shared.store.load_config().unwrap().is_none());
+    }
+
+    /// The inference credential a sign-in mints beside its session. Fixture
+    /// values, never a real key.
+    fn inference(key_id: &str) -> crate::daemon::settings::NearAiInferenceCredential {
+        crate::daemon::settings::NearAiInferenceCredential {
+            key: format!("sk-fixture-{key_id}"),
+            key_id: key_id.into(),
+            key_prefix: "sk-fixtur".into(),
+            organization_id: "org-fixture".into(),
+            workspace_id: "ws-fixture".into(),
+            minted_at: Utc::now(),
+        }
+    }
+
+    /// A daemon right after a sign-in: a minted key and its session.
+    fn shared_signed_in() -> (tempfile::TempDir, DaemonShared) {
+        let (dir, shared) = shared_with_session();
+        let mut settings = shared.settings.lock().unwrap();
+        settings.near_ai_inference = Some(inference("key-fixture-1"));
+        settings.save_for_test(&shared.store).unwrap();
+        drop(settings);
+        (dir, shared)
+    }
+
+    /// Prepare against the stub, then let something else spend the session
+    /// before the ceremony reaches its own exchange -- what the shell's
+    /// balance read does the moment a sign-in lands, while the first run is
+    /// already enrolling.
+    async fn enroll_after_a_concurrent_rotation(
+        shared: &DaemonShared,
+        stub: &Stub,
+        between: impl AsyncFnOnce(&DaemonShared, &CloudApi),
+    ) -> Result<Value> {
+        let expected = super::super::commons_credentials::snapshot(
+            &shared.store,
+            super::super::commons_credentials::Kind::Account,
+        )
+        .unwrap();
+        let client =
+            super::super::native_identity::client(&stub.origin, "unauthenticated").unwrap();
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+        let prepared = prepare_on(shared, client, &stub.origin).await.unwrap();
+        between(shared, &api).await;
+        enroll_prepared(shared, &api, &stub.origin, prepared, expected).await
+    }
+
+    /// The first click of "Sign in with near.ai" failed: start answered, the
+    /// finish was never sent, a second click worked. The shell reads the
+    /// balance as soon as the sign-in lands, and that read rotates the
+    /// refresh token while enrollment is between its session snapshot and
+    /// its own exchange. The exchange then refuses the stale token -- before
+    /// sending it anywhere -- and enrollment used to give up there.
+    ///
+    /// The same login, rotated, is followed once: the retry spends the token
+    /// the rotation stored, never the retired one, and the rotation it
+    /// produces is stored in turn.
+    #[tokio::test]
+    async fn a_rotation_by_a_concurrent_balance_read_does_not_fail_enrollment() {
+        let (_dir, shared) = shared_signed_in();
+        let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
+        #[cfg(feature = "near-ai-staging")]
+        let commons = Commons::Staging;
+        #[cfg(not(feature = "near-ai-staging"))]
+        let commons = Commons::Production;
+        let stub = stub(commons, identity).await;
+        let result = enroll_after_a_concurrent_rotation(&shared, &stub, async |shared, api| {
+            let session = shared
+                .settings
+                .lock()
+                .unwrap()
+                .near_ai_session
+                .clone()
+                .unwrap();
+            crate::daemon::nearai_credential::exchange(shared, api, &session)
+                .await
+                .expect("the balance read's exchange");
+        })
+        .await;
+        let reply = result.expect("enrollment follows the rotation");
+        assert_eq!(reply["enrolled"], true);
+        assert_eq!(
+            stub.spent(),
+            vec!["rt_original".to_string(), "rt_rotated".to_string()],
+            "each refresh token is spent exactly once, the retired one never again"
+        );
+        assert_eq!(
+            stub.requests().last().map(String::as_str),
+            Some(format!("POST {PROVISION_FINISH_PATH}").as_str())
+        );
+        assert_eq!(stored_refresh(&shared), "rt_rotated_2");
+        assert!(shared.store.load_config().unwrap().is_some());
+    }
+
+    /// A different login is not a rotation. A sign-in that replaced the key
+    /// and the session while enrollment was in flight is refused, and its
+    /// new session is not spent on a ceremony prepared for the old one.
+    #[tokio::test]
+    async fn a_new_sign_in_during_enrollment_is_refused_not_followed() {
+        let (_dir, shared) = shared_signed_in();
+        let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
+        #[cfg(feature = "near-ai-staging")]
+        let commons = Commons::Staging;
+        #[cfg(not(feature = "near-ai-staging"))]
+        let commons = Commons::Production;
+        let stub = stub(commons, identity).await;
+        let result = enroll_after_a_concurrent_rotation(&shared, &stub, async |shared, _| {
+            let mut settings = shared.settings.lock().unwrap();
+            settings.near_ai_inference = Some(inference("key-fixture-2"));
+            settings.near_ai_session = Some(crate::daemon::settings::NearAiSession {
+                refresh_token: "rt_second_sign_in".into(),
+                refresh_token_expires_at: None,
+                stored_at: Utc::now(),
+                user_agent: "Mozilla/5.0 Test".into(),
+            });
+            settings.save_for_test(&shared.store).unwrap();
+        })
+        .await;
+        assert_eq!(
+            label(&result.unwrap_err()),
+            "near_ai_enroll_token_unavailable"
+        );
+        assert!(stub.spent().is_empty(), "no refresh token was spent");
+        assert_eq!(stored_refresh(&shared), "rt_second_sign_in");
         assert!(shared.store.load_config().unwrap().is_none());
     }
 }
