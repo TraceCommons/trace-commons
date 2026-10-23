@@ -142,6 +142,13 @@ All dated 2026-10-21. The owner's words are quoted.
   commit. This changed the v2 payload's `compose_actions` from a list to an
   object before any v2 document had been signed, so the format string stays
   `trace-commons-near-ai-pins/v2`.
+- **(S18) Staging signs in through NEAR AI's login, not a NEAR wallet.** "In
+  the staging builds the sign in needs to be via Google and not your near
+  wallet" (2026-10-23, after installing a staging DMG). A staging build's
+  NEAR AI sign-in providers are Google and GitHub
+  (`channel::NEAR_AI_SIGN_IN_PROVIDERS`), Google by default; the daemon
+  refuses the NEAR wallet ceremony and the native wallet signup answers
+  Unsupported. Production keeps the NEAR wallet as its default (3.12).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -628,7 +635,9 @@ runs in both builds and holds them to the same answer.
 
 The one staging difference is that the NEAR wallet ceremony is refused
 (`staging_wallet_provisioning_closed`) whatever the configuration says, so
-NEAR AI is the only way to make a staging account.
+NEAR AI is the only way to make a staging account. The staging app does not
+offer it either (S18): its NEAR AI sign-in is NEAR AI's Google login by
+default, or GitHub where a picker offers it, and never the NEAR wallet.
 
 What opens NEAR AI sign-in is the pilot's readiness check
 (`near_ai_login_readiness_named`) less one control:
