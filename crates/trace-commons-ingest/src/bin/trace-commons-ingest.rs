@@ -43875,6 +43875,20 @@ async fn append_automatic_utility_credit_events_once_with_counts(
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
 ) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
+    append_automatic_utility_credit_events_once_with_counts_at(state, tenant, config, sources, None)
+        .await
+}
+
+/// `append_automatic_utility_credit_events_once_with_counts`, with each
+/// event's `created_at` fixed to `created_at` when given (otherwise the time
+/// of its append).
+async fn append_automatic_utility_credit_events_once_with_counts_at(
+    state: &AppState,
+    tenant: &TenantAuth,
+    config: AutomaticUtilityCreditConfig,
+    sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
+    created_at: Option<DateTime<Utc>>,
+) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
     require_positive_credit_issuance_principal_if_configured(
         state,
         tenant,
@@ -43918,7 +43932,7 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             external_ref: Some(config.external_ref.clone()),
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
-            created_at: Utc::now(),
+            created_at: created_at.unwrap_or_else(Utc::now),
             witness_provenance_class: credit_witness_provenance_class(
                 state,
                 tenant,
@@ -60768,10 +60782,12 @@ async fn emit_scoring_award_for_scored_decision(
 /// kinds. Returns `(credit_emitted, credit_withheld_reason)`:
 /// - `(true, None)` — credit minted via
 ///   `append_automatic_utility_credit_events_once_with_counts` (`appended > 0`)
-/// - `(false, None)` — idempotent hit: the submission already has a scoring
-///   award, under this gate version or any other (`skipped_existing > 0`, or
-///   the ledger check before it); no new credit minted, but the prior
-///   emission is the audit trail. A submission earns at most one award.
+/// - `(false, None)` — idempotent hit: the submission already has a paid
+///   scoring award, under this gate version or any other (the ledger check),
+///   or already holds the award this write would key on
+///   (`skipped_existing > 0`); no new credit minted, but the prior emission
+///   is the audit trail. A submission earns at most one paid award; a $0 or
+///   pre-cut-over award does not stand in the way of it.
 /// - `(false, Some(label))` — credit withheld; the decision row records the
 ///   stable label-only reason
 ///
@@ -60855,26 +60871,40 @@ async fn attempt_emit_novelty_utility_credit(
         return Ok((false, Some("policy_mismatch".to_string())));
     }
 
-    // (7) One scoring award per submission. The award settles, and
+    // (7) One paid scoring award per submission. The award settles, and
     // `gate_version_hash` moves with the model, the floors, the chunking and
     // the render version, so a submission re-scored under a new gate version
-    // must not earn again. The ledger is the record: any gate-written award
-    // for this submission, under any gate version or idempotency key
-    // (including the `(gate_version_hash, submission_id)` key used before),
-    // means this submission has had its award. That is an idempotent hit,
-    // not a withheld reason.
-    let already_awarded = read_all_credit_events(&state.root, &tenant.tenant_id)
+    // must not be paid again. The ledger is the record: a paid award for this
+    // submission (`is_paid_scoring_award`: a positive delta at or after the
+    // cut-over), under any gate version or idempotency key (including the
+    // `(gate_version_hash, submission_id)` key used before), means this
+    // submission has had its award. That is an idempotent hit, not a
+    // withheld reason. A $0 award, or one from before the cut-over, never
+    // settles and does not block (owner decision 2026-10-23). The lock holds
+    // from this check through the append, so racing evaluations in this
+    // process see each other's award.
+    let award_lock = novelty_utility_award_lock(&state.root, &tenant.tenant_id);
+    let _award_guard = award_lock.lock().await;
+    let settle_from = state.novelty_utility_settle_from;
+    let already_paid = read_all_credit_events(&state.root, &tenant.tenant_id)
         .map_err(internal_error)?
         .iter()
-        .any(|event| event.submission_id == submission_id && is_gate_scoring_award(event));
-    if already_awarded {
+        .any(|event| {
+            event.submission_id == submission_id && is_paid_scoring_award(event, settle_from)
+        });
+    if already_paid {
         return Ok((false, None));
     }
 
-    // (8) Emit. The event id is keyed on the submission alone
-    // (`idempotency_ref: None`), so two concurrent evaluations of one
-    // submission collide on one event id whatever gate version each ran
-    // under. `external_ref` still records the gate version that scored it:
+    // (8) Emit. A paid award (a positive delta, written at or after the
+    // cut-over; `created_at` is fixed here so the key and the timestamp the
+    // settlement reads agree) is keyed on the submission and
+    // `NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF`, so two paid awards for
+    // one submission collide on one event id whatever gate version each ran
+    // under, in this process or another. Any other award is keyed on the
+    // submission alone, so a submission holds at most one of those too, and
+    // it never takes the paid id. `external_ref` still records the gate
+    // version that scored it:
     // `novelty_utility:<gate_version_hash>:<submission_id>`. The
     // `decision_id` is not in it -- it is freshly minted on every
     // gate-worker call -- but the trace_gate_decisions row carries it, and
@@ -60885,12 +60915,15 @@ async fn attempt_emit_novelty_utility_credit(
         decision.gate_version_hash, submission_id,
     );
     let reason = format!("novelty_utility:{}", decision.gate_policy_version);
-    let counts = append_automatic_utility_credit_events_once_with_counts(
+    let created_at = Utc::now();
+    let pays = state.novelty_utility_credit_points_delta > 0.0
+        && settle_from.is_some_and(|settle_from| created_at >= settle_from);
+    let counts = append_automatic_utility_credit_events_once_with_counts_at(
         state,
         tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: event_type.utility_idempotency_label(),
-            idempotency_ref: None,
+            idempotency_ref: pays.then(|| NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF.to_string()),
             event_type,
             credit_points_delta: state.novelty_utility_credit_points_delta,
             reason,
@@ -60901,6 +60934,7 @@ async fn attempt_emit_novelty_utility_credit(
             trace_id: submission_record.trace_id,
             auth_principal_ref: submission_record.auth_principal_ref.clone(),
         }],
+        Some(created_at),
     )
     .await?;
 
@@ -60908,13 +60942,54 @@ async fn attempt_emit_novelty_utility_credit(
 }
 
 /// Returns true when `kind` (as returned by `TraceGateService::safe_status()`)
-/// names a production trust boundary. Mirrors the spec's enumeration: the only
-/// production-trust kinds today are `enclave_local_gpu` (Phase A2 real local
-/// GPU) and `dstack` (Phase A2/A3 enclave deployment). Stubs
-/// (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) are
-/// explicitly non-production.
+/// names a production trust boundary: `enclave_local_gpu` (real local GPU),
+/// `dstack` (enclave deployment) and `enclave_near_ai` (attested NEAR AI TEE
+/// scoring, what the pilot and staging run; owner decision 2026-10-23). The
+/// test gates (`in_memory`, `enclave_mock`, `legacy_deterministic`,
+/// `dstack_stub`) are non-production, so they can never create payable
+/// credit.
 fn is_production_gate_service_kind(kind: &str) -> bool {
-    matches!(kind, "enclave_local_gpu" | "dstack")
+    matches!(kind, "enclave_local_gpu" | "dstack" | "enclave_near_ai")
+}
+
+/// Whether `event` is a scoring award that pays: written by the legacy gate
+/// path, with a positive delta, at or after the
+/// `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over. Only such an award
+/// blocks a later one (owner decision 2026-10-23); a $0 award, or one from
+/// before the cut-over, never settles and does not count.
+fn is_paid_scoring_award(
+    event: &TraceCommonsCreditLedgerRecord,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+) -> bool {
+    is_gate_scoring_award(event)
+        && event.credit_points_delta > 0.0
+        && novelty_utility_settle_from.is_some_and(|settle_from| event.created_at >= settle_from)
+}
+
+/// The `idempotency_ref` of a paid scoring award. A paid award's event id is
+/// keyed on the submission and this constant, apart from the
+/// submission-only id a $0 or pre-cut-over award takes, so a submission has
+/// exactly one id a paid award can be written under, whatever the gate
+/// version or cut-over: two paid awards for one submission collide on it.
+const NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF: &str = "paid";
+
+/// Serialises the one-award check and the append of a scoring award within
+/// this process, per tenant ledger, so two evaluations of one submission
+/// cannot both pass the check before either appends. Across processes the
+/// event id is the guard: the database mirror's primary key refuses a second
+/// row under it.
+fn novelty_utility_award_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(credit_ledger_path(root, tenant_id))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 async fn vector_index_handler(

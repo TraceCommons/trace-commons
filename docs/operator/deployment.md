@@ -1497,7 +1497,12 @@ So `unknown` on a deployed binary points at the build step, not at the host.
   `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true`, and
   `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` set to the RFC 3339 time the
   delta goes live. Only awards written at or after that time settle;
-  awards written before it never do. The production-gate list does not
-  include `enclave_near_ai`, so on that gate every award is withheld as
-  `non_production_gate` until the list changes. Run the settlement as a dry
+  awards written before it never do. A submission is paid at most once: a
+  $0 award or a pre-cut-over award does not count, so a trace scored during
+  calibration still earns one paid award after the cut-over, and a second
+  paid award is never written. Do not move the cut-over earlier once awards
+  have been written after the current one, or an older award can start to
+  count beside the paid one. The production gates are `enclave_local_gpu`,
+  `dstack` and `enclave_near_ai` (attested NEAR AI TEE scoring); the test
+  gates are withheld as `non_production_gate`. Run the settlement as a dry
   run first.

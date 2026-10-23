@@ -36,6 +36,21 @@ Predecessors:
 > perplexity driver earns the award for the traces it scores through the
 > same path as the worker route (`emit_scoring_award_for_scored_decision`),
 > issuing as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`.
+>
+> **Owner decisions, 2026-10-23.** (5) `enclave_near_ai` joins
+> `enclave_local_gpu` and `dstack` as a production gate: NEAR AI TEE scoring
+> is attested and is what the pilot and staging run. The test gates
+> (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) stay
+> out. (6) Only a paid award blocks a later one, superseding (1): an earlier
+> award blocks only when its delta is positive and it was written at or
+> after `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`. A paid award's event id
+> is keyed on the submission and the constant `paid`; every other award
+> keeps the submission-only id. So a submission holds at most one paid
+> award under any gate version or cut-over, a $0 or pre-cut-over award
+> never takes the paid id, and the emitter holds a per-tenant lock from the
+> ledger check through the append, so racing evaluations in one process
+> write one award (across processes the database primary key refuses the
+> second row).
 
 ## Goal
 
