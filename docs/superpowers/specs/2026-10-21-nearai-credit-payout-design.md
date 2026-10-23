@@ -798,7 +798,11 @@ rail). The switch is rail-wide, so it is not a tenant control: halt, resume
 and hold clearing accept only the deployment's payout control token
 (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`, stored as a hash, at least 32
 characters), never a tenant token, a tenant admin's included, and refuse
-every caller (`payout_control_unconfigured`) while it is unset. Audit and
+every caller (`payout_control_unconfigured`) while it is unset. A rail in
+`live` cannot run without it: boot refuses
+(`payout_control_token_unconfigured`) when any rail is `live` and the token
+is unset, so a live rail always has a reachable kill switch. `dry_run`
+sends nothing and boots without it, logging the same label. Audit and
 control rows name the operator by a hash of the token's hash.
 
 Holds an operator clears. A hold about one account (recovery unmatched,
