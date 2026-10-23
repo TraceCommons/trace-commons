@@ -172,6 +172,9 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    curl -fsS https://ingest.staging.tracecommons.ai/health | jq .near_ai_staging   # true
    curl -fsS https://ingest.staging.tracecommons.ai/v1/account/near/provision/capabilities
    scripts/check-aasa.sh https://staging.tracecommons.ai KXSWJN7WY8.ai.tracecommons.shell.staging
+   # 200, not 503 attestation_signing_key_unconfigured: proves systemd read
+   # the multi-line attestation keys out of ingest.env.
+   curl -fsS https://ingest.staging.tracecommons.ai/.well-known/trace-commons-attestation-keyset.json
    ```
 
    A staging ingest that names a production NEAR AI host does not reach

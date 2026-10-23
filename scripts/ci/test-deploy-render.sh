@@ -328,6 +328,7 @@ if [ -f "$ingest" ]; then
   expect "$ingest" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE disabled
   expect "$ingest" TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED false
   expect "$ingest" TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS 0
+  expect "$ingest" TRACE_COMMONS_GATE_POLICY_VERSION staging-2026-10
   expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_ID "$H"
   expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_ORIGIN "https://$H,https://ingest.$H"
   expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_NAME '"Near.ai Staging"'
@@ -368,12 +369,15 @@ if [ -f "$ingest" ]; then
 
   # Nothing of the pilot: its bucket, key ring, hosts, database or the
   # production NEAR AI hosts. The staging host is stripped first, so a bare
-  # tracecommons.ai left over is a pilot host. Comment lines are left out:
+  # tracecommons.ai left over is a pilot host. The shared GCP project's name
+  # (design 3.1: staging lives in the pilot's project) is stripped too, so
+  # any other `pilot-` is a pilot resource or label. Comment lines are left out:
   # the Caddyfile keeps the pilot template's comments, which name examples.
   stripped="$(cat "$ingest" "$issuer" "$deploy_dir/Caddyfile" 2>/dev/null \
-    | grep -v -E '^[[:space:]]*#' | sed 's/staging\.tracecommons\.ai//g')"
+    | grep -v -E '^[[:space:]]*#' \
+    | sed -e 's/staging\.tracecommons\.ai//g' -e 's/tracecommons-pilot-2026//g')"
   for needle in tc-pilot qwen3-6-35b cloud-api.near.ai completions.near.ai nip.io \
-    tracecommons.ai '/trace-commons$' 'pilot-workload-issuer' '\$\{'; do
+    tracecommons.ai '/trace-commons$' 'pilot-' '\$\{'; do
     if grep -q -E -- "$needle" <<<"$stripped"; then
       fail "a staging render names '$needle'"
       grep -n -E -- "$needle" <<<"$stripped" >&2 || true
@@ -436,7 +440,9 @@ else
   fail "render-env.sh did not make the signed pin directory"
 fi
 
-caddyfile="$deploy_dir/Caddyfile"
+# Kept aside: the refusal runs below clear the deploy directory.
+caddyfile="$scratch/staging-Caddyfile"
+cp "$deploy_dir/Caddyfile" "$caddyfile" 2>/dev/null || fail "render-env.sh staged no Caddyfile"
 if [ -f "$caddyfile" ]; then
   for site_name in "staging.tracecommons.ai {" "ingest.staging.tracecommons.ai {" "issuer.staging.tracecommons.ai {"; do
     if grep -q -x -F -- "$site_name" "$caddyfile"; then
@@ -515,9 +521,12 @@ fi
 # 4. caddy adapt, where caddy is installed.
 if command -v caddy >/dev/null 2>&1; then
   for file in "$scratch/pilot-Caddyfile" "$caddyfile"; do
-    [ -f "$file" ] || continue
+    if [ ! -f "$file" ]; then
+      fail "no $(basename "$file") to adapt"
+      continue
+    fi
     if caddy adapt --config "$file" --adapter caddyfile >/dev/null 2>"$scratch/adapt.err"; then
-      pass "caddy adapt accepts $(basename "$(dirname "$file")")/$(basename "$file")"
+      pass "caddy adapt accepts the $(basename "$file")"
     else
       fail "caddy adapt refuses $file"
       cat "$scratch/adapt.err" >&2
