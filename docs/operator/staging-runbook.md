@@ -99,12 +99,21 @@ Sign-up is open to any staging NEAR AI account (S12), so there is no list to
 keep. There is no per-person switch. To shut staging to everyone, stop the
 staging ingest service.
 
-## Server bring-up (pending Task 11)
+## Server bring-up
 
-Placeholder. To be filled in when Task 11 lands: provisioning order, the VM,
-DNS, TLS, PostgreSQL, Secret Manager names and IAM, the first deploy,
-readiness, the payout steps (by reference to the payout design) and
-rollback.
+The order, the secret names and how to make each, and the commands are in
+[`deploy/staging-gcp/README.md`](../../deploy/staging-gcp/README.md). In
+short: build with `deploy/staging-gcp/cloudbuild.yaml`; fetch the binaries
+with `deploy/pilot-gcp/pull-and-install.sh` in fetch-only mode; create the
+missing `tc-staging-*` secrets; render with
+`deploy/staging-gcp/render-env.sh`; install and first boot with
+`deploy/pilot-gcp/deploy.sh` and its staging parameters, which refuses an
+ingest whose `/health` does not report `near_ai_staging: true`; create the
+login-resolver role; verify `/health`, the provisioning capabilities and the
+AASA file. Rollback is the pilot's: each install keeps a timestamped
+`.bak-*` beside the binary (`docs/operator/pilot-gcp-deployment.md`). The
+payout rail stays `disabled` until the ingest reads its settings (payout
+design section 2).
 
 ## Serving the first pin set
 

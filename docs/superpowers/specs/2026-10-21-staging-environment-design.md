@@ -1406,3 +1406,36 @@ profile is in `macos/` (#1545). Still open:
   (3.7).
 - **NEAR AI staging's public `/v1/attestation/pins` is not NEAR AI's pins.**
   It holds backup-provider pins.
+- **Open sign-up does not open for today's client (found in review of
+  Task 11).** 3.12 compiles the admission ledger out of the staging build,
+  but the old readiness check (`near_ai_login_readiness_named` under the
+  legacy contract) still requires `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`,
+  and the old capabilities response publishes no issuer without a witness.
+  The contributor daemon, which the macOS app drives, signs up only through
+  `/v1/account/near/provision/capabilities` and
+  `/v1/account/near-ai/provision/start` and `/finish`, and requires the
+  `witness` field. No client calls the `/v2` routes, which are the only
+  ones a staging build makes ready. So a staging server with no witness
+  boots and every app sign-up fails with
+  `near_ai_enroll_commons_unsupported`. Closing it is a code change, not a
+  setting: either the staging client moves to `capabilities/v2` and
+  `start`/`finish/v2`, or the staging build drops the witness from the old
+  contract on both sides, with a staging test on the old routes. A
+  placeholder witness is not a fix: the client would call that host.
+- **Task 11 differs from the plan in five places, on purpose.**
+  - The ingest overlay is `deploy/staging-gcp/ingest.env.template`, not
+    `staging.env.template`: the release check refuses the substring
+    `staging.env` in deploy files.
+  - The `staging.tracecommons.ai` site is a separate file
+    (`Caddyfile.site.template`) appended to the pilot Caddyfile's render,
+    not a block in the pilot template behind a variable. The pilot template
+    is unchanged.
+  - Under `TC_DB_MODE=local`, `deploy.sh` installs the pilot units with the
+    Cloud SQL proxy dependency swapped for the local PostgreSQL unit (a
+    `sed` rewrite), not a drop-in: a drop-in can add a dependency but cannot
+    remove the pilot ingest unit's `Requires=cloud-sql-proxy.service`.
+  - Payout starts `disabled`, not `dry_run` (3.8). `dry_run` records a rate
+    epoch at boot and needs the payout store, and the rail's own settings
+    have no caller yet.
+  - `trace-commons-staging-pins` is built with
+    `near-attestation-collateral`, so its `observe` step can check quotes.

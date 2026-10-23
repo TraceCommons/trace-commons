@@ -20,6 +20,11 @@ The public `tracecommons.ai` Pages surface is deployed from
 - `systemd/cloud-sql-proxy.service` — Cloud SQL Auth Proxy sidecar; the
   ingest and onboarding-enabled issuer connect via 127.0.0.1:5432 with
   no SSL, the proxy upgrades to mTLS to Cloud SQL.
-- `deploy.sh` — host-side install/start sequence.
+- `deploy.sh` — host-side install/start sequence. Its parameters
+  (`TC_DB_MODE`, `TC_DEPLOY_LABEL`, `TC_EXPECT_STAGING`, `TC_ENV_INSTALL`,
+  `TC_BINARY_DIR`) default to the pilot; the staging server sets them, see
+  [`deploy/staging-gcp/README.md`](../staging-gcp/README.md).
+  `scripts/ci/test-deploy-render.sh` holds the pilot renders and the pilot
+  `deploy.sh` command sequence unchanged.
 - `sign-workload-token.py` — operator helper for minting pilot workload
   JWTs. Not for production.
