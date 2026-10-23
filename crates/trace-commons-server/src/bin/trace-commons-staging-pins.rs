@@ -31,8 +31,9 @@
 //!   form (section 5.9). A set is never printed from a quote that did not
 //!   verify or a log that did not replay, and one refused model prints
 //!   nothing at all (`trace_commons_server::near_attestation::pin_observe`).
-//!   It writes the replayed events' values and the compose actions it saw
-//!   to the `--review` file, as a candidate allowlist in the shape `sign
+//!   It writes the replayed events' values, the distinct compose-manager
+//!   images and the distinct compose files (path, SHA-256, commit) of the
+//!   compose actions it saw (owner decision S17) to the `--review` file, as a candidate allowlist in the shape `sign
 //!   --allowlist` reads, for the operator to review and commit under
 //!   `deploy/staging-gcp/`; the per-boot `instance-id` value is never
 //!   written. Fetching collateral needs the `near-attestation-collateral`
@@ -289,10 +290,15 @@ fn sign(seed_text: &[u8], request: &SignRequest<'_>) -> Result<Signed, String> {
 
     Ok(Signed {
         summary: format!(
-            "signed sequence={} sets={} compose_actions={} issued_at={} expires_at={} key_id={} allowlist_sha256=sha256:{} payload_sha256=sha256:{}",
+            "signed sequence={} sets={} compose_manager_images={} compose_files={} issued_at={} expires_at={} key_id={} allowlist_sha256=sha256:{} payload_sha256=sha256:{}",
             verified.sequence,
             verified.sets.len(),
-            verified.allowlist.compose_actions.len(),
+            verified
+                .allowlist
+                .compose_actions
+                .compose_manager_images
+                .len(),
+            verified.allowlist.compose_actions.compose_files.len(),
             utc(verified.issued_at)?,
             utc(verified.expires_at)?,
             staging_pins::key_id(public_key),
@@ -314,10 +320,15 @@ fn verify_document(document: &[u8], public_key_hex: &str, now: u64) -> Result<St
     let verified = staging_pins::verify(document, &public_key, now, &staging_gateway_host())
         .map_err(|refusal| refusal.label().to_string())?;
     Ok(format!(
-        "verified sequence={} sets={} compose_actions={} issued_at={} expires_at={} key_id={} allowlist_sha256=sha256:{} payload_sha256=sha256:{}",
+        "verified sequence={} sets={} compose_manager_images={} compose_files={} issued_at={} expires_at={} key_id={} allowlist_sha256=sha256:{} payload_sha256=sha256:{}",
         verified.sequence,
         verified.sets.len(),
-        verified.allowlist.compose_actions.len(),
+        verified
+            .allowlist
+            .compose_actions
+            .compose_manager_images
+            .len(),
+        verified.allowlist.compose_actions.compose_files.len(),
         utc(verified.issued_at)?,
         utc(verified.expires_at)?,
         staging_pins::key_id(&public_key),
@@ -357,9 +368,13 @@ fn allowlist_is_placeholder(allowlist: &Allowlist) -> bool {
 }
 
 /// Filled in from a review: app id, KMS, OS image and key provider all
-/// present, and every progress marker listed (a marker's payload may be
-/// empty). Anything between this and the placeholder is a half-finished
-/// review, which would refuse every entry while looking signed.
+/// present, every progress marker listed (a marker's payload may be
+/// empty), and at least one compose-manager image and one compose file
+/// listed (the live record of 2026-10-22 had both kinds, and an
+/// allowlist without one refuses every such record). Anything between this
+/// and the placeholder
+/// is a half-finished review, which would refuse every entry while looking
+/// signed.
 fn allowlist_is_complete(allowlist: &Allowlist) -> bool {
     let rtmr3 = &allowlist.rtmr3;
     !rtmr3.app_id.is_empty()
@@ -369,6 +384,8 @@ fn allowlist_is_complete(allowlist: &Allowlist) -> bool {
         && MARKER_EVENTS
             .iter()
             .all(|name| rtmr3.markers.iter().any(|marker| marker.name == *name))
+        && !allowlist.compose_actions.compose_manager_images.is_empty()
+        && !allowlist.compose_actions.compose_files.is_empty()
 }
 
 /// The bare host of the compiled-in staging NEAR AI base: what a staging
@@ -636,10 +653,15 @@ fn main() -> ExitCode {
                 }
                 println!("{INGEST_LINE_PREFIX}{}", observation.ingest_pin);
                 eprintln!(
-                    "observed models={} sets={} compose_actions={} review_sha256=sha256:{}",
+                    "observed models={} sets={} compose_manager_images={} compose_files={} review_sha256=sha256:{}",
                     models.len(),
                     observation.sets.len(),
-                    observation.review.compose_actions.len(),
+                    observation
+                        .review
+                        .compose_actions
+                        .compose_manager_images
+                        .len(),
+                    observation.review.compose_actions.compose_files.len(),
                     allowlist_sha256(&observation.review),
                 );
                 ExitCode::SUCCESS

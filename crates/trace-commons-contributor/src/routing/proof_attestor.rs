@@ -91,8 +91,10 @@
 //! allowlist (`staging_replay::replay_rtmr3`, `check_rtmr3_allowlist`), then
 //! checks that entry's `compose_manager_attestation`: its quote verified the
 //! same way, the same TD and boot as the model quote, our nonce, the
-//! recomputed actions hash, and every action allowlisted
-//! (`staging_replay::check_compose_manager`). All from the one report this
+//! recomputed actions hash, and every action parsed by kind and allowed
+//! (`staging_replay::check_compose_manager`; owner decision S17: the compose
+//! manager's image by digest, a `compose_up`'s file by path, SHA-256 and
+//! commit, a `compose_down`'s by path and commit). All from the one report this
 //! answer fetched with its own nonce. A key is earned only if the set, the
 //! replay, the RTMR3 allowlist and the compose-manager checks all pass. The
 //! last outcome is reported as a label too
@@ -1372,7 +1374,12 @@ mod tests {
         "0505050505050505050505050505050505050505050505050505050505050505";
     pub(super) const KEY_PROVIDER: &str =
         "7b226e616d65223a226b6d73222c226964223a2273796e746865746963227d";
-    pub(super) const MODEL_IMAGE: &str = "registry.example/model@sha256:ab";
+    /// Synthetic compose-action values, in the live record's formats.
+    pub(super) const MANAGER_IMAGE: &str = "registry.example/compose-manager@sha256:abababababababababababababababababababababababababababababababab";
+    pub(super) const COMPOSE_FILE: &str = "example/models.yaml";
+    pub(super) const FILE_SHA256: &str =
+        "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+    pub(super) const COMMIT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
     const RTMR3_EVENT_TYPE: u32 = 0x0800_0001;
     const RTMR3_EVENTS: [&str; 10] = [
         "system-preparing",
@@ -1445,16 +1452,20 @@ mod tests {
         hex::encode(register)
     }
 
+    /// One action of each kind, structurally exact to the live record
+    /// (string timestamps, a digest-pinned compose-manager image, a compose
+    /// file named by path, commit and SHA-256); every value synthetic.
     pub(super) fn actions() -> Vec<serde_json::Value> {
         vec![
-            serde_json::json!({"action": "compose_manager_started", "container": null, "image": null, "timestamp": 1}),
-            serde_json::json!({"action": "compose_up", "container": "model", "image": MODEL_IMAGE, "timestamp": 2}),
+            serde_json::json!({"action": "compose_manager_started", "container": "compose-manager", "image": MANAGER_IMAGE, "timestamp": "2026-01-01T00:00:00Z"}),
+            serde_json::json!({"action": "compose_up", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "services": ["model-a", "proxy"], "timestamp": "2026-01-01T00:00:01Z"}),
+            serde_json::json!({"action": "compose_down", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "services": ["proxy"], "timestamp": "2026-01-01T00:00:02Z"}),
         ]
     }
 
     /// SHA-256 of `actions` as sorted-key compact JSON. The fixture's
-    /// actions are ASCII and integral, where `serde_json`'s compact form of
-    /// a sorted copy is Python's.
+    /// actions are ASCII strings and lists, where `serde_json`'s compact
+    /// form of a sorted copy is Python's.
     pub(super) fn actions_hash(actions: &[serde_json::Value]) -> String {
         use sha2::{Digest, Sha256};
         fn sorted(value: &serde_json::Value) -> serde_json::Value {
@@ -1570,10 +1581,12 @@ mod tests {
                 "key_provider": KEY_PROVIDER,
                 "markers": markers,
             },
-            "compose_actions": [
-                {"action": "compose_manager_started", "container": null, "image": null},
-                {"action": "compose_up", "container": "model", "image": MODEL_IMAGE},
-            ],
+            "compose_actions": {
+                "compose_manager_images": [MANAGER_IMAGE],
+                "compose_files": [
+                    {"file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "commit": COMMIT},
+                ],
+            },
         })
     }
 
@@ -1614,9 +1627,13 @@ mod tests {
             "compose_manager_attestation": {
                 "actions": actions(),
                 "actions_hash": actions_hash(&actions()),
+                // A JSON-encoded string, as the live record carries it.
+                "event_log": event_log(&ten_events()).to_string(),
                 "nonce": nonce,
                 "nonce_source": "client",
                 "quote": hex::encode(compose_quote()),
+                "report_data": "00",
+                "vm_config": "{}",
             },
         })
     }
@@ -3630,7 +3647,12 @@ mod tests {
             // The listed actions, at other times: the timestamp is not
             // compared.
             let mut later = actions();
-            later[1]["timestamp"] = serde_json::json!(99);
+            later[1]["timestamp"] = serde_json::json!("2027-01-01T00:00:00Z");
+            // Which services a listed file starts or stops is free, and the
+            // tag is not matched.
+            later[1]["services"] = serde_json::json!(["model-b"]);
+            later[2]["services"] = serde_json::json!([]);
+            later[1]["tag"] = serde_json::json!("v9.9.9");
             assert_eq!(
                 earn(
                     report_over(&ten_events(), &later),
@@ -3643,12 +3665,13 @@ mod tests {
 
         #[tokio::test]
         async fn a_staging_build_refuses_a_disallowed_compose_image() {
-            // A container swapped after boot for one that logs prompts: the
-            // record honestly binds it, and it is not in the allowlist.
+            // A compose file swapped after boot for one that logs prompts:
+            // the record honestly binds it, and its hash is not listed.
             let mut swapped = actions();
             swapped.push(serde_json::json!({
-                "action": "compose_up", "container": "model",
-                "image": "registry.example/model-that-logs@sha256:cd", "timestamp": 3,
+                "action": "compose_up", "tag": "v0.0.1", "commit": COMMIT,
+                "file": COMPOSE_FILE, "file_sha256": "f2".repeat(32),
+                "services": ["model-a"], "timestamp": "2026-01-01T00:00:03Z",
             }));
             assert_eq!(
                 earn(
@@ -3667,6 +3690,52 @@ mod tests {
                 .await,
                 (Attestation::NotAttested, "compose_actions_hash_mismatch")
             );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_each_unlisted_or_unknown_compose_action() {
+            let mut cases: Vec<(Vec<serde_json::Value>, &str)> = Vec::new();
+            // Another compose-manager image, or the listed one in another
+            // container.
+            let mut image = actions();
+            image[0]["image"] = serde_json::json!(format!(
+                "registry.example/compose-manager@sha256:{}",
+                "cd".repeat(32)
+            ));
+            cases.push((image, "compose_action_not_allowed"));
+            let mut container = actions();
+            container[0]["container"] = serde_json::json!("sidecar");
+            cases.push((container, "compose_action_not_allowed"));
+            // A compose_up of the listed file at another commit.
+            let mut commit = actions();
+            commit[1]["commit"] = serde_json::json!("c2".repeat(20));
+            cases.push((commit, "compose_action_not_allowed"));
+            // A compose_down of a file not listed.
+            let mut down = actions();
+            down[2]["file"] = serde_json::json!("example/other.yaml");
+            cases.push((down, "compose_action_not_allowed"));
+            // A kind the format does not define.
+            let mut unknown = actions();
+            unknown[1]["action"] = serde_json::json!("compose_restart");
+            cases.push((unknown, "compose_action_unknown"));
+            // A key the kind does not carry, and a numeric timestamp.
+            let mut extra = actions();
+            extra[2]["file_sha256"] = serde_json::json!(FILE_SHA256);
+            cases.push((extra, "compose_manager_malformed"));
+            let mut numeric = actions();
+            numeric[0]["timestamp"] = serde_json::json!(1);
+            cases.push((numeric, "compose_manager_malformed"));
+            for (record_actions, label) in cases {
+                assert_eq!(
+                    earn(
+                        report_over(&ten_events(), &record_actions),
+                        verifier(ten_events(), record_actions.clone(), |_| {})
+                    )
+                    .await,
+                    (Attestation::NotAttested, label),
+                    "{label}"
+                );
+            }
         }
 
         #[tokio::test]

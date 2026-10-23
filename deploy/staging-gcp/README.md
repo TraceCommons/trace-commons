@@ -45,14 +45,17 @@ fork (design 3.6). This directory holds only what is staging's own.
   even one with an empty payload), no progress marker is listed and no
   compose action is listed, so every replayed log and every compose-manager
   record is refused and a pin set signed with it earns no key. `sign`
-  accepts this placeholder or a fully filled-in allowlist (all four values
-  and all four markers) and refuses anything in between as
+  accepts this placeholder or a fully filled-in allowlist (all four values,
+  all four markers, at least one compose-manager image and at least one
+  compose file) and refuses anything in between as
   `allowlist_incomplete`. The
   operator fills it from the `--review` file of an `observe` run against
   NEAR AI staging, in a reviewed pull request, after checking each value
-  (app id, KMS, OS image, key provider, the four progress markers, and
-  every compose action's kind, container and image). Every later change is
-  a reviewed pull request too, so a new image or compose action fails
+  (app id, KMS, OS image, key provider, the four progress markers, each
+  compose-manager image digest, and each compose file, fetched from NEAR
+  AI's repository at its commit, its SHA-256 checked and the images it
+  names read; owner decision S17). Every later change is
+  a reviewed pull request too, so a new image or compose file fails
   closed until someone has looked at it. The procedure is in
   `docs/operator/staging-pin-signing.md`.
 

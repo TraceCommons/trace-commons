@@ -65,9 +65,18 @@ const ALLOWLIST: &str = r#"{
       {"name": "system-ready", "payload": "00"}
     ]
   },
-  "compose_actions": [
-    {"action": "compose_up", "container": "model", "image": "registry.example/model"}
-  ]
+  "compose_actions": {
+    "compose_manager_images": [
+      "registry.example/compose-manager@sha256:abababababababababababababababababababababababababababababababab"
+    ],
+    "compose_files": [
+      {
+        "file": "example/models.yaml",
+        "file_sha256": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+        "commit": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+      }
+    ]
+  }
 }"#;
 
 fn request<'a>(sets_text: &'a str, sequence: u64, served: Option<&'a [u8]>) -> SignRequest<'a> {
@@ -394,6 +403,12 @@ fn nothing_logs_a_key_or_a_measurement() {
         assert!(!line.contains(&"c3".repeat(48)), "a measurement: {line}");
         assert!(!line.contains("3b3b"), "an allowlist value: {line}");
         assert!(!line.contains("registry.example"), "an image: {line}");
+        assert!(
+            !line.contains("example/models.yaml"),
+            "a compose file: {line}"
+        );
+        assert!(!line.contains(&"f1".repeat(32)), "a file hash: {line}");
+        assert!(!line.contains(&"c1".repeat(20)), "a commit: {line}");
     }
     // The summary identifies the document by hash, and the key by its id.
     assert!(signed.summary.contains("payload_sha256=sha256:"));
@@ -560,6 +575,20 @@ fn sign_embeds_the_allowlist_file() {
     .unwrap();
     placeholder_with_actions["compose_actions"] = full["compose_actions"].clone();
     partial.push(placeholder_with_actions);
+    // RTMR3 filled in, a compose list left empty: every live record has a
+    // compose_manager_started and a compose_up, so this refuses them all.
+    for list in ["compose_manager_images", "compose_files"] {
+        let mut case = full.clone();
+        case["compose_actions"][list] = serde_json::json!([]);
+        partial.push(case);
+    }
+    let mut placeholder_with_one_image: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
+    ))
+    .unwrap();
+    placeholder_with_one_image["compose_actions"]["compose_manager_images"] =
+        full["compose_actions"]["compose_manager_images"].clone();
+    partial.push(placeholder_with_one_image);
     for case in partial {
         let text = case.to_string();
         let req = SignRequest {
@@ -578,7 +607,12 @@ fn sign_embeds_the_allowlist_file() {
         ("not json", "allowlist_malformed"),
         ("{}", "allowlist_malformed"),
         (
-            r#"{"rtmr3": {"app_id": "AB", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []}, "compose_actions": []}"#,
+            r#"{"rtmr3": {"app_id": "AB", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []}, "compose_actions": {"compose_manager_images": [], "compose_files": []}}"#,
+            "allowlist_malformed",
+        ),
+        // The #1575 list form of compose_actions is not the v2 schema.
+        (
+            r#"{"rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []}, "compose_actions": []}"#,
             "allowlist_malformed",
         ),
     ] {
