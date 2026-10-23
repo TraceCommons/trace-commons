@@ -54,7 +54,11 @@ set +x
 #                       (payment, grant or staking_farm; no default) and
 #                       _ACCOUNT_CEILING_NANO, and read the secret
 #                       tc-staging-nearai-reseller-key, which must be an org
-#                       credential: oc_ and 64 hex characters.
+#                       credential: oc_ and 64 hex characters. They also
+#                       require TC_CREDIT_SETTLEMENT_TABLE_PATH, the absolute
+#                       path of the installed settlement table (an existing
+#                       file; it carries the payout rate), written as
+#                       TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH.
 #   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
 #                       optional, both or neither: the first run's estimated
 #                       NEAR AI credit per accepted trace, in micro-dollars,
@@ -276,6 +280,16 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
       payment | grant | staking_farm) ;;
       *) refuse "TC_NEAR_AI_PAYOUT_SOURCE must be payment, grant or staking_farm" ;;
     esac
+    # The rate the pass prices accruals at is the installed settlement
+    # table's. Without one the ingest boots, records no rate epoch and pays
+    # nothing, so an enabled rail refuses to render without it. The file is
+    # the operator's, installed before this render; only its path is here.
+    table_path="${TC_CREDIT_SETTLEMENT_TABLE_PATH:-}"
+    [[ "$table_path" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+      || refuse "TC_CREDIT_SETTLEMENT_TABLE_PATH is not an absolute path (payout $TC_NEAR_AI_PAYOUT_MODE)"
+    [ -f "$table_path" ] \
+      || refuse "TC_CREDIT_SETTLEMENT_TABLE_PATH is not a file (payout $TC_NEAR_AI_PAYOUT_MODE)"
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH=$table_path"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=$TC_NEAR_AI_PAYOUT_MODE"$'\n'
     reseller_key="$(secret tc-staging-nearai-reseller-key)"
     # An org credential, as cloud-api issues it and the ingest parses it:

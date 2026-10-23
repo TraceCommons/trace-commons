@@ -682,12 +682,17 @@ fi
 # issues an org credential in: `oc_` and 64 hex. An API key (`sk-...`) or any
 # other token is refused before anything is written, and the source must be
 # one #1271 names. Synthetic values only.
+# The settlement table carries the payout rate; the render checks only that
+# the file is there, the ingest parses it at boot. A placeholder document.
+payout_table="$scratch/settlement-table.json"
+echo '{}' >"$payout_table"
 payout_settings=(
   TC_NEAR_AI_PAYOUT_MODE=dry_run
   TC_NEAR_AI_PAYOUT_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1
   TC_NEAR_AI_PAYOUT_SENDER_ORG=00000000-0000-4000-8000-0000000000c2
   TC_NEAR_AI_PAYOUT_SOURCE=payment
   TC_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO=1000
+  "TC_CREDIT_SETTLEMENT_TABLE_PATH=$payout_table"
 )
 payout_key_ok="oc_$(printf 'c3%.0s' $(seq 32))"
 if run_render payout-ok "${payout_settings[@]}" \
@@ -695,6 +700,12 @@ if run_render payout-ok "${payout_settings[@]}" \
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE dry_run
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL "$payout_key_ok"
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE payment
+  expect "$out/ingest.env" TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH "$payout_table"
+  # The recipient key the link routes seal with: sign-up provisioning, the
+  # pepper and the account-name KEK all reach an enabled rail's ingest.
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_PROVISIONING_ENABLED true
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER ZHVtbXktc3RhZ2luZy1wZXBwZXItMDEyMzQ1Njc4OWFiY2RlZg==
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY "$hex_name_kek"
 else
   fail "render-env.sh failed on payout dry_run with every setting"
   cat "$scratch/payout-ok.err" >&2
@@ -735,6 +746,36 @@ payout_refused source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" 
   TC_NEAR_AI_PAYOUT_SOURCE=transfer
 payout_refused no-source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   TC_NEAR_AI_PAYOUT_SOURCE=
+# An enabled rail without a settlement table records no rate and pays
+# nothing, so the render refuses it: unset, relative, or a file that is not
+# there.
+payout_refused no-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_CREDIT_SETTLEMENT_TABLE_PATH=
+payout_refused relative-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_CREDIT_SETTLEMENT_TABLE_PATH=settlement-table.json
+payout_refused missing-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  "TC_CREDIT_SETTLEMENT_TABLE_PATH=$scratch/no-such-table.json"
+# Every setting the rail reads from the environment is one the render knows
+# (NearAiRailConfig's names, the rate table's path), so a setting added later
+# cannot reach an enabled rail unrendered.
+rail_config="$repo/crates/trace-commons-server/src/near_ai_rail_config.rs"
+rail_names="$(grep -E '^pub const NEAR_AI_PAYOUT_[A-Z_]+_ENV: &str' -A1 "$rail_config" \
+  | grep -oE '"TRACE_COMMONS_[A-Z0-9_]+"' | tr -d '"')"
+rail_names+=$'\n'"$(grep -E '^pub const NEAR_AI_PAYOUT_MODE_ENV' "$repo/crates/trace-commons-server/src/payout_rate.rs" \
+  | grep -oE '"TRACE_COMMONS_[A-Z0-9_]+"' | tr -d '"')"
+rail_names+=$'\nTRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH'
+if [ "$(printf '%s\n' "$rail_names" | grep -c .)" -lt 7 ]; then
+  fail "found fewer than seven payout settings in the rail config ($(printf '%s\n' "$rail_names" | grep -c .))"
+fi
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  if grep -q "$name" "$repo/deploy/staging-gcp/render-env.sh" \
+    && grep -q "$name" "$repo/deploy/staging-gcp/ingest.env.template"; then
+    pass "the staging render and template name $name"
+  else
+    fail "the staging render or template does not name $name"
+  fi
+done <<<"$rail_names"
 
 # The first run's dollar estimate: unset by default, so the ingest serves no
 # range and the app words its first run in points. Both settings pass
