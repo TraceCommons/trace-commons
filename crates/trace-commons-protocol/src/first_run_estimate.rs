@@ -57,8 +57,9 @@ impl UsdMicrosRange {
     /// and `min <= max`. Server boot and the client apply the same rule.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        let end_ok =
-            |v: u64| v > 0 && v <= FIRST_RUN_USD_MICROS_MAX && v % USD_MICROS_PER_CENT == 0;
+        let end_ok = |v: u64| {
+            v > 0 && v <= FIRST_RUN_USD_MICROS_MAX && v.is_multiple_of(USD_MICROS_PER_CENT)
+        };
         end_ok(self.min) && end_ok(self.max) && self.min <= self.max
     }
 }

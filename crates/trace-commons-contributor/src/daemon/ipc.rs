@@ -18129,7 +18129,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 68, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
