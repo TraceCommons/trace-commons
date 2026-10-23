@@ -544,11 +544,14 @@ mod tests {
             prompt(),
             early,
             target,
+            call("call2", "read", args(json!({"path": "b"})), Some("c2")),
+            call("call3", "read", args(json!({"path": "c"})), None),
             result("r1", Some("c1"), Some("one")),
             result("r2", Some("c1"), Some("two")),
             result("r9", Some("c9"), Some("orphan")),
         ];
         let projection = project_tool_calls(&envelope(events));
+        assert_eq!(projection.tool_calls, 3);
         assert_eq!(projection.paired_calls, 1);
         assert_eq!(projection.calls_with_results, 1);
     }
