@@ -1188,9 +1188,8 @@ for title, body, button and accessibility name, per `docs/ui-copy-guide.md`.
   contribute, as soon as their credit settles. This is on top of your Trace
   Credit, which you keep. Credit sent to {org name} stays there and can't be
   moved. Other members of {org name} can spend it too. If {org name} owes
-  NEAR AI for past use, new credit pays that first. You'll confirm with your
-  [D5 superseded 2026-10-23: the passkey sentence is dropped; Task 8 drafts
-  the replacement.]"
+  NEAR AI for past use, new credit pays that first." (The draft's closing
+  passkey sentence is dropped: D5 superseded 2026-10-23.)
 - Scope line beside the button: "Sends credit to {org name} only."
 - Button: ~~"Continue with passkey"~~ (superseded; Task 8 drafts a label)
 - Secondary: "Not now"
@@ -1205,7 +1204,8 @@ for title, body, button and accessibility name, per `docs/ui-copy-guide.md`.
 
 The confirm step names the org shown, and a `connection_revision`-style
 check (as `near_ai_funding` does) refuses a click if the org changed since
-it was displayed. macOS is the lead shell; the others follow it.
+it was displayed. On the server the same check is `expected_current_version`
+("Who confirms" above). macOS is the lead shell; the others follow it.
 
 ## 6. Eligibility
 

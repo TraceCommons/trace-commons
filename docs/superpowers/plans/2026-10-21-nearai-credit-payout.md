@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Pay every settled Trace Credit award out on N parallel external rails, each exactly-once, capped, haltable and reconcilable on its own, and ship the first external rail: NEAR AI inference credit to an org the contributor links with a passkey.
+**Goal:** Pay every settled Trace Credit award out on N parallel external rails, each exactly-once, capped, haltable and reconcilable on its own, and ship the first external rail: NEAR AI inference credit to an org the contributor links from the app's signed-in session (D5's passkey superseded 2026-10-23).
 
-**Architecture:** A `PayoutRail` contract in `trace-commons-gate-api` (rail id, instrument with decimals, rate, recipient-link kind, exactly-once send keyed by line, reads, preflight, refusal mapping). One set of `trace_payout_*` tables keyed by `rail_id`. A per-rail payout pass in `trace-commons-server` (own advisory lock, mode, kill switch, ceilings, readiness) that accrues from finalized settlement batch lines and sends through the rail. The NEAR AI rail wraps a #1271 transfer client in cumulative mode. Ingest gains link routes behind a passkey step-up, the per-rail worker, readiness and a reconciliation drill. The contributor daemon lists owned NEAR AI orgs on the device and starts a link; the native macOS app shows the org picker. A keyed, 18-decimal test rail proves the contract is not #1271-shaped.
+**Architecture:** A `PayoutRail` contract in `trace-commons-gate-api` (rail id, instrument with decimals, rate, recipient-link kind, exactly-once send keyed by line, reads, preflight, refusal mapping). One set of `trace_payout_*` tables keyed by `rail_id`. A per-rail payout pass in `trace-commons-server` (own advisory lock, mode, kill switch, ceilings, readiness) that accrues from finalized settlement batch lines and sends through the rail. The NEAR AI rail wraps a #1271 transfer client in cumulative mode. Ingest gains link routes on the signed-in account session with a server-side NEAR AI ownership check, the per-rail worker, readiness and a reconciliation drill. The contributor daemon lists owned NEAR AI orgs on the device and starts a link; the native macOS app shows the org picker. A keyed, 18-decimal test rail proves the contract is not #1271-shaped.
 
 **Tech Stack:** Rust (gate-api, gate-enclave, server on axum + PostgreSQL, ingest, protocol, contributor daemon on tokio), C ABI (`trace-commons-contributor-ffi`), Swift / SwiftUI (`macos/`).
 
@@ -22,7 +22,7 @@
   unlink. Every passkey step below (the goal line, Review Focus 7, Task 6's
   `require_passkey_step_up` and step-up page section, Task 7's step-up
   redirect, Task 8's passkey copy) is replaced by this when that task is
-  built; this note governs where they disagree.
+  built; this note governs where they disagree. Task 6 is built this way (see its section); tasks 7 and 8 follow it: the daemon calls the confirm route itself once the person confirms in the app, with no step-up URL.
 - **2026-10-23, payout source:** `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` is
   `payment`, `grant` or `staking_farm`, required in `dry_run`/`live`, with
   no default (the staging sender is funded with paid credit, so staging
@@ -413,6 +413,8 @@ The passkey tests the plan first listed (`confirm_requires_a_fresh_passkey_sessi
 ### Task 7: Daemon link flow (`payout-rail-daemon-link`, base `payout-rail-link-routes`)
 
 Spec: section 5 ("Verification on the server, not the client" steps 1-3, 7; "Consent copy").
+
+**D5 superseded:** no step-up URL and no passkey. After the person confirms in the app, the daemon calls `POST /v1/account/payout-rails/near_ai/link-requests/{handle}/confirm` over its own account session, sending the status `version` it showed as `expected_current_version` on the start. Read task 6's routes and `trace_commons_protocol::payout_link` for the wire types; the copy keys drop the passkey lines (spec section 5, "Consent copy").
 
 **Files:**
 - Create: `crates/trace-commons-contributor/src/payout_link.rs` (ingest client for the three routes, copying `inference_connection.rs`'s client shape)
