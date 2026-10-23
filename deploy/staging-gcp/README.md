@@ -177,12 +177,14 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    `psql` on stdin and in its environment, never on a command line:
 
    ```bash
-   pw="$(gcloud secrets versions access latest --secret tc-staging-db-login-resolver-password)"
+   pw="$(gcloud secrets versions access latest --secret tc-staging-db-login-resolver-password \
+     --project tracecommons-pilot-2026)"
    { printf '\\set pw %s\n' "'$pw'"; cat <<'SQL'
    CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS PASSWORD :'pw';
    GRANT trace_login_resolver TO tc_login_resolver_login;
    SQL
-   } | PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password)" \
+   } | PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
+         --project tracecommons-pilot-2026)" \
        psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1
    unset pw
    ```
@@ -195,12 +197,32 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
 
    ```bash
    curl -fsS https://ingest.staging.tracecommons.ai/health | jq .near_ai_staging   # true
+   # Expected today: {"ready":false,"near_ai_login_ready":false,...}. See below.
    curl -fsS https://ingest.staging.tracecommons.ai/v1/account/near/provision/capabilities
+   # The v2 contract reports the staging login path ready:
+   # "near_ai_login_ready": true.
+   curl -fsS https://ingest.staging.tracecommons.ai/v1/account/near/provision/capabilities/v2
    scripts/check-aasa.sh https://staging.tracecommons.ai KXSWJN7WY8.ai.tracecommons.shell.staging
    # 200, not 503 attestation_signing_key_unconfigured: proves systemd read
-   # the multi-line attestation keys out of ingest.env.
+   # the multi-line attestation keys out of ingest.env. This is the only
+   # check of that; no CI job parses ingest.env the way systemd does. Do not
+   # skip it.
    curl -fsS https://ingest.staging.tracecommons.ai/.well-known/trace-commons-attestation-keyset.json
    ```
+
+   **Sign-up from the app does not work yet.** The contributor daemon the
+   macOS app drives signs up through the old routes
+   (`/v1/account/near/provision/capabilities`, then
+   `/v1/account/near-ai/provision/start` and `/finish`). It requires the
+   capabilities response to carry a redaction witness, and the old
+   readiness check requires `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`.
+   A staging build compiles out only the admission ledger, not that check.
+   Staging runs no witness (design 3.12), so the old capabilities response
+   reads `near_ai_login_ready:false` and every tester's sign-up fails with
+   `near_ai_enroll_commons_unsupported`. Do not set a placeholder witness:
+   the app would then call that host. Sign-up opens once the staging client
+   or server change lands (design section 11). Only the `/v2` routes, which
+   no client calls yet, are ready.
 
    A staging ingest that names a production NEAR AI host does not reach
    this step: it refuses to boot with
@@ -230,11 +252,16 @@ back, restarts it and fails. The issuer, installed first, is not rolled back
 
 ## Not here yet
 
-- The payout rail (design 3.10) stays `disabled`. Its settings are not read
-  by the ingest yet; when they are, rerun step 4 with
+- The payout rail (design 3.10) stays `disabled`. The ingest reads
+  `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` at boot: `dry_run` or `live` records
+  the settlement table's rate as an epoch and refuses to boot without the
+  payout store. The rail's other settings (`NearAiRailConfig::from_env`) have
+  no caller yet. When they do, rerun step 4 with
   `TC_NEAR_AI_PAYOUT_MODE=dry_run` and `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`,
   `_SENDER_ORG`, `_SOURCE` and `_ACCOUNT_CEILING_NANO`, which also reads
   `tc-staging-nearai-reseller-key`.
-- The nightly `pg_dump` to the staging bucket (design 3.2).
+- The nightly `pg_dump` (design 3.2). A follow-up: dumps go to the private
+  bucket `tc-staging-artifacts-20261021` only, never to anything public.
+- Open sign-up from the app (step 7).
 - The staging environment runbook, `docs/operator/staging-environment.md`
   (plan Task 12), which will take this order over.
