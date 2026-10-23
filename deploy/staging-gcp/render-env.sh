@@ -281,9 +281,12 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
       *) refuse "TC_NEAR_AI_PAYOUT_SOURCE must be payment, grant or staking_farm" ;;
     esac
     # The rate the pass prices accruals at is the installed settlement
-    # table's. Without one the ingest boots, records no rate epoch and pays
-    # nothing, so an enabled rail refuses to render without it. The file is
-    # the operator's, installed before this render; only its path is here.
+    # table's. Without one the ingest still boots, but the rail has no rate
+    # in force: every pass stops with `payout_rate_unavailable` before it
+    # accrues or sends, even when an earlier boot stored a rate epoch, and
+    # readiness shows the rail unqualified. An enabled rail therefore refuses
+    # to render without the table. The file is the operator's, installed
+    # before this render; only its path is here.
     table_path="${TC_CREDIT_SETTLEMENT_TABLE_PATH:-}"
     [[ "$table_path" =~ ^/[A-Za-z0-9_./-]+$ ]] \
       || refuse "TC_CREDIT_SETTLEMENT_TABLE_PATH is not an absolute path (payout $TC_NEAR_AI_PAYOUT_MODE)"
