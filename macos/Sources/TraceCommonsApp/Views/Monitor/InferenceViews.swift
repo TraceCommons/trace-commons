@@ -53,6 +53,9 @@ struct InferenceTabView: View {
         // Keyed on the switch: Settings is its own window, so this tab can
         // stay in view while the feed is turned off there.
         .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
+        // Lazily, with the tab and never on the sign-in: whether to ask the
+        // contributor to choose a spending organization.
+        .task { model.refreshSpendOrganizations() }
     }
 
     private var ledger: some View {
@@ -69,6 +72,9 @@ struct InferenceTabView: View {
                 // the NEAR AI sign-in are popover notices over the tab
                 // (`MonitorNotices`).
                 PrivateAIInspectorView(store: store)
+                // Only with several NEAR AI organizations and no choice made
+                // (owner request, 2026-10-23); otherwise draws nothing.
+                SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
                 InferenceBalanceSection()
                 ManagedSessionsSection()
                 ledgerSections

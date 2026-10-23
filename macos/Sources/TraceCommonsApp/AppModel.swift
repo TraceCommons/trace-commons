@@ -748,6 +748,61 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - The organization Private AI spends from
+
+    /// The account's organizations, as the daemon last listed them. Seeded
+    /// unreported, which draws nothing: most accounts have one organization,
+    /// and an unknown count is never "several".
+    @Published private(set) var spendOrganizations: SpendOrganizations = .unreported
+
+    /// A switch is in flight. It takes about ten seconds: the daemon waits
+    /// for the new key to become usable before moving Private AI onto it.
+    @Published private(set) var spendOrganizationSwitching = false
+
+    /// The last switch's refusal, in the daemon's words. Every refusal
+    /// changed nothing.
+    @Published private(set) var spendOrganizationFailure: String?
+
+    /// Read lazily -- when the Private AI tab or the Private AI section of
+    /// Settings appears, and after a switch -- never on the sign-in or the
+    /// key hand-off. The daemon caches it with the balance.
+    ///
+    /// Not `perform`: a daemon too old to know the method answers
+    /// `unknown_method`, which is "nothing to show", not an error to raise.
+    func refreshSpendOrganizations(fresh: Bool = false) {
+        guard let client else { return }
+        Task.detached(priority: .utility) {
+            let status = (try? client.nearAiSpendOrganizations(fresh: fresh)) ?? .unreported
+            await MainActor.run {
+                guard self.client === client else { return }
+                self.publishIfChanged(\.spendOrganizations, status)
+            }
+        }
+    }
+
+    func selectSpendOrganization(_ organizationID: String) async {
+        guard let client, !spendOrganizationSwitching, !credentialBusy else { return }
+        spendOrganizationSwitching = true
+        spendOrganizationFailure = nil
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result { try client.nearAiSelectSpendOrganization(organizationID) }
+        }.value
+        guard self.client === client else { return }
+        spendOrganizationSwitching = false
+        switch outcome {
+        case .success:
+            // The choice is recorded, so the prompt ends now, not on the
+            // re-read below.
+            publishIfChanged(\.spendOrganizations, spendOrganizations.withPromptEnded())
+        case .failure(let error):
+            let label = (error as? DaemonClient.Failure)?.message ?? ""
+            spendOrganizationFailure = spendOrganizations.failureLine(for: label)
+        }
+        // The key moved, so the balance and billing it is read with did too.
+        refreshNearAiBalance(fresh: true)
+        refreshSpendOrganizations(fresh: true)
+    }
+
     /// Whether billing has opened in the browser during this run.
     ///
     /// Set only when the browser accepted the page. A payment made there

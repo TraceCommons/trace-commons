@@ -120,6 +120,12 @@ pub(crate) fn record_change_after_migration(dir: &std::path::Path) {
     record_change(dir);
 }
 
+/// A switch of spending organization published a new key. Same ordering rule
+/// as [`record_change`]: called only after the settings document is written.
+pub(crate) fn record_credential_change(dir: &std::path::Path) {
+    record_change(dir);
+}
+
 #[cfg(test)]
 pub(crate) fn record_change_for_test(dir: &std::path::Path) {
     record_change(dir);
@@ -197,7 +203,7 @@ fn ceremony_runtime() -> Result<&'static tokio::runtime::Runtime> {
 /// It is unique per attempt because the service answers `409` on a duplicate
 /// name within a workspace, and a contributor who re-runs the ceremony after
 /// losing a key must not be blocked by the name of the one they lost.
-fn key_name(attempt_id: &str) -> String {
+pub(super) fn key_name(attempt_id: &str) -> String {
     let suffix: String = attempt_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -330,8 +336,19 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                 sign_in.finish(&api, |session, expires_at, user_agent| async move {
                     // A fresh client, on this runtime: never a connection pool
                     // attached to the reactor the caller may already have dropped.
+                    // A remembered spending organization is preferred when the
+                    // account still has it, so signing in again lands where the
+                    // contributor chose. The listing is the one the mint already
+                    // makes: no extra call, and no new way for a sign-in to fail.
+                    let preferred = ConfigStore::open(finished_dir.to_path_buf())
+                        .ok()
+                        .and_then(|store| super::spend_org::chosen_organization(&store));
+                    let choice = match preferred.as_deref() {
+                        Some(preferred) => super::api::OrganizationChoice::Prefer(preferred),
+                        None => super::api::OrganizationChoice::FirstActive,
+                    };
                     let minted = api_ref
-                        .mint_inference_key(&session, &key_name(finished_id))
+                        .mint_inference_key_in(&session, &key_name(finished_id), choice)
                         .await?;
                     // The session is kept, not dropped. Inference does not need it --
                     // the key above is non-expiring and self-sufficient -- but the
@@ -627,6 +644,8 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     cancel_locked(store.dir(), None);
     let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
+    // The spending-organization record goes with the session it needs.
+    super::spend_org::clear_locked(store);
     if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.

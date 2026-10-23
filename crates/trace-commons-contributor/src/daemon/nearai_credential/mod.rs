@@ -40,6 +40,7 @@ pub(crate) mod near_wallet;
 pub(crate) mod near_wallet_loopback;
 pub(crate) mod near_wallet_page;
 pub(crate) mod session;
+pub mod spend_org;
 
 pub(super) use session::exchange;
 
@@ -526,6 +527,56 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
     Response::ok(req.id, balance::read(shared, fresh).await.to_value())
+}
+
+/// The signed-in account's active organizations, which one Private AI spends
+/// from, and whether the contributor chose it.
+///
+/// Always `ok`, like `near_ai_balance`: a listing that could not be made is a
+/// named `state` with no organizations, and `multiple` and `prompt` are both
+/// false in it -- an unknown count is never "several". `"fresh": true` goes
+/// back to the service instead of serving the last minute's listing.
+pub async fn handle_spend_organizations(shared: &DaemonShared, req: &Request) -> Response {
+    let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+    Response::ok(
+        req.id,
+        spend_org::organizations(shared, fresh).await.to_value(),
+    )
+}
+
+/// Choose the organization Private AI spends from: mint a key there, move the
+/// proxy onto it, then revoke the key it replaced. See [`spend_org`] for the
+/// order and why a failure at any step leaves one working key.
+///
+/// Answers `{"switched", "revoke_pending", "organization_id"}`, or an error
+/// whose message is one of the `near_ai_spend_org_*` labels.
+pub async fn handle_spend_organization_select(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(target) = req
+        .params
+        .get("organization_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, spend_org::LABEL_SPEND_ORG_INVALID);
+    };
+    match spend_org::select(shared, target).await {
+        Ok(outcome) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "switched": outcome.switched,
+                "revoke_pending": outcome.revoke_pending,
+                "organization_id": target,
+            }),
+        ),
+        Err(error) => {
+            let label = error.to_string();
+            let code = if label == spend_org::LABEL_SPEND_ORG_INVALID {
+                ERR_BAD_PARAMS
+            } else {
+                ERR_UNAVAILABLE
+            };
+            Response::err(req.id, code, &label)
+        }
+    }
 }
 
 /// Read a verified credits destination, optionally bound to a displayed context.

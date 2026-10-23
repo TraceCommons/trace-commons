@@ -417,6 +417,8 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_migrate",
     "near_ai_balance",
     "near_ai_funding",
+    "near_ai_spend_organizations",
+    "near_ai_spend_organization_select",
     "get_public_profile",
     "get_settings",
     "token_storage_status",
@@ -3619,6 +3621,14 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("near_ai_funding", "near-ai-funding-requires-async"),
+    (
+        "near_ai_spend_organizations",
+        "near-ai-spend-org-requires-async",
+    ),
+    (
+        "near_ai_spend_organization_select",
+        "near-ai-spend-org-requires-async",
+    ),
     ("witness_preview_request", "witness-review-requires-async"),
     ("preview_body", "preview-body-requires-async"),
     ("preview_turns", "preview-turns-requires-async"),
@@ -6532,6 +6542,12 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         }
         "near_ai_balance" => super::nearai_credential::handle_balance(shared, req).await,
         "near_ai_funding" => crate::daemon::nearai_credential::handle_funding(shared, req).await,
+        "near_ai_spend_organizations" => {
+            super::nearai_credential::handle_spend_organizations(shared, req).await
+        }
+        "near_ai_spend_organization_select" => {
+            super::nearai_credential::handle_spend_organization_select(shared, req).await
+        }
         "near_account_capabilities" => {
             super::account_onboarding::handle_capabilities(shared, req).await
         }
@@ -17708,7 +17724,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 62);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 64);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18196,7 +18212,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 68, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 70, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
