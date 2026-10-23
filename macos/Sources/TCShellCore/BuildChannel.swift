@@ -21,10 +21,15 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
     public let urlScheme: String
     /// The NEAR AI dashboard the funding row's credits link opens.
     public let nearAiDashboardOrigin: String
+    /// The NEAR AI sign-in providers this build offers, in the order a
+    /// picker lists them (the daemon's `provider` values). A staging build
+    /// names `google` only: it signs in through NEAR AI's Google login.
+    public let nearAiSignInProviders: [String]
 
     public init(
         channel: String, stateDirName: String, stateDirEnv: String,
-        passkeyRelyingParty: String, urlScheme: String, nearAiDashboardOrigin: String
+        passkeyRelyingParty: String, urlScheme: String, nearAiDashboardOrigin: String,
+        nearAiSignInProviders: [String]
     ) {
         self.channel = channel
         self.stateDirName = stateDirName
@@ -32,6 +37,7 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         self.passkeyRelyingParty = passkeyRelyingParty
         self.urlScheme = urlScheme
         self.nearAiDashboardOrigin = nearAiDashboardOrigin
+        self.nearAiSignInProviders = nearAiSignInProviders
     }
 
     enum CodingKeys: String, CodingKey {
@@ -41,10 +47,12 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         case passkeyRelyingParty = "passkey_rp_id"
         case urlScheme = "url_scheme"
         case nearAiDashboardOrigin = "near_ai_dashboard_origin"
+        case nearAiSignInProviders = "near_ai_sign_in_providers"
     }
 
     /// The dylib's answer, or nil when it is absent, unreadable, or has an
-    /// empty field. Nil is a refusal to start, never a fallback.
+    /// empty field (an empty provider list included). Nil is a refusal to
+    /// start, never a fallback.
     public static func decode(fromJSON json: String?) -> BuildChannel? {
         guard let json,
             let channel = try? JSONDecoder().decode(BuildChannel.self, from: Data(json.utf8))
@@ -53,6 +61,8 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
             channel.channel, channel.stateDirName, channel.stateDirEnv,
             channel.passkeyRelyingParty, channel.urlScheme, channel.nearAiDashboardOrigin,
         ]
+        let providers = channel.nearAiSignInProviders
+        if providers.isEmpty || providers.contains(where: \.isEmpty) { return nil }
         return fields.contains(where: \.isEmpty) ? nil : channel
     }
 }

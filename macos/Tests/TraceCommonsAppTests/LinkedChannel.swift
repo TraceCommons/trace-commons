@@ -16,6 +16,9 @@ enum LinkedChannel {
         return channel
     }()
 
+    /// Whether the linked dylib is the staging channel.
+    static var isStaging: Bool { channel.channel == "staging" }
+
     /// The NEAR AI dashboard origin, such as `https://host`.
     static var dashboardOrigin: String { channel.nearAiDashboardOrigin }
 

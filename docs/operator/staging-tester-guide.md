@@ -19,10 +19,11 @@ built yet.
 ## Make a NEAR AI staging account
 
 1. Go to https://cloud-stg.near.ai.
-2. Sign up with GitHub or Google.
+2. Sign up with Google. The staging app signs in with Google only, so an
+   account made with GitHub cannot sign in.
 
 This account is separate from your production NEAR AI account, even if you
-use the same GitHub or Google login. A production account does not work in
+use the same Google login. A production account does not work in
 staging, and a staging account does not work in production.
 
 You do not need an invite. Anyone with a staging NEAR AI account can sign up
@@ -65,7 +66,8 @@ It should say `accepted` and name the Notarized Developer ID source.
 
 ## First run
 
-1. Sign in with your staging NEAR AI account.
+1. Sign in with your staging NEAR AI account. The browser opens a Google
+   sign-in; use the Google account you made it with.
 2. Add a passkey if the app asks. A staging passkey works for the staging
    site only (`staging.tracecommons.ai`).
 3. Choose which session folders the app may watch.

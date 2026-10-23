@@ -791,13 +791,16 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
 /// {"channel":"production","state_dir_name":"trace-commons",
 ///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
 ///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
-///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
+///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
+///  "near_ai_sign_in_providers":["near","github","google"]}
 /// ```
 ///
 /// `channel` is `production` or `staging`. The macOS app compares `channel`
 /// with its Info.plist `TCChannel` and starts nothing on a mismatch.
 /// `near_ai_dashboard_origin` is where the funding row's credits link points;
-/// it takes no part in that check. No key, secret
+/// it takes no part in that check. `near_ai_sign_in_providers` is the
+/// NEAR AI sign-in providers this build offers, in order
+/// (`channel::NEAR_AI_SIGN_IN_PROVIDERS`); a staging build names `google` only. No key, secret
 /// or keychain name is in it. Reads nothing and writes nothing; the same
 /// object for every caller on this build. Returns an owned string; free it
 /// with [`tc_string_free`]. NULL only on a caught panic.
@@ -812,6 +815,7 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
             "passkey_rp_id": channel::PASSKEY_RP_ID,
             "url_scheme": channel::URL_SCHEME,
             "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
+            "near_ai_sign_in_providers": channel::NEAR_AI_SIGN_IN_PROVIDERS,
         });
         Ok(to_owned_cstring(&serde_json::to_string(&json)?))
     })
