@@ -798,7 +798,11 @@ rail). The switch is rail-wide, so it is not a tenant control: halt, resume
 and hold clearing accept only the deployment's payout control token
 (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`, stored as a hash, at least 32
 characters), never a tenant token, a tenant admin's included, and refuse
-every caller (`payout_control_unconfigured`) while it is unset. Audit and
+every caller (`payout_control_unconfigured`) while it is unset. A rail in
+`live` cannot run without it: boot refuses
+(`payout_control_token_unconfigured`) when any rail is `live` and the token
+is unset, so a live rail always has a reachable kill switch. `dry_run`
+sends nothing and boots without it, logging the same label. Audit and
 control rows name the operator by a hash of the token's hash.
 
 Holds an operator clears. A hold about one account (recovery unmatched,
@@ -1423,7 +1427,11 @@ system admin only; NEAR AI can run it.
 - **Rounding.** Floor per batch line per rail; at most one atomic unit of
   the rail's instrument per line (for `near_ai`, one nano-USD).
 - **Metadata leak.** Memo empty, metadata an opaque hash.
-- **Org name.** The server never deserializes, stores or logs it.
+- **Org name.** The server never deserializes, stores or logs it. The
+  contributor daemon keeps the linked or pending org's name, and no other,
+  in its state directory (0600) so status can show it after a restart; it
+  is refreshed on every list read, deleted when the NEAR AI session is
+  forgotten, and never logged (owner decision 2026-10-23).
 - **Rate.** Not in the repo, not in logs; only the epoch version label.
   The settlement table is served to clients, so the rate is visible to
   them, as S2 already accepts.

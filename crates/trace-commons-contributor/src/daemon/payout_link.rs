@@ -28,8 +28,13 @@
 //!
 //! # What never leaves this device
 //!
-//! Org names. They are read from NEAR AI, kept in memory for display, and
-//! never sent to the commons or written to disk. The commons receives the
+//! Org names. They are read from NEAR AI and never sent to the commons.
+//! The name of the org a link from this device names (linked, or pending a
+//! confirm) -- that one only, never the rest of the listing -- is kept in
+//! `daemon-payout-org-names.json` (0600, written atomically), so status
+//! shows it after a restart without listing again. Every read of the list
+//! refreshes it, and forgetting the NEAR AI session deletes it. Names are
+//! never logged. The commons receives the
 //! chosen org's id and a fresh NEAR AI access token, in the start request
 //! body only; the token is exchanged for that one request and dropped, never
 //! stored, logged, returned over IPC or sent with the confirm.
@@ -76,7 +81,9 @@ use super::nearai_credential::session;
 use super::settings::NearAiSession;
 use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, account_session, keep_rotated_token};
 use crate::account_auth::LoadedAccountSession;
-use crate::config::{ContributorConfig, DAEMON_PAYOUT_LINK_FILE};
+use crate::config::{
+    ConfigStore, ContributorConfig, DAEMON_PAYOUT_LINK_FILE, DAEMON_PAYOUT_ORG_NAMES_FILE,
+};
 use crate::payout_link::{self as client, Endpoint, PayoutLinkError};
 
 pub const AUDIT_LINK_STARTED: &str = "payout-link-started";
@@ -103,9 +110,11 @@ pub const ERR_NEAR_AI_UNAVAILABLE: &str = "payout-link-near-ai-unavailable";
 pub const ERR_STATE_UNREADABLE: &str = "payout-link-state-unreadable";
 
 /// What this daemon holds in memory: the org list it last showed (names
-/// included, never written anywhere) and the started requests awaiting a
+/// included; only the linked or pending org's name is written, to
+/// `daemon-payout-org-names.json`) and the started requests awaiting a
 /// confirm, per rail. Behind `DaemonShared::payout_link`, which also guards
-/// `daemon-payout-link.json`; never held across an await.
+/// `daemon-payout-link.json` and the names file; never held across an
+/// await.
 #[derive(Default)]
 pub(crate) struct PayoutLinkMemory {
     listing: Option<Vec<OwnedOrganization>>,
@@ -156,6 +165,102 @@ fn save_state(shared: &DaemonShared, state: &LocalState) -> Result<(), ()> {
         .store
         .write_daemon_file(DAEMON_PAYOUT_LINK_FILE, &bytes)
         .map_err(|_| ())
+}
+
+/// `daemon-payout-org-names.json`: org id to the name last read from NEAR
+/// AI, for the orgs a link from this device names. Display only.
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+struct OrgNames {
+    #[serde(default)]
+    names: BTreeMap<Uuid, String>,
+}
+
+/// The saved names. Unreadable reads as none: a name is display only.
+fn load_names(store: &ConfigStore) -> OrgNames {
+    store
+        .read_daemon_file(DAEMON_PAYOUT_ORG_NAMES_FILE)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keep the names of the orgs a link from this device names -- linked here,
+/// or pending a confirm -- taking each from `listing` when it has it (a
+/// rename lands here) and otherwise keeping the saved one. Every other id is
+/// dropped, and the file goes when none is left. Best effort: a failure
+/// costs only the name after a restart. The caller holds the
+/// `payout_link` mutex.
+fn remember_names(
+    shared: &DaemonShared,
+    memory: &PayoutLinkMemory,
+    listing: Option<&[OwnedOrganization]>,
+) {
+    let saved = load_names(&shared.store);
+    let mut ids: Vec<Uuid> = load_state(shared)
+        .map(|state| {
+            state
+                .rails
+                .values()
+                .map(|linked| linked.organization_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.extend(
+        memory
+            .pending
+            .values()
+            .filter_map(|pending| pending.organization_id),
+    );
+    let mut kept = OrgNames::default();
+    for id in ids {
+        let fresh = listing
+            .and_then(|orgs| orgs.iter().find(|org| org.id == id))
+            .map(|org| org.name.clone());
+        if let Some(name) = fresh.or_else(|| saved.names.get(&id).cloned()) {
+            kept.names.insert(id, name);
+        }
+    }
+    if kept == saved {
+        return;
+    }
+    let written = if kept.names.is_empty() {
+        shared
+            .store
+            .remove_daemon_file(DAEMON_PAYOUT_ORG_NAMES_FILE)
+            .is_ok()
+    } else {
+        serde_json::to_vec(&kept).is_ok_and(|bytes| {
+            shared
+                .store
+                .write_daemon_file(DAEMON_PAYOUT_ORG_NAMES_FILE, &bytes)
+                .is_ok()
+        })
+    };
+    if !written {
+        tracing::warn!(
+            target: "payout_link",
+            "payout_link_org_name_not_saved"
+        );
+    }
+}
+
+/// Forget the saved org names with the NEAR AI session they were read
+/// with. Called beside the other NEAR AI records' clear; the caller holds
+/// the NEAR AI commit lock.
+pub(crate) fn clear_org_names_locked(store: &ConfigStore) {
+    if store
+        .remove_daemon_file(DAEMON_PAYOUT_ORG_NAMES_FILE)
+        .is_err()
+    {
+        tracing::warn!(target: "payout_link", "payout_link_org_names_not_cleared");
+    }
+}
+
+/// Drop the org list this process holds, names included, when the NEAR AI
+/// session it was read with is forgotten.
+pub(crate) fn forget_listing(shared: &DaemonShared) {
+    memory(shared).listing = None;
 }
 
 fn audit_row(shared: &DaemonShared, action: &str) {
@@ -361,6 +466,7 @@ pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Respo
     let Ok(local) = load_state(shared) else {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_STATE_UNREADABLE);
     };
+    let saved_names = load_names(&shared.store);
     let now = Utc::now();
     let rails: Vec<serde_json::Value> = status
         .rails
@@ -388,6 +494,8 @@ pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Respo
                     .as_ref()
                     .and_then(|orgs| orgs.iter().find(|org| org.id == id))
                     .map(|org| org.name.clone())
+                    // After a restart nothing is listed; the saved name.
+                    .or_else(|| saved_names.names.get(&id).cloned())
             };
             let organization_name = (check == Some("match"))
                 .then(|| linked_here.and_then(|linked| name_of(linked.organization_id)))
@@ -455,7 +563,11 @@ pub(super) async fn orgs(shared: &DaemonShared, req: &Request, api: &CloudApi) -
         .iter()
         .map(|org| serde_json::json!({ "id": org.id, "name": org.name }))
         .collect();
-    memory(shared).listing = Some(orgs);
+    {
+        let mut memory = memory(shared);
+        remember_names(shared, &memory, Some(&orgs));
+        memory.listing = Some(orgs);
+    }
     Response::ok(
         req.id,
         serde_json::json!({ "organizations": shown, "orgs_revision": revision }),
@@ -526,6 +638,7 @@ pub(super) async fn start(shared: &DaemonShared, req: &Request, api: &CloudApi) 
                 expires_at: started.expires_at,
             },
         );
+        remember_names(shared, &memory, memory.listing.as_deref());
     }
     audit_row(shared, AUDIT_LINK_STARTED);
     finish(
@@ -673,6 +786,7 @@ pub(super) async fn handle_confirm(shared: &DaemonShared, req: &Request) -> Resp
             save_state(shared, &state)
         })
         .is_ok();
+    remember_names(shared, &memory, memory.listing.as_deref());
     drop(memory);
     audit_row(
         shared,

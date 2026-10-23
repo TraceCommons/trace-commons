@@ -571,6 +571,15 @@ Startup refuses a scheduler with neither. Its liveness name is
 
 See [legacy invite migration](./legacy-invite-migration.md).
 
+## Payout rails (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` | optional | `disabled` | `disabled`, `dry_run` or `live` for the NEAR AI payout rail. Anything else fails startup, as does `dry_run` or `live` with a rail setting missing. |
+| `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | R when any rail is `live` | (none) | The operator's payout control token, at least 32 characters; only its hash is kept. It is the only credential `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` and the hold list and clear routes accept; tenant tokens, a tenant admin's included, are refused. Shorter than 32 characters fails startup. Unset fails startup when any rail is `live` (`payout_control_token_unconfigured`), because the kill switch would be unreachable. A `dry_run` rail sends nothing and starts without it, logging the same label; the controls then answer 503 `payout_control_unconfigured`. Rotate by env reload and restart. |
+
+See the [payout design](../superpowers/specs/2026-10-21-nearai-credit-payout-design.md).
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.

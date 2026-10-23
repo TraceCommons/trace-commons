@@ -394,6 +394,8 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
             // just removed. Serving it again would put a figure from a
             // forgotten account on screen.
             balance::invalidate(shared.store.dir());
+            // The org names this process read with that session.
+            crate::daemon::payout_link::forget_listing(shared);
             Response::ok(
                 req.id,
                 serde_json::json!({ "removed": removed, "revoked": false }),
