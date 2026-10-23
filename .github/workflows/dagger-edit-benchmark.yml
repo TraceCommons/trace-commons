@@ -1,0 +1,70 @@
+# Controlled, branch-only warm-cache comparison. The harness restores its edits.
+name: Dagger small Rust edit benchmark
+
+on:
+  push:
+    branches: [dagger-edit-benchmark]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NO_COLOR: '1'
+      DAGGER_NO_NAG: '1'
+      BENCH_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Dagger 0.21.11 (verified release archive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/dagger-cli"
+          mkdir -p "$install_dir"
+          cd "$install_dir"
+          release=https://github.com/dagger/dagger/releases/download/v0.21.11
+          archive=dagger_v0.21.11_linux_amd64.tar.gz
+          curl --fail --silent --show-error --location "$release/$archive" --output "$archive"
+          curl --fail --silent --show-error --location "$release/checksums.txt" --output checksums.txt
+          awk -v archive="$archive" '$2 == archive { print; found++ } END { if (found != 1) exit 1 }' checksums.txt > archive.sha256
+          sha256sum --check --strict archive.sha256
+          tar -xzf "$archive" dagger
+          echo "$install_dir" >> "$GITHUB_PATH"
+      - name: Record runner and lane metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .local/dagger-edit-benchmark
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          keys = ('GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB',
+                  'RUNNER_OS', 'RUNNER_ARCH', 'RUNNER_NAME', 'ImageOS', 'ImageVersion')
+          metadata = {key: os.environ.get(key) for key in keys}
+          metadata.update(platform=platform.platform(), cpu_count=os.cpu_count(),
+                          lane=['dagger', '--progress=plain', '-v', 'check', '*:build'],
+                          run_url=f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+          for name, command in (('dagger_version', ['dagger', 'version']),
+                                ('docker_version', ['docker', 'version']),
+                                ('cpu', ['lscpu']), ('memory', ['free', '-b'])):
+              metadata[name] = subprocess.check_output(command, text=True)
+          Path('.local/dagger-edit-benchmark/github-runner.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          PY
+      - name: Measure warm cache and three unique Rust leaf edits
+        run: python3 scripts/ci/benchmark-dagger-edit.py --backend github --output .local/dagger-edit-benchmark
+      - name: Upload benchmark JSON and raw logs
+        id: artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dagger-edit-benchmark-github-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/dagger-edit-benchmark
+          if-no-files-found: warn
+      - name: Link benchmark artifact
+        if: always() && steps.artifact.outputs.artifact-url != ''
+        env:
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: echo "[Benchmark JSON and raw logs]($ARTIFACT_URL)" >> "$GITHUB_STEP_SUMMARY"
