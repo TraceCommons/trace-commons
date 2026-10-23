@@ -310,9 +310,14 @@ final class DaemonClient {
         return try call("consent_options", as: Wrapper.self).scopes
     }
 
-    func listProjects() throws -> [ProjectRow] {
+    /// `includeFound` also lists the repos with a session on disk that no
+    /// rule or queued trace has made known yet, which the first run's
+    /// Customize needs seconds after the daemon started. It walks the
+    /// sources, so only a screen that asks once sends it.
+    func listProjects(includeFound: Bool = false) throws -> [ProjectRow] {
         struct Wrapper: Decodable { let projects: [ProjectRow] }
-        return try call("list_projects", as: Wrapper.self).projects
+        let params: [String: Any] = includeFound ? ["include_found": true] : [:]
+        return try call("list_projects", params: params, as: Wrapper.self).projects
     }
 
     /// Sets a project's mode, naming it by the opaque id `list_projects`

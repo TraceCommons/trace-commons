@@ -51,6 +51,19 @@ final class ButtonSizeTests: XCTestCase {
         XCTAssertEqual(GlassButtonStyle.metrics(.primary, size: .bar).type.weight, .bold)
     }
 
+    /// The first run's bar (Ron, 2026-10-22): every kind as tall as the
+    /// CTA, at semibold, so Continue is not the app's bold.
+    func test_theStageBarIsTheCanvasButtons() {
+        for kind in [GlassButtonKind.primary] + barKinds {
+            let stage = GlassButtonStyle.metrics(kind, size: .stage)
+            XCTAssertEqual(stage.minHeight, GlassTokens.Size.cta, "\(kind)")
+            XCTAssertEqual(stage.type.size, GlassTokens.TypeScale.bodyStrong.size, "\(kind)")
+            XCTAssertEqual(stage.type.weight, .semibold, "\(kind)")
+        }
+        XCTAssertEqual(GlassButtonStyle.metrics(.primary, size: .stage).horizontalPadding, 20)
+        XCTAssertEqual(GlassButtonStyle.metrics(.link, size: .stage).horizontalPadding, 14)
+    }
+
     /// The modal's action bar sizes every action against its small CTA.
     @MainActor
     func test_theModalsActionBarIsBarSized() throws {

@@ -37,6 +37,11 @@ public enum GlassButtonSize: Sendable, Equatable {
     /// own fill, edge, ink, weight, hover, pressed and disabled look.
     /// `.primary` is bar-sized already and reads the same either way.
     case bar
+    /// The animated first run's action bar (Ron's 2026-10-21 canvas,
+    /// `.btn`): every kind at the CTA's height in the 13pt type at
+    /// semibold, with 20pt of padding (14pt for the link), so the stage's
+    /// Continue reads lighter than the app's bold CTA (Ron, 2026-10-22).
+    case stage
 }
 
 /// The box a button kind draws its label in: minimum height, horizontal
@@ -77,6 +82,10 @@ public struct GlassButtonStyle: ButtonStyle {
     static let ctaPadding: CGFloat = 16
     /// An inline pill's horizontal padding (#1146 `.tc-btn--glass`).
     static let inlinePadding: CGFloat = 12
+    /// The first run's bar buttons' padding, and its link's (canvas `.btn`,
+    /// `.btn.clink`).
+    static let stagePadding: CGFloat = 20
+    static let stageLinkPadding: CGFloat = 14
     /// The submit pill's horizontal padding.
     static let submitPadding: CGFloat = 10
 
@@ -94,6 +103,12 @@ public struct GlassButtonStyle: ButtonStyle {
     /// own weight; an `.inline` one keeps the kind's own.
     static func metrics(_ kind: GlassButtonKind, size: GlassButtonSize, small: Bool = false) -> GlassButtonMetrics {
         switch (kind, size) {
+        case (.link, .stage):
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.cta, horizontalPadding: stageLinkPadding,
+                                      type: GlassTokens.TypeScale.bodyStrong.weight(.semibold))
+        case (.primary, .stage), (.secondary, .stage), (.glass, .stage), (.destructive, .stage):
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.cta, horizontalPadding: stagePadding,
+                                      type: GlassTokens.TypeScale.bodyStrong.weight(.semibold))
         case (.primary, _), (.secondary, .bar):
             return ctaMetrics(small: small)
         case (.secondary, .inline):
@@ -115,7 +130,9 @@ public struct GlassButtonStyle: ButtonStyle {
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        GlassButtonBody(kind: kind, metrics: Self.metrics(kind, size: size, small: small), selected: selected, configuration: configuration)
+        GlassButtonBody(
+            kind: kind, metrics: Self.metrics(kind, size: size, small: small), selected: selected,
+            stage: size == .stage, configuration: configuration)
     }
 
     /// The fill a kind gets under the pointer, in place of its own fill
@@ -153,6 +170,9 @@ private struct GlassButtonBody: View {
     let kind: GlassButtonKind
     let metrics: GlassButtonMetrics
     let selected: Bool
+    /// On the first run's stage, the glass pill is the canvas's light glass
+    /// (`firstRunControl`) rather than the flat theme's dark well.
+    let stage: Bool
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
@@ -189,6 +209,13 @@ private struct GlassButtonBody: View {
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaEdge, in: Capsule())
+        case .glass where stage:
+            box
+                .foregroundStyle(GlassColor.textPrimary)
+                .background(
+                    Capsule()
+                        .fill((hovering && isEnabled ? GlassTokens.Color.firstRunControlHover : GlassTokens.Color.firstRunControl).color)
+                        .glassPressedFill())
         case .glass:
             box
                 .foregroundStyle(GlassColor.textPrimary)

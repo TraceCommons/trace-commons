@@ -2857,16 +2857,27 @@ mod tests {
             assert_eq!(provider.status_label(), PinRefusal::BadSignature.label());
         }
 
-        /// Until the real staging pin key exists, the compiled-in key is a
-        /// fixed, searchable placeholder one byte short of an Ed25519 key,
-        /// so a release scan can find it and no signature can verify.
+        /// The compiled-in key is a real Ed25519 public key, and the
+        /// production release scan lists it, so a release binary that carried
+        /// it would be refused (staging design 5.7). The two cannot drift
+        /// apart.
         #[test]
-        fn the_compiled_in_key_is_a_real_key_or_the_placeholder() {
+        fn the_compiled_in_key_is_real_and_listed_for_the_release_scan() {
             let key = crate::channel::STAGING_PIN_PUBLIC_KEY;
-            if key.len() != 32 {
-                assert_eq!(key, b"TC-STAGING-PIN-KEY-PLACEHOLDER!");
-                assert_eq!(key.len(), 31);
-            }
+            assert_eq!(key.len(), 32);
+            let listed = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/ci/staging-pin-public-keys.txt"
+            ))
+            .unwrap();
+            let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            assert!(
+                listed
+                    .lines()
+                    .map(str::trim)
+                    .any(|line| !line.starts_with('#') && line == hex),
+                "the compiled-in staging pin key is not listed for the release scan"
+            );
         }
 
         fn label_unknown_key() -> &'static str {

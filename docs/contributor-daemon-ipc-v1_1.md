@@ -640,7 +640,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
+| `list_projects` | `include_found` (optional boolean) | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
@@ -2822,6 +2822,21 @@ Every project the daemon knows about, in two kinds:
 - **discovered** (`configured: false`, `added_at: null`) means the daemon has
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
+
+A session becomes "seen" only once it has queued, which waits for it to go
+quiet (30 minutes by default) across two passes, so a daemon started seconds
+ago lists none of the repos the person already works in. A caller that needs
+them now -- the macOS first run's Customize, which shows a rule per repo on
+the Tools step -- sends `include_found: true`: the daemon then also walks the
+declared sources as `list_past_sessions` does and adds a discovered row for
+every repo with a session on disk, its `session_count`, `last_session_at`
+and `tools` counted from that walk. The walk reads file listings and
+modification times, never a session's contents, and costs one pass over the
+roots, so the flag is for a screen that asks once, not a poll. Without it
+(the default) the listing is the configured and queued projects alone.
+`set_project_mode` accepts the `project_id` of such a row: an id it cannot
+place from policy and the queue is looked up in the same walk before it is
+refused with `project-id-unrecognized`.
 
 `mode` is the mode **in force**, which a contribution override can change;
 `folder_mode` is the folder's own mode, the one `set_project_mode` set and

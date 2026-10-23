@@ -4530,6 +4530,39 @@ struct ProjectSessionsSeen {
     tools: std::collections::BTreeMap<String, usize>,
 }
 
+/// Whether `id` names a project the daemon holds a rule or a queue entry
+/// for, so `set_project_mode` can skip the walk for every id but a found
+/// repo's.
+fn project_id_is_known(shared: &DaemonShared, id: &str) -> bool {
+    let policy = shared.policy.lock().expect("policy lock");
+    let queue = shared.queue.lock().expect("queue lock");
+    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+    project_key_for_id(id, &known).is_some()
+}
+
+/// The sessions the past-session walk found, per project, in the shape the
+/// cwd cache's counts take: how many, the latest write, and how many came
+/// from each tool (the adapter that found them).
+fn found_per_project(
+    found: &[super::past_sessions::DiscoveredSession],
+) -> std::collections::BTreeMap<String, ProjectSessionsSeen> {
+    let mut per: std::collections::BTreeMap<String, ProjectSessionsSeen> =
+        std::collections::BTreeMap::new();
+    for session in found {
+        let slot = per.entry(session.project_key.clone()).or_default();
+        slot.count += 1;
+        slot.last_modified_at = Some(match slot.last_modified_at {
+            Some(current) => current.max(session.modified_at),
+            None => session.modified_at,
+        });
+        *slot
+            .tools
+            .entry(session.session_ref.source.to_string())
+            .or_insert(0) += 1;
+    }
+    per
+}
+
 /// Sessions the watcher has observed per project key, with the latest one's
 /// modification time and a per-tool breakdown (K11), from the cwd cache.
 ///
@@ -4604,14 +4637,36 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     let group_filters = super::contribution_eligibility::evidence_flag(
         shared.store.load_config().ok().flatten().as_ref(),
     );
+    // `include_found` (the first run's Customize): the repos found in the
+    // watched tools' sessions on disk as well -- the walk the past-session
+    // picker takes -- which the daemon may hold no rule for and have queued
+    // nothing from yet. A daemon the first run has just started has queued
+    // nothing: a session is queued only once it has been quiet for
+    // `quiescence_secs` across two passes. Taken first, with no lock held
+    // and off the async worker, as the picker takes it.
+    let include_found = req
+        .params
+        .get("include_found")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let found = if include_found {
+        super::run_blocking(|| super::past_sessions::discover_sessions(shared))
+    } else {
+        Vec::new()
+    };
     // How many sessions the watcher has seen in each project, and when the
     // latest was last written: from the cwd cache every observed session
     // passes through, so it counts sessions whatever their queue state.
-    // Taken before the policy lock, so it adds no lock ordering.
-    let seen = sessions_seen_per_project(shared);
+    // Taken before the policy lock, so it adds no lock ordering. A repo the
+    // watcher has not observed yet takes its counts from the walk instead.
+    let mut seen = sessions_seen_per_project(shared);
+    for (key, walked) in found_per_project(&found) {
+        seen.entry(key).or_insert(walked);
+    }
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
-    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+    let mut known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+    known.extend(found.iter().map(|d| d.project_key.clone()));
     let labels = super::policy::LabelCollisions::new(&known);
     let counts = |key: &str| {
         let pending: Vec<&super::queue::QueueEntry> = queue
@@ -4677,6 +4732,17 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         .map(|e| (e.project_key.clone(), e.project_path.clone()))
         .filter(|(key, _)| !policy.projects.contains_key(key))
         .collect();
+    // Found on disk and nowhere else. The unresolved bucket is not a repo
+    // found in a trace, so it is never offered from the walk.
+    let found_only: std::collections::BTreeSet<String> = found
+        .iter()
+        .map(|d| d.project_key.clone())
+        .filter(|key| {
+            key != UNKNOWN_PROJECT_KEY
+                && !policy.projects.contains_key(key)
+                && !discovered.contains_key(key)
+        })
+        .collect();
     let projects: Vec<serde_json::Value> = policy
         .projects
         .iter()
@@ -4726,6 +4792,21 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
+                }),
+                key,
+            )
+        }))
+        .chain(found_only.iter().map(|key| {
+            with_counts(
+                serde_json::json!({
+                "project_id": project_id_for(key),
+                "project_label": labels.label(key, None),
+                "project_path": display_path(key),
+                "mode": policy.resolve(key),
+                "folder_mode": policy.folder_mode(key),
+                "added_at": serde_json::Value::Null,
+                "configured": false,
+                "is_unresolved_bucket": false,
                 }),
                 key,
             )
@@ -5109,13 +5190,28 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let cfg = shared.store.load_config().ok().flatten();
         super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(cfg.as_ref()))
     });
+    // An id `list_projects` gave for a repo found on disk (`include_found`,
+    // the first run's Customize) names a key no rule or queue entry holds
+    // yet. It is corroborated by the same walk the listing took, taken
+    // before any lock and only when the id is not already known.
+    let found_keys: Vec<String> = match id_param {
+        Some(id) if !project_id_is_known(shared, id) => {
+            super::run_blocking(|| super::past_sessions::discover_sessions(shared))
+                .into_iter()
+                .map(|d| d.project_key)
+                .filter(|key| key != UNKNOWN_PROJECT_KEY)
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     // The badge before the change, so a change that moves it -- arming a
     // folder with entries waiting, say -- is announced (K6).
     let decisions_owed_before = shared.decisions_owed_value();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
-        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let mut known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        known.extend(found_keys);
         // Whichever way the project was named, what comes out of
         // here is a key the daemon itself already holds or has just
         // corroborated on disk -- never a caller's string. That is

@@ -124,9 +124,10 @@ private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
 
 @MainActor
 final class FirstRunRunnerTests: XCTestCase {
-    /// Quick, on Folders, every tool answered, an invite pasted on Join.
+    /// On Join with the tools answered, an invite held and near.ai chosen,
+    /// the daemon not yet started: what Sign in commits.
     private func onFolders() -> FirstRunState {
-        var state = FirstRunState(tier: .quick, step: .folders)
+        var state = FirstRunState(step: .join)
         state.invite = " INVITE-1 "
         state.issuerHost = "issuer.example"
         state.account = .nearAI
@@ -135,9 +136,9 @@ final class FirstRunRunnerTests: XCTestCase {
         return state
     }
 
-    /// Custom, on Uses, every call kind the start commit can make.
+    /// On Join, signed in, every call kind the start commit can make.
     private func onUses() -> FirstRunState {
-        var state = FirstRunState(tier: .custom, step: .uses)
+        var state = FirstRunState(step: .join)
         state.account = .nearAI
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)
@@ -160,7 +161,7 @@ final class FirstRunRunnerTests: XCTestCase {
     /// recorded so Folders sends only what differs.
     func test_createPasskeyOnJoinStartsTheDaemonAndOpensTheSheetsOnJoin() async throws {
         let daemon = RecordingFirstRunDaemon()
-        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        let runner = FirstRunRunner(state: FirstRunState(step: .join), daemon: daemon)
         await runner.openPasskeyOnJoin()
         let json = try XCTUnwrap(FirstRunPlan.watchNothingSettingsJSON)
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)])
@@ -179,7 +180,7 @@ final class FirstRunRunnerTests: XCTestCase {
     func test_aFailedPasskeyStartOnJoinOpensNothing() async {
         let daemon = RecordingFirstRunDaemon()
         daemon.failing = { if case .startDaemon = $0 { return true }; return false }
-        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        let runner = FirstRunRunner(state: FirstRunState(step: .join), daemon: daemon)
         await runner.openPasskeyOnJoin()
         XCTAssertEqual(runner.failure, .passkeyUnavailable)
         XCTAssertFalse(runner.passkeyDue)
@@ -209,7 +210,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!)],
             "no lookup or enroll runs without a started daemon")
@@ -220,12 +221,12 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.state.startedSettingsJSON)
         XCTAssertNil(runner.state.enrolledInvite)
         XCTAssertFalse(runner.state.signedIn)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
 
         // The retry is the same plan: the invite is still there to join.
         daemon.failing = { _ in false }
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [
             .startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!),
             .lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI,
@@ -248,19 +249,19 @@ final class FirstRunRunnerTests: XCTestCase {
         refusing.failing = { if case .startDaemon = $0 { return true }; return false }
         let failed = FirstRunRunner(state: state, daemon: refusing)
         XCTAssertFalse(failed.passkeyDue)
-        await failed.commit(.leaveRoots)
+        await failed.commit(.signIn)
         XCTAssertFalse(failed.passkeyDue, "no sheet before the daemon runs")
         XCTAssertEqual(failed.state.account, .passkeyChosen)
-        XCTAssertEqual(failed.state.step, .folders)
+        XCTAssertEqual(failed.state.step, .join)
 
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: state, daemon: daemon)
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)],
             "the sheets are not a daemon call, and nothing signs in to near.ai")
         XCTAssertTrue(runner.passkeyDue)
         XCTAssertTrue(runner.state.daemonStarted)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertNil(runner.failure)
     }
 
@@ -271,7 +272,7 @@ final class FirstRunRunnerTests: XCTestCase {
     /// offered again in this first run; Create passkey on Join opens P-1.
     func test_aReturningPersonIsOfferedWelcomeBackOnceAndCanDismissIt() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        let join = FirstRunState(tier: .quick, step: .join, daemonStarted: true)
+        let join = FirstRunState(step: .join, daemonStarted: true)
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: join, daemon: daemon)
         let account = PasskeySheetsTests.RecordingAccount()
@@ -308,7 +309,7 @@ final class FirstRunRunnerTests: XCTestCase {
             NativePasskeyState(state: "unknown", passkeyCount: nil, rememberedName: nil, nearAiConnected: nil),
         ] {
             let runner = FirstRunRunner(
-                state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+                state: FirstRunState(step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
             let account = PasskeySheetsTests.RecordingAccount()
             account.passkeys = passkeys
             await runner.offerWelcomeBack(from: account)
@@ -322,7 +323,7 @@ final class FirstRunRunnerTests: XCTestCase {
     /// again on the state as it is then.
     func test_welcomeBackIsRecheckedAfterTheDaemonAnswers() async {
         let runner = FirstRunRunner(
-            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+            state: FirstRunState(step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
         let account = PasskeySheetsTests.RecordingAccount()
         account.passkeys = NativePasskeyState(
             state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
@@ -341,7 +342,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let reply = #"{"state":"none","passkey_count":1,"remembered_name":"Studio","signed_in_name":null,"near_ai_connected":null}"#
         let passkeys = try JSONDecoder().decode(NativePasskeyState.self, from: Data(reply.utf8))
         let runner = FirstRunRunner(
-            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+            state: FirstRunState(step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
         let account = PasskeySheetsTests.RecordingAccount()
         account.passkeys = passkeys
         await runner.offerWelcomeBack(from: account)
@@ -362,7 +363,7 @@ final class FirstRunRunnerTests: XCTestCase {
     func test_aLateEnrolmentUnderWelcomeBackRefusesAnotherTenantsSignIn() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let runner = FirstRunRunner(
-            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+            state: FirstRunState(step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
         let account = PasskeySheetsTests.RecordingAccount()
         account.passkeys = NativePasskeyState(
             state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
@@ -396,7 +397,7 @@ final class FirstRunRunnerTests: XCTestCase {
     func test_aLateEnrolmentUnderWelcomeBackFinishesWithTheEnrolledAccountsPasskey() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let runner = FirstRunRunner(
-            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+            state: FirstRunState(step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
         let account = PasskeySheetsTests.RecordingAccount()
         account.passkeys = NativePasskeyState(
             state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
@@ -463,11 +464,11 @@ final class FirstRunRunnerTests: XCTestCase {
         state = OnboardingNavigation.recordEnrolment(state)
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!)])
         XCTAssertNil(runner.failure)
-        XCTAssertNotEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.step, .join, "Sign in stays on Join")
         XCTAssertEqual(runner.state.enrolledInvite, "")
     }
 
@@ -487,7 +488,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(
             daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin, .enrollNearAI])
@@ -495,13 +496,13 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.nearAIEnrolled)
         XCTAssertTrue(runner.state.signedIn)
         XCTAssertTrue(runner.state.holdsEnrolment)
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: runner.state), [.automatic, .askMe])
-        XCTAssertNotEqual(runner.state.step, .folders)
+        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(runner.state))
+        XCTAssertEqual(runner.state.step, .join, "Sign in stays on Join")
 
         // Going forward again neither signs in nor enrolls twice.
         daemon.log = []
-        runner.state.step = .folders
-        await runner.commit(.leaveRoots)
+        runner.state.step = .join
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [])
     }
 
@@ -514,7 +515,7 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.failing = { $0 == .nearAILogin }
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin])
         XCTAssertEqual(runner.failure, .signInFailed)
@@ -534,7 +535,7 @@ final class FirstRunRunnerTests: XCTestCase {
         // required): Continue stays on Join until near.ai is chosen again.
         XCTAssertFalse(JoinScreenLayout.canForward(runner.state))
         let held = runner.state
-        runner.state = JoinScreenLayout.forward(runner.state)
+        runner.state = JoinScreenLayout.readyToStart(runner.state)
         XCTAssertEqual(runner.state, held)
         XCTAssertEqual(runner.state.step, .join)
     }
@@ -549,17 +550,17 @@ final class FirstRunRunnerTests: XCTestCase {
         let daemon = RecordingFirstRunDaemon()
         daemon.failing = { $0 == .nearAILogin }
         let runner = FirstRunRunner(state: state, daemon: daemon)
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(runner.state.step, .join)
 
-        runner.state = JoinScreenLayout.toggleNearAI(runner.state)
-        runner.state = JoinScreenLayout.forward(runner.state)
+        runner.state = JoinScreenLayout.chooseNearAI(runner.state)
+        runner.state = JoinScreenLayout.readyToStart(runner.state)
         daemon.failing = { _ in false }
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
         XCTAssertTrue(runner.state.nearAIEnrolled)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// A refused enrollment says why in the core's own line for its label
@@ -573,7 +574,7 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.nearAIEnrolment = .refused(label: "near_ai_enroll_commons_unreachable")
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(runner.failure, .nearAIEnrollFailed(label: "near_ai_enroll_commons_unreachable"))
         XCTAssertFalse(runner.state.nearAIEnrolled)
@@ -598,7 +599,7 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.nearAIEnrolment = .refused(label: "near_ai_enroll_endpoint_refused")
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.account, .none)
@@ -617,7 +618,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         let json = state.sessionRoots.settingsJSON()!
         XCTAssertEqual(
@@ -640,15 +641,15 @@ final class FirstRunRunnerTests: XCTestCase {
 
         // near.ai chosen again signs in to the enrolled invite's account;
         // nothing is looked up, joined, or started twice.
-        runner.state = JoinScreenLayout.toggleNearAI(runner.state)
-        runner.state = JoinScreenLayout.forward(runner.state)
+        runner.state = JoinScreenLayout.chooseNearAI(runner.state)
+        runner.state = JoinScreenLayout.readyToStart(runner.state)
         daemon.failing = { _ in false }
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.signInNearAI])
         XCTAssertNil(runner.failure)
         XCTAssertTrue(runner.state.signedIn)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// The other invite failures are unchanged: a refused enroll stays on
@@ -658,10 +659,10 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.failing = { $0 == .enroll("INVITE-1") }
         let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(runner.failure, .enrollFailed)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.account, .nearAI)
         XCTAssertNil(runner.state.enrolledInvite)
     }
@@ -684,7 +685,7 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.loginHolds = true
         let runner = FirstRunRunner(state: state, daemon: daemon)
         XCTAssertFalse(runner.signInWaiting, "no Cancel before the sign-in runs")
-        let commit = Task { await runner.commit(.leaveRoots) }
+        let commit = Task { await runner.commit(.signIn) }
         await yield { runner.signInWaiting }
         XCTAssertTrue(runner.isCommitting)
         return (runner, commit, state)
@@ -705,7 +706,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNil(runner.failure, "a cancel is the person's, not a failure")
         XCTAssertFalse(runner.isCommitting, "Continue is enabled again")
         XCTAssertFalse(runner.signInWaiting)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.account, .nearAI)
         XCTAssertFalse(runner.state.nearAIEnrolled)
         XCTAssertFalse(runner.state.signedIn)
@@ -718,10 +719,10 @@ final class FirstRunRunnerTests: XCTestCase {
         // Continue starts a fresh sign-in.
         daemon.loginHolds = false
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
         XCTAssertTrue(runner.state.nearAIEnrolled)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// A sign-in that finishes as the cancel arrives still enrolls nothing:
@@ -736,7 +737,7 @@ final class FirstRunRunnerTests: XCTestCase {
 
         XCTAssertFalse(daemon.log.contains(.enrollNearAI))
         XCTAssertNil(runner.failure)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.account, .nearAI)
         XCTAssertFalse(runner.state.nearAIEnrolled)
     }
@@ -756,7 +757,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.failure, .signInFailed)
         XCTAssertFalse(runner.isCommitting)
         XCTAssertFalse(runner.signInWaiting)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertEqual(runner.state.account, .nearAI)
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         XCTAssertEqual(
@@ -770,7 +771,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
         var waitingDuringSignIn: Bool?
         daemon.duringSignIn = { waitingDuringSignIn = runner.signInWaiting }
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertTrue(daemon.log.contains(.signInNearAI))
         XCTAssertEqual(waitingDuringSignIn, false)
         XCTAssertFalse(runner.signInWaiting)
@@ -784,7 +785,7 @@ final class FirstRunRunnerTests: XCTestCase {
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         let json = state.sessionRoots.settingsJSON()!
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1")])
@@ -801,7 +802,7 @@ final class FirstRunRunnerTests: XCTestCase {
         runner.state = FirstRunNavigation.next(runner.state)
         daemon.lookup = .found(RecordingFirstRunDaemon.validLookup)
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-2"), .enroll("INVITE-2"), .signInNearAI])
         XCTAssertEqual(runner.state.enrolledInvite, "INVITE-2")
         XCTAssertEqual(runner.lookup, RecordingFirstRunDaemon.validLookup)
@@ -873,7 +874,7 @@ final class FirstRunRunnerTests: XCTestCase {
         var roots = onFolders()
         roots.daemonStarted = true
         roots.startedSettingsJSON = #"{"claude_source":{"mode":"off"}}"#
-        let rootsPlan = FirstRunPlan.calls(for: roots, at: .leaveRoots)
+        let rootsPlan = FirstRunPlan.calls(for: roots, at: .signIn)
         for (index, call) in rootsPlan.enumerated() {
             let daemon = RecordingFirstRunDaemon()
             if case .lookupInvite = call {
@@ -882,7 +883,7 @@ final class FirstRunRunnerTests: XCTestCase {
                 daemon.failing = { $0 == call }
             }
             let failed = FirstRunRunner(state: roots, daemon: daemon)
-            await failed.commit(.leaveRoots)
+            await failed.commit(.signIn)
             XCTAssertEqual(daemon.log, Array(rootsPlan.prefix(index + 1)), "\(call)")
             XCTAssertEqual(failed.failure, expectedFailure(for: call), "\(call)")
             XCTAssertNotEqual(failed.state.step, .uses, "\(call) moved on after failing")
@@ -895,22 +896,22 @@ final class FirstRunRunnerTests: XCTestCase {
         let state = onFolders()
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         let json = state.sessionRoots.settingsJSON()!
         XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json), .lookupInvite("INVITE-1")])
         XCTAssertEqual(runner.failure, .lookupUnavailable)
-        XCTAssertEqual(runner.state.step, .folders, "a daemon hiccup is not a dead invite")
+        XCTAssertEqual(runner.state.step, .join, "a daemon hiccup is not a dead invite")
         XCTAssertNil(runner.lookup)
         XCTAssertNil(runner.state.enrolledInvite)
 
         // The retry looks the same invite up again; nothing starts twice.
         daemon.lookup = .found(RecordingFirstRunDaemon.validLookup)
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         XCTAssertEqual(daemon.log, [.lookupInvite("INVITE-1"), .enroll("INVITE-1"), .signInNearAI])
         XCTAssertNil(runner.failure)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// Review Focus 5: Start finishes watching. No consent scopes are sent
@@ -918,7 +919,7 @@ final class FirstRunRunnerTests: XCTestCase {
     /// marker, not the tenant's, ends the run.
     func test_aWatchOnlyStartFinishes() async {
         let daemon = RecordingFirstRunDaemon()
-        var state = FirstRunState(tier: .quick, step: .uses, account: .watchOnly)
+        var state = FirstRunState(step: .join, account: .watchOnly)
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)
         state.daemonStarted = true
@@ -956,33 +957,58 @@ final class FirstRunRunnerTests: XCTestCase {
 
     func test_leavingWithoutADeclarationFailsClosed() async {
         let daemon = RecordingFirstRunDaemon()
-        let runner = FirstRunRunner(state: FirstRunState(tier: .quick, step: .folders), daemon: daemon)
+        let runner = FirstRunRunner(state: FirstRunState(step: .tools), daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(daemon.log, [])
         XCTAssertEqual(runner.failure, .startFailed, "an undeclared start is never silent")
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .tools)
+        await runner.commit(.leaveTools)
+        XCTAssertEqual(runner.failure, .startFailed)
+        XCTAssertEqual(runner.state.step, .tools, "Tools does not move on without a declaration")
     }
 
-    func test_aSuccessfulLeaveRecordsTheDaemonFactsAndMovesOn() async {
+    /// Continue on Tools starts the daemon with the ticked tools and moves
+    /// on to Uses, joining nothing: sign-in is Join's, the last step.
+    func test_leavingToolsStartsTheDaemonAndMovesOn() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveTools)
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)])
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.startedSettingsJSON, json)
+        XCTAssertNil(runner.state.enrolledInvite)
+        XCTAssertEqual(runner.state.step, .uses)
+
+        // Customize sends the same, and stays on Tools.
+        let customizing = FirstRunRunner(state: state, daemon: RecordingFirstRunDaemon())
+        await customizing.commit(.declareRoots)
+        XCTAssertTrue(customizing.state.daemonStarted)
+        XCTAssertEqual(customizing.state.step, .tools)
+    }
+
+    func test_aSuccessfulSignInRecordsTheDaemonFacts() async {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: onFolders(), daemon: daemon)
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
         let json = onFolders().sessionRoots.settingsJSON()
         XCTAssertTrue(runner.state.daemonStarted)
         XCTAssertEqual(runner.state.startedSettingsJSON, json)
         XCTAssertEqual(runner.state.enrolledInvite, "INVITE-1")
         XCTAssertTrue(runner.state.signedIn)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
         XCTAssertNil(runner.failure)
 
-        // Back to Folders, a folder changed: only the change is sent, and the
+        // Back to Tools, a folder changed: only the change is sent, and the
         // whole declaration is what the daemon now holds.
-        runner.state = FirstRunNavigation.back(runner.state)
+        runner.state = FirstRunNavigation.back(to: .tools, from: runner.state)
         runner.state.answer(.codex, .watch(path: "/Users/someone/.codex/sessions"))
         daemon.log = []
-        await runner.commit(.leaveRoots)
+        await runner.commit(.leaveTools)
         guard case .setSourceSettings = daemon.log.first else {
             return XCTFail("expected setSourceSettings, got \(daemon.log)")
         }
@@ -1007,12 +1033,12 @@ final class FirstRunRunnerTests: XCTestCase {
         daemon.failing = { if case .setSourceSettings = $0 { return true }; return false }
         let runner = FirstRunRunner(state: state, daemon: daemon)
 
-        await runner.commit(.leaveRoots)
+        await runner.commit(.signIn)
 
         XCTAssertEqual(runner.failure, .settingsFailed)
         XCTAssertNotEqual(runner.failure, .startFailed)
         XCTAssertEqual(runner.state.startedSettingsJSON, held)
-        XCTAssertEqual(runner.state.step, .folders)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// Kristi's #1235 I1, as decided: Start with a passkey chosen but not
@@ -1022,7 +1048,7 @@ final class FirstRunRunnerTests: XCTestCase {
     func test_startWithAChosenPasskeyReopensTheSheets() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let daemon = RecordingFirstRunDaemon()
-        var state = FirstRunState(tier: .quick, step: .uses)
+        var state = FirstRunState(step: .join)
         state.account = .passkeyChosen
         state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
         state.answer(.codex, .off)
@@ -1039,7 +1065,7 @@ final class FirstRunRunnerTests: XCTestCase {
 
         runner.finishPasskey(.closed, copy: copy)
         XCTAssertEqual(runner.state.account, .passkeyChosen)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .join)
         await runner.commit(.start)
         XCTAssertTrue(runner.passkeyDue, "Start reopens them again")
         XCTAssertEqual(daemon.log, [])

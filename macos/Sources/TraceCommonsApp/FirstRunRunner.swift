@@ -76,13 +76,12 @@ enum FirstRunFailure: Equatable {
     /// so none opened and no account was made. Join says so.
     case passkeyUnavailable
     /// The running daemon refused a changed declaration (`set_settings`) on
-    /// a later Continue. It keeps watching what it held before.
+    /// a later commit. It keeps watching what it held before.
     case settingsFailed
-    /// The invite was refused when it was looked up; the person is back on
-    /// Join.
+    /// The invite was refused when it was looked up on Join.
     case inviteDead(label: String)
-    /// The invite could not be looked up just now; the step stays and a
-    /// retry looks it up again.
+    /// The invite could not be looked up just now; Join stays and a retry
+    /// looks it up again.
     case lookupUnavailable
     case enrollFailed
     case signInFailed
@@ -102,9 +101,10 @@ enum FirstRunFailure: Equatable {
 
 /// Executes `FirstRunPlan`'s calls in order and records what the daemon now
 /// holds back into the state. The plan is recomputed from the state at every
-/// commit. At `.leaveRoots` a retry after a failure repeats only what did not
-/// succeed; at `.start` it re-sends every call, each of which is idempotent
-/// on the daemon, except that a refused grant is not asked for again.
+/// commit. At `.leaveTools`, `.declareRoots` and `.signIn` a retry after a
+/// failure repeats only what did not succeed; at `.start` it re-sends every
+/// call, each of which is idempotent on the daemon, except that a refused
+/// grant is not asked for again.
 @MainActor
 final class FirstRunRunner: ObservableObject {
     @Published var state: FirstRunState
@@ -113,8 +113,8 @@ final class FirstRunRunner: ObservableObject {
     @Published private(set) var lookup: DaemonData.InviteLookup?
     @Published private(set) var isCommitting = false
     /// The near.ai login without an invite is running, which can wait on
-    /// the browser for up to `NearAILoginPoll.limit`: Folders and Tools
-    /// offer Cancel beside the spinning Continue only while this holds.
+    /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
+    /// beside the spinning Sign in only while this holds.
     @Published private(set) var signInWaiting = false
     /// The login `signInWaiting` covers, so Cancel can end its wait.
     private var loginTask: Task<Bool, Never>?
@@ -171,11 +171,12 @@ final class FirstRunRunner: ObservableObject {
         self.finishedNotice = finishedNotice
     }
 
-    /// Run the calls for `point`. Leaving the roots moves on to the next step
-    /// only when every call succeeded; a dead invite, a near.ai sign-in that
-    /// did not succeed (with an invite or without), or a near.ai enrollment
-    /// without one that was refused, goes back to Join; any other failure
-    /// leaves the step where it is, and so does a cancelled browser wait. Start always ends in
+    /// Run the calls for `point`. Leaving Tools moves on to the next step
+    /// only when every call succeeded. On Join a dead invite, a near.ai
+    /// sign-in that did not succeed (with an invite or without), or a
+    /// near.ai enrollment without one that was refused clears the near.ai
+    /// choice (`returnToJoin`); any other failure leaves the step where it
+    /// is, and so does a cancelled browser wait. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
     /// `completeFailed` when the marker was not written. `refusal` is one
     /// decided before Start (`UsesStart`); once the marker is written it is
@@ -194,7 +195,7 @@ final class FirstRunRunner: ObservableObject {
 
         // Continue is disabled without a declaration; should it be pressed
         // anyway, nothing can start, and that is said rather than swallowed.
-        if point == .leaveRoots, state.sessionRoots.settingsJSON() == nil {
+        if Self.declaresRoots(point), state.sessionRoots.settingsJSON() == nil {
             failure = .startFailed
             return
         }
@@ -206,8 +207,16 @@ final class FirstRunRunner: ObservableObject {
                 return
             }
         }
-        if point == .leaveRoots {
+        if point == .leaveTools {
             state = FirstRunNavigation.next(state)
+        }
+    }
+
+    /// The commits that send the session roots, and so need a declaration.
+    static func declaresRoots(_ point: CommitPoint) -> Bool {
+        switch point {
+        case .declareRoots, .leaveTools, .signIn: return true
+        case .passkeyOnJoin, .start: return false
         }
     }
 
@@ -312,7 +321,7 @@ final class FirstRunRunner: ObservableObject {
         return true
     }
 
-    /// Cancel on Folders or Tools while the near.ai browser sign-in runs:
+    /// Cancel on Join while the near.ai browser sign-in runs:
     /// the daemon is asked to end its attempt, and the wait ends here
     /// whatever it answers (fail closed); the commit stops once the daemon
     /// has answered. Nothing to cancel, nothing done.
@@ -367,10 +376,9 @@ final class FirstRunRunner: ObservableObject {
     /// and lower the request, whatever the outcome, so a closed sheet is
     /// asked again only by the next commit or the button.
     ///
-    /// The sheets open after Folders or Tools, so a sign-out (Verify
-    /// cancelled) can end them on a later step. It clears every sign-in, the
-    /// invite included, so the person goes back to Join, which says why;
-    /// every other answer is kept.
+    /// A sign-out (Verify cancelled) clears every sign-in, the invite
+    /// included, and the person is on Join, which says why; every other
+    /// answer is kept.
     /// After Start the first run is finished and stays where it is.
     func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
         state = JoinScreenLayout.apply(outcome, to: state, copy: copy).state
