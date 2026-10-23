@@ -60839,7 +60839,7 @@ fn the_scoring_award_counts_only_from_the_settle_from_cut_over() {
     // Withdrawal forfeits only what settlement would batch.
     assert!(withdrawal_retains_all_credit(
         submission_id,
-        &[before.clone()],
+        std::slice::from_ref(&before),
         &BTreeSet::new(),
         Some(cut_over),
     ));
