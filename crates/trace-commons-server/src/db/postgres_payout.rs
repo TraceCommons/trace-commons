@@ -25,12 +25,12 @@ use uuid::Uuid;
 use super::PayoutAccountStanding;
 use super::postgres::PgBackend;
 use super::{
-    PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutControl,
-    PayoutLine, PayoutLineResolution, PayoutLineResolve, PayoutLineState, PayoutLineWrite,
-    PayoutLink, PayoutLinkAction, PayoutLinkClose, PayoutLinkInsert, PayoutLinkRequest,
-    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition,
-    PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore,
-    PendingPayoutLineInsert, SealedRecipient,
+    PayoutAccountLinkView, PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction,
+    PayoutControl, PayoutLine, PayoutLineResolution, PayoutLineResolve, PayoutLineState,
+    PayoutLineWrite, PayoutLink, PayoutLinkAction, PayoutLinkClose, PayoutLinkConfirm,
+    PayoutLinkConfirmWrite, PayoutLinkInsert, PayoutLinkRequest, PayoutLinkRequestInsert,
+    PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition, PayoutLinkWrite, PayoutOwed,
+    PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
 };
 use crate::error::DatabaseError;
 
@@ -90,6 +90,26 @@ fn parse_recipient_kind(value: String) -> Result<RecipientKind, DatabaseError> {
         .map_err(|_| DatabaseError::Query("payout_recipient_kind_unknown".into()))
 }
 
+/// The account's link version on a rail ([`PayoutAccountLinkView::version`]):
+/// links ever written plus unlinks confirmed. Only the person's changes
+/// move it; the pass activating, closing or marking a link does not.
+async fn account_link_version(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    rail: &str,
+) -> Result<i64, DatabaseError> {
+    Ok(tx
+        .query_one(
+            "SELECT (count(*) + count(unlink_requested_at))::BIGINT
+               FROM trace_payout_links
+              WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3",
+            &[&tenant, &account, &rail],
+        )
+        .await?
+        .get(0))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_audit(
     tx: &deadpool_postgres::Transaction<'_>,
@@ -133,7 +153,8 @@ impl PgBackend {
 
 const LINK_COLUMNS: &str = "account_id, rail_id, link_id, recipient_kind, state,
     sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref, subject_index,
-    program, final_paid::TEXT, unlink_requested_at, recipient_unavailable_at, version";
+    program, final_paid::TEXT, unlink_requested_at, recipient_unavailable_at, version,
+    recipient_ref";
 
 fn link_from_row(row: &tokio_postgres::Row) -> Result<PayoutLink, DatabaseError> {
     let final_paid: Option<String> = row.get(11);
@@ -149,6 +170,7 @@ fn link_from_row(row: &tokio_postgres::Row) -> Result<PayoutLink, DatabaseError>
             recipient_key_ref: row.get(7),
             index_pepper_ref: row.get(8),
             subject_index: row.get(9),
+            recipient_ref: row.get(15),
         },
         program: row.get(10),
         final_paid: final_paid
@@ -549,8 +571,8 @@ impl PayoutStore for PgBackend {
                 "INSERT INTO trace_payout_links (
                      tenant_id, account_id, rail_id, link_id, recipient_kind, state,
                      sealed_recipient, recipient_index, recipient_key_ref,
-                     index_pepper_ref, subject_index, program
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                     index_pepper_ref, subject_index, program, recipient_ref
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &tenant,
                     &link.account_id,
@@ -564,6 +586,7 @@ impl PayoutStore for PgBackend {
                     &link.recipient.index_pepper_ref,
                     &link.recipient.subject_index,
                     &link.program,
+                    &link.recipient.recipient_ref,
                 ],
             )
             .await;
@@ -1083,8 +1106,8 @@ impl PayoutStore for PgBackend {
                      tenant_id, account_id, rail_id, idempotency_key, handle_hash,
                      request_digest, action, expected_current_version, recipient_kind,
                      sealed_recipient, recipient_index, recipient_key_ref,
-                     index_pepper_ref, subject_index, expires_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                     index_pepper_ref, subject_index, expires_at, recipient_ref
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                  ON CONFLICT (tenant_id, account_id, rail_id, idempotency_key) DO NOTHING",
                 &[
                     &tenant,
@@ -1102,6 +1125,7 @@ impl PayoutStore for PgBackend {
                     &recipient.map(|recipient| recipient.index_pepper_ref.as_str()),
                     &recipient.map(|recipient| recipient.subject_index.as_str()),
                     &request.expires_at,
+                    &recipient.and_then(|recipient| recipient.recipient_ref.as_deref()),
                 ],
             )
             .await?;
@@ -1165,7 +1189,7 @@ impl PayoutStore for PgBackend {
                   RETURNING account_id, rail_id, idempotency_key, action,
                             expected_current_version, recipient_kind, sealed_recipient,
                             recipient_index, recipient_key_ref, index_pepper_ref,
-                            subject_index, expires_at",
+                            subject_index, expires_at, recipient_ref",
                 &[&tenant, &account, &rail.as_str(), &handle_hash],
             )
             .await?;
@@ -1189,6 +1213,7 @@ impl PayoutStore for PgBackend {
                     recipient_key_ref: row.get(8),
                     index_pepper_ref: row.get(9),
                     subject_index: row.get(10),
+                    recipient_ref: row.get(12),
                 },
             )),
             None => None,
@@ -1216,6 +1241,248 @@ impl PayoutStore for PgBackend {
             .await?;
         tx.commit().await?;
         Ok(purged)
+    }
+
+    async fn payout_account_link_view(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutAccountLinkView, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let version = account_link_version(&tx, tenant, account, rail.as_str()).await?;
+        let newest = tx
+            .query_opt(
+                &format!(
+                    "SELECT {LINK_COLUMNS} FROM trace_payout_links
+                      WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                        AND state <> 'closed'
+                      ORDER BY (state = 'waiting') DESC, created_at DESC
+                      LIMIT 1"
+                ),
+                &[&tenant, &account, &rail.as_str()],
+            )
+            .await?
+            .as_ref()
+            .map(link_from_row)
+            .transpose()?;
+        let pending_request: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM trace_payout_link_requests
+                      WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                        AND expires_at > clock_timestamp())",
+                &[&tenant, &account, &rail.as_str()],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(PayoutAccountLinkView {
+            version,
+            newest,
+            pending_request,
+        })
+    }
+
+    async fn payout_account_login_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT anchor_hash FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2
+                    AND identity_source = 'near_ai_login'",
+                &[&tenant, &account],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn confirm_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+        confirm: &PayoutLinkConfirmWrite,
+    ) -> Result<PayoutLinkConfirm, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // One confirm at a time per account and rail, so the version read
+        // below and the write after it see the same links. The pass never
+        // creates a link or an unlink, so it does not need this lock.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                 'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
+            &[&tenant, &account, &rail.as_str()],
+        )
+        .await?;
+        let Some(row) = tx
+            .query_opt(
+                "DELETE FROM trace_payout_link_requests
+                  WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                    AND handle_hash = $4
+                  RETURNING action, expected_current_version, recipient_kind,
+                            sealed_recipient, recipient_index, recipient_key_ref,
+                            index_pepper_ref, subject_index, recipient_ref,
+                            expires_at <= clock_timestamp(), created_at",
+                &[&tenant, &account, &rail.as_str(), &handle_hash],
+            )
+            .await?
+        else {
+            tx.commit().await?;
+            return Ok(PayoutLinkConfirm::NotFound);
+        };
+        let expired: bool = row.get(9);
+        if expired {
+            tx.commit().await?;
+            return Ok(PayoutLinkConfirm::Expired);
+        }
+        let created_at: chrono::DateTime<chrono::Utc> = row.get(10);
+        let superseded: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM trace_payout_link_requests
+                      WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                        AND created_at > $4 AND expires_at > clock_timestamp())",
+                &[&tenant, &account, &rail.as_str(), &created_at],
+            )
+            .await?
+            .get(0);
+        if superseded {
+            tx.commit().await?;
+            return Ok(PayoutLinkConfirm::NotFound);
+        }
+        let expected: Option<i64> = row.get(1);
+        let version = account_link_version(&tx, tenant, account, rail.as_str()).await?;
+        if expected.unwrap_or(0) != version {
+            tx.commit().await?;
+            return Ok(PayoutLinkConfirm::VersionConflict);
+        }
+        let action: String = row.get(0);
+        let action = match action.as_str() {
+            "link" => PayoutLinkAction::Link,
+            "unlink" => PayoutLinkAction::Unlink,
+            _ => return Err(DatabaseError::Query("payout_link_action_unknown".into())),
+        };
+        let waiting: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM trace_payout_links
+                      WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                        AND state = 'waiting')",
+                &[&tenant, &account, &rail.as_str()],
+            )
+            .await?
+            .get(0);
+        match action {
+            PayoutLinkAction::Link => {
+                if waiting {
+                    tx.commit().await?;
+                    return Ok(PayoutLinkConfirm::ChangePending);
+                }
+                let kind: Option<String> = row.get(2);
+                let kind =
+                    parse_recipient_kind(kind.ok_or_else(|| {
+                        DatabaseError::Query("payout_link_request_shape".into())
+                    })?)?;
+                let recipient_ref: Option<String> = row.get(8);
+                tx.execute(
+                    "INSERT INTO trace_payout_links (
+                         tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+                         sealed_recipient, recipient_index, recipient_key_ref,
+                         index_pepper_ref, subject_index, program, recipient_ref
+                     ) VALUES ($1, $2, $3, $4, $5, 'waiting', $6, $7, $8, $9, $10, $11, $12)",
+                    &[
+                        &tenant,
+                        &account,
+                        &rail.as_str(),
+                        &confirm.link_id,
+                        &kind.as_str(),
+                        &row.get::<_, Option<serde_json::Value>>(3),
+                        &row.get::<_, Option<String>>(4),
+                        &row.get::<_, Option<String>>(5),
+                        &row.get::<_, Option<String>>(6),
+                        &row.get::<_, Option<String>>(7),
+                        &confirm.program,
+                        &recipient_ref,
+                    ],
+                )
+                .await?;
+                for audit in [
+                    PayoutAuditAction::LinkCreated,
+                    PayoutAuditAction::LinkConfirmed,
+                ] {
+                    insert_audit(
+                        &tx,
+                        tenant,
+                        rail.as_str(),
+                        audit,
+                        &confirm.actor_ref_hash,
+                        Some(account),
+                        Some(confirm.link_id),
+                        None,
+                        Some(PayoutLinkState::Waiting),
+                        Some(action.as_str()),
+                    )
+                    .await?;
+                }
+            }
+            PayoutLinkAction::Unlink => {
+                let active = tx
+                    .query_opt(
+                        "UPDATE trace_payout_links
+                            SET unlink_requested_at = clock_timestamp(),
+                                version = version + 1, updated_at = clock_timestamp()
+                          WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                            AND state = 'active' AND unlink_requested_at IS NULL
+                          RETURNING link_id",
+                        &[&tenant, &account, &rail.as_str()],
+                    )
+                    .await?;
+                let Some(active) = active else {
+                    let marked: bool = tx
+                        .query_one(
+                            "SELECT EXISTS (
+                                 SELECT 1 FROM trace_payout_links
+                                  WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                                    AND state = 'active' AND unlink_requested_at IS NOT NULL)",
+                            &[&tenant, &account, &rail.as_str()],
+                        )
+                        .await?
+                        .get(0);
+                    tx.commit().await?;
+                    return Ok(if waiting || marked {
+                        PayoutLinkConfirm::ChangePending
+                    } else {
+                        PayoutLinkConfirm::NotLinked
+                    });
+                };
+                let link_id: Uuid = active.get(0);
+                insert_audit(
+                    &tx,
+                    tenant,
+                    rail.as_str(),
+                    PayoutAuditAction::LinkConfirmed,
+                    &confirm.actor_ref_hash,
+                    Some(account),
+                    Some(link_id),
+                    Some(PayoutLinkState::Active),
+                    Some(PayoutLinkState::Active),
+                    Some(action.as_str()),
+                )
+                .await?;
+            }
+        }
+        let version = account_link_version(&tx, tenant, account, rail.as_str()).await?;
+        tx.commit().await?;
+        Ok(PayoutLinkConfirm::Confirmed { action, version })
     }
 
     async fn payout_audit_actions(

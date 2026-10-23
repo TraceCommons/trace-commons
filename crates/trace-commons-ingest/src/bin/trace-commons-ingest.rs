@@ -27,6 +27,8 @@ mod file_witness;
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
 mod legacy_invite_link_routes;
+#[path = "trace_commons_ingest_internal/payout_link.rs"]
+mod payout_link_routes;
 #[path = "trace_commons_ingest_internal/payout_rails.rs"]
 mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
@@ -1489,7 +1491,10 @@ pub async fn run_ingest(
         &state,
         state.community_snapshot_invalidation_scheduler.clone(),
     );
-    // One worker per enabled payout rail; a disabled rail spawns nothing.
+    // One worker per enabled payout rail; a disabled rail spawns nothing. An
+    // enabled rail with no recipient key refuses the start: every link it
+    // found would be unreadable.
+    payout_rails::require_payout_recipient_key(&state)?;
     let _payout_rail_workers = payout_rails::spawn_payout_rail_workers(&state);
     tracing::info!(
         addr = %listener.local_addr()?,
@@ -8479,6 +8484,10 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
+        // Payout recipient links (payout spec section 5): start, confirm and
+        // status on the signed-in account session; no passkey (owner,
+        // 2026-10-23).
+        .merge(payout_link_routes::routes())
         .get("/v1/account/traces", account_traces_list_handler)
         .post(
             "/v1/account/source-sessions/status",

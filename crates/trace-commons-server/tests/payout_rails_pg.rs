@@ -245,6 +245,7 @@ fn recipient(seed: &str) -> SealedRecipient {
         recipient_key_ref: "key-test-1".into(),
         index_pepper_ref: "pepper-test-1".into(),
         subject_index: sha(&format!("subject:{seed}")),
+        recipient_ref: None,
     }
 }
 

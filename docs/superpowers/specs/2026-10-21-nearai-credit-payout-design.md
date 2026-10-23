@@ -61,9 +61,11 @@ All dated 2026-10-21. The owner's words are quoted.
   stored), keeps the org-changed-since-shown (`connection_revision`-style)
   check, and audits every link, change and unlink. The owner accepted the
   trade-off in the option's own words: "anyone holding the app session
-  could redirect future payouts." Section 5's passkey gate, step-up page
-  section and passkey consent lines are replaced accordingly when the link
-  routes are built; where they still say passkey, this note governs.
+  could redirect future payouts." Section 5's passkey gate and step-up
+  page section were replaced when the link routes were built (task 6, see
+  section 5, "Who confirms"); the passkey consent lines are struck there
+  and their replacements are drafted with the macOS picker (task 8). Where
+  any text still says passkey, this note governs.
 - **(D6) Parallel to Trace Credit.** "Near ai payout is parallel to trace
   credit." A NEAR AI payout does not consume, redeem or convert Trace
   Credit. The contributor keeps their Trace Credit, and whatever pays it
@@ -84,7 +86,7 @@ All dated 2026-10-21. The owner's words are quoted.
   Each enabled rail pays its own instrument from the same finalized award,
   independently: a failure, hold or halt on one rail never blocks or delays
   another. Every exactly-once, crash-recovery, ceiling, kill-switch and
-  passkey rule in this design is stated per rail. D6 is the first instance
+  link-confirmation rule in this design is stated per rail. D6 is the first instance
   of this rule.
 - **(D9) One staging build of the whole NEAR AI path.** "What we need is a
   stageing build of the sign in, settlement and private inference system"
@@ -982,7 +984,7 @@ memo, metadata, the tenant or account id, or the rate. This follows
 ## 5. Linking an account to a recipient
 
 Linking is generic in shape and per rail in proof. The routes, the request
-table, the passkey step-up and the audit are one mechanism with a rail
+table, the session rule and the audit are one mechanism with a rail
 segment. What proves the recipient is the rail's **recipient-proof
 verifier**, chosen by the rail's recipient-link kind; the body carries a
 per-rail proof, a tagged enum keyed by rail id. Only `near_ai` is accepted
@@ -994,18 +996,20 @@ this section is the `near_ai` verifier and the shared mechanism.
 Any account whose person can sign in to NEAR AI in the app and owns the
 org they choose (D3). The proof is a fresh NEAR AI access token whose
 `/users/me` lists the org as active and owned. The authority to direct the
-account's credit is a passkey step-up on that account (D5).
+account's credit is the account's signed-in session (D5 as superseded on
+2026-10-23; see "Who confirms" below).
 
 | Account class | NEAR AI subject on file | Check at link time |
 |---|---|---|
-| `nearai-` tenant | yes (the tenant anchor) | `/users/me` `id` must match the anchor, else `subject_mismatch` |
+| `nearai-` tenant, or any account with a `near_ai_login` anchor | yes (the anchor) | `/users/me` `id` must match the anchor, else `subject_mismatch` |
 | `near-` tenant (wallet) | no | the person signs in with NEAR AI in the app; the subject is recorded as `subject_index` on the link |
 | passkey-origin account, bound or not | per its binding, or none | as the two rows above |
 | account in a legacy or pooled tenant | no | as the wallet row |
 
 Recording `subject_index` lets an operator see that one NEAR AI subject
 linked several accounts, without opening anything. It is not an anchor and
-grants nothing.
+grants nothing; it is keyed under its own domain, so its value is never the
+login anchor's and a link row cannot be joined to a tenant's anchor.
 
 ### Verification on the server, not the client
 
@@ -1041,27 +1045,49 @@ grants nothing.
    does see a closed list; an inactive recipient left off a closed list
    answers 409, not 404, because activity is checked after policy.
 6. Ingest stores a `pending_confirmation` request: sealed org id, subject
-   index, the account it belongs to, a 5-minute expiry, and an opaque
-   ceremony handle returned to the daemon. **Nothing changes yet.**
-7. The daemon opens the step-up page with `return=confirm-payout-link` (a
-   fourth section). The person signs in **with a passkey**; the page shows
-   "the organization you chose in the app" (the server does not hold the
-   name) and a confirm button. Confirming writes the `waiting` link (or the
-   unlink request) and the audit row. Expiry, a second request, or a
-   different account discards it.
+   index, recipient ref, the account it belongs to, a 5-minute expiry, and
+   an opaque handle returned to the daemon. **Nothing changes yet.** The
+   handle is keyed over the tenant, account, rail and idempotency key, so a
+   replayed start answers the same handle.
+7. The app shows the consent for "the organization you chose" and, on the
+   person's click, the daemon calls confirm with the handle over the same
+   account session. Confirming writes the `waiting` link (or the unlink
+   mark) and its audit rows in one transaction. Expiry, a newer request on
+   the same account and rail, a different account, or a link that changed
+   since the request discards it.
 
-### The passkey gate
+(Until 2026-10-23 step 7 sent the person to a step-up page to confirm with
+a passkey. The owner superseded that; see below.)
 
-D5 holds on every rail: link, change and unlink on any rail are confirmed
-with a passkey, through the same gate and the same step-up page section.
-A new gate, `require_passkey_step_up`, guards the confirm call. It passes
-only a session whose `client_kind` is `passkey`, minted within the step-up
-window, on the account that started the request. It has no
-zero-authenticator carve-out: an account with no passkey gets
-`passkey_required`, and the app sends the person to the step-up page's
-`add-passkey` section first. A NEAR wallet (`near`) session does not pass:
-D5 says passkey. `require_authenticator_change_allowed` is not changed; the
-existing NEAR payout redirect keeps its rules.
+### Who confirms (D5, superseded 2026-10-23)
+
+The owner: "We aren't using passkeys at all in the app right now." The
+contributor's signed-in account session confirms link, change and unlink
+on every rail. Any account session passes: a native token (`tcn1_`) or a
+same-origin cookie session, weak or strong. A device bearer is not an
+account session and is refused with 403. There is no passkey gate, no
+`require_passkey_step_up`, no step-up page section, and nothing requires
+the account to have a passkey; `require_authenticator_change_allowed` and
+the NEAR wallet payout redirect keep their own rules.
+
+The API keeps two calls (start, then confirm) so the app can show the
+consent between them, and so that nothing is written until the person
+confirms. What stands behind a link without a passkey:
+
+- the server's own ownership check with NEAR AI (steps 4 and 5), with the
+  person's token, against the host that pays;
+- the "changed since shown" check: the status route reports a `version`
+  per account and rail that counts every link the account was given and
+  every unlink it confirmed (only the person's changes move it; the pass
+  activating or closing a link does not). Start and confirm both refuse
+  `version_conflict` unless the request's `expected_current_version`
+  equals it, and start checks it before the token leaves the machine;
+- an audit row for every request (`link_requested`, `unlink_requested`)
+  and every confirmation (`link_confirmed`, and `link_created` for a new
+  link), each naming the account and link by hash only.
+
+The owner accepted the trade-off in the option's words: "anyone holding
+the app session could redirect future payouts."
 
 ### The routes
 
@@ -1070,37 +1096,54 @@ copying the inference-connection stack
 (`crates/trace-commons-contributor/src/inference_connection.rs:190-230`,
 `trace_commons_ingest_internal/inference_connection.rs`):
 
-- account session only; `DeviceBearer` is refused with 403;
+- account session only (any kind, weak included); `DeviceBearer` is
+  refused with 403; a cookie session only from the same origin;
 - `rail_id` must name a rail whose mode is not `disabled`, else
   `payout_unavailable`; an unknown id is `payout_rail_unknown`;
 - body `deny_unknown_fields`: `action` (`link` or `unlink`),
   `idempotency_key` (non-nil UUID), `expected_current_version`, and for
   `link` a `proof` tagged by rail. For `near_ai` the proof is
   `{"rail": "near_ai", "organization_id", "near_ai_access_token"}`;
-- outcomes: `pending_confirmation` (with the handle), `idempotency_conflict`,
-  `version_conflict`, `payout_rail_unknown`, `payout_unavailable`,
-  `passkey_required`, and the verifier's own refusals (for `near_ai`:
-  `subject_mismatch`, `org_not_owned`, `near_ai_org_unavailable`,
-  `near_ai_org_not_permitted`).
+- outcomes: `pending_confirmation` (with the handle, expiry and recipient
+  ref), `idempotency_conflict`, `version_conflict`, `payout_not_linked`
+  (an unlink with nothing linked), `payout_account_ineligible` (a closed
+  account), `invalid_payout_link_request`, `payout_rail_unknown`,
+  `payout_unavailable`, and the verifier's own refusals (for `near_ai`:
+  `near_ai_login_unverified`, `subject_mismatch`, `org_not_owned`,
+  `near_ai_org_unavailable`, `near_ai_org_not_permitted`). There is no
+  `passkey_required`.
 
 `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`,
-behind `require_passkey_step_up`, called only by the step-up page.
-Outcomes: `confirmed`, `expired`, `not_found`.
+on the same account session rule, called by the daemon after the person
+confirms in the app. Outcomes: `confirmed` (with the new `version`),
+`expired`, `not_found` (no such request on this account, or superseded),
+`version_conflict`, `payout_link_change_pending` (a link already waits for
+the pass, or an unlink is already recorded), `payout_not_linked`. A
+confirmed change wakes the rail's pass.
 
 `GET /v1/account/payout-rails` returns one entry per rail that is not
-`disabled`: `{rail_id, linked, recipient_ref, state, version,
-request_state}`, never a recipient or a name. For `near_ai`,
+`disabled`: `{rail_id, mode, linked, recipient_ref, state, version,
+request_state, unlink_requested, recipient_unavailable}`, never a
+recipient or a name. For `near_ai`,
 `recipient_ref` is
 `sha256("nearai-payout-org-ref-v1:" || idempotency_key || ":" || org_id)`;
 the daemon keeps the key and the org id together, so it can recompute the
 ref and check the server holds the same org without the server echoing it.
+The ref is computed at start, carried on the request row and copied onto
+the link (`recipient_ref` on both tables, V134), so a read never opens the
+sealed recipient.
 
 ### Storage
 
 The send needs the raw recipient (for `near_ai`, the org UUID), so
 hash-only storage is impossible. The recipient is sealed with the
 machinery behind `sealed_account_name`, with a keyed blind index and key
-and pepper refs for rotation. The key is not in the database.
+and pepper refs for rotation. The key is not in the database. The pass
+opens a link's recipient with the same key (`SealedRecipientOpener`); a seal
+under another key or pepper, or one whose plaintext does not reproduce its
+index, does not open and the link is held `payout_link_unreadable`. Ingest
+refuses to start with a rail enabled and no recipient key
+(`payout_recipient_key_unconfigured`).
 
 ### Change and unlink
 
@@ -1125,7 +1168,7 @@ and pepper refs for rotation. The key is not in the database.
 - **Operator release.** `POST /v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release`
   moves a link to `closing` (for example after a contributor reports lost
   access to the org) with an audit row naming the actor hash and a reason
-  label. The account then links again through the passkey flow.
+  label. The account then links again from its signed-in session.
 
 ### Credit earned before linking
 
@@ -1146,16 +1189,18 @@ for title, body, button and accessibility name, per `docs/ui-copy-guide.md`.
   Credit, which you keep. Credit sent to {org name} stays there and can't be
   moved. Other members of {org name} can spend it too. If {org name} owes
   NEAR AI for past use, new credit pays that first. You'll confirm with your
-  passkey."
+  [D5 superseded 2026-10-23: the passkey sentence is dropped; Task 8 drafts
+  the replacement.]"
 - Scope line beside the button: "Sends credit to {org name} only."
-- Button: "Continue with passkey"
+- Button: ~~"Continue with passkey"~~ (superseded; Task 8 drafts a label)
 - Secondary: "Not now"
-- No passkey yet: "Add a passkey to choose where NEAR AI credit goes."
+- ~~No passkey yet~~: no longer needed; nothing requires a passkey.
 - Unlink button: "Stop sending credit"; body: "Credit you earn is kept and
-  sent when you choose an organization again. You'll confirm with your
-  passkey."
+  sent when you choose an organization again." (the passkey sentence is
+  dropped, D5 superseded)
 - Status: "Credit goes to {org name}" / "No organization chosen" /
-  "Waiting for passkey confirmation" / "Organization unavailable. Choose
+  ~~"Waiting for passkey confirmation"~~ (superseded; Task 8 drafts the
+  line for a started request) / "Organization unavailable. Choose
   another."
 
 The confirm step names the org shown, and a `connection_revision`-style
@@ -1326,10 +1371,16 @@ system admin only; NEAR AI can run it.
   is visible rather than masked by a healthy one.
 - **Wrong recipient.** The org must be in the person's own `/users/me`,
   active and owned, checked by the server with the person's own token
-  against the host that pays. Only a passkey session on the same account
-  can confirm. A wrong send cannot be reversed.
-- **Stolen device.** The daemon's refresh token and `tcn1_` token can start
-  a link request, but cannot confirm it without the account's passkey.
+  against the host that pays. Only a session on the same account can
+  confirm. A wrong send cannot be reversed.
+- **Stolen device or session (accepted 2026-10-23).** With D5 superseded,
+  the daemon's `tcn1_` token can start and confirm a link to any org the
+  holder owns on NEAR AI, so whoever holds the app session can redirect
+  future payouts (not past ones: a sent credit stays where it went). The
+  owner accepted this. What bounds it: the holder must also own the new
+  org on NEAR AI; every change is audited; the person's app shows the
+  recipient ref it did not choose as a mismatch; revoke-all ends the
+  session; the operator can release the link.
 - **Role lost after linking.** The server cannot re-check org ownership
   without the person's token, so a link stays valid if the person later
   loses the owner role. Credit then goes to an org they no longer own. The
@@ -1360,7 +1411,8 @@ has the files, tests and verification for each. In order: the rail
 interface and types with the test rail; the schema; rate epochs and
 accrual (no network); the #1271 client and the `near_ai` rail with the
 staging feature; the payout pass behind a mode that defaults to
-`disabled`; the link routes with the passkey gate; the daemon link flow;
+`disabled`; the link routes on the signed-in session (D5 superseded);
+the daemon link flow;
 the macOS org picker and draft consent copy; the reconciliation drill and
 readiness; the operator runbook and staging steps.
 

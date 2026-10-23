@@ -33,8 +33,9 @@ use trace_commons_server::db::{
     PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_link_id_hash,
 };
 use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
-use trace_commons_server::payout_pass::UnconfiguredRecipientOpener;
+use trace_commons_server::payout_pass::{PayoutRecipientOpener, UnconfiguredRecipientOpener};
 use trace_commons_server::payout_rate::{NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot};
+use trace_commons_server::payout_recipient_seal::SealedRecipientOpener;
 use trace_commons_server::payout_worker::PayoutRails;
 
 const PAYOUT_HALT_LABEL: &str = "operator_halt";
@@ -97,11 +98,36 @@ pub(crate) async fn payout_rails_from_env(
     Ok(rails)
 }
 
+/// Refuses the start when a rail is enabled but the recipient key (the
+/// NEAR account identity's pepper and sealing key, which the link routes
+/// seal recipients with) is not configured: no link could be made, and
+/// none already stored could be opened.
+pub(crate) fn require_payout_recipient_key(state: &AppState) -> anyhow::Result<()> {
+    let enabled = state
+        .payout_rails
+        .entries()
+        .any(|entry| entry.mode() != trace_commons_server::payout_rate::PayoutMode::Disabled);
+    if enabled && state.near_account_identity.is_none() {
+        anyhow::bail!("near_ai payout refused to start: payout_recipient_key_unconfigured");
+    }
+    Ok(())
+}
+
+/// The opener the pass uses: the recipient key when the deployment has it,
+/// else one that opens nothing (any link found is held
+/// `payout_link_unreadable`; an enabled rail without the key has already
+/// refused the start).
+fn recipient_opener(state: &AppState) -> Arc<dyn PayoutRecipientOpener> {
+    match state.near_account_identity.clone() {
+        Some(identity) => Arc::new(SealedRecipientOpener::new(identity)),
+        None => Arc::new(UnconfiguredRecipientOpener),
+    }
+}
+
 /// One worker per enabled rail. Without a payout store or a database
 /// mirror nothing runs (and an enabled rail has already refused the start
-/// without a store). Recipients are sealed by the link routes, which this
-/// build does not have yet, so the opener opens nothing: any link found is
-/// held `payout_link_unreadable` and nothing is sent to it.
+/// without a store). Recipients are opened with the key the link routes
+/// sealed them under.
 pub(crate) fn spawn_payout_rail_workers(state: &Arc<AppState>) -> Vec<tokio::task::JoinHandle<()>> {
     let (Some(payouts), Some(corpus)) = (state.payout_store.clone(), state.db_mirror.clone())
     else {
@@ -109,7 +135,7 @@ pub(crate) fn spawn_payout_rail_workers(state: &Arc<AppState>) -> Vec<tokio::tas
     };
     state
         .payout_rails
-        .spawn_workers(payouts, corpus, Arc::new(UnconfiguredRecipientOpener))
+        .spawn_workers(payouts, corpus, recipient_opener(state))
 }
 
 /// The operator's hash on control and audit rows. Hash-only: never the

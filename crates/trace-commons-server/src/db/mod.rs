@@ -2846,6 +2846,11 @@ pub struct SealedRecipient {
     pub recipient_key_ref: String,
     pub index_pepper_ref: String,
     pub subject_index: String,
+    /// What the status route reports so the app can check the server holds
+    /// the recipient it chose (for `near_ai`,
+    /// `trace_commons_protocol::payout_link::near_ai_recipient_ref`). A hash;
+    /// `None` on a link written without one.
+    pub recipient_ref: Option<String>,
 }
 
 impl std::fmt::Debug for SealedRecipient {
@@ -3116,6 +3121,64 @@ pub struct PayoutLinkRequest {
     pub expected_current_version: Option<i64>,
     pub recipient: Option<(RecipientKind, SealedRecipient)>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// What a confirm writes beside the request it takes: the new link's id and
+/// program (for a `link`) and the confirming account's actor hash. The
+/// recipient comes from the request row, never from the confirm call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkConfirmWrite {
+    pub link_id: Uuid,
+    pub program: String,
+    pub actor_ref_hash: String,
+}
+
+/// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
+/// variant but `Confirmed` changed nothing but consuming the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkConfirm {
+    Confirmed {
+        action: PayoutLinkAction,
+        /// The account's link version on the rail after the change.
+        version: i64,
+    },
+    /// No request with that handle on this account and rail, or a newer
+    /// request on the same account and rail superseded it.
+    NotFound,
+    Expired,
+    /// The account's link version on the rail is not the one the request
+    /// was made against: the link changed since the app showed it.
+    VersionConflict,
+    /// A link already waits for the pass, or an unlink is already recorded.
+    ChangePending,
+    /// An unlink with no active link.
+    NotLinked,
+}
+
+/// One account's link state on one rail, for the link routes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccountLinkView {
+    /// Counts every link the account was given on the rail and every unlink
+    /// it confirmed: it moves on each change the person makes and on none
+    /// the pass makes, so it says whether the recipient changed since an app
+    /// read it. 0 with no history.
+    pub version: i64,
+    /// The newest link that is not closed: the waiting one if there is one,
+    /// else the active or closing one.
+    pub newest: Option<PayoutLink>,
+    /// An unexpired request waits for a confirm.
+    pub pending_request: bool,
+}
+
+impl std::fmt::Debug for PayoutAccountLinkView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccountLinkView")
+            .field("version", &self.version)
+            .field("newest", &self.newest)
+            .field("pending_request", &self.pending_request)
+            .finish()
+    }
 }
 
 // Hash-only logging (spec, "Hash-only logging"): these `Debug` impls print
@@ -3497,6 +3560,40 @@ pub trait PayoutStore: Send + Sync {
     /// a discard writes no audit row.
     async fn purge_expired_payout_link_requests(&self, tenant: &str) -> Result<u64, DatabaseError>;
 
+    /// The account's version, newest live link and pending-request flag on
+    /// `rail` ([`PayoutAccountLinkView`]).
+    async fn payout_account_link_view(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutAccountLinkView, DatabaseError>;
+
+    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
+    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
+    /// proof's subject must match. Empty for an account with none.
+    async fn payout_account_login_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Takes the account's request on `rail` with that handle hash and, in
+    /// the same transaction, writes what it asks for: a `waiting` link
+    /// carrying the request's sealed recipient, or the unlink mark on the
+    /// active link, each with its audit rows. Serialized per account and
+    /// rail. Refuses (consuming the request) when it expired, a newer
+    /// request superseded it, or the account's link version is no longer
+    /// the request's `expected_current_version`.
+    async fn confirm_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+        confirm: &PayoutLinkConfirmWrite,
+    ) -> Result<PayoutLinkConfirm, DatabaseError>;
+
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(
         &self,
@@ -3601,6 +3698,7 @@ mod payout_debug_tests {
             recipient_key_ref: "key".into(),
             index_pepper_ref: "pepper".into(),
             subject_index: "sha256:11".into(),
+            recipient_ref: None,
         }
     }
 

@@ -1249,6 +1249,7 @@ mod tests {
                 recipient_key_ref: "key".into(),
                 index_pepper_ref: "pepper".into(),
                 subject_index: "sha256:11".into(),
+                recipient_ref: None,
             },
             program: "tc1-0".into(),
             final_paid: None,

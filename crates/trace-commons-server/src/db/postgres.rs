@@ -1882,6 +1882,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "payout_reversal_hold_decisions",
         include_str!("../../../../migrations/V133__payout_reversal_hold_decisions.sql"),
     ),
+    // V134: the recipient ref on payout links and link requests, which the
+    // status route reports so the app can check the org it chose.
+    (
+        134,
+        "payout_link_recipient_ref",
+        include_str!("../../../../migrations/V134__payout_link_recipient_ref.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

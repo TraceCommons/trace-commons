@@ -299,6 +299,7 @@ async fn release_moves_an_active_link_to_closing_with_an_audit_row() {
                         recipient_key_ref: "key-test-1".into(),
                         index_pepper_ref: "pepper-test-1".into(),
                         subject_index: digest("subject"),
+                        recipient_ref: None,
                     },
                     program: format!("tc1-{}", &digest(&link_id.to_string())[7..39]),
                     state: PayoutLinkState::Active,

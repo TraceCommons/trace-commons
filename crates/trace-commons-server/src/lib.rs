@@ -49,6 +49,8 @@ pub mod near_legion_claim;
 pub mod payout_accrual;
 pub mod payout_pass;
 pub mod payout_rate;
+pub mod payout_recipient_proof;
+pub mod payout_recipient_seal;
 pub mod payout_worker;
 pub mod redaction_witness;
 pub mod register_stats;

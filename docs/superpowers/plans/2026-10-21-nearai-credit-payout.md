@@ -31,7 +31,8 @@
 - **2026-10-23, task 5 seam:** the pass opens a link's sealed recipient
   through `PayoutRecipientOpener`. Task 5 ships `UnconfiguredRecipientOpener`
   (opens nothing, so any link is held `payout_link_unreadable`); task 6,
-  which seals recipients, supplies the real opener.
+  which seals recipients, supplies the real opener (`SealedRecipientOpener`)
+  and refuses the start with a rail enabled and no recipient key.
 
 ## Global Constraints
 
@@ -81,7 +82,7 @@ Repo and process rules (every task):
 | 3 | `payout-rail-accrual` | `payout-rail-schema` | rate sources, rate epochs at boot, accrual of credit and reversal rows, per rail; no network |
 | 4 | `payout-rail-near-ai-client` | `payout-rail-accrual` | #1271 client, `near_ai` rail, refusal mapping, shared compiled-in host, `near-ai-staging` feature |
 | 5 | `payout-rail-pass` | `payout-rail-near-ai-client` | per-rail pass: lock, owed, send, recovery, close, ceilings, holds, modes (default `disabled`), halt/resume, notify, tick, readiness |
-| 6 | `payout-rail-link-routes` | `payout-rail-pass` | link request/confirm/status routes, `/users/me` verifier, liveness probe, `require_passkey_step_up`, step-up page section, protocol types |
+| 6 | `payout-rail-link-routes` | `payout-rail-pass` | link request/confirm/status routes on the signed-in session (D5 superseded), `/users/me` verifier, liveness probe, recipient seal and opener, protocol types |
 | 7 | `payout-rail-daemon-link` | `payout-rail-link-routes` | daemon org listing (on device), link/unlink IPC, ingest client, core copy keys |
 | 8 | `payout-rail-macos-picker` | `payout-rail-daemon-link` | macOS org picker, status, consent copy surfaces (copy marked for owner review) |
 | 9 | `payout-rail-reconcile-drill` | `payout-rail-macos-picker` | per-rail reconciliation drill wired into rollout-smoke evidence |
@@ -350,49 +351,62 @@ Spec: section 3 ("Independence"), section 4 ("Holds", "Ceilings", "Modes and the
 
 ---
 
-### Task 6: Link routes with the passkey gate (`payout-rail-link-routes`, base `payout-rail-pass`)
+### Task 6: Link routes on the signed-in session (`payout-rail-link-routes`, base `payout-rail-pass`)
 
-Spec: section 5 (all), section 6.
+Spec: section 5 (all, including "Who confirms"), section 6.
 
-**Files:**
-- Create: `crates/trace-commons-protocol/src/payout_link.rs` (permissive; `PayoutLinkRequest { action, idempotency_key, expected_current_version, proof: Option<PayoutLinkProof> }`, `#[serde(tag = "rail")] enum PayoutLinkProof { #[serde(rename = "near_ai")] NearAi { organization_id: Uuid, near_ai_access_token: String } }`, response and status types, outcome label enum, `recipient_ref` derivation `sha256("nearai-payout-org-ref-v1:" || idempotency_key || ":" || org_id)`; every struct `deny_unknown_fields`; the token field is redacted in `Debug`)
+**D5 superseded (owner, 2026-10-23).** No passkey gate: link, change and unlink are authorized by the contributor's signed-in account session (any kind; a device bearer is refused). `require_passkey_step_up`, the `confirm-payout-link` step-up page section and the `native-step-up-page.md` change are dropped. The two calls stay (start, then confirm from the same account) so the app can show the consent between them and nothing is written before the person confirms. The server still verifies org ownership with NEAR AI (`/users/me` with the person's token, never stored), keeps the "changed since shown" check (`expected_current_version` against the account's link version on the rail, checked at start before the token leaves the machine and again at confirm), and audits every request and confirmation.
+
+**Files (as built):**
+- Create: `crates/trace-commons-protocol/src/payout_link.rs` (permissive; `PayoutLinkRequest { action, idempotency_key, expected_current_version, proof: Option<PayoutLinkProof> }`, `#[serde(tag = "rail")] enum PayoutLinkProof { #[serde(rename = "near_ai")] NearAi { organization_id: Uuid, near_ai_access_token: String } }`, start, confirm and status response types, the outcome label enum, `near_ai_recipient_ref`; every struct `deny_unknown_fields`; the token is redacted in `Debug`)
 - Modify: `crates/trace-commons-protocol/src/lib.rs`
-- Create: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link.rs` (routes `POST /v1/account/payout-rails/{rail_id}/link-requests`, `POST .../link-requests/{handle}/confirm`, `GET /v1/account/payout-rails`, copying `inference_connection.rs`'s session extraction; `DeviceBearer` refused 403)
-- Create: `crates/trace-commons-server/src/payout_recipient_proof.rs` (`trait RecipientProofVerifier`; `NearAiOrgVerifier`: one `GET /v1/users/me` at `NEAR_AI_API_BASE_URL` with the user's token, deserialized into a struct holding `id` and `organizations[]{id, role, is_active}` only, never `name`; subject check per the spec table; then `rail.probe_recipient`)
-- Modify: `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` (`require_passkey_step_up` beside `require_authenticator_change_allowed` at ~22776, which stays unchanged; route registration)
-- Modify: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/step_up_page.rs` and `step_up_page.js` (a fourth section `confirm-payout-link`; `ALL` gains it; the page names "the organization you chose in the app" and never a name)
-- Modify: `docs/operator/native-step-up-page.md` (the new section)
-- Tests: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link_pg_tests.rs` (ingest bin, runs under `ingest-bin-postgres`), protocol unit tests
+- Create: `crates/trace-commons-server/src/payout_recipient_proof.rs` (`trait RecipientProofVerifier`; `NearAiOrgVerifier`: one `GET {base}/users/me` with the person's token, read into a struct of `id` and `organizations[]{id, role, is_active}` only, never `name`; the subject check against the account's `near_ai_login` anchors; `role == "owner"`, active; then `rail.probe_recipient`, mapped by `RailRefusal`)
+- Create: `crates/trace-commons-server/src/payout_recipient_seal.rs` (sealing under the NEAR account identity's key with a recipient index, a subject index and a link handle, each keyed under its own domain; `SealedRecipientOpener`, the real `PayoutRecipientOpener` task 5 left a seam for)
+- Modify: `crates/trace-commons-server/src/near_account_identity.rs` (crate-private `keyed_label` and `seal_bound_to`)
+- Modify: `crates/trace-commons-server/src/db/mod.rs`, `db/postgres_payout.rs` (`SealedRecipient.recipient_ref`; `payout_account_link_view`, `payout_account_login_anchors`, `confirm_payout_link_request`, which takes the request and writes the link or the unlink mark with its audit rows in one transaction, serialized per account and rail)
+- Create: `migrations/V134__payout_link_recipient_ref.sql` (`recipient_ref` on links and link requests); register it in `db/postgres.rs`
+- Modify: `crates/trace-commons-server/src/payout_worker.rs` (`PayoutRailEntry::rail`, `PayoutRails::from_config_at_loopback` for tests)
+- Create: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link.rs` (routes `POST /v1/account/payout-rails/{rail_id}/link-requests`, `POST .../link-requests/{handle}/confirm`, `GET /v1/account/payout-rails`)
+- Modify: `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` (route registration; boot refuses an enabled rail without the recipient key), `.../account_routes.rs` (the three routes `Refused` for an unbound account), `.../payout_rails.rs` (the sealed-recipient opener)
+- Tests: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/tests/payout_link_tests.rs` (ingest lib, runs under `ingest-bin-postgres`), unit tests in the protocol and server modules
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // protocol
 #[test] fn link_requests_refuse_unknown_fields_and_unknown_rails()
 #[test] fn the_access_token_never_appears_in_debug()
 #[test] fn recipient_ref_is_recomputable_by_the_client()
+// server
+#[test] fn a_sealed_recipient_opens_only_under_its_own_keys()
+#[test] fn the_subject_index_is_not_the_login_anchor()
+#[tokio::test] async fn a_non_owner_inactive_or_absent_org_is_refused_before_the_probe()
+#[tokio::test] async fn probe_404_and_409_and_403_map_to_their_outcomes()
 // ingest pg
 #[tokio::test] async fn a_link_request_with_an_owned_active_org_is_pending_confirmation_and_changes_nothing()
+#[tokio::test] async fn an_account_with_no_passkey_links_from_its_signed_in_session()
 #[tokio::test] async fn a_non_owner_or_inactive_org_is_refused()
 #[tokio::test] async fn a_nearai_tenant_with_a_different_subject_is_refused()
-#[tokio::test] async fn the_org_name_is_never_deserialized_or_stored()    // mock /users/me returns a name with a sentinel; grep the DB dump and logs
+#[tokio::test] async fn the_org_name_and_token_are_never_stored_or_returned()
 #[tokio::test] async fn probe_404_and_409_and_403_map_to_their_outcomes()
-#[tokio::test] async fn confirm_requires_a_fresh_passkey_session_on_the_same_account()
-#[tokio::test] async fn an_account_with_no_passkey_gets_passkey_required()   // no zero-authenticator carve-out
-#[tokio::test] async fn a_near_wallet_session_cannot_confirm()
+#[tokio::test] async fn confirm_needs_the_same_account_session_and_no_passkey()
 #[tokio::test] async fn an_expired_or_second_request_is_discarded()
+#[tokio::test] async fn a_link_that_changed_since_it_was_shown_is_refused()
 #[tokio::test] async fn a_device_bearer_is_refused()
 #[tokio::test] async fn a_disabled_rail_answers_payout_unavailable_and_an_unknown_rail_is_refused()
 #[tokio::test] async fn status_lists_each_enabled_rail_without_a_recipient()
 #[tokio::test] async fn change_and_unlink_on_one_rail_leave_another_rails_link_alone()
 #[tokio::test] async fn every_request_and_confirmation_writes_an_audit_row()
+#[tokio::test] async fn an_enabled_rail_without_the_recipient_key_refuses_the_start()
 ```
 
-- [ ] **Step 2: Run to verify they fail.** **Step 3: Implement.**
-- [ ] **Step 4: Verify** — protocol tests and `--no-default-features` check; the whole ingest bin pg run; `cargo test -p trace-commons-server --test license_boundary`; global checks.
-- [ ] **Step 5: Commit** — `Let an account link a payout recipient with a passkey`.
+The passkey tests the plan first listed (`confirm_requires_a_fresh_passkey_session_on_the_same_account`, `an_account_with_no_passkey_gets_passkey_required`, `a_near_wallet_session_cannot_confirm`) are dropped with D5.
 
-**Done when:** a link changes nothing until a passkey confirms it, the server alone verifies ownership with the person's token against the compiled-in host, no org name or id reaches storage unsealed or a log, and every test passes against PostgreSQL with output pasted.
+- [x] **Step 2: Run to verify they fail.** **Step 3: Implement.**
+- [x] **Step 4: Verify** — protocol tests and `--no-default-features` check; the whole ingest lib pg run; `cargo test -p trace-commons-server --test license_boundary`; global checks.
+- [x] **Step 5: Commit** — `Let an account link a payout recipient from its signed-in session`.
+
+**Done when:** a link changes nothing until the same account confirms it, the server alone verifies ownership with the person's token against the compiled-in host, no org name or id reaches storage unsealed or a log, nothing asks for a passkey, and every test passes against PostgreSQL with output pasted.
 
 ---
 

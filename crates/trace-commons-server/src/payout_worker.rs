@@ -73,14 +73,33 @@ pub fn build_rail(
     rail_id: &str,
     near_ai: &NearAiRailConfig,
 ) -> Result<Option<Arc<dyn PayoutRail>>, PayoutRailsError> {
+    build_rail_at(rail_id, near_ai, None)
+}
+
+/// [`build_rail`], with the `near_ai` client at a plain-HTTP loopback base
+/// when `loopback` is set ([`NearAiTransferClient::at_loopback`], which
+/// refuses anything but a loopback IP literal), for tests against a local
+/// mock. Still `near_ai` only.
+fn build_rail_at(
+    rail_id: &str,
+    near_ai: &NearAiRailConfig,
+    loopback: Option<&str>,
+) -> Result<Option<Arc<dyn PayoutRail>>, PayoutRailsError> {
     if rail_id != NEAR_AI_RAIL_ID {
         return Err(PayoutRailsError::Unknown);
     }
     match near_ai {
         NearAiRailConfig::Disabled => Ok(None),
         NearAiRailConfig::Enabled(settings) => {
-            let client = NearAiTransferClient::new(settings.credentials.clone())
-                .map_err(|_| PayoutRailsError::ClientInvalid)?;
+            let client = match loopback {
+                None => NearAiTransferClient::new(settings.credentials.clone()),
+                Some(base) => NearAiTransferClient::at_loopback(
+                    base,
+                    settings.credentials.clone(),
+                    std::time::Duration::from_secs(5),
+                ),
+            }
+            .map_err(|_| PayoutRailsError::ClientInvalid)?;
             Ok(Some(Arc::new(NearAiRail::new(client))))
         }
     }
@@ -168,6 +187,12 @@ impl PayoutRailEntry {
         );
     }
 
+    /// The rail, when it is enabled. The link routes probe a recipient
+    /// through it.
+    pub fn rail(&self) -> Option<&Arc<dyn PayoutRail>> {
+        self.rail.as_ref()
+    }
+
     /// Records the kill switch as an admin route just set it.
     pub fn record_halted(&self, halted: bool) {
         self.update(|status| status.halted = Some(halted));
@@ -250,7 +275,24 @@ impl PayoutRails {
 
     /// Builds each known rail from its configuration.
     pub fn from_config(near_ai: &NearAiRailConfig) -> Result<Self, PayoutRailsError> {
-        let rail = build_rail(NEAR_AI_RAIL_ID, near_ai)?;
+        Self::from_config_at(near_ai, None)
+    }
+
+    /// [`Self::from_config`] with the `near_ai` client at a loopback mock
+    /// (see `build_rail_at`). For tests; a deployment has no setting that
+    /// reaches it, and the host it pays stays the compiled-in one.
+    pub fn from_config_at_loopback(
+        near_ai: &NearAiRailConfig,
+        base: &str,
+    ) -> Result<Self, PayoutRailsError> {
+        Self::from_config_at(near_ai, Some(base))
+    }
+
+    fn from_config_at(
+        near_ai: &NearAiRailConfig,
+        loopback: Option<&str>,
+    ) -> Result<Self, PayoutRailsError> {
+        let rail = build_rail_at(NEAR_AI_RAIL_ID, near_ai, loopback)?;
         let settings = match near_ai {
             NearAiRailConfig::Disabled => None,
             NearAiRailConfig::Enabled(settings) => Some(PayoutPassSettings {

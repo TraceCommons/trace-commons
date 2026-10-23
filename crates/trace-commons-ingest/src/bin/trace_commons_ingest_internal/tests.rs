@@ -15,6 +15,8 @@ mod mission_catalog_tests;
 mod native_passkey_tests;
 #[path = "tests/near_ai_bind_tests.rs"]
 mod near_ai_bind_tests;
+#[path = "tests/payout_link_tests.rs"]
+mod payout_link_tests;
 #[path = "tests/payout_rails_tests.rs"]
 mod payout_rails_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
