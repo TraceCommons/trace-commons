@@ -205,7 +205,7 @@ configured, and prints all three assignments in env-file format.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points. Set to `0` during calibration; flip to configured value at cutover. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points of the gate's scoring award. Set to `0` during calibration; flip to configured value at cutover. The award is settlement-eligible: a non-zero value settles at the next live settlement run and is paid out, including awards written at a non-zero value before this release. |
 | `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` | R for live | `false` | Refuse to emit novelty-utility credit unless gate is `enclave_local_gpu`. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | R for prod | — | Hard cap per account per settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | R for prod | — | Allowlist of policy versions accepted for settlement. |

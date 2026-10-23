@@ -529,9 +529,10 @@ const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
 /// Zero by default. Emission pays this flat delta without consulting
 /// the `credit_quality` and `contributor_cap` signals that are computed
 /// and stored on every gate decision, so a non-zero default issues
-/// value that the quality signals never gated. Operators can set
-/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` explicitly once
-/// emission consults those signals.
+/// value that the quality signals never gated. The award is
+/// settlement-eligible (`trace_credit_event_type_is_settlement_eligible`),
+/// so a non-zero `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` is
+/// value that settles and is paid out; at zero nothing new settles.
 const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 0.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
@@ -12711,7 +12712,9 @@ fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
 
 /// Parse and validate the `novelty_utility` per-pass credit-points delta from
 /// the environment. Defaulted to `DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
-/// (1.0) when unset. The value must be finite and within the existing
+/// (0.0) when unset. A non-zero value settles (see
+/// `trace_credit_event_type_is_settlement_eligible`). The value must be
+/// finite and within the existing
 /// `MAX_DELAYED_CREDIT_POINTS_DELTA` envelope; we validate here so startup
 /// fails fast rather than every gate-evaluate call. Negative values are
 /// rejected — novelty credit is purely positive issuance.
@@ -28594,6 +28597,16 @@ async fn append_credit_event_handler(
 ) -> ApiResult<Json<TraceCommonsCreditLedgerRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
+    // The gate's scoring award settles
+    // (`trace_credit_event_type_is_settlement_eligible`), so only the gate
+    // worker route mints it (`attempt_emit_novelty_utility_credit`), after
+    // its production-gate, issuer, tenant-policy and allowed-use checks.
+    if body.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "novelty_utility credit is emitted by the gate only",
+        ));
+    }
     if !body.credit_points_delta.is_finite() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -30501,7 +30514,7 @@ async fn run_credit_settlement_unlocked(
         .map_err(internal_error)?;
     let candidate_events = credit_events
         .into_iter()
-        .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
+        .filter(|event| trace_credit_event_counts_toward_settlement(event))
         .filter(|event| event.credit_points_delta > 0.0)
         .filter(|event| !already_settled_event_ids.contains(&event.event_id))
         .filter(|event| {
@@ -31929,7 +31942,7 @@ async fn build_credit_risk_summary(
         .map_err(internal_error)?;
     let mut account_summaries = BTreeMap::<String, TraceCreditRiskAccountAccumulator>::new();
     for event in credit_events {
-        if !trace_credit_event_type_is_settlement_eligible(event.event_type)
+        if !trace_credit_event_counts_toward_settlement(&event)
             || event.credit_points_delta <= 0.0
             || settled_credit_event_ids.contains(&event.event_id)
             || !delayed_credit_eligible_submission_ids.contains(&event.submission_id)
@@ -42548,16 +42561,21 @@ fn average_i128(sum: i128, count: usize) -> Option<i64> {
     Some((sum / count as i128) as i64)
 }
 
-/// Event types whose credit may reach on-chain settlement.
+/// Event types whose credit may reach settlement.
 ///
-/// `NoveltyUtility` is deliberately excluded. The graded-credit design
-/// records that novelty and perplexity are cheaply fabricated, and
-/// requires dedup, per-contributor caps, reputation and delayed
-/// settlement before novelty can carry settlement-eligible value.
-/// Those signals (`credit_quality`, `contributor_cap`) are computed and
-/// stored on every gate decision but are still shadow-mode: emission
-/// pays a flat delta without consulting them. Novelty credit therefore
-/// keeps accruing as a signal, but cannot settle.
+/// `NoveltyUtility`, the gate's scoring award, is eligible by the owner's
+/// decision of 2026-10-23: a scored trace's credit counts toward settlement,
+/// or real traces never settle. Its amount is the operator-configured
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, which defaults to 0,
+/// and every consumer skips an event whose delta is not positive, so a
+/// deployment that never set the delta settles nothing new. The award is
+/// still a flat delta that does not consult the shadow-mode `credit_quality`
+/// and `contributor_cap` signals; an operator who sets the delta pays that
+/// flat amount, bounded by the settlement controls (per-account cap, credit
+/// holds, issuer approval, allowed policy versions).
+///
+/// The consumers call `trace_credit_event_counts_toward_settlement`, which
+/// adds the scoring award's provenance rule.
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
     matches!(
         event_type,
@@ -42565,7 +42583,37 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
+            | TraceCreditLedgerEventType::NoveltyUtility
     )
+}
+
+/// The `external_ref` prefix of a `NoveltyUtility` event the legacy gate path
+/// writes (`attempt_emit_novelty_utility_credit`):
+/// `novelty_utility:<gate_version_hash>:<submission_id>`.
+const NOVELTY_UTILITY_EXTERNAL_REF_PREFIX: &str = "novelty_utility:";
+
+/// Whether the legacy settlement path owes `event`'s type and provenance:
+/// what `run_credit_settlement`, the credit risk summary and
+/// `withdrawal_retains_all_credit` select, before each applies its own delta,
+/// status, hold and finalized-batch filters.
+///
+/// A `NoveltyUtility` event counts only when the legacy gate path wrote it.
+/// A compatibility pipeline run writes the same event type into the same
+/// ledger under its own ledger source key, and the pipeline never batches
+/// that leg (Ruling S10); `main` paying it would pay what the pipeline chose
+/// not to. An award with no gate provenance fails closed. The legacy drain
+/// count (`delayed_credit_unsettled` in `versioned_pipeline_activation.rs`)
+/// applies the same rule in SQL.
+fn trace_credit_event_counts_toward_settlement(event: &TraceCommonsCreditLedgerRecord) -> bool {
+    if !trace_credit_event_type_is_settlement_eligible(event.event_type) {
+        return false;
+    }
+    if event.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        return event.external_ref.as_deref().is_some_and(|external_ref| {
+            external_ref.starts_with(NOVELTY_UTILITY_EXTERNAL_REF_PREFIX)
+        });
+    }
+    true
 }
 
 /// Credit event ids already carried by a finalized settlement batch.
@@ -42593,7 +42641,7 @@ fn withdrawal_retains_all_credit(
 ) -> bool {
     !events.iter().any(|event| {
         event.submission_id == submission_id
-            && trace_credit_event_type_is_settlement_eligible(event.event_type)
+            && trace_credit_event_counts_toward_settlement(event)
             && event.credit_points_delta > 0.0
             && !finalized_event_ids.contains(&event.event_id)
     })
@@ -60568,7 +60616,7 @@ async fn attempt_emit_novelty_utility_credit(
     // not lost — the trace_gate_decisions row carries it and the audit log
     // links the two via the `reason` and the row's `decided_at` ordering.
     let external_ref = format!(
-        "novelty_utility:{}:{}",
+        "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}{}:{}",
         decision.gate_version_hash, submission_id,
     );
     let reason = format!("novelty_utility:{}", decision.gate_policy_version);

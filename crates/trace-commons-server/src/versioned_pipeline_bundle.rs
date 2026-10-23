@@ -507,9 +507,11 @@ const MINIMAL_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.minimal.v1";
 /// unchanged PR 2 behavior: the ledger's `Accepted` event type, batched and
 /// finalized like every other credit event. `NoveltyUtility` is the
 /// compatibility family's leg: the ledger's `NoveltyUtility` event type,
-/// which `main`'s `trace_credit_event_type_is_settlement_eligible` excludes
-/// from settlement -- that leg completes in the same transaction but is
-/// never composed into a batch or paid.
+/// which completes in the same transaction but is never composed into a
+/// batch or paid by the pipeline. `main` settles its own gate's
+/// `NoveltyUtility` events (owner decision 2026-10-23) but not this leg:
+/// `trace_credit_event_counts_toward_settlement` in `trace-commons-ingest.rs`
+/// takes only the legacy gate's `external_ref` shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineTraceCreditEvent {
     PipelineScore,

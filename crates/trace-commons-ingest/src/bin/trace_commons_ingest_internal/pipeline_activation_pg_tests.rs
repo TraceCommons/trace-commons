@@ -1691,6 +1691,107 @@ async fn the_vector_and_credit_counts_select_the_workers_own_sets() {
     );
 }
 
+/// The gate's scoring award (`NoveltyUtility`) is owed like the reviewed
+/// delayed types once it carries value, by the report and by the worker. A
+/// zero-valued award (the default delta) and an award shaped as a pipeline
+/// run writes it are owed by neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_credit_count_and_the_worker_agree_on_the_gate_scoring_award() {
+    let Some(fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+    write_routing_as_operator(tenant, "legacy").await;
+
+    let envelope = clean_envelope(&format!("drain_scoring_award_{suffix}")).await;
+    let receipt = fixture.upload_ok(&fixture.contributor, &envelope).await;
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+    let submission_id = envelope.submission_id;
+    let principal = fixture
+        .owner_text(
+            tenant,
+            "SELECT auth_principal_ref FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await;
+    let trace_id: Uuid = fixture
+        .owner_text(
+            tenant,
+            "SELECT trace_id::text FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .parse()
+        .expect("trace id parses");
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+
+    let award = |external_ref: String, credit_points_delta: f32| TraceCommonsCreditLedgerRecord {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant),
+        submission_id,
+        trace_id,
+        auth_principal_ref: principal.clone(),
+        event_type: TraceCreditLedgerEventType::NoveltyUtility,
+        credit_points_delta,
+        reason: Some("novelty_utility:gate-policy-v1".to_string()),
+        external_ref: Some(external_ref),
+        actor_role: TokenRole::VectorWorker,
+        actor_principal_ref: "principal:synthetic-gate-worker".to_string(),
+        created_at: Utc::now(),
+        witness_provenance_class: None,
+    };
+    let scored = award(
+        format!("{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-a:{submission_id}"),
+        1.25,
+    );
+    let zero = award(
+        format!("{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-b:{submission_id}"),
+        0.0,
+    );
+    let pipeline_shaped = award(
+        trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+            tenant,
+            &format!("synthetic-idempotency-key-{suffix}"),
+        ),
+        2.0,
+    );
+    for event in [&scored, &zero, &pipeline_shaped] {
+        append_credit_event(&fixture.state.root, tenant, event).expect("credit event appends");
+        mirror_credit_event_to_db(fixture.state.as_ref(), event)
+            .await
+            .expect("credit event mirrors");
+    }
+
+    assert_eq!(fixture.settlement_would_settle().await, 1);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        1
+    );
+    let settled = fixture
+        .call_ok(
+            "POST",
+            "/v1/admin/credit-settlements",
+            &fixture.admin,
+            serde_json::json!({
+                "dry_run": false,
+                "policy_version": "trace-credit-policy-v1",
+                "reason": "drain report agreement",
+            }),
+        )
+        .await;
+    assert_eq!(settled["settled_source_event_count"], 1, "{settled}");
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
+    );
+}
+
 /// Every count excludes a submission that a pipeline run owns, and counts the
 /// legacy twin of it: P (a pipeline receipt) and L (a legacy receipt) are given
 /// the same rows, each in the state that one count looks for, and the report

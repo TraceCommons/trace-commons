@@ -44287,6 +44287,44 @@ async fn delayed_credit_requires_reason_artifact_ref_and_bounded_delta() {
     assert_eq!(excessive_delta.0, StatusCode::BAD_REQUEST);
 }
 
+/// The scoring award settles, so only the gate may mint it: a reviewer who
+/// could append a `novelty_utility` event with the gate's `external_ref`
+/// shape would mint settling credit that no gate scored.
+#[tokio::test]
+async fn reviewer_route_refuses_the_gate_scoring_award() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let submission_id = submit_consented_metadata_fixture(
+        state.clone(),
+        "token-a",
+        ConsentScope::ModelTraining,
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+
+    let refused = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta: 1.0,
+            reason: Some("novelty_utility:gate-policy-v1".to_string()),
+            external_ref: Some(format!(
+                "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-a:{submission_id}"
+            )),
+        }),
+    )
+    .await
+    .expect_err("the scoring award is gate-emitted only");
+    assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+    assert!(
+        read_all_credit_events(temp.path(), "tenant-a")
+            .expect("ledger reads")
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn manual_training_credit_rejects_source_without_model_training_use() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -60624,13 +60662,13 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
 }
 
 #[test]
-fn novelty_utility_credit_is_not_settlement_eligible() {
-    // Novelty is cheaply fabricated. The graded-credit design requires
-    // dedup, caps, reputation and delayed settlement before novelty can
-    // carry settlement-eligible value; none of those gate emission yet.
-    // Until they do, novelty credit accrues as a signal but must never
-    // reach on-chain issuance.
-    assert!(!trace_credit_event_type_is_settlement_eligible(
+fn novelty_utility_credit_is_settlement_eligible() {
+    // Owner decision 2026-10-23: the gate's scoring award counts toward
+    // settlement, so a scored trace's credit can settle. Its amount is the
+    // operator-configured `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
+    // (default 0), and every consumer skips a non-positive delta, so a
+    // deployment that never set the delta settles nothing new.
+    assert!(trace_credit_event_type_is_settlement_eligible(
         TraceCreditLedgerEventType::NoveltyUtility
     ));
 }
@@ -60644,6 +60682,7 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
         TraceCreditLedgerEventType::RegressionCatch,
         TraceCreditLedgerEventType::TrainingUtility,
         TraceCreditLedgerEventType::RankingUtility,
+        TraceCreditLedgerEventType::NoveltyUtility,
     ] {
         assert!(
             trace_credit_event_type_is_settlement_eligible(event_type),
@@ -60651,7 +60690,6 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
         );
     }
     for event_type in [
-        TraceCreditLedgerEventType::NoveltyUtility,
         TraceCreditLedgerEventType::ReviewerBonus,
         TraceCreditLedgerEventType::AbusePenalty,
     ] {
@@ -60660,6 +60698,210 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
             "{event_type:?} should not be settlement-eligible"
         );
     }
+}
+
+/// A `NoveltyUtility` event as `attempt_emit_novelty_utility_credit` writes it.
+fn legacy_scoring_award_event(
+    submission_id: Uuid,
+    gate_version_hash: &str,
+    credit_points_delta: f32,
+) -> TraceCommonsCreditLedgerRecord {
+    TraceCommonsCreditLedgerRecord {
+        reason: Some("novelty_utility:gate-policy-v1".to_string()),
+        external_ref: Some(format!(
+            "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}{gate_version_hash}:{submission_id}"
+        )),
+        ..withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta,
+        )
+    }
+}
+
+/// A `NoveltyUtility` event as a compatibility pipeline run writes it
+/// (`settle_internal_credit`): the pipeline's ledger source key as its
+/// `external_ref`. The pipeline never batches that leg (Ruling S10).
+fn pipeline_scoring_award_event(
+    submission_id: Uuid,
+    credit_points_delta: f32,
+) -> TraceCommonsCreditLedgerRecord {
+    TraceCommonsCreditLedgerRecord {
+        reason: Some(
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(),
+        ),
+        external_ref: Some(
+            trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+                "tenant-a",
+                "synthetic-idempotency-key",
+            ),
+        ),
+        ..withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta,
+        )
+    }
+}
+
+#[test]
+fn only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement() {
+    let submission_id = Uuid::new_v4();
+    assert!(trace_credit_event_counts_toward_settlement(
+        &legacy_scoring_award_event(submission_id, "sha256:gate-a", 1.0)
+    ));
+    // The pipeline's own `NoveltyUtility` leg is the pipeline's to settle;
+    // `main` paying it would pay what the pipeline chose not to.
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &pipeline_scoring_award_event(submission_id, 1.0)
+    ));
+    // Fail closed on a scoring award with no gate provenance.
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            1.0
+        )
+    ));
+    // The provenance rule is the scoring award's alone: reviewed types keep
+    // whatever `external_ref` an operator gave them.
+    assert!(trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::TrainingUtility,
+            1.0
+        )
+    ));
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::ReviewerBonus,
+            1.0
+        )
+    ));
+}
+
+#[test]
+fn the_pipeline_ledger_source_key_never_reads_as_a_gate_scoring_award() {
+    let key = trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+        "tenant-a",
+        "synthetic-idempotency-key",
+    );
+    assert!(!key.starts_with(NOVELTY_UTILITY_EXTERNAL_REF_PREFIX));
+}
+
+#[tokio::test]
+async fn admin_credit_settlement_settles_the_gate_scoring_award() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let submission_id = submit_consented_metadata_fixture(
+        state.clone(),
+        "token-a",
+        ConsentScope::ModelTraining,
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let shaped = |event: TraceCommonsCreditLedgerRecord| TraceCommonsCreditLedgerRecord {
+        trace_id: record.trace_id,
+        auth_principal_ref: record.auth_principal_ref.clone(),
+        ..event
+    };
+    let scored = shaped(legacy_scoring_award_event(
+        submission_id,
+        "sha256:gate-a",
+        1.25,
+    ));
+    // At the default delta (0) the award is written with no value: it
+    // settles nothing, whatever its type.
+    let zero = shaped(legacy_scoring_award_event(
+        submission_id,
+        "sha256:gate-b",
+        0.0,
+    ));
+    let pipeline = shaped(pipeline_scoring_award_event(submission_id, 2.0));
+    for event in [&scored, &zero, &pipeline] {
+        append_credit_event(temp.path(), "tenant-a", event).expect("credit event appends");
+    }
+
+    // The risk summary owes the same events settlement would batch.
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/admin/credit-risk-summary")
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("admin response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+    assert_eq!(value["pending_credit_micros"], serde_json::json!(1_250_000));
+    assert_eq!(
+        value["accounts"][0]["pending_source_event_count"],
+        serde_json::json!(1)
+    );
+
+    // Withdrawal would forfeit the unsettled award.
+    let events = read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+    assert!(!withdrawal_retains_all_credit(
+        submission_id,
+        &events,
+        &BTreeSet::new()
+    ));
+
+    let Json(dry_run) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: true,
+            ..test_settlement_request("preview scoring award settlement".to_string())
+        }),
+    )
+    .await
+    .expect("admin can dry-run settlement");
+    assert_eq!(dry_run.settled_source_event_count, 1);
+    assert_eq!(dry_run.settled_credit_points, 1.25);
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(test_settlement_request(
+            "finalize scoring award settlement".to_string(),
+        )),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+    assert_eq!(finalized.settled_credit_points, 1.25);
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].source_credit_event_ids, vec![scored.event_id]);
+
+    // Settled: withdrawal now keeps everything, and the contributor's credit
+    // summary moves the award from pending to settled.
+    let finalized_ids = finalized_settlement_credit_event_ids(&batches);
+    assert!(withdrawal_retains_all_credit(
+        submission_id,
+        &events,
+        &finalized_ids
+    ));
+    let Json(credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("credit summary succeeds");
+    assert_eq!(credit.credit_points_settled, 1.25);
 }
 
 #[test]
@@ -99382,7 +99624,7 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
 
 /// Zaki review 1, minor item M-b: a Trace Credit leg that will never be paid
 /// reports no pending points, as a forfeited or failed one does: a
-/// `NoveltyUtility` leg `main` never settles (`NotSettlementEligible`) and
+/// compatibility `NoveltyUtility` leg nothing settles (`NotSettlementEligible`) and
 /// one `main`'s credit checks withheld (`Withheld`).
 #[test]
 fn a_withheld_or_never_settled_leg_reports_no_pending_points() {

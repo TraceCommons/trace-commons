@@ -149,10 +149,11 @@ pub enum PipelineCreditStatus {
     Finalized,
     Failed,
     /// Ruling S11: a compatibility bundle's `NoveltyUtility` Trace Credit
-    /// leg. It completes like any other leg, but the ledger event type it
-    /// wrote is one `main` never batches or pays
-    /// (`trace_credit_event_type_is_settlement_eligible` excludes it), so it
-    /// would otherwise sit at `Pending` forever.
+    /// leg. It completes like any other leg, but the pipeline's own batch
+    /// rule (Ruling S10) never composes it into a batch, and `main`'s
+    /// settlement takes only the events its own gate wrote
+    /// (`trace_credit_event_counts_toward_settlement`), so it would otherwise
+    /// sit at `Pending` forever.
     NotSettlementEligible,
     /// Ruling RB-6: a `trace_credit` leg a failed Settle run
     /// (`resolve_open_settlement_legs_on_tx`) or a withdrawal after Score

@@ -1490,4 +1490,8 @@ So `unknown` on a deployed binary points at the build step, not at the host.
 - Wire scheduled smoke testing.
 - After ~1000 real pilot traces, re-calibrate floors and flip
   `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` from `0` to the
-  configured live value.
+  configured live value. The gate's scoring award settles like the
+  reviewed utility credit types, so a non-zero value is value the next
+  live settlement run batches and pays. Run the settlement as a dry run
+  first: unsettled awards written at a non-zero value before this release
+  are included.

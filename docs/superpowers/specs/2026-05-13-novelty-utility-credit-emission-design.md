@@ -8,6 +8,21 @@ Predecessors:
 - `2026-05-12-perplexity-scorer-design.md` (A2)
 - Migration V23 (schema additions for `gate_version_hash`, `gate_policy_version`, `trace_gate_decisions`)
 
+> **Amendment, 2026-10-23 (owner decision).** The implementation kept
+> `novelty_utility` out of `trace_credit_event_type_is_settlement_eligible`,
+> so the award accrued but never settled, and real traces never settled.
+> The owner decided that a scored trace's credit counts toward settlement:
+> the gate's `novelty_utility` award is now settlement-eligible on the
+> legacy settlement path. Its amount is still
+> `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, default `0`, and
+> every consumer skips a non-positive delta, so nothing new settles until
+> an operator sets a value. Only the events this gate writes (`external_ref`
+> `novelty_utility:<gate_version_hash>:<submission_id>`) count, and the
+> reviewer credit route now refuses a `novelty_utility` event, so only the
+> gate mints it. A compatibility pipeline run's `NoveltyUtility` leg is
+> unchanged: the pipeline never batches it, and the legacy settlement
+> leaves it alone.
+
 ## Goal
 
 When the gate worker route (`POST /v1/workers/gate/evaluate`, shipped in PR
