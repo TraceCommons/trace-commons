@@ -50,7 +50,7 @@ use trace_commons_protocol::trace_contribution::{
 };
 use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
 use trace_commons_server::versioned_pipeline_bundle::{
-    PipelineBundleConfig, package_compatibility_config,
+    PipelineBundleConfig, package_compatibility_config, package_substance_config,
 };
 use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, CompatibilityBundleConfig,
@@ -72,6 +72,9 @@ use trace_commons_server::versioned_pipeline_qualification::{
     SignedBundlePackage, TrustedBundleKey, evidence_hash, package_digests, sign_bundle_package,
     sign_check_result, trusted_key_for_pkcs8,
 };
+use trace_commons_server::versioned_pipeline_substance::{
+    SUBSTANCE_SCORE_IMPLEMENTATION, substance_candidate_package,
+};
 
 const CORPUS_SCHEMA: &str = "trace_commons.pipeline_corpus.v1";
 const CORPUS_REPORT_SCHEMA: &str = "trace_commons.pipeline_corpus_report.v1";
@@ -83,10 +86,12 @@ const MINIMAL_CORPUS_CHECK_ID: &str = "pipeline_http_corpus_minimal";
 /// The check ids `pipeline_corpus_run` may emit. `pipeline.py` chooses one:
 /// `_<bundle>` for a built-in bundle, `_package` for a signed package, and
 /// `_hf_local` for an HF pin (two partitions). `pipeline_http_corpus_package`
-/// is not a required check (controller ruling PF-1).
-const CORPUS_CHECK_IDS: [&str; 4] = [
+/// is not a required check (controller ruling PF-1), and neither is
+/// `pipeline_http_corpus_substance` (owner decision O-3: permitted).
+const CORPUS_CHECK_IDS: [&str; 5] = [
     MINIMAL_CORPUS_CHECK_ID,
     "pipeline_http_corpus_compatibility",
+    "pipeline_http_corpus_substance",
     "pipeline_http_corpus_hf_local",
     "pipeline_http_corpus_package",
 ];
@@ -380,6 +385,19 @@ fn bundle_award_states(package: &BundlePackage) -> Result<BTreeMap<String, Strin
         } else {
             BTreeMap::new()
         })
+    } else if package.manifest.score.implementation_id == SUBSTANCE_SCORE_IMPLEMENTATION {
+        // The substance novelty award is the compatibility one: a positive
+        // delta settles one leg as `not_settlement_eligible`.
+        let config =
+            package_substance_config(package).ok_or("corpus_package_configuration_invalid")?;
+        Ok(if config.novelty.novelty_utility_microcredits > 0 {
+            BTreeMap::from([(
+                config.novelty.instrument.instrument_id.clone(),
+                "not_settlement_eligible".to_string(),
+            )])
+        } else {
+            BTreeMap::new()
+        })
     } else {
         let config: PipelineBundleConfig =
             serde_json::from_slice(config).map_err(|_| "corpus_package_configuration_invalid")?;
@@ -458,7 +476,7 @@ impl CorpusRunConfig {
                 return Err("corpus_package_and_bundle_conflict");
             }
             (Some(bundle), None, None) => {
-                if !matches!(bundle.as_str(), "minimal" | "compatibility") {
+                if !matches!(bundle.as_str(), "minimal" | "compatibility" | "substance") {
                     return Err("corpus_bundle_invalid");
                 }
                 CorpusPackageSource::Bundle(bundle)
@@ -546,7 +564,8 @@ fn production_bundle_package_from_env() -> anyhow::Result<BundlePackage> {
 /// The built-in bundles, by name: PR 2's minimal package with the
 /// `storage_rebate` award, and the qualification candidate, the
 /// compatibility package over `local_reference()` with a 2_500_000
-/// microcredit `NoveltyUtility` delta (`qualification_candidate_package`).
+/// microcredit `NoveltyUtility` delta (`qualification_candidate_package`),
+/// and the substance candidate (`substance_candidate_package`).
 fn corpus_bundle_package(bundle: &str) -> anyhow::Result<BundlePackage> {
     match bundle {
         "minimal" => minimal_storage_rebate_package(
@@ -554,6 +573,7 @@ fn corpus_bundle_package(bundle: &str) -> anyhow::Result<BundlePackage> {
             &ReferenceEmbedder::new(),
         ),
         "compatibility" => qualification_candidate_package(),
+        "substance" => substance_candidate_package(),
         _ => anyhow::bail!("corpus_bundle_invalid"),
     }
 }
@@ -2977,6 +2997,43 @@ async fn fixture_envelopes_send_redacted_text_for_low_risk_and_metadata_otherwis
     assert!(
         secret.input.contains(&secret.secret_probe),
         "the fixture's input holds its probe until local redaction removes it"
+    );
+}
+
+#[test]
+fn corpus_run_config_accepts_the_substance_bundle() {
+    let vars: BTreeMap<String, String> = [
+        (CORPUS_PATH_VAR, "/tmp/corpus.json"),
+        (CORPUS_CHECK_ID_VAR, "pipeline_http_corpus_substance"),
+        (CORPUS_BUNDLE_VAR, "substance"),
+        (CORPUS_REPORT_PATH_VAR, "/tmp/report.json"),
+    ]
+    .iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect();
+    let parsed = CorpusRunConfig::from_vars(|name| vars.get(name).cloned())
+        .expect("the substance bundle is accepted")
+        .expect("a complete configuration");
+    assert_eq!(
+        parsed.source,
+        CorpusPackageSource::Bundle("substance".into())
+    );
+    let package = corpus_bundle_package("substance").expect("the substance package builds");
+    assert_eq!(
+        package.manifest.score.implementation_id,
+        "trace_commons.score.substance.v1"
+    );
+}
+
+#[test]
+fn substance_award_states_come_from_its_novelty_config() {
+    let package = substance_candidate_package().expect("the substance package builds");
+    assert_eq!(
+        bundle_award_states(&package),
+        Ok(BTreeMap::from([(
+            "trace_credit".to_string(),
+            "not_settlement_eligible".to_string(),
+        )]))
     );
 }
 

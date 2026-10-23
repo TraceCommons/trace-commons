@@ -110,7 +110,7 @@ PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package
 # writer, two more ignored tests beside the package writer.
 ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
 KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
-BUNDLES = ("minimal", "compatibility")
+BUNDLES = ("minimal", "compatibility", "substance")
 # `package` also builds the production package (spec B-D5), from the
 # deployment's env file; `run` never serves it as a built-in bundle.
 PACKAGE_BUNDLES = (*BUNDLES, "production")

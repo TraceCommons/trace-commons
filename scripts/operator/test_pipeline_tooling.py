@@ -2253,6 +2253,14 @@ class PackageCommandTests(_CorpusRunCase):
         # `run` serves no production bundle: its package comes from `package`.
         self.assertNotIn("production", pipeline.BUNDLES)
 
+    def test_substance_is_a_built_in_bundle(self):
+        self.assertIn("substance", pipeline.BUNDLES)
+        self.assertIn("substance", pipeline.PACKAGE_BUNDLES)
+
+    def test_substance_corpus_check_is_permitted_not_required(self):
+        self.assertIn("pipeline_http_corpus_substance", corpus.CORPUS_CHECK_IDS)
+        self.assertNotIn("pipeline_http_corpus_substance", checks.REQUIRED_CORPUS_CHECK_IDS)
+
 
 # ---------------------------------------------------------------------------
 # Task 10: `pipeline.py restore-drill`.
