@@ -3032,7 +3032,9 @@ fn production_harness_service(
 /// The production assembler over `dependencies`, under the pins `pins_from`
 /// carries, refused unless it serves exactly `expected`. A real run passes
 /// the same package twice; the second argument exists so a test can show
-/// the refusal.
+/// the refusal. This harness has no gate of its own: a compatibility
+/// package runs under the gate it holds, a substance package under the gate
+/// its novelty values imply (`substance_package_gate`).
 fn production_harness_service_for(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -3040,11 +3042,25 @@ fn production_harness_service_for(
     pins_from: &BundlePackage,
     dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_server::versioned_pipeline_bundle::package_substance_config;
     use trace_commons_server::versioned_pipeline_harness::{
-        assemble_harness_production, harness_production_components, production_package_pins,
+        HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL, assemble_harness_production,
+        harness_production_components, production_package_pins, substance_package_gate,
     };
-    use trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs;
+    use trace_commons_server::versioned_pipeline_production::{
+        ProductionPipelineInputs, ProductionScoreSelection,
+    };
     let pins = production_package_pins(pins_from)?;
+    let main_gate = match &pins.score_selection {
+        ProductionScoreSelection::Compatibility => pins
+            .main_gate
+            .ok_or_else(|| anyhow::anyhow!(HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL))?,
+        ProductionScoreSelection::Substance(_) => substance_package_gate(
+            &package_substance_config(pins_from)
+                .ok_or_else(|| anyhow::anyhow!(HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL))?
+                .novelty,
+        ),
+    };
     let components = harness_production_components(
         &pins,
         dependencies,
@@ -3060,10 +3076,10 @@ fn production_harness_service_for(
             lease_config: PipelineLeaseConfig::default(),
             novelty_utility_checks: issuing_checks(),
             unqualified_routing_allowed: false,
-            main_gate: pins.main_gate,
+            main_gate,
             components,
             score_policies: Default::default(),
-            score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
+            score_selection: pins.score_selection,
         },
     )?))
 }

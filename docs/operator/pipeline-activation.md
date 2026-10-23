@@ -1343,8 +1343,11 @@ not re-qualify. To shorten the window, raise the batch for the deploy.
 A tenant an operator activated by hand, or whose row an operator changed
 since (for example a `contain`), is not re-qualified by the loop. Qualify it
 through `POST /v1/admin/pipeline/qualifications` as before. A tenant whose
-active bundle is another bundle (after a rollback) is skipped with
-`pipeline_default_routing_requalify_bundle_differs`.
+active bundle is another bundle (after a rollback, or after a switch of the
+default package) is skipped with
+`pipeline_default_routing_requalify_bundle_differs`. After a switch of the
+default package, activate each such tenant on the new bundle by hand (see
+"Switch the default package to substance").
 
 ### Disarm
 
@@ -1812,9 +1815,13 @@ the embedder model is loaded once. The pipeline gets:
 
 The assembly never enables NEAR payout, whatever
 `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` says: a pipeline tenant cannot be paid out
-by this runtime. It binds the compatibility bundle with `main`'s gate
-configuration. A start whose descriptors would name values other than the ones
-the gate was built with refuses (`pipeline_scorer_descriptor_mismatch`,
+by this runtime. It binds the default package that
+`TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` selects, with `main`'s gate
+configuration: the compatibility bundle when the variable is unset or
+`compatibility`, and the calibrated substance bundle when it is `substance`
+(see "Switch the default package to substance" below). A start whose
+descriptors would name values other than the ones the gate was built with
+refuses (`pipeline_scorer_descriptor_mismatch`,
 `pipeline_embedder_descriptor_mismatch`).
 
 ### `pipeline_production_adapters`
@@ -1841,6 +1848,59 @@ there. A boot refused at any of those writes nothing:
   counts only. `runtime_identity_digest` is the value activation compares.
 
 Unset the three variables after that boot.
+
+## Switch the default package to substance
+
+The deployment selects its default package with six variables in its env
+file. A tenant runs its active bundle, so a new default package does not
+move a tenant that is already active on the compatibility bundle. Each such
+tenant moves with its own `activate`. Do these steps in this order.
+
+1. Calibrate. Run `pipeline.py evaluate` and give the distribution report to
+   the owner. The owner sets the floor percentile. Run `evaluate` again with
+   that percentile and keep its values file
+   ([substance-calibration.md](substance-calibration.md)).
+2. Set the six variables in the deployment env file, from that values file.
+   Keep the gate variables as they are.
+
+   | Variable | Value |
+   |---|---|
+   | `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` | `substance` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS` | `sub_ceil_micros` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS` | `substance_floor_micros` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE` | `calibration.substance_floor_percentile` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST` | `calibration.corpus_pin_digest` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST` | `calibration.report_digest` |
+
+   With `substance`, a missing or unparsable value refuses the start
+   (`pipeline_substance_calibration_missing`). With no selection or with
+   `compatibility`, a set calibration variable refuses the start
+   (`pipeline_substance_calibration_unexpected`).
+3. Deploy. As for every deploy, the new revision closes the intake of each
+   routed tenant until its active bundle has a qualification on that revision
+   (#1249; "After a deploy: the qualification is read again for each new
+   upload" above). Uploads of those tenants answer `503`
+   `pipeline_bundle_not_qualified` until step 6 reaches them.
+4. Promote the substance package. Run `pipeline.py package --bundle
+   production --env-file ENV` with the deployment env file: it builds the
+   substance package from the six variables. Then run the `promote` cycle on
+   that package, up to `assemble`
+   ([pipeline-qualification.md](pipeline-qualification.md#the-production-run-pipelinepy-promote)).
+5. Install the new default-routing set: the `assemble` output, swapped into
+   the results directory as in "After a deploy" under "Default routing". The
+   loop arms on the substance package. A tenant with no routing row is
+   activated on it.
+6. Activate the substance bundle for each tenant that is still on the
+   compatibility bundle: `POST /v1/admin/pipeline/qualifications` with the
+   signed substance package, then `POST /v1/admin/pipeline/activate` with its
+   `bundle_id` and the assembled results. The loop does not do this step: it
+   re-qualifies only a tenant whose active bundle is the armed bundle, and
+   skips the others with `pipeline_default_routing_requalify_bundle_differs`.
+
+To roll back one tenant, `activate` the compatibility bundle for it. The
+compatibility bundle stays runnable while the gate variables stay in the env
+file. As for every `activate`, it needs signed results for the compatibility
+package on the running revision.
 
 ## Fail-closed dependency qualification
 

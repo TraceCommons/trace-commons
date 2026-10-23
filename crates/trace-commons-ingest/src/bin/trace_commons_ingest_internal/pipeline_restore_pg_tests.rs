@@ -64,9 +64,11 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 use super::pipeline_corpus_pg_tests::{
-    ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, TEST_MASTER_KEY_VAR,
-    assemble_production_harness_service, fixture_envelope, id_hash, load_corpus, main_corpus_path,
-    production_test_package, production_test_package_awarding, sha256_bytes, write_atomically,
+    ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, CorpusFixture,
+    TEST_MASTER_KEY_VAR, assemble_production_harness_service, fixture_envelope,
+    fixture_envelope_with_tool_calls, id_hash, load_corpus, main_corpus_path,
+    production_test_package, production_test_package_awarding, production_test_substance_package,
+    production_test_substance_package_awarding, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
@@ -1371,17 +1373,37 @@ impl RestoreDependencies {
 
     /// Whether Score awards Trace Credit to a run that passes its floors:
     /// the reference candidate always does; a production package does unless
-    /// its `NoveltyUtility` delta, `main`'s, is `0`, as on the pilot.
+    /// its `NoveltyUtility` delta, `main`'s, is `0`, as on the pilot. A
+    /// substance package holds the delta in its novelty configuration.
     fn awards_credit(&self) -> bool {
+        use trace_commons_server::versioned_pipeline_bundle::{
+            package_compatibility_config, package_substance_config,
+        };
         match self {
             Self::Reference { .. } => true,
             Self::Production { package, .. } => {
-                trace_commons_server::versioned_pipeline_bundle::package_compatibility_config(
-                    package,
-                )
-                .unwrap_or_else(|| panic!("harness_production_package_invalid"))
-                .novelty_utility_microcredits
-                    > 0
+                let microcredits = match package_compatibility_config(package) {
+                    Some(config) => config.novelty_utility_microcredits,
+                    None => {
+                        package_substance_config(package)
+                            .unwrap_or_else(|| panic!("harness_production_package_invalid"))
+                            .novelty
+                            .novelty_utility_microcredits
+                    }
+                };
+                microcredits > 0
+            }
+        }
+    }
+
+    /// Whether the package the drill serves scores substance: then its two
+    /// runs need a trace with tool calls ([`seed_envelopes`]).
+    fn scores_substance(&self) -> bool {
+        match self {
+            Self::Reference { .. } => false,
+            Self::Production { package, .. } => {
+                trace_commons_server::versioned_pipeline_bundle::package_substance_config(package)
+                    .is_some()
             }
         }
     }
@@ -2020,14 +2042,57 @@ async fn pipeline_restore_seed() {
     restore_seed(&config, &dependencies).await;
 }
 
+/// The tool calls of the drill's trace under a substance package: 20 paired
+/// calls over 8 tools, each with its own arguments and a result. With the
+/// fixture's prompt, its substance is `900_000` unattested (both terms 1,
+/// the attestation factor 0.90), so it passes any calibrated floor: no
+/// corpus trace scores above `900_000`.
+fn substance_drill_tool_calls()
+-> Vec<trace_commons_protocol::trace_contribution::RawTraceCaptureToolCall> {
+    (0..20)
+        .map(
+            |index| trace_commons_protocol::trace_contribution::RawTraceCaptureToolCall {
+                name: format!("drill_tool_{}", index % 8),
+                id: Some(format!("drill_call_{index}")),
+                arguments: Some(serde_json::json!({ "step": index })),
+                result_preview: Some("ok".to_string()),
+                error: None,
+                rationale: None,
+            },
+        )
+        .collect()
+}
+
+/// The seed's two envelopes, one for each of the first two fixtures. Under
+/// a substance package Score's index write depends on the trace, so each is
+/// the fixture's envelope with [`substance_drill_tool_calls`]; any other
+/// package keeps the fixture envelopes.
+async fn seed_envelopes(
+    dependencies: &RestoreDependencies,
+    completed_fixture: &CorpusFixture,
+    pending_fixture: &CorpusFixture,
+) -> (TraceContributionEnvelope, TraceContributionEnvelope) {
+    if dependencies.scores_substance() {
+        (
+            fixture_envelope_with_tool_calls(completed_fixture, substance_drill_tool_calls()).await,
+            fixture_envelope_with_tool_calls(pending_fixture, substance_drill_tool_calls()).await,
+        )
+    } else {
+        (
+            fixture_envelope(completed_fixture).await,
+            fixture_envelope(pending_fixture).await,
+        )
+    }
+}
+
 /// The seed over `dependencies`: the body of `pipeline_restore_seed`.
 async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies) {
     let (corpus, _) = load_corpus(&main_corpus_path()).unwrap_or_else(|label| panic!("{label}"));
     let [completed_fixture, pending_fixture, ..] = corpus.fixtures.as_slice() else {
         panic!("restore_corpus_too_small");
     };
-    let completed_envelope = fixture_envelope(completed_fixture).await;
-    let pending_envelope = fixture_envelope(pending_fixture).await;
+    let (completed_envelope, pending_envelope) =
+        seed_envelopes(dependencies, completed_fixture, pending_fixture).await;
 
     let runtime = runtime_backend(8)
         .await
@@ -2965,6 +3030,122 @@ async fn production_restore_drill_resumes_once_without_credit_over_doubles() {
     restore_seed(&config, &dependencies).await;
     let resume = production_restore_doubles(production_test_package_awarding(0));
     restore_resume(&config, &url, &resume).await;
+}
+
+/// The production restore drill over doubles under the production
+/// substance test package: the seed's two runs carry the drill's tool-call trace
+/// ([`seed_envelopes`]), which passes the calibrated floor, so the pending
+/// run has an index write and legs to settle, and the resume completes it
+/// once. The service runs under the corpus runtime's gate, whose novelty
+/// values are the package's. Ignored for the reason
+/// `production_restore_drill_resumes_once_over_doubles` is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "writes the drill's fixed tenants into the shared database: run alone"]
+async fn production_restore_drill_resumes_once_over_doubles_with_substance() {
+    let Some(url) = pipeline_http_database_url().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = RestoreConfig {
+        artifacts: RestoreArtifacts::Local(dir.path().join("artifacts")),
+        master_key_hex: trace_commons_server::secrets::keychain::generate_master_key_hex(),
+        fingerprint_path: dir.path().join("fingerprint.json"),
+    };
+    let dependencies = production_restore_doubles(production_test_substance_package());
+    assert!(dependencies.scores_substance());
+    assert!(dependencies.awards_credit());
+    restore_seed(&config, &dependencies).await;
+    let resume = production_restore_doubles(production_test_substance_package());
+    restore_resume(&config, &url, &resume).await;
+}
+
+/// `awards_credit` reads a substance package's award from its novelty
+/// configuration: true exactly when `novelty_utility_microcredits` is
+/// above 0. A compatibility package keeps its own reading, and only a
+/// substance package scores substance.
+#[test]
+fn restore_awards_credit_reads_the_substance_award() {
+    use trace_commons_server::versioned_pipeline_bundle::package_substance_config;
+
+    for microcredits in [0, 1, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS] {
+        let package = production_test_substance_package_awarding(microcredits);
+        assert_eq!(
+            package_substance_config(&package)
+                .unwrap()
+                .novelty
+                .novelty_utility_microcredits,
+            microcredits
+        );
+        let dependencies = production_restore_doubles(package);
+        assert!(dependencies.scores_substance());
+        assert_eq!(
+            dependencies.awards_credit(),
+            microcredits > 0,
+            "{microcredits}"
+        );
+    }
+    for microcredits in [0, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS] {
+        let dependencies =
+            production_restore_doubles(production_test_package_awarding(microcredits));
+        assert!(!dependencies.scores_substance());
+        assert_eq!(
+            dependencies.awards_credit(),
+            microcredits > 0,
+            "{microcredits}"
+        );
+    }
+    assert!(!RestoreDependencies::reference().scores_substance());
+    assert!(RestoreDependencies::reference().awards_credit());
+}
+
+/// The drill's substance envelope, after the contributor side's redaction,
+/// still holds 20 paired calls over 8 tools and the prompt, so it scores
+/// `900_000` unattested, which no calibrated floor exceeds. A package of
+/// another family keeps the fixture envelopes.
+#[tokio::test]
+async fn substance_drill_envelopes_score_900_000_unattested() {
+    use trace_commons_gate_api::pipeline::ScoreWitnessClass;
+    use trace_commons_server::versioned_pipeline_substance::{
+        SubstanceParams, composite, project_tool_calls, substance_terms, to_micros,
+    };
+
+    let (corpus, _) = load_corpus(&main_corpus_path()).unwrap_or_else(|label| panic!("{label}"));
+    let [completed_fixture, pending_fixture, ..] = corpus.fixtures.as_slice() else {
+        panic!("restore_corpus_too_small");
+    };
+    let substance = production_restore_doubles(production_test_substance_package());
+    let (completed, pending) = seed_envelopes(&substance, completed_fixture, pending_fixture).await;
+    assert_ne!(completed.submission_id, pending.submission_id);
+    assert_eq!(
+        completed.submission_id,
+        fixture_envelope(completed_fixture).await.submission_id
+    );
+    let params = SubstanceParams::rlvr_v1();
+    for envelope in [&completed, &pending] {
+        let projection = project_tool_calls(envelope);
+        assert_eq!(
+            (
+                projection.tool_calls,
+                projection.paired_calls,
+                projection.distinct_tools,
+                projection.has_initial_prompt,
+            ),
+            (20, 20, 8, true)
+        );
+        let terms = substance_terms(&projection, ScoreWitnessClass::Unattested, &params);
+        assert_eq!(to_micros(composite(&terms, &params)), 900_000);
+    }
+
+    let compatibility = production_restore_doubles(production_test_package());
+    let (completed, pending) =
+        seed_envelopes(&compatibility, completed_fixture, pending_fixture).await;
+    for (envelope, fixture) in [(&completed, completed_fixture), (&pending, pending_fixture)] {
+        assert_eq!(
+            envelope.submission_id,
+            fixture_envelope(fixture).await.submission_id
+        );
+        assert_eq!(project_tool_calls(envelope).tool_calls, 0);
+    }
 }
 
 fn vars_from(set: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {

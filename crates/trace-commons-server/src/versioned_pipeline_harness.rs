@@ -15,8 +15,9 @@
 //! (`harness_production_assembly_unavailable` otherwise).
 //!
 //! A production harness serves a signed production package, never one of
-//! its own making: it reads the scorer and embedder descriptors and `main`'s
-//! gate configuration back out of the package
+//! its own making: it reads the scorer and embedder descriptors, the Score
+//! selection, and (for a compatibility package) `main`'s gate
+//! configuration back out of the package
 //! ([`production_package_pins`]), takes its components from
 //! `PipelineGateComponents::from_env` -- the constructor the deployed ingest
 //! uses, and the only one whose scorer and embedder adapters are
@@ -44,16 +45,17 @@ use trace_commons_gate_api::{
 
 use crate::versioned_pipeline::{PipelineCrashPoint, PipelineService};
 use crate::versioned_pipeline_authority::{PipelineAuthorityProvider, PipelinePrivacyBoundary};
-use crate::versioned_pipeline_bundle::package_compatibility_config;
+use crate::versioned_pipeline_bundle::{package_compatibility_config, package_substance_config};
 use crate::versioned_pipeline_compat::{CompatibilityQualification, MainGateConfig};
 use crate::versioned_pipeline_production::{
     FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponentParts,
-    PipelineGateComponents, ProductionPipelineInputs, production_compatibility_package,
+    PipelineGateComponents, ProductionPipelineInputs, ProductionScoreSelection, production_package,
     production_pipeline_builder,
 };
 use crate::versioned_pipeline_qualification::{
     BundlePackageTrustStore, SignedBundlePackage, TrustedBundleKey,
 };
+use crate::versioned_pipeline_substance::{CalibratedSubstanceValues, SubstanceNoveltyConfig};
 
 /// Selects what the qualification harnesses assemble.
 pub const TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY: &str = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY";
@@ -120,27 +122,80 @@ impl HarnessAssembly {
 }
 
 /// What a production package says its assembly is built from: the two
-/// descriptors its Score policy names and stores, and `main`'s gate
-/// configuration its compatibility configuration holds.
+/// descriptors its Score policy names and stores, the Score selection it
+/// was built with, and, for a compatibility package, `main`'s gate
+/// configuration its configuration holds. A substance package holds only
+/// the novelty values of a gate (no perplexity or tail floor), so its
+/// `main_gate` is `None`: a harness then runs it under its context's gate,
+/// and the assembly refuses a gate whose novelty values differ
+/// ([`assemble_harness_production_crashing_at`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionPackagePins {
     pub scorer_descriptor: NearAiScorerDescriptor,
     pub embedder_descriptor: FastEmbedDescriptor,
-    pub main_gate: MainGateConfig,
+    pub main_gate: Option<MainGateConfig>,
+    pub score_selection: ProductionScoreSelection,
+}
+
+/// The gate a substance package's novelty values imply: those values, with
+/// no perplexity or tail floor, which a substance package neither holds nor
+/// reads. What [`production_package_pins`] rebuilds a substance package
+/// under, and the gate of a harness with no context gate of its own.
+pub fn substance_package_gate(novelty: &SubstanceNoveltyConfig) -> MainGateConfig {
+    MainGateConfig {
+        perplexity_floor_micros: None,
+        tail_fraction_floor_micros: None,
+        novelty_floor_micros: Some(novelty.novelty_floor_micros),
+        embed_insert_novelty_micros: novelty.embed_insert_novelty_micros,
+        top_k: novelty.top_k,
+        chunk_target_tokens: novelty.chunk_target_tokens,
+        chunk_max_tokens: novelty.chunk_max_tokens,
+        chunk_cap: novelty.chunk_cap,
+        chunk_min_tokens: novelty.chunk_min_tokens,
+        novelty_utility_microcredits: novelty.novelty_utility_microcredits,
+    }
 }
 
 /// Reads [`ProductionPackagePins`] out of `package` and proves them: the
-/// production package those pins build must be `package` itself. Anything
-/// else -- a reference or test package, a production package whose
-/// descriptors this build cannot reproduce byte for byte, one built with
-/// another projection or index id -- is refused.
+/// production package those pins build ([`production_package`]) must be
+/// `package` itself. A compatibility package rebuilds under the gate its
+/// configuration holds; a substance package under its calibrated values
+/// and [`substance_package_gate`] of its novelty values. Anything else -- a
+/// reference or test package, a production package whose descriptors this
+/// build cannot reproduce byte for byte, one built with another projection
+/// or index id or another fixed substance value -- is refused.
 pub fn production_package_pins(package: &BundlePackage) -> anyhow::Result<ProductionPackagePins> {
     let invalid = || anyhow::anyhow!(HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL);
-    let config = package_compatibility_config(package).ok_or_else(invalid)?;
-    anyhow::ensure!(
-        config.qualification == CompatibilityQualification::ProductionCompatible,
-        HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL
-    );
+    let (main_gate, score_selection, rebuild_gate) =
+        if let Some(config) = package_compatibility_config(package) {
+            anyhow::ensure!(
+                config.qualification == CompatibilityQualification::ProductionCompatible,
+                HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL
+            );
+            let main_gate = config.main_gate();
+            (
+                Some(main_gate),
+                ProductionScoreSelection::Compatibility,
+                main_gate,
+            )
+        } else if let Some(config) = package_substance_config(package) {
+            anyhow::ensure!(
+                config.qualification == CompatibilityQualification::ProductionCompatible,
+                HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL
+            );
+            let values = CalibratedSubstanceValues {
+                sub_ceil_micros: config.sub_ceil_micros,
+                substance_floor_micros: config.substance_floor_micros,
+                calibration: config.calibration.ok_or_else(invalid)?,
+            };
+            (
+                None,
+                ProductionScoreSelection::Substance(values),
+                substance_package_gate(&config.novelty),
+            )
+        } else {
+            return Err(invalid());
+        };
     let [scorer_hash, embedder_hash] = package.manifest.score.data_artifact_hashes.as_slice()
     else {
         return Err(invalid());
@@ -151,12 +206,14 @@ pub fn production_package_pins(package: &BundlePackage) -> anyhow::Result<Produc
             .ok_or_else(invalid)?,
         embedder_descriptor: FastEmbedDescriptor::from_bytes(artifact(embedder_hash)?)
             .ok_or_else(invalid)?,
-        main_gate: config.main_gate(),
+        main_gate,
+        score_selection,
     };
-    let rebuilt = production_compatibility_package(
+    let rebuilt = production_package(
         &pins.scorer_descriptor,
         &pins.embedder_descriptor,
-        &pins.main_gate,
+        &rebuild_gate,
+        &pins.score_selection,
     )
     .map_err(|_| invalid())?;
     anyhow::ensure!(
@@ -367,6 +424,7 @@ pub fn open_harness_rebuild_index()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::versioned_pipeline_production::production_compatibility_package;
 
     /// Spec 5.2 item 3: unset, blank and `reference` select the reference
     /// assembly; `production` selects the production assembly only in a
@@ -429,7 +487,7 @@ mod tests {
                 max_tokens: 512,
                 matryoshka_dim: Some(256),
             },
-            main_gate: MainGateConfig {
+            main_gate: Some(MainGateConfig {
                 perplexity_floor_micros: Some(0),
                 tail_fraction_floor_micros: Some(0),
                 novelty_floor_micros: Some(500_000),
@@ -440,7 +498,8 @@ mod tests {
                 chunk_cap: 16,
                 chunk_min_tokens: 64,
                 novelty_utility_microcredits: 2_500_000,
-            },
+            }),
+            score_selection: ProductionScoreSelection::Compatibility,
         }
     }
 
@@ -490,7 +549,7 @@ mod tests {
         let package = production_compatibility_package(
             &pins.scorer_descriptor,
             &pins.embedder_descriptor,
-            &pins.main_gate,
+            pins.main_gate.as_ref().unwrap(),
         )
         .unwrap();
         assert_eq!(production_package_pins(&package).unwrap(), pins);
@@ -499,7 +558,7 @@ mod tests {
         let package = production_compatibility_package(
             &without_matryoshka.scorer_descriptor,
             &without_matryoshka.embedder_descriptor,
-            &without_matryoshka.main_gate,
+            without_matryoshka.main_gate.as_ref().unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -530,7 +589,7 @@ mod tests {
         let package = production_compatibility_package(
             &pins.scorer_descriptor,
             &pins.embedder_descriptor,
-            &pins.main_gate,
+            pins.main_gate.as_ref().unwrap(),
         )
         .unwrap();
         // A descriptor with a field this build does not know.
@@ -564,5 +623,182 @@ mod tests {
         )
         .unwrap();
         assert_eq!(label(&other), HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL);
+    }
+
+    /// The calibrated values of the production substance test package.
+    fn substance_values() -> CalibratedSubstanceValues {
+        use crate::versioned_pipeline_substance::{
+            SUBSTANCE_SUB_CEIL_PERCENTILE, SubstanceCalibration,
+        };
+        CalibratedSubstanceValues {
+            sub_ceil_micros: 600_000,
+            substance_floor_micros: 120_000,
+            calibration: SubstanceCalibration {
+                corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+                report_digest: format!("sha256:{}", "b".repeat(64)),
+                sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+                substance_floor_percentile: 25,
+            },
+        }
+    }
+
+    /// The production substance package of `values` under the pilot's
+    /// descriptors and gate.
+    fn pilot_substance_package(values: CalibratedSubstanceValues) -> BundlePackage {
+        let pins = pilot_pins();
+        production_package(
+            &pins.scorer_descriptor,
+            &pins.embedder_descriptor,
+            pins.main_gate.as_ref().unwrap(),
+            &ProductionScoreSelection::Substance(values),
+        )
+        .unwrap()
+    }
+
+    /// A substance package gives back its descriptors and its calibrated
+    /// values, and no gate: it holds only the novelty values of one. The
+    /// pins rebuild it, also when its calibrated values are other ones, and
+    /// the gate they rebuild it under holds the package's novelty values.
+    #[test]
+    fn production_package_pins_round_trip_a_substance_package() {
+        let pilot = pilot_pins();
+        let package = pilot_substance_package(substance_values());
+        let pins = production_package_pins(&package).unwrap();
+        assert_eq!(
+            pins,
+            ProductionPackagePins {
+                scorer_descriptor: pilot.scorer_descriptor.clone(),
+                embedder_descriptor: pilot.embedder_descriptor.clone(),
+                main_gate: None,
+                score_selection: ProductionScoreSelection::Substance(substance_values()),
+            }
+        );
+        assert_eq!(
+            production_package(
+                &pins.scorer_descriptor,
+                &pins.embedder_descriptor,
+                pilot.main_gate.as_ref().unwrap(),
+                &pins.score_selection,
+            )
+            .unwrap(),
+            package
+        );
+        let config = package_substance_config(&package).unwrap();
+        let gate = substance_package_gate(&config.novelty);
+        assert!(config.novelty.matches_main_gate(&gate));
+        assert!(
+            config
+                .novelty
+                .matches_main_gate(pilot.main_gate.as_ref().unwrap())
+        );
+        assert_eq!(
+            (
+                gate.perplexity_floor_micros,
+                gate.tail_fraction_floor_micros
+            ),
+            (None, None)
+        );
+
+        let mut other = substance_values();
+        other.substance_floor_micros = 240_000;
+        other.calibration.substance_floor_percentile = 50;
+        let package = pilot_substance_package(other.clone());
+        assert_eq!(
+            production_package_pins(&package).unwrap().score_selection,
+            ProductionScoreSelection::Substance(other)
+        );
+    }
+
+    /// The gate a substance package implies holds that package's novelty
+    /// values: for the local candidate's novelty configuration and for the
+    /// production one, `matches_main_gate` accepts it.
+    #[test]
+    fn substance_package_gate_matches_its_novelty_values() {
+        use crate::versioned_pipeline_substance::substance_candidate_package;
+
+        for package in [
+            substance_candidate_package().unwrap(),
+            pilot_substance_package(substance_values()),
+        ] {
+            let novelty = package_substance_config(&package).unwrap().novelty;
+            let gate = substance_package_gate(&novelty);
+            assert!(novelty.matches_main_gate(&gate));
+            assert_eq!(gate.perplexity_floor_micros, None);
+            assert_eq!(gate.tail_fraction_floor_micros, None);
+        }
+    }
+
+    /// The harness refuses a substance package it cannot rebuild exactly: a
+    /// configuration whose floor changed after the bundle id was taken (the
+    /// configuration re-hashed, the bundle id not), a value the production
+    /// configuration fixes, an uncalibrated configuration, and a local one.
+    #[test]
+    fn production_package_pins_refuse_a_changed_substance_value() {
+        use crate::versioned_pipeline_production::{
+            FastEmbedPipelineEmbedder, NearAiPipelineScorer,
+        };
+        use crate::versioned_pipeline_substance::{substance_candidate_package, substance_package};
+        use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+
+        let label =
+            |package: &BundlePackage| production_package_pins(package).unwrap_err().to_string();
+        let pins = pilot_pins();
+        let package = pilot_substance_package(substance_values());
+        let config = package_substance_config(&package).unwrap();
+
+        // `substance_floor_micros + 1` in the configuration, which is
+        // re-hashed: every policy ref names the new configuration hash, so
+        // every pin decodes, and the bundle id is the one taken before.
+        let mut raised = config.clone();
+        raised.substance_floor_micros += 1;
+        let raised_bytes = serde_json::to_vec(&raised).unwrap();
+        let raised_hash = crate::versioned_pipeline_bundle::dependency_content_hash(&raised_bytes);
+        let old_hash = package.manifest.score.configuration_hash.clone();
+        let mut changed = package.clone();
+        changed.artifacts.remove(&old_hash);
+        changed.artifacts.insert(raised_hash.clone(), raised_bytes);
+        for policy in [
+            &mut changed.manifest.admission,
+            &mut changed.manifest.review,
+            &mut changed.manifest.score,
+            &mut changed.manifest.settle,
+        ] {
+            assert_eq!(policy.configuration_hash, old_hash);
+            policy.configuration_hash = raised_hash.clone();
+        }
+        assert_eq!(package_substance_config(&changed).unwrap(), raised);
+        assert_eq!(changed.bundle_id, package.bundle_id);
+        assert_eq!(label(&changed), HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL);
+
+        // A value the production configuration fixes, in a package built
+        // through the substance builder: every pin decodes, the rebuild
+        // differs.
+        let scorer = NearAiPipelineScorer::new(
+            Arc::new(ReferencePerplexityScorer::new()),
+            pins.scorer_descriptor.clone(),
+        );
+        let embedder = FastEmbedPipelineEmbedder::new(
+            Arc::new(ReferenceEmbedder::new()),
+            pins.embedder_descriptor.clone(),
+        );
+        let mut fixed = config.clone();
+        fixed.sub_floor_mult_micros += 1;
+        let other = substance_package(&fixed, &scorer, &embedder).unwrap();
+        assert_eq!(label(&other), HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL);
+
+        // No calibration: there are no calibrated values to read.
+        let mut uncalibrated = config.clone();
+        uncalibrated.calibration = None;
+        let uncalibrated = substance_package(&uncalibrated, &scorer, &embedder).unwrap();
+        assert_eq!(
+            label(&uncalibrated),
+            HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL
+        );
+
+        // The local substance candidate is not a production package.
+        assert_eq!(
+            label(&substance_candidate_package().unwrap()),
+            HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL
+        );
     }
 }

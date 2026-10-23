@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 
 import pipeline
-from pipeline_tooling import cargo, catalog, checks, comparison, corpus, environment, errors, results
+from pipeline_tooling import cargo, catalog, checks, comparison, corpus, environment, envfile, errors, results
 from pipeline_tooling import report as report_module
 
 
@@ -2260,6 +2260,44 @@ class PackageCommandTests(_CorpusRunCase):
     def test_substance_corpus_check_is_permitted_not_required(self):
         self.assertIn("pipeline_http_corpus_substance", corpus.CORPUS_CHECK_IDS)
         self.assertNotIn("pipeline_http_corpus_substance", checks.REQUIRED_CORPUS_CHECK_IDS)
+
+    def test_package_variables_hold_the_substance_selection(self):
+        """SQ-17: `package --bundle production` passes the Score selection
+        and its five calibration variables, so the writer builds the
+        substance package when the env file selects it. No other variable
+        is new: a key, an endpoint or a database URL never reaches it."""
+        selection = (
+            "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST",
+        )
+        before = (
+            "TRACE_COMMONS_NEAR_AI_MODEL",
+            "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF",
+            "TRACE_COMMONS_EMBEDDER_MODEL_ID",
+            "TRACE_COMMONS_VECTOR_INDEX_DIM",
+            "TRACE_COMMONS_EMBEDDER_MAX_TOKENS",
+            "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM",
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_TOP_K",
+            "TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS",
+            "TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS",
+            "TRACE_COMMONS_GATE_CHUNK_CAP",
+            "TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS",
+            "TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS",
+            "TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS",
+            "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA",
+        )
+        for variable in selection:
+            with self.subTest(variable=variable):
+                self.assertIn(variable, envfile.PACKAGE_VARIABLES)
+        self.assertEqual(set(envfile.PACKAGE_VARIABLES), set(before) | set(selection))
+        self.assertEqual(len(envfile.PACKAGE_VARIABLES), len(before) + len(selection))
 
 
 # ---------------------------------------------------------------------------

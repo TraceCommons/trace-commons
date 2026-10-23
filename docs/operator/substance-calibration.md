@@ -142,10 +142,17 @@ The owner reads the substance row to set the floor percentile. Then run
 
 The production substance package takes `sub_ceil`, `substance_floor` and the
 calibration provenance from the values file. The bundle id hashes them, so a
-new `evaluate` run with other values gives a new bundle id. The way to copy
-the values into the deployment is in the production package runbooks:
-[pipeline-qualification.md](pipeline-qualification.md) and
-[pipeline-activation.md](pipeline-activation.md).
+new `evaluate` run with other values gives a new bundle id.
+
+- The switch, in order: copy the values into the six variables of the
+  deployment env file, deploy, promote the substance package, install the
+  new default-routing set, and activate each tenant that is still on the
+  compatibility bundle. See "Switch the default package to substance" in
+  [pipeline-activation.md](pipeline-activation.md#switch-the-default-package-to-substance).
+- How `pipeline.py package --bundle production` builds the substance package
+  from the env file, and how the promotion checks run on it: see "The
+  production run: `pipeline.py promote`" in
+  [pipeline-qualification.md](pipeline-qualification.md#the-production-run-pipelinepy-promote).
 
 ## Credit quality version 4
 

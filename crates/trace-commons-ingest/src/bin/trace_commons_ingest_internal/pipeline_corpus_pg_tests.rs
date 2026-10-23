@@ -60,7 +60,7 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_harness::{
     HarnessAssembly, HarnessDependencies, assemble_harness_production_crashing_at,
-    harness_production_components, production_package_pins,
+    harness_production_components, production_package_pins, substance_package_gate,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_product::{
@@ -536,23 +536,28 @@ impl CorpusRunConfig {
 
 /// The production package (spec B-D5): the scorer and embedder descriptors
 /// `lookup` names, through the parsers the deployed binary uses, under
-/// `main_gate`. Loads no model and calls no network
-/// (`production_compatibility_package` reads descriptors only).
+/// `main_gate`, for the Score selection `lookup` names (SQ-17): the
+/// compatibility package, also when no selection is set, or the calibrated
+/// substance package. Loads no model and calls no network
+/// (`production_package` reads descriptors only).
 fn production_bundle_package(
     lookup: &dyn Fn(&str) -> Option<String>,
     main_gate: &trace_commons_server::versioned_pipeline_compat::MainGateConfig,
 ) -> anyhow::Result<BundlePackage> {
+    use trace_commons_server::versioned_pipeline_production::{
+        production_package, production_score_selection_from_lookup,
+    };
     let scorer = production_assembly::near_ai_scorer_descriptor_from_lookup(lookup)?;
     let embedder = production_assembly::fastembed_descriptor_from_lookup(lookup)?;
-    trace_commons_server::versioned_pipeline_production::production_compatibility_package(
-        &scorer, &embedder, main_gate,
-    )
+    let selection = production_score_selection_from_lookup(lookup)?;
+    production_package(&scorer, &embedder, main_gate, &selection)
 }
 
 /// [`production_bundle_package`] from the process environment, with
 /// `main`'s gate configuration parsed exactly as ingest parses it under a
 /// pipeline runtime. `pipeline.py package --bundle production` passes the
-/// env file's descriptor and gate variables, and nothing else.
+/// env file's descriptor, gate and Score selection variables, and nothing
+/// else.
 fn production_bundle_package_from_env() -> anyhow::Result<BundlePackage> {
     let main_gate = pipeline_main_gate_config_from_env(
         true,
@@ -677,10 +682,12 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
 
 /// A production harness's service (spec B-D1): the production assembler,
 /// through the ingest seam's context, over `dependencies` under `package`'s
-/// own pins, with the harness's allow-all authority and pass-through
-/// privacy boundary (the corpus and restore tenants are the harness's, not
-/// the deployment's), and `crash_point` when the restore seed needs one.
-/// Refused unless it serves exactly `package`.
+/// own pins and Score selection, with the harness's allow-all authority and
+/// pass-through privacy boundary (the corpus and restore tenants are the
+/// harness's, not the deployment's), and `crash_point` when the restore
+/// seed needs one. `main`'s gate configuration is the context's. Refused
+/// unless it serves exactly `package`, so a substance package is refused
+/// under a context gate whose novelty values are not its own.
 pub(super) fn production_harness_runtime(
     package: &BundlePackage,
     dependencies: HarnessDependencies,
@@ -706,7 +713,7 @@ pub(super) fn production_harness_runtime(
             main_gate: context.main_gate,
             components,
             score_policies: context.score_policies,
-            score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
+            score_selection: pins.score_selection,
         },
         crash_point,
     )?))
@@ -737,7 +744,10 @@ impl IngestPipelineRuntimeAssembler for ProductionHarnessAssembler {
 /// `assemble_ingest_pipeline_runtime` with the arguments the compatibility
 /// drill passes (`assemble_compatibility_pipeline_service_with`): the
 /// pipeline's credit issuer configured, and `main`'s gate configuration the
-/// one `package` holds. Panics with the refusal's label.
+/// one a compatibility `package` holds, or, for a substance `package`, the
+/// corpus runtime's ([`corpus_main_gate`]: its novelty values, with
+/// `TEST_MAIN_GATE`'s perplexity and tail floors). Panics with the
+/// refusal's label.
 pub(super) fn assemble_production_harness_service(
     backend: Arc<PgBackend>,
     configured_store: &ConfiguredTraceArtifactStore,
@@ -745,9 +755,11 @@ pub(super) fn assemble_production_harness_service(
     dependencies: HarnessDependencies,
     crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
-    let main_gate = package_compatibility_config(package)
-        .map(|config| config.main_gate())
-        .unwrap_or_else(|| panic!("harness_production_package_invalid"));
+    let main_gate = match package_compatibility_config(package) {
+        Some(config) => config.main_gate(),
+        None if package_substance_config(package).is_some() => corpus_main_gate(package),
+        None => panic!("harness_production_package_invalid"),
+    };
     let assembler = ProductionHarnessAssembler {
         package: package.clone(),
         dependencies,
@@ -836,17 +848,10 @@ fn corpus_main_gate(
         return main_gate_of(&config);
     }
     if let Some(config) = package_substance_config(package) {
-        let novelty = config.novelty;
         return trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-            novelty_floor_micros: Some(novelty.novelty_floor_micros),
-            embed_insert_novelty_micros: novelty.embed_insert_novelty_micros,
-            top_k: novelty.top_k,
-            chunk_target_tokens: novelty.chunk_target_tokens,
-            chunk_max_tokens: novelty.chunk_max_tokens,
-            chunk_cap: novelty.chunk_cap,
-            chunk_min_tokens: novelty.chunk_min_tokens,
-            novelty_utility_microcredits: novelty.novelty_utility_microcredits,
-            ..TEST_MAIN_GATE
+            perplexity_floor_micros: TEST_MAIN_GATE.perplexity_floor_micros,
+            tail_fraction_floor_micros: TEST_MAIN_GATE.tail_fraction_floor_micros,
+            ..substance_package_gate(&config.novelty)
         };
     }
     TEST_MAIN_GATE
@@ -872,10 +877,23 @@ fn corpus_main_gate(
 /// does: the allowed use a compatibility award needs to be credited rather
 /// than withheld (ruling T9-6).
 pub(super) async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope {
+    fixture_envelope_with_tool_calls(fixture, Vec::new()).await
+}
+
+/// [`fixture_envelope`] whose turn also makes `tool_calls`, with their
+/// payloads consented when there are any (the arguments on each call, the
+/// result on its result event). A result names its call by the call's id
+/// and by its parent event, which keeps the deterministic event id of its
+/// call. With no tool calls it is exactly [`fixture_envelope`].
+pub(super) async fn fixture_envelope_with_tool_calls(
+    fixture: &CorpusFixture,
+    tool_calls: Vec<trace_commons_protocol::trace_contribution::RawTraceCaptureToolCall>,
+) -> TraceContributionEnvelope {
+    let include_tool_payloads = !tool_calls.is_empty();
     let turn = RawTraceCaptureTurn {
         user_input: fixture.input.clone(),
         response: Some("Completed the local fixture safely.".to_string()),
-        tool_calls: Vec::new(),
+        tool_calls,
         started_at: fixture.created_at,
         completed_at: Some(fixture.created_at + chrono::Duration::seconds(1)),
         state: Some("completed".to_string()),
@@ -884,6 +902,7 @@ pub(super) async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributi
         &[turn],
         RecordedTraceContributionOptions {
             include_message_text: true,
+            include_tool_payloads,
             pseudonymous_contributor_id: Some("sha256:corpus-contributor".to_string()),
             tenant_scope_ref: Some("tenant_sha256:corpus".to_string()),
             ..RecordedTraceContributionOptions::default()
@@ -896,11 +915,19 @@ pub(super) async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributi
         &Uuid::NAMESPACE_URL,
         format!("tracecommons:corpus-revocation:{}", fixture.label).as_bytes(),
     );
+    let mut event_ids = BTreeMap::new();
     for (index, event) in raw.events.iter_mut().enumerate() {
-        event.event_id = Uuid::new_v5(
+        let event_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("tracecommons:corpus-event:{}:{index}", fixture.label).as_bytes(),
         );
+        event_ids.insert(event.event_id, event_id);
+        event.event_id = event_id;
+    }
+    for event in &mut raw.events {
+        if let Some(parent) = event.parent_event_id {
+            event.parent_event_id = event_ids.get(&parent).copied();
+        }
     }
     let mut envelope = DeterministicTraceRedactor::try_default()
         .expect("corpus_redactor_unavailable")
@@ -3496,6 +3523,53 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
     .expect("the production test package builds")
 }
 
+/// The calibrated values of the production substance test package, as the six
+/// selection variables of [`production_substance_package_build_needs_no_network`]
+/// give them.
+pub(super) fn production_test_substance_values()
+-> trace_commons_server::versioned_pipeline_substance::CalibratedSubstanceValues {
+    use trace_commons_server::versioned_pipeline_substance::{
+        CalibratedSubstanceValues, SUBSTANCE_SUB_CEIL_PERCENTILE, SubstanceCalibration,
+    };
+    CalibratedSubstanceValues {
+        sub_ceil_micros: 600_000,
+        substance_floor_micros: 120_000,
+        calibration: SubstanceCalibration {
+            corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+            report_digest: format!("sha256:{}", "b".repeat(64)),
+            sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+            substance_floor_percentile: 25,
+        },
+    }
+}
+
+/// The production substance package for the harness tests: the descriptors and
+/// gate of [`production_test_package`], with
+/// [`production_test_substance_values`].
+pub(super) fn production_test_substance_package() -> BundlePackage {
+    production_test_substance_package_awarding(COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS)
+}
+
+/// [`production_test_substance_package`] with `main`'s `NoveltyUtility`
+/// delta set to `microcredits`, which the substance package awards as its
+/// own (SQ-18).
+pub(super) fn production_test_substance_package_awarding(microcredits: u64) -> BundlePackage {
+    use trace_commons_server::versioned_pipeline_production::{
+        ProductionScoreSelection, production_package,
+    };
+    let compatibility = production_test_package_awarding(microcredits);
+    let pins = production_package_pins(&compatibility).expect("the production test package pins");
+    production_package(
+        &pins.scorer_descriptor,
+        &pins.embedder_descriptor,
+        pins.main_gate
+            .as_ref()
+            .expect("a compatibility package holds its gate"),
+        &ProductionScoreSelection::Substance(production_test_substance_values()),
+    )
+    .expect("the production test substance package builds")
+}
+
 /// Spec B-D5, plan B6: `pipeline.py package --bundle production` builds the
 /// production package from the deployment's env file alone. The
 /// descriptors come from the variables the deployed binary parses, the
@@ -3535,7 +3609,7 @@ fn production_package_build_needs_no_network() {
         .expect("a production package");
     assert_eq!(package, production_test_package());
     let pins = production_package_pins(&package).unwrap();
-    assert_eq!(pins.main_gate, gate);
+    assert_eq!(pins.main_gate, Some(gate));
     assert_eq!(pins.scorer_descriptor.model, "Qwen/Qwen3.6-35B-A3B-FP8");
 
     // No model pin, no package; an all-zero floor configuration is refused
@@ -3556,4 +3630,94 @@ fn production_package_build_needs_no_network() {
         ..gate
     };
     assert!(production_bundle_package(&lookup, &zero).is_err());
+}
+
+/// SQ-17: with the six selection variables of the env file set,
+/// `pipeline.py package --bundle production` builds the calibrated
+/// substance package offline, as it builds the compatibility package: the
+/// descriptors through the deployed parsers, no model loaded, no network
+/// reached. The package validates as a production package, is
+/// [`production_test_substance_package`], and gives back its pins. A
+/// selection without its calibration builds no package.
+#[test]
+fn production_substance_package_build_needs_no_network() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL, ProductionScoreSelection,
+    };
+
+    let corpus = format!("sha256:{}", "a".repeat(64));
+    let report = format!("sha256:{}", "b".repeat(64));
+    let env = BTreeMap::from([
+        ("TRACE_COMMONS_NEAR_AI_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8"),
+        ("TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF", "-8.0"),
+        ("TRACE_COMMONS_EMBEDDER_MODEL_ID", "BAAI/bge-large-en-v1.5"),
+        ("TRACE_COMMONS_VECTOR_INDEX_DIM", "1024"),
+        // Never read: the build has no endpoint and no key.
+        (
+            "TRACE_COMMONS_NEAR_AI_BASE_URL",
+            "https://unreachable.invalid/v1",
+        ),
+        ("TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE", "substance"),
+        ("TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS", "600000"),
+        ("TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS", "120000"),
+        ("TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE", "25"),
+        (
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
+            corpus.as_str(),
+        ),
+        (
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST",
+            report.as_str(),
+        ),
+    ]);
+    let lookup = |var: &str| env.get(var).map(|value| value.to_string());
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+    };
+    let package = production_bundle_package(&lookup, &gate).expect("builds offline");
+    trace_commons_server::versioned_pipeline_qualification::validate_production_package(&package)
+        .expect("a production package");
+    assert_eq!(
+        package.manifest.score.implementation_id,
+        SUBSTANCE_SCORE_IMPLEMENTATION
+    );
+    assert_eq!(package, production_test_substance_package());
+    assert_ne!(package.bundle_id, production_test_package().bundle_id);
+    let pins = production_package_pins(&package).unwrap();
+    assert_eq!(pins.main_gate, None);
+    assert_eq!(
+        pins.score_selection,
+        ProductionScoreSelection::Substance(production_test_substance_values())
+    );
+    assert_eq!(pins.scorer_descriptor.model, "Qwen/Qwen3.6-35B-A3B-FP8");
+    assert!(
+        package_substance_config(&package)
+            .unwrap()
+            .novelty
+            .matches_main_gate(&gate)
+    );
+
+    // The selection without one of its calibration variables builds no
+    // package.
+    let no_floor = |var: &str| {
+        (var != "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS")
+            .then(|| lookup(var))
+            .flatten()
+    };
+    assert_eq!(
+        production_bundle_package(&no_floor, &gate)
+            .unwrap_err()
+            .to_string(),
+        PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL
+    );
 }
