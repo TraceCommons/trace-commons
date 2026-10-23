@@ -10558,7 +10558,8 @@ impl PipelineService {
 
     /// Whether the default bundle holds `main`'s gate configuration
     /// (`versioned_pipeline_bundle::package_matches_main_gate`): every value
-    /// for a compatibility bundle, the novelty values for a substance bundle.
+    /// for a compatibility bundle, the gate values it holds for a substance
+    /// bundle.
     pub fn default_package_matches_main_gate(
         &self,
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
@@ -10937,8 +10938,8 @@ impl PipelineService {
     /// (`activate_bundle_if_none`). Each gets the checks ingest gives the
     /// default package at assembly: its dependencies resolve (`construct`),
     /// a compatibility package holds `main`'s gate configuration
-    /// (`main_gate`), a substance package its novelty values, each has the
-    /// pipeline's credit issuer, and, with
+    /// (`main_gate`), a substance package the gate values it holds, each
+    /// has the pipeline's credit issuer, and, with
     /// `require_qualifiable`, the package passes the default package's
     /// qualification gate: its own bundle qualification
     /// (`bundle_qualification`, decision P4-D7), every dependency it names
@@ -10990,7 +10991,7 @@ impl PipelineService {
             }
         })?;
         // A compatibility package holds every value of `main`'s gate, a
-        // substance package its novelty values.
+        // substance package the gate values it holds (never the ids).
         if !crate::versioned_pipeline_bundle::package_matches_main_gate(package, main_gate) {
             return Err("pipeline_runtime_main_gate_config_mismatch");
         }

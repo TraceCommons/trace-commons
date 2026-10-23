@@ -44,8 +44,7 @@ use crate::versioned_pipeline_score_registry::{
     ScorePolicyDependencies, ScorePolicyFactory, ScorePolicyRegistry,
 };
 use crate::versioned_pipeline_substance::{
-    SUBSTANCE_SCORE_IMPLEMENTATION, SubstanceNoveltyConfig, SubstanceScoreConfig,
-    SubstanceScorePolicy,
+    SUBSTANCE_SCORE_IMPLEMENTATION, SubstanceScoreConfig, SubstanceScorePolicy,
 };
 
 /// Test-index identity the minimal Score policy proposes entries against.
@@ -1025,25 +1024,24 @@ pub fn binds_compatibility_family(package: &BundlePackage) -> bool {
     is_compatibility_family(package) || is_substance_family(package)
 }
 
-/// Whether `package` holds `main`'s gate configuration `main_gate`: a
-/// compatibility package holds every value
-/// (`CompatibilityBundleConfig::matches_main_gate`), and a substance package
-/// holds the novelty values [`SubstanceNoveltyConfig::from_main_gate`] takes
-/// from it. A substance package whose configuration does not decode, or a
-/// gate with no novelty floor, matches nothing, as a floor `main` has no
-/// value for matches no compatibility configuration. A package of any other
-/// family holds no gate configuration, so nothing is compared. The
-/// startup checks and `PipelineService::check_runnable_package` compare
-/// through this one function, with `pipeline_runtime_main_gate_config_mismatch`.
+/// Whether `package` holds `main`'s gate configuration `main_gate`, by its
+/// gate values only: a compatibility package
+/// (`CompatibilityBundleConfig::matches_main_gate`) and a substance package
+/// (`SubstanceNoveltyConfig::matches_main_gate`, the same rule over the
+/// values it holds) alike. Neither compares projection or index ids, which
+/// the gate does not carry; the production ids are pinned where the
+/// production package is built. A substance package whose configuration
+/// does not decode matches nothing. A package of any other family holds no
+/// gate configuration, so nothing is compared. The startup checks and
+/// `PipelineService::check_runnable_package` compare through this one
+/// function, with `pipeline_runtime_main_gate_config_mismatch`.
 pub fn package_matches_main_gate(package: &BundlePackage, main_gate: &MainGateConfig) -> bool {
     if let Some(config) = package_compatibility_config(package) {
         return config.matches_main_gate(main_gate);
     }
     if is_substance_family(package) {
-        return main_gate.novelty_floor_micros.is_some()
-            && package_substance_config(package).is_some_and(|config| {
-                config.novelty == SubstanceNoveltyConfig::from_main_gate(main_gate)
-            });
+        return package_substance_config(package)
+            .is_some_and(|config| config.novelty.matches_main_gate(main_gate));
     }
     true
 }

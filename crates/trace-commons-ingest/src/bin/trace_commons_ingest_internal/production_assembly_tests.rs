@@ -1174,9 +1174,9 @@ impl IngestPipelineRuntimeAssembler for SelectedScoreAssembler {
 /// the calibrated substance package under the rule they apply to the
 /// compatibility package: over doubles, a production-required boot is
 /// refused only for the scorer and embedder adapters, the test opt-in
-/// starts it, the package holds `main`'s novelty values, its configuration
+/// starts it, the package holds `main`'s gate values, its configuration
 /// is qualifiable, and it is a production package. A substance default
-/// package whose novelty values are not `main`'s, or a processing runtime
+/// package whose gate values are not `main`'s, or a processing runtime
 /// with no credit issuer, is refused with the compatibility label.
 #[tokio::test]
 async fn the_runtime_accepts_a_substance_default_package() {
@@ -1283,9 +1283,10 @@ async fn the_runtime_accepts_a_substance_default_package() {
 }
 
 /// `check_runnable_package` (startup's tenant bundles, and activation)
-/// refuses a substance package whose novelty values are not
-/// `SubstanceNoveltyConfig::from_main_gate` of the service's gate, with the
-/// label it gives a compatibility package that does not hold that gate. A
+/// refuses a substance package whose gate values (novelty floor,
+/// index-insert threshold, top-k, chunk values, award) are not the
+/// service's gate, with the label it gives a compatibility package that
+/// does not hold that gate. A
 /// gate with no novelty floor matches no substance package, and the
 /// perplexity and tail floors, which a substance package does not hold, are
 /// not compared.

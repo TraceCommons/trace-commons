@@ -341,10 +341,10 @@ impl SubstanceNoveltyConfig {
     ///
     /// A gate with no novelty floor gives a floor of 0 here. No caller
     /// accepts that gate: [`production_substance_config`] refuses it
-    /// (`compatibility_main_gate_floors_missing`), and the runtime check
-    /// (`versioned_pipeline_bundle::package_matches_main_gate`) matches
-    /// nothing against it, as a compatibility package matches nothing
-    /// against a floor `main` has no value for.
+    /// (`compatibility_main_gate_floors_missing`), and
+    /// [`Self::matches_main_gate`] matches nothing against it, as a
+    /// compatibility package matches nothing against a floor `main` has no
+    /// value for.
     pub fn from_main_gate(main_gate: &MainGateConfig) -> Self {
         Self {
             projection_id: PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
@@ -360,6 +360,24 @@ impl SubstanceNoveltyConfig {
             novelty_utility_microcredits: main_gate.novelty_utility_microcredits,
             instrument: default_trace_credit_instrument(),
         }
+    }
+
+    /// Whether these novelty values hold `main`'s gate configuration
+    /// `gate`, by the rule of `CompatibilityBundleConfig::matches_main_gate`:
+    /// the gate values only, never the projection and index ids, the `cq4`
+    /// novelty parameters or the instrument pin, which the gate does not
+    /// carry. The perplexity and tail-fraction floors are not compared: a
+    /// substance configuration does not hold them. A floor `main` has no
+    /// value for matches nothing.
+    pub fn matches_main_gate(&self, gate: &MainGateConfig) -> bool {
+        gate.novelty_floor_micros == Some(self.novelty_floor_micros)
+            && gate.embed_insert_novelty_micros == self.embed_insert_novelty_micros
+            && gate.top_k == self.top_k
+            && gate.chunk_target_tokens == self.chunk_target_tokens
+            && gate.chunk_max_tokens == self.chunk_max_tokens
+            && gate.chunk_cap == self.chunk_cap
+            && gate.chunk_min_tokens == self.chunk_min_tokens
+            && gate.novelty_utility_microcredits == self.novelty_utility_microcredits
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -1871,6 +1889,135 @@ mod tests {
         assert_eq!(novelty.credit, NoveltyCreditParams::cq3());
         assert_eq!(novelty.novelty_floor_micros, 400_000);
         assert_eq!(novelty.novelty_utility_microcredits, 1_250_000);
+    }
+
+    /// `matches_main_gate` compares the eight gate values a substance
+    /// configuration holds, by the compatibility rule: each one changed in
+    /// the gate is a mismatch, a gate with no novelty floor matches nothing,
+    /// and the perplexity and tail floors are not compared.
+    #[test]
+    fn substance_novelty_matches_the_gate_by_its_gate_values() {
+        let novelty = SubstanceNoveltyConfig::from_main_gate(&DISTINCT_GATE);
+        assert!(novelty.matches_main_gate(&DISTINCT_GATE));
+        for (other, what) in [
+            (
+                MainGateConfig {
+                    novelty_floor_micros: Some(400_001),
+                    ..DISTINCT_GATE
+                },
+                "novelty floor",
+            ),
+            (
+                MainGateConfig {
+                    novelty_floor_micros: None,
+                    ..DISTINCT_GATE
+                },
+                "no novelty floor",
+            ),
+            (
+                MainGateConfig {
+                    embed_insert_novelty_micros: 60_001,
+                    ..DISTINCT_GATE
+                },
+                "index-insert threshold",
+            ),
+            (
+                MainGateConfig {
+                    top_k: 8,
+                    ..DISTINCT_GATE
+                },
+                "top-k",
+            ),
+            (
+                MainGateConfig {
+                    chunk_target_tokens: 1_001,
+                    ..DISTINCT_GATE
+                },
+                "chunk target",
+            ),
+            (
+                MainGateConfig {
+                    chunk_max_tokens: 1_501,
+                    ..DISTINCT_GATE
+                },
+                "chunk max",
+            ),
+            (
+                MainGateConfig {
+                    chunk_cap: 10,
+                    ..DISTINCT_GATE
+                },
+                "chunk cap",
+            ),
+            (
+                MainGateConfig {
+                    chunk_min_tokens: 34,
+                    ..DISTINCT_GATE
+                },
+                "chunk min",
+            ),
+            (
+                MainGateConfig {
+                    novelty_utility_microcredits: 1_250_001,
+                    ..DISTINCT_GATE
+                },
+                "award",
+            ),
+        ] {
+            assert!(!novelty.matches_main_gate(&other), "{what}");
+        }
+        assert!(novelty.matches_main_gate(&MainGateConfig {
+            perplexity_floor_micros: None,
+            tail_fraction_floor_micros: Some(99),
+            ..DISTINCT_GATE
+        }));
+    }
+
+    /// The gate rule is the compatibility one: a substance package whose
+    /// projection and index ids are not the production ids still holds the
+    /// gate its gate values come from, and the substance candidate holds the
+    /// gate its own novelty values imply.
+    #[test]
+    fn a_substance_package_with_other_ids_matches_its_gate() {
+        use crate::versioned_pipeline_bundle::package_matches_main_gate;
+
+        let mut config = production_substance_config(&DISTINCT_GATE, &calibrated_values()).unwrap();
+        config.novelty.projection_id = "other_projection_v1".to_string();
+        config.novelty.index_id = "other_index_v1".to_string();
+        assert_ne!(
+            config.novelty,
+            SubstanceNoveltyConfig::from_main_gate(&DISTINCT_GATE)
+        );
+        let package = substance_package(
+            &config,
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .unwrap();
+        assert!(package_matches_main_gate(&package, &DISTINCT_GATE));
+        assert!(!package_matches_main_gate(
+            &package,
+            &MainGateConfig {
+                top_k: 8,
+                ..DISTINCT_GATE
+            }
+        ));
+
+        let candidate = substance_candidate_package().unwrap();
+        let novelty = package_substance_config(&candidate).unwrap().novelty;
+        let gate = MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(novelty.novelty_floor_micros),
+            embed_insert_novelty_micros: novelty.embed_insert_novelty_micros,
+            top_k: novelty.top_k,
+            chunk_target_tokens: novelty.chunk_target_tokens,
+            chunk_max_tokens: novelty.chunk_max_tokens,
+            chunk_cap: novelty.chunk_cap,
+            chunk_min_tokens: novelty.chunk_min_tokens,
+            novelty_utility_microcredits: novelty.novelty_utility_microcredits,
+        };
+        assert!(package_matches_main_gate(&candidate, &gate));
     }
 
     /// The production configuration: production compatible, the witness

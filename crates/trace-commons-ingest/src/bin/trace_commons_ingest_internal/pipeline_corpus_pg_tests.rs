@@ -784,18 +784,15 @@ pub(super) fn assemble_production_harness_service(
 /// with the pipeline's credit issuer configured, which a runtime that
 /// routes the compatibility bundle needs (PR 3: Zaki review 1, round 2,
 /// finding 15); the minimal bundle ignores it. `main`'s gate configuration
-/// is the one a compatibility package holds, which ingest requires of a
-/// default package (PR 3, 9b54b647); a package of another family holds
-/// none and is handed `TEST_MAIN_GATE`.
+/// is the one the package holds ([`corpus_main_gate`]), which ingest
+/// requires of a default package (PR 3, 9b54b647).
 fn assemble_corpus_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
     dependencies: CorpusDependencies,
     package: BundlePackage,
 ) -> Arc<PipelineService> {
-    let main_gate = package_compatibility_config(&package)
-        .map(|config| main_gate_of(&config))
-        .unwrap_or(TEST_MAIN_GATE);
+    let main_gate = corpus_main_gate(&package);
     let assembler = CorpusAssembler {
         package,
         dependencies,
@@ -824,6 +821,35 @@ fn assemble_corpus_service(
     )
     .expect("assemble the injected corpus pipeline runtime")
     .expect("an assembler was given, so a service is returned")
+}
+
+/// The `main` gate configuration the corpus runtime is started with for
+/// `package`: the one a compatibility package holds (`main_gate_of`); for
+/// a substance package, the gate values its novelty configuration holds,
+/// with `TEST_MAIN_GATE`'s perplexity and tail floors, which a substance
+/// package does not hold and is not compared on; for a package of any
+/// other family, which holds none, `TEST_MAIN_GATE`.
+fn corpus_main_gate(
+    package: &BundlePackage,
+) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+    if let Some(config) = package_compatibility_config(package) {
+        return main_gate_of(&config);
+    }
+    if let Some(config) = package_substance_config(package) {
+        let novelty = config.novelty;
+        return trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+            novelty_floor_micros: Some(novelty.novelty_floor_micros),
+            embed_insert_novelty_micros: novelty.embed_insert_novelty_micros,
+            top_k: novelty.top_k,
+            chunk_target_tokens: novelty.chunk_target_tokens,
+            chunk_max_tokens: novelty.chunk_max_tokens,
+            chunk_cap: novelty.chunk_cap,
+            chunk_min_tokens: novelty.chunk_min_tokens,
+            novelty_utility_microcredits: novelty.novelty_utility_microcredits,
+            ..TEST_MAIN_GATE
+        };
+    }
+    TEST_MAIN_GATE
 }
 
 // ---------------------------------------------------------------------------
@@ -3024,6 +3050,35 @@ fn corpus_run_config_accepts_the_substance_bundle() {
         package.manifest.score.implementation_id,
         "trace_commons.score.substance.v1"
     );
+}
+
+/// Each built-in corpus bundle holds the gate the corpus runtime is
+/// started with, so ingest's start check
+/// (`pipeline_runtime_main_gate_config_mismatch`) passes for each: the
+/// substance candidate, whose ids are not the production ids, included.
+#[test]
+fn each_corpus_bundle_matches_its_corpus_gate() {
+    use trace_commons_server::versioned_pipeline_bundle::package_matches_main_gate;
+
+    for bundle in ["minimal", "compatibility", "substance"] {
+        let package = corpus_bundle_package(bundle).expect("the built-in bundle builds");
+        assert!(
+            package_matches_main_gate(&package, &corpus_main_gate(&package)),
+            "{bundle}"
+        );
+    }
+    let substance = substance_candidate_package().unwrap();
+    let gate = corpus_main_gate(&substance);
+    assert_eq!(
+        gate.novelty_floor_micros,
+        Some(
+            package_substance_config(&substance)
+                .unwrap()
+                .novelty
+                .novelty_floor_micros
+        )
+    );
+    assert!(!package_matches_main_gate(&substance, &TEST_MAIN_GATE));
 }
 
 #[test]
