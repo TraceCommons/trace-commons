@@ -131,6 +131,90 @@ final class PayoutLinkSurfaceTests: XCTestCase {
         XCTAssertTrue(surface.canChoose(for: PayoutRailStatus(recipientUnavailable: true)))
     }
 
+    /// A direct change: offered on an active link nothing is closing, as
+    /// its own button, without stopping the link first.
+    func testChangeIsOfferedOnAnActiveLink() {
+        let active = PayoutRailStatus(linked: true, state: "active", organizationName: "Alpha")
+        XCTAssertTrue(surface.canChange(for: active))
+        XCTAssertTrue(
+            surface.canChange(for: PayoutRailStatus(linked: true, state: "active")),
+            "the change's words name no org, so it does not wait on the name")
+        XCTAssertFalse(surface.canChange(for: PayoutRailStatus()), "nothing linked: Choose instead")
+        XCTAssertFalse(
+            surface.canChange(
+                for: PayoutRailStatus(linked: true, state: "active", unlinkRequested: true)))
+        XCTAssertFalse(
+            surface.canChange(
+                for: PayoutRailStatus(linked: true, state: "waiting", organizationName: "Alpha")),
+            "a waiting link already has a change in flight")
+        XCTAssertFalse(
+            surface.canChange(
+                for: PayoutRailStatus(
+                    linked: true, state: "active", recipientRefCheck: "mismatch",
+                    organizationName: "Alpha")),
+            "a mismatch is chosen over directly")
+        XCTAssertEqual(surface.copy.changeButton, "T:change_button {org_name}")
+        XCTAssertEqual(
+            surface.copy.changeAccessibilityName, "T:change_accessibility_name {org_name}")
+    }
+
+    /// Change shows the org list, then the same consent and Choose as a
+    /// first link; Not now, a finish or a lost list ends it.
+    func testChangeShowsTheListThenTheSameConsent() {
+        let active = PayoutRailStatus(linked: true, state: "active", organizationName: "Alpha")
+        var picker = PayoutPicker()
+        XCTAssertFalse(surface.showsPicker(for: active, picker))
+        picker.beginChange()
+        XCTAssertTrue(picker.changing)
+        XCTAssertEqual(picker.phase, .loading)
+        XCTAssertTrue(surface.showsPicker(for: active, picker))
+        picker.beginLoading()
+        picker.listed(listing([Self.a, Self.b]))
+        XCTAssertTrue(picker.changing, "listing keeps the change open")
+        XCTAssertNil(picker.selected, "nothing is preselected on a change either")
+        picker.select("org-b")
+        XCTAssertEqual(picker.consent(copy: copy)?.body, "T:body Beta")
+        picker.beginWorking()
+        XCTAssertEqual(picker.phase, .working)
+        picker.finished()
+        XCTAssertFalse(picker.changing)
+        XCTAssertFalse(surface.showsPicker(for: active, picker))
+
+        picker.beginChange()
+        picker.listed(listing([Self.a, Self.b]))
+        picker.select("org-a")
+        picker.dismissSelection()
+        XCTAssertFalse(picker.changing, "Not now leaves the change")
+        XCTAssertEqual(picker.phase, .idle)
+        XCTAssertTrue(picker.rows.isEmpty)
+
+        picker.beginChange()
+        picker.listed(listing([Self.a]))
+        picker.select("org-a")
+        picker.refused(.failed)
+        XCTAssertTrue(picker.changing, "a plain failure keeps the list to retry")
+        picker.refused(.changed)
+        XCTAssertFalse(picker.changing, "a changed list ends it; Change lists again")
+        XCTAssertFalse(surface.showsPicker(for: active, picker))
+        // Change is hidden only while its list or consent is up; after a
+        // refusal or an empty list it is back to list again.
+        var shown = PayoutPicker()
+        XCTAssertTrue(surface.showsChangeButton(for: active, shown))
+        shown.beginChange()
+        XCTAssertFalse(surface.showsChangeButton(for: active, shown))
+        shown.listed(listing([Self.a]))
+        XCTAssertFalse(surface.showsChangeButton(for: active, shown))
+        shown.refused(.failed)
+        XCTAssertTrue(
+            surface.showsChangeButton(for: active, shown), "a failed choose can be retried")
+        shown.beginChange()
+        shown.listed(listing([]))
+        XCTAssertTrue(surface.showsChangeButton(for: active, shown))
+        XCTAssertFalse(surface.showsChangeButton(for: PayoutRailStatus(), PayoutPicker()))
+        // A first link shows the picker without a change.
+        XCTAssertTrue(surface.showsPicker(for: PayoutRailStatus(), PayoutPicker()))
+    }
+
     func testTheSectionIsHiddenUnlessNearAiIsEnabled() {
         XCTAssertNil(PayoutLinkSurface.nearAiRail(in: []))
         XCTAssertNil(PayoutLinkSurface.nearAiRail(in: [PayoutRailStatus(railId: "other")]))

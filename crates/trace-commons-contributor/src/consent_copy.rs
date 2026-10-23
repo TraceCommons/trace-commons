@@ -2495,6 +2495,12 @@ pub const PAYOUT_LINK_ACCESSIBILITY_NAME: &str = "Choose {org_name} for NEAR AI 
 pub const PAYOUT_LINK_UNLINK_BUTTON: &str = "Stop sending credit";
 /// DRAFT, NEEDS APPROVAL. The unlink button's accessibility name.
 pub const PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME: &str = "Stop sending credit to {org_name}";
+/// DRAFT, NEEDS APPROVAL. Changes the org while a link is active, without
+/// stopping it first: shows the org list, then the same consent and Choose.
+pub const PAYOUT_LINK_CHANGE_BUTTON: &str = "Change";
+/// DRAFT, NEEDS APPROVAL. The change button's accessibility name.
+pub const PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME: &str =
+    "Change the organization that receives NEAR AI credit";
 /// DRAFT, NEEDS APPROVAL. Beside the unlink button.
 pub const PAYOUT_LINK_UNLINK_BODY: &str =
     "Credit you earn is kept and sent when you choose an organization again.";
@@ -2534,6 +2540,8 @@ pub struct PayoutLinkCopy {
     pub unlink_button: &'static str,
     pub unlink_accessibility_name: &'static str,
     pub unlink_body: &'static str,
+    pub change_button: &'static str,
+    pub change_accessibility_name: &'static str,
     pub status_linked: &'static str,
     pub status_none: &'static str,
     pub status_waiting: &'static str,
@@ -2558,6 +2566,8 @@ pub fn payout_link_copy() -> PayoutLinkCopy {
         unlink_button: PAYOUT_LINK_UNLINK_BUTTON,
         unlink_accessibility_name: PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME,
         unlink_body: PAYOUT_LINK_UNLINK_BODY,
+        change_button: PAYOUT_LINK_CHANGE_BUTTON,
+        change_accessibility_name: PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME,
         status_linked: PAYOUT_LINK_STATUS_LINKED,
         status_none: PAYOUT_LINK_STATUS_NONE,
         status_waiting: PAYOUT_LINK_STATUS_WAITING,
@@ -4011,6 +4021,18 @@ mod payout_link_copy_tests {
             assert!(button.split_whitespace().count() <= 2, "{button}");
             assert!(!button.contains("{org_name}"), "{button}");
         }
+        // The direct change while a link is active: one word, named for
+        // assistive tech by the whole action, with no org to fill.
+        assert_eq!(copy.change_button, "Change");
+        assert_eq!(
+            copy.change_accessibility_name,
+            "Change the organization that receives NEAR AI credit"
+        );
+        assert!(
+            copy.change_accessibility_name
+                .starts_with(copy.change_button)
+        );
+        assert!(!copy.change_accessibility_name.contains("{org_name}"));
         // Rule 4: titles and buttons are separate keys and separate words.
         assert_ne!(copy.title, copy.button);
         // Rule 5: the accessibility name includes the visible action and

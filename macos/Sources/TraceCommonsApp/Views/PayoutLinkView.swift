@@ -46,7 +46,13 @@ struct PayoutLinkView: View {
                     .accessibilityLabel(surface.unlinkAccessibilityName(for: rail) ?? surface.copy.unlinkButton)
                     .disabled(model.busy)
             }
-            if surface.canChoose(for: rail) {
+            if surface.showsChangeButton(for: rail, model.picker) {
+                Button(surface.copy.changeButton) { Task { await model.change() } }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .accessibilityLabel(surface.copy.changeAccessibilityName)
+                    .disabled(model.busy)
+            }
+            if surface.showsPicker(for: rail, model.picker) {
                 picker(surface)
             }
             if let refusal = model.refusal {

@@ -500,8 +500,8 @@ Spec: section 5 ("Consent copy"), D1, D5 (superseded 2026-10-23), D7.
 - `macos/Sources/TraceCommonsApp/DaemonClient+PayoutLink.swift`, `PayoutLinkModel.swift`, `Views/PayoutLinkView.swift`: the model drives the calls off the main actor; the view sits in the Private AI settings section and draws nothing unless the commons lists `near_ai` as `dry_run` or `live`.
 - `TCConsentCopy.payoutLinkCopyJSON()` reads `tc_payout_link_copy_json`.
 - Choose is one click that runs start then confirm, after the consent for the selected org is on screen. Stop sending credit does the same for an unlink. There is no separate waiting state to show: the confirm is the person's click.
-- The picker shows while no link is active (or a mismatch or a gone org needs a new choice). Changing an active link is stop, then choose.
-- Every visible string is a core draft marked for owner review.
+- The picker shows while no link is active (or a mismatch or a gone org needs a new choice). An active link has a direct Change button (owner decision 2026-10-23): it lists the orgs and runs the same consent, start and confirm as a first link, with the `version` shown as `expected_current_version`, so a link that moved since is refused. Its label is "Change" and its accessibility name "Change the organization that receives NEAR AI credit" (core copy keys `change_button`, `change_accessibility_name`, drafts).
+- The owner approved the payout wording as written on 2026-10-23 ("Wording is fine"); the constants keep their `DRAFT, NEEDS APPROVAL` markers until the copy test's marker rule is retired.
 
 **Done when:** the picker works end to end against a local daemon and mock services (describe the manual run; no screenshots of the user's screen), Swift tests pass with output pasted, and every visible string comes from core copy.
 

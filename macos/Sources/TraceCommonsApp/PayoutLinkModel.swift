@@ -42,9 +42,9 @@ final class PayoutLinkModel: ObservableObject {
         case .failure:
             rail = nil
         }
-        if let rail, let surface {
-            // The name only comes from the org list. Load it when the status
-            // line needs it or when the person may choose.
+        if let rail, let surface, !picker.changing {
+            // The daemon has no name for the link (neither listed nor
+            // saved), or the person may choose: list the orgs.
             if surface.needsOrgName(for: rail) || surface.canChoose(for: rail) {
                 await loadOrganizations()
                 await reloadStatusForNames()
@@ -77,6 +77,14 @@ final class PayoutLinkModel: ObservableObject {
         }
     }
 
+    /// Change on an active link: the org list, then the same consent and
+    /// `choose()` -- start, then confirm against the version shown.
+    func change() async {
+        guard !busy else { return }
+        picker.beginChange()
+        await loadOrganizations()
+    }
+
     func select(_ id: String?) {
         picker.select(id)
     }
@@ -87,6 +95,8 @@ final class PayoutLinkModel: ObservableObject {
 
     /// The person's click on Choose, after the consent was shown for the
     /// selected org: start, then confirm. Nothing is saved if start fails.
+    /// The same for a first link and a change: the start carries the
+    /// `version` the person was shown, so a link that moved since refuses.
     func choose() async {
         guard let client, let rail, let org = picker.selected,
             let revision = picker.listing?.orgsRevision, !busy

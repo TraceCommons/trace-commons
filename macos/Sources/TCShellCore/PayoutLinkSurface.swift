@@ -3,7 +3,8 @@ import Foundation
 /// The NEAR AI payout section's words, decoded from what the Rust exported
 /// (`tc_payout_link_copy_json`).
 ///
-/// Every string is a DRAFT the owner has not approved. None is written in
+/// The owner approved this wording as written on 2026-10-23; the Change
+/// button's two strings, added after, are a draft. None is written in
 /// Swift: a payload with a missing or empty field is refused whole, so a
 /// blank never stands where a consent sentence belongs. Templates carry the
 /// one placeholder `{org_name}`, filled by `render(_:orgName:)` with the name
@@ -19,6 +20,8 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
     public let unlinkButton: String
     public let unlinkAccessibilityName: String
     public let unlinkBody: String
+    public let changeButton: String
+    public let changeAccessibilityName: String
     public let statusLinked: String
     public let statusNone: String
     public let statusWaiting: String
@@ -35,6 +38,8 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
         case unlinkButton = "unlink_button"
         case unlinkAccessibilityName = "unlink_accessibility_name"
         case unlinkBody = "unlink_body"
+        case changeButton = "change_button"
+        case changeAccessibilityName = "change_accessibility_name"
         case statusLinked = "status_linked"
         case statusNone = "status_none"
         case statusWaiting = "status_waiting"
@@ -50,14 +55,15 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
     public static let consumedFields = [
         "title", "body", "scope", "button", "secondary", "accessibility_name",
         "unlink_button", "unlink_accessibility_name", "unlink_body",
-        "status_linked", "status_none", "status_waiting", "status_unavailable",
+        "change_button", "change_accessibility_name", "status_linked", "status_none", "status_waiting", "status_unavailable",
         "status_mismatch", "sign_in", "no_organization", "changed", "failed",
     ]
 
     public var sentences: [String] {
         [
             title, body, scope, button, secondary, accessibilityName, unlinkButton,
-            unlinkAccessibilityName, unlinkBody, statusLinked, statusNone, statusWaiting,
+            unlinkAccessibilityName, unlinkBody, changeButton, changeAccessibilityName,
+            statusLinked, statusNone, statusWaiting,
             statusUnavailable, statusMismatch, signIn, noOrganization, changed, failed,
         ]
     }
@@ -79,7 +85,8 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
 }
 
 /// An organization the signed-in NEAR AI user owns and may choose. The name
-/// lives in memory only; it is never sent to the commons or saved.
+/// is never sent to the commons; the daemon keeps the linked org's name on
+/// this device so status shows it after a restart.
 public struct PayoutOrganization: Decodable, Equatable, Hashable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -120,7 +127,8 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
     public let recipientUnavailable: Bool
     /// `match`, `mismatch` or `unknown`; nil when the commons reports no ref.
     public let recipientRefCheck: String?
-    /// Present only while this daemon still holds the org list in memory.
+    /// The linked org's name, from the daemon's org list or the name it
+    /// saved for this link; nil when it has neither.
     public let organizationName: String?
 
     enum CodingKeys: String, CodingKey {
@@ -240,7 +248,8 @@ public struct PayoutLinkSurface: Equatable, Sendable {
     }
 
     /// Whether the person may choose an organization now. A live link is
-    /// stopped first; a mismatch or a gone org is chosen over directly.
+    /// changed with `canChange` instead; a mismatch or a gone org is chosen
+    /// over directly.
     public func canChoose(for rail: PayoutRailStatus) -> Bool {
         if rail.recipientRefCheck == "mismatch" || rail.recipientUnavailable { return true }
         return !rail.linked || rail.unlinkRequested
@@ -251,6 +260,33 @@ public struct PayoutLinkSurface: Equatable, Sendable {
     public func canUnlink(for rail: PayoutRailStatus) -> Bool {
         rail.linked && !rail.unlinkRequested && rail.state == "active"
             && rail.organizationName != nil
+    }
+
+    /// Whether the direct change is offered: an active link nothing is
+    /// closing. A mismatch or a gone org is chosen over with `canChoose`
+    /// instead, and a waiting link already has a change in flight. The
+    /// change's words name no org, so it does not wait on the name.
+    public func canChange(for rail: PayoutRailStatus) -> Bool {
+        rail.linked && !rail.unlinkRequested && rail.state == "active"
+            && rail.recipientRefCheck != "mismatch" && !rail.recipientUnavailable
+    }
+
+    /// Whether the Change button is drawn: on an active link, except while
+    /// the change's list or consent is on screen. After a refusal or an
+    /// empty list it is back, so the person can list again.
+    public func showsChangeButton(for rail: PayoutRailStatus, _ picker: PayoutPicker) -> Bool {
+        guard canChange(for: rail) else { return false }
+        guard picker.changing else { return true }
+        switch picker.phase {
+        case .loading, .choosing, .working: return false
+        case .idle, .noOrganization, .refused: return true
+        }
+    }
+
+    /// Whether the org list and consent are drawn: when the person may
+    /// choose, or while they are changing an active link.
+    public func showsPicker(for rail: PayoutRailStatus, _ picker: PayoutPicker) -> Bool {
+        canChoose(for: rail) || picker.changing
     }
 
     public func unlinkAccessibilityName(for rail: PayoutRailStatus) -> String? {
@@ -286,6 +322,9 @@ public struct PayoutPicker: Equatable, Sendable {
     public private(set) var phase: Phase = .idle
     public private(set) var listing: PayoutOrganizationListing?
     public private(set) var selectedId: String?
+    /// The person pressed Change on an active link: the list and consent are
+    /// shown over it until they choose, leave, or the list is lost.
+    public private(set) var changing = false
 
     public init() {}
 
@@ -297,6 +336,14 @@ public struct PayoutPicker: Equatable, Sendable {
     }
 
     public mutating func beginLoading() {
+        phase = .loading
+    }
+
+    /// Change on an active link: list the orgs, then the same consent and
+    /// Choose as a first link, sent against the version shown.
+    public mutating func beginChange() {
+        changing = true
+        selectedId = nil
         phase = .loading
     }
 
@@ -313,9 +360,16 @@ public struct PayoutPicker: Equatable, Sendable {
         selectedId = id
     }
 
-    /// Back to the list without a choice ("Not now").
+    /// Back to the list without a choice ("Not now"). During a change it
+    /// leaves the change: the active link stays as it was.
     public mutating func dismissSelection() {
         selectedId = nil
+        if changing {
+            changing = false
+            listing = nil
+            phase = .idle
+            return
+        }
         if phase == .choosing || phase == .refused(.failed) {
             phase = rows.isEmpty ? .idle : .choosing
         }
@@ -331,12 +385,16 @@ public struct PayoutPicker: Equatable, Sendable {
     /// a retry lists again.
     public mutating func refused(_ refusal: PayoutLinkRefusal) {
         selectedId = nil
-        if refusal != .failed { listing = nil }
+        if refusal != .failed {
+            listing = nil
+            changing = false
+        }
         phase = .refused(refusal)
     }
 
     public mutating func finished() {
         selectedId = nil
+        changing = false
         listing = nil
         phase = .idle
     }
