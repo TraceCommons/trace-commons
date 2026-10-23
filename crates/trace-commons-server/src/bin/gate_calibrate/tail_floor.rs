@@ -557,6 +557,15 @@ mod tests {
             eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL not configured");
             return;
         };
+        use trace_commons_server::db::Database as _;
+        trace_commons_server::db::postgres::PgBackend::new(
+            &trace_commons_server::config::DatabaseConfig::from_postgres_url(&url, 1),
+        )
+        .await
+        .expect("connect the migration pool")
+        .run_migrations()
+        .await
+        .expect("run migrations");
         let fetcher = PgDecisionsFetcher::connect(&url).await.expect("connect");
         let tenant = format!("tail-floor-{}", uuid::Uuid::new_v4());
         let substance = uuid::Uuid::new_v4();
