@@ -1191,20 +1191,29 @@ for title, body, button and accessibility name, per `docs/ui-copy-guide.md`.
   NEAR AI for past use, new credit pays that first." (The draft's closing
   passkey sentence is dropped: D5 superseded 2026-10-23.)
 - Scope line beside the button: "Sends credit to {org name} only."
-- Button: ~~"Continue with passkey"~~ (superseded; Task 8 drafts a label)
+- Button: ~~"Continue with passkey"~~ (superseded). Task 7 drafted "Choose",
+  with the accessibility name "Choose {org name} for NEAR AI credit".
 - Secondary: "Not now"
 - ~~No passkey yet~~: no longer needed; nothing requires a passkey.
 - Unlink button: "Stop sending credit"; body: "Credit you earn is kept and
   sent when you choose an organization again." (the passkey sentence is
   dropped, D5 superseded)
 - Status: "Credit goes to {org name}" / "No organization chosen" /
-  ~~"Waiting for passkey confirmation"~~ (superseded; Task 8 drafts the
-  line for a started request) / "Organization unavailable. Choose
-  another."
+  ~~"Waiting for passkey confirmation"~~ (superseded; Task 7 drafted
+  "Credit goes to {org name} from the next payout" for a confirmed link
+  the rail has not made active yet) / "Organization unavailable. Choose
+  another." Task 7 added a line for a commons that reports another org
+  than the one chosen on this device: "Credit may be going to an
+  organization you didn't choose. Choose again."
 
 The confirm step names the org shown, and a `connection_revision`-style
 check (as `near_ai_funding` does) refuses a click if the org changed since
-it was displayed. On the server the same check is `expected_current_version`
+it was displayed. As built in Task 7: the daemon's `orgs_revision` hashes
+every owned active org's id and name as shown, and the start re-reads
+`/users/me` with its fresh token and refuses before calling the commons if
+it differs; the confirm must name the org the start was for. The keys live
+in `consent_copy.rs` as `PAYOUT_LINK_*`, with `{org_name}` as the
+placeholder, and cross the C ABI as `tc_payout_link_copy_json`. On the server the same check is `expected_current_version`
 ("Who confirms" above). macOS is the lead shell; the others follow it.
 
 ## 6. Eligibility
