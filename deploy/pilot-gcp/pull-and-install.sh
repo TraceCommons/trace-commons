@@ -15,6 +15,11 @@
 #   deploy/pilot-gcp/pull-and-install.sh issuer             # just the issuer
 #   deploy/pilot-gcp/pull-and-install.sh ingest 4655cf45    # refuse unless latest.txt is that build
 #   TC_EXPECT_TAG=4655cf45 deploy/pilot-gcp/pull-and-install.sh   # same, for `both`
+#   TC_FETCH_ONLY_DIR=/opt/tracecommons/staged deploy/pilot-gcp/pull-and-install.sh both 4655cf45
+#                                                           # fetch and verify only (first install)
+#
+# Another environment sets TC_ARTIFACT_BUCKET to its own bucket; the staging
+# server's is in deploy/staging-gcp/README.md.
 #
 # Each install verifies the sha256 sidecar, backs up the running binary, installs,
 # and restarts the service. Reads the per-binary `latest.txt` pointer the build
@@ -33,6 +38,11 @@ BUCKET="${TC_ARTIFACT_BUCKET:-tc-pilot-artifacts-20260518}"
 # mismatch against `latest.txt` refuses the install instead of quietly
 # deploying whatever was published last.
 EXPECT_TAG="${TC_EXPECT_TAG:-${2:-}}"
+# Optional: fetch and verify into this directory and stop there -- no backup,
+# no install, no restart. A first install has no running binary and no unit
+# yet; deploy.sh then installs from here (TC_BINARY_DIR). In this mode a
+# missing sha256 sidecar refuses instead of warning.
+FETCH_ONLY_DIR="${TC_FETCH_ONLY_DIR:-}"
 
 install_one() {
   local bin="$1" svc="$2"
@@ -61,10 +71,22 @@ install_one() {
   if gcloud storage cp "${src}.sha256" "$tmp/$bin.sha256" 2>/dev/null; then
     ( cd "$tmp" && sha256sum -c "$bin.sha256" )
     echo "[$bin] sha256 verified"
+  elif [ -n "$FETCH_ONLY_DIR" ]; then
+    echo "[$bin] REFUSING: no sha256 sidecar for $src." >&2
+    rm -rf "$tmp"
+    return 1
   else
     echo "[$bin] WARNING: no sha256 sidecar; skipping checksum" >&2
   fi
   chmod 0755 "$tmp/$bin"
+
+  if [ -n "$FETCH_ONLY_DIR" ]; then
+    install -d -m 0755 "$FETCH_ONLY_DIR"
+    install -m 0755 "$tmp/$bin" "$FETCH_ONLY_DIR/$bin"
+    rm -rf "$tmp"
+    echo "[$bin] fetched to $FETCH_ONLY_DIR/$bin (not installed, not restarted)"
+    return 0
+  fi
 
   local stamp dest
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"

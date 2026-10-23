@@ -9,7 +9,8 @@
 #   4. Start the issuer (loopback only — no cert needed yet).
 #   5. Configure + start Caddy → fetches LE certs for both subdomains.
 #   6. Smoke the issuer through the public URL.
-#   7. Start ingest (it fetches the issuer's JWKS over HTTPS at startup).
+#   7. Start ingest (it fetches the issuer's JWKS over HTTPS at startup),
+#      and refuse a binary from the other environment (TC_EXPECT_STAGING).
 #   8. Smoke /health on both ingest and issuer.
 #   9. Smoke the AGPL section 13 source offer through the public ingress.
 #
@@ -31,6 +32,96 @@
 # docs/operator/near-attestation-drill.md.
 
 set -euo pipefail
+
+# Parameters. Every default is the pilot's, so a pilot run with none of them
+# set issues exactly the commands it always did
+# (scripts/ci/test-deploy-render.sh holds that against a recorded trace). The
+# staging server sets them as deploy/staging-gcp/README.md describes.
+#
+#   TC_DB_MODE        cloudsql (default): PostgreSQL through the Cloud SQL Auth
+#                     Proxy. local: PostgreSQL on this VM; the proxy is never
+#                     installed or started, and both service units are
+#                     installed ordered after TC_PG_UNIT instead of the proxy.
+#   TC_PG_UNIT        the local PostgreSQL unit (default postgresql.service).
+#   TC_DEPLOY_LABEL   PILOT (default): the closing "<label> DEPLOY OK" line;
+#                     in local mode also the units' "(TraceCommons <label>)".
+#   TC_EXPECT_STAGING unset (default): refuse an ingest whose /health reports
+#                     near_ai_staging true. 1: refuse one that does not report
+#                     it true. A staging binary on the pilot, or the reverse,
+#                     stops the deploy before the public smoke.
+#   TC_ENV_INSTALL    1 (default): install ~/deploy/ingest.env and issuer.env.
+#                     0: they were rendered in place under /etc/tracecommons
+#                     (deploy/staging-gcp/render-env.sh); require them, never
+#                     overwrite them.
+#   TC_BINARY_DIR     where the two binaries are installed from (default
+#                     ~/trace-commons-server/target/release).
+TC_DB_MODE="${TC_DB_MODE:-cloudsql}"
+TC_PG_UNIT="${TC_PG_UNIT:-postgresql.service}"
+TC_DEPLOY_LABEL="${TC_DEPLOY_LABEL:-PILOT}"
+TC_EXPECT_STAGING="${TC_EXPECT_STAGING:-}"
+TC_ENV_INSTALL="${TC_ENV_INSTALL:-1}"
+TC_BINARY_DIR="${TC_BINARY_DIR:-$HOME/trace-commons-server/target/release}"
+
+case "$TC_DB_MODE" in
+  cloudsql | local) ;;
+  *) echo "REFUSING: TC_DB_MODE must be cloudsql or local" >&2; exit 2 ;;
+esac
+case "$TC_EXPECT_STAGING" in
+  "" | 1) ;;
+  *) echo "REFUSING: TC_EXPECT_STAGING must be unset or 1" >&2; exit 2 ;;
+esac
+case "$TC_ENV_INSTALL" in
+  0 | 1) ;;
+  *) echo "REFUSING: TC_ENV_INSTALL must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$TC_PG_UNIT" in
+  *[!A-Za-z0-9@._-]* | "") echo "REFUSING: TC_PG_UNIT is not a unit name" >&2; exit 2 ;;
+esac
+case "$TC_DEPLOY_LABEL" in
+  *[!A-Za-z0-9_-]* | "") echo "REFUSING: TC_DEPLOY_LABEL must be letters, digits, - or _" >&2; exit 2 ;;
+esac
+
+# Install one service unit. cloudsql: the file as staged, byte for byte.
+# local: the same file with the proxy dependency replaced by the local
+# PostgreSQL unit and the label in its description. A drop-in cannot do
+# this: systemd lets a drop-in add dependencies but not remove one, and the
+# ingest unit Requires= the proxy.
+install_unit() {
+  local src="$1"
+  if [ "$TC_DB_MODE" = cloudsql ]; then
+    sudo install -m 644 "$src" /etc/systemd/system/
+    return
+  fi
+  local label rendered
+  label="$(printf '%s' "$TC_DEPLOY_LABEL" | tr '[:upper:]' '[:lower:]')"
+  rendered="$(mktemp -d)/$(basename "$src")"
+  sed -e "s/cloud-sql-proxy\.service/$TC_PG_UNIT/g" \
+    -e "s/(TraceCommons pilot)/(TraceCommons $label)/" "$src" >"$rendered"
+  sudo install -m 644 "$rendered" /etc/systemd/system/
+  rm -rf "$(dirname "$rendered")"
+}
+
+# Read the ingest's /health and refuse a build from the other environment.
+# An ingest that predates the field reports nothing, which the pilot
+# accepts and a staging deploy refuses.
+check_health_channel() {
+  local health="$1" staging=absent
+  if printf '%s' "$health" | grep -Eq '"near_ai_staging"[[:space:]]*:[[:space:]]*true'; then
+    staging=true
+  elif printf '%s' "$health" | grep -Eq '"near_ai_staging"[[:space:]]*:[[:space:]]*false'; then
+    staging=false
+  fi
+  if [ "$TC_EXPECT_STAGING" = 1 ] && [ "$staging" != true ]; then
+    echo "REFUSING: TC_EXPECT_STAGING=1 but the ingest /health reports near_ai_staging=$staging." >&2
+    echo "  This binary is not the staging build. Stop the ingest and install the staging binary." >&2
+    exit 1
+  fi
+  if [ -z "$TC_EXPECT_STAGING" ] && [ "$staging" = true ]; then
+    echo "REFUSING: the ingest /health reports near_ai_staging=true on a deploy that does not expect it." >&2
+    echo "  A staging binary was installed here. Stop the ingest and roll back." >&2
+    exit 1
+  fi
+}
 
 # 0. Keep the outgoing binaries.
 #
@@ -64,10 +155,10 @@ done
 
 # 1. Binaries.
 sudo install -o tracecommons -g tracecommons -m 755 \
-  ~/trace-commons-server/target/release/trace-commons-ingest \
+  "$TC_BINARY_DIR/trace-commons-ingest" \
   /opt/tracecommons/bin/
 sudo install -o tracecommons -g tracecommons -m 755 \
-  ~/trace-commons-server/target/release/trace-commons-upload-claim-issuer \
+  "$TC_BINARY_DIR/trace-commons-upload-claim-issuer" \
   /opt/tracecommons/bin/
 
 # 1b. State directories.
@@ -83,19 +174,35 @@ for d in /var/lib/trace-commons-vector-index \
 done
 
 # 2. Env files + systemd units + Caddy.
-sudo install -o root -g tracecommons -m 640 ~/deploy/ingest.env /etc/tracecommons/ingest.env
-sudo install -o root -g tracecommons -m 640 ~/deploy/issuer.env /etc/tracecommons/issuer.env
-sudo install -m 644 ~/deploy/trace-commons-ingest.service /etc/systemd/system/
-sudo install -m 644 ~/deploy/trace-commons-upload-claim-issuer.service /etc/systemd/system/
-sudo install -m 644 ~/deploy/cloud-sql-proxy.service /etc/systemd/system/
+if [ "$TC_ENV_INSTALL" = 1 ]; then
+  sudo install -o root -g tracecommons -m 640 ~/deploy/ingest.env /etc/tracecommons/ingest.env
+  sudo install -o root -g tracecommons -m 640 ~/deploy/issuer.env /etc/tracecommons/issuer.env
+else
+  for f in /etc/tracecommons/ingest.env /etc/tracecommons/issuer.env; do
+    if ! sudo test -f "$f"; then
+      echo "REFUSING: TC_ENV_INSTALL=0 but $f does not exist; render it first." >&2
+      exit 1
+    fi
+  done
+fi
+install_unit ~/deploy/trace-commons-ingest.service
+install_unit ~/deploy/trace-commons-upload-claim-issuer.service
+if [ "$TC_DB_MODE" = cloudsql ]; then
+  sudo install -m 644 ~/deploy/cloud-sql-proxy.service /etc/systemd/system/
+fi
 sudo install -m 644 ~/deploy/Caddyfile /etc/caddy/Caddyfile
 
 sudo systemctl daemon-reload
 
-# 3. Cloud SQL Auth Proxy (TLS to Cloud SQL, loopback to ingest).
-sudo systemctl enable --now cloud-sql-proxy.service
-sleep 3
-sudo systemctl is-active cloud-sql-proxy.service
+# 3. The database: the Cloud SQL Auth Proxy (TLS to Cloud SQL, loopback to
+#    ingest), or PostgreSQL on this VM.
+if [ "$TC_DB_MODE" = cloudsql ]; then
+  sudo systemctl enable --now cloud-sql-proxy.service
+  sleep 3
+  sudo systemctl is-active cloud-sql-proxy.service
+else
+  sudo systemctl is-active "$TC_PG_UNIT"
+fi
 
 # 4. Issuer.
 sudo systemctl enable --now trace-commons-upload-claim-issuer.service
@@ -109,7 +216,7 @@ sleep 5
 
 # 6. Wait for cert + smoke issuer through public URL.
 echo "Waiting for Let's Encrypt cert for issuer subdomain..."
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   if curl -sfk "https://issuer.${TC_PUBLIC_HOST}/health" -o /tmp/issuer-health.out; then
     echo "issuer reachable via HTTPS"
     break
@@ -124,7 +231,9 @@ curl -sf "https://issuer.${TC_PUBLIC_HOST}/.well-known/trace-commons-ed25519-key
 sudo systemctl enable --now trace-commons-ingest.service
 sleep 8
 sudo systemctl is-active trace-commons-ingest.service
-curl -sfS http://127.0.0.1:3907/health | head -c 400; echo
+INGEST_HEALTH="$(curl -sfS http://127.0.0.1:3907/health)"
+printf '%s' "$INGEST_HEALTH" | head -c 400; echo
+check_health_channel "$INGEST_HEALTH"
 
 # 8. Smoke through Caddy.
 curl -sf "https://ingest.${TC_PUBLIC_HOST}/health" | head -c 300; echo
@@ -134,4 +243,4 @@ curl -sf "https://ingest.${TC_PUBLIC_HOST}/health" | head -c 300; echo
 #    merely on localhost. --fail so a proxy rule that swallows it breaks the
 #    deploy rather than going unnoticed.
 curl -sfS "https://ingest.${TC_PUBLIC_HOST}/v1/source" | head -c 300; echo
-echo "PILOT DEPLOY OK"
+echo "$TC_DEPLOY_LABEL DEPLOY OK"
