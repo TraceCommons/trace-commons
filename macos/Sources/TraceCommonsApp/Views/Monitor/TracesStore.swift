@@ -709,6 +709,29 @@ final class TracesStore {
             && EligibilitySurface.offersContribute(eligibility, calls: calls)
     }
 
+    /// Whether a session's row Submit sends it (owner, 2026-10-22: a row's
+    /// Submit sends the trace at once, without its preview, as a folder's
+    /// Submit sends its traces). The review card's gate without the
+    /// preview: a core that answers, the consent words read, the daemon
+    /// holding an enrollment, the trace eligible by the shared table, and
+    /// its folder not ignored. A trace held as worth a second look is not
+    /// sent from its row: its look comes first, in its review.
+    func maySubmitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) -> Bool {
+        guard client != nil, consent != nil, status?.loggedIn == true, !folderIgnored, !entry.heldForReview
+        else { return false }
+        if case .failed = phase { return false }
+        return EligibilitySurface.offersContribute(Self.eligibility(entry), calls: Self.eligibilityCalls)
+    }
+
+    /// A row's Submit: the session sent with no verdict, as a folder's
+    /// Submit sends its traces, asked again at the press.
+    func submitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) async {
+        guard let live = tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+              maySubmitSession(live, folderIgnored: folderIgnored)
+        else { return }
+        await perform(.contribute, on: live.entryId)
+    }
+
     /// What the tab says for a refused action: a skipped approve in the
     /// submit toast's words, anything else in the core's line. Never the
     /// error's fixed label.

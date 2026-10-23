@@ -197,13 +197,17 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertNil(selection, "a second click on the folder clears it")
         XCTAssertFalse(showsInspector, "clearing is not a demand to open the inspector")
 
-        // Both rows toggle; the Review pill always selects, as Ron's onSubmit.
+        // Both rows toggle. A session's pill is Submit (owner, 2026-10-22):
+        // it sends the trace while it can be sent, and Return still opens
+        // the selected session's review.
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         XCTAssertTrue(source.contains(
             "onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) }"))
         XCTAssertTrue(source.contains(
             "onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) }"))
-        XCTAssertTrue(source.contains("onSubmit: { onReview(entry.entryId) }"))
+        XCTAssertTrue(source.contains("onSubmit: store.maySubmitSession(entry, folderIgnored: off)\n"
+            + "                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,"))
+        XCTAssertTrue(source.contains("onReview(entryID)"), "Return opens the review")
     }
 
     /// Up and down walk the rows as drawn, folders included, so the

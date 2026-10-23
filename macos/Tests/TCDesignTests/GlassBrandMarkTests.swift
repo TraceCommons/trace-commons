@@ -16,6 +16,53 @@ final class GlassBrandMarkTests: XCTestCase {
         XCTAssertGreaterThan(bounds.height / box.height, 0.99)
     }
 
+    /// The wordmark's six paths parse, "near" and "AI" side by side, and
+    /// together they fill the artwork's box; "AI" takes the kit's brand blue
+    /// and "near" the kit's single inks.
+    func test_theWordmarkParsesAndFillsItsBox() throws {
+        let near = try XCTUnwrap(GlassNearWordmark.nearPath).boundingRect
+        let ai = try XCTUnwrap(GlassNearWordmark.aiPath).boundingRect
+        XCTAssertEqual(GlassNearWordmark.near.count, 4)
+        XCTAssertEqual(GlassNearWordmark.ai.count, 2)
+        XCTAssertLessThan(near.maxX, ai.minX, "\"near\" comes before \"AI\"")
+        let box = GlassNearWordmark.viewBox
+        let bounds = near.union(ai)
+        XCTAssertTrue(box.insetBy(dx: -0.5, dy: -0.5).contains(bounds), "the wordmark spills out of its box: \(bounds)")
+        XCTAssertGreaterThan(bounds.width / box.width, 0.99)
+        XCTAssertGreaterThan(bounds.height / box.height, 0.99)
+        XCTAssertEqual(GlassNearWordmark.brandBlue, GlassRGBA(0x0091FD))
+        XCTAssertEqual(GlassTokens.Color.menuItemMark, GlassRGBA(0xFFFFFF, light: GlassRGBA(0x000000)))
+    }
+
+    /// The edge rail's Traces icon (owner, 2026-10-22): four nodes in a T,
+    /// three across the top joined by one line, and one under the middle
+    /// joined to it, all inside the square.
+    func test_theTraceNodesMakeAT() {
+        let nodes = GlassTraceNodesGlyph.nodes
+        XCTAssertEqual(nodes.count, 4)
+        XCTAssertEqual(Set(nodes[0...2].map(\.y)).count, 1, "the top three share a row")
+        XCTAssertEqual(nodes[3].x, nodes[1].x, "the fourth is under the middle")
+        XCTAssertGreaterThan(nodes[3].y, nodes[1].y)
+        XCTAssertLessThan(nodes[0].x, nodes[1].x)
+        XCTAssertLessThan(nodes[1].x, nodes[2].x)
+        XCTAssertEqual(GlassTraceNodesGlyph.links.count, 2)
+        XCTAssertTrue(GlassTraceNodesGlyph.links.contains { $0 == (0, 2) })
+        XCTAssertTrue(GlassTraceNodesGlyph.links.contains { $0 == (1, 3) })
+        let r = GlassTraceNodesGlyph.nodeRadius
+        for node in nodes {
+            XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(
+                CGRect(x: node.x - r, y: node.y - r, width: 2 * r, height: 2 * r)), "\(node) spills out")
+        }
+    }
+
+    /// The rail's N mark is the brand mark in the kit's brand blue.
+    func test_theNMarkIsTheBrandBlue() throws {
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "GlassNearWordmark.swift" }?.1)
+        XCTAssertTrue(source.contains("public struct GlassNearMark: View {"))
+        XCTAssertTrue(source.contains("context.fill(mark, with: .color(GlassNearWordmark.brandBlue.color))"))
+        XCTAssertNotNil(GlassBrandMark.path(at: .zero, size: 20))
+    }
+
     func test_theMarkIsDrawnAtItsSizeAndPlace() throws {
         let mark = try XCTUnwrap(GlassBrandMark.path(at: CGPoint(x: 10, y: 20), size: 4.2)).boundingRect
         XCTAssertEqual(mark.minX, 10, accuracy: 0.01)
