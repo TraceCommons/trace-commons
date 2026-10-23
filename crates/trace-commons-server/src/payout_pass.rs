@@ -66,6 +66,7 @@ pub const PAYOUT_AMOUNT_OUT_OF_RANGE: &str = "payout_amount_out_of_range";
 pub const PAYOUT_PROGRAM_TOTAL_MISMATCH: &str = "payout_program_total_mismatch";
 pub const PAYOUT_RECOVERY_UNMATCHED: &str = "payout_recovery_unmatched";
 pub const PAYOUT_LINK_CLOSE_BLOCKED: &str = "payout_link_close_blocked";
+pub const PAYOUT_RECEIPT_UNRECORDED: &str = "payout_receipt_unrecorded";
 const PAYOUT_STORE_FAILED: &str = "payout_store_failed";
 const PAYOUT_RAIL_SENDING_DISABLED: &str = "payout_rail_sending_disabled";
 pub const PAYOUT_RATE_UNAVAILABLE: &str = "payout_rate_unavailable";
@@ -951,7 +952,7 @@ impl PayoutPass {
                             tenant,
                             line.line_id,
                             &PayoutLineResolution::Confirmed {
-                                receipt_hash,
+                                receipt_hash: receipt_hash.clone(),
                                 delta,
                             },
                         )
@@ -963,7 +964,29 @@ impl PayoutPass {
                             .end_line(tenant, account, line, "payout_receipt_conflict", report)
                             .await;
                     }
-                    PayoutLineResolve::NotPending => report.skip("payout_line_not_pending"),
+                    // The send committed, but the line was ended by another
+                    // path first. If a line already holds this receipt it
+                    // is recorded; otherwise money moved that no row
+                    // records, so never drop it: hold the account for an
+                    // operator, who finds the record in the rail's history.
+                    PayoutLineResolve::NotPending => {
+                        if store(
+                            self.payouts
+                                .payout_receipt_is_claimed(tenant, self.rail_id(), &receipt_hash)
+                                .await,
+                        )? {
+                            report.skip("payout_line_not_pending");
+                        } else {
+                            tracing::error!(
+                                rail = %self.rail_id(),
+                                label = PAYOUT_RECEIPT_UNRECORDED,
+                                "payout send committed on a line no longer pending"
+                            );
+                            return self
+                                .hold(tenant, account, PAYOUT_RECEIPT_UNRECORDED, report)
+                                .await;
+                        }
+                    }
                 }
                 if total_after.is_some_and(|total| total != line.target_total) {
                     self.hold(tenant, account, PAYOUT_PROGRAM_TOTAL_MISMATCH, report)
@@ -1238,6 +1261,7 @@ mod tests {
             PAYOUT_PROGRAM_TOTAL_MISMATCH,
             PAYOUT_RECOVERY_UNMATCHED,
             PAYOUT_LINK_CLOSE_BLOCKED,
+            PAYOUT_RECEIPT_UNRECORDED,
             PAYOUT_STORE_FAILED,
             PAYOUT_RAIL_SENDING_DISABLED,
             PAYOUT_RATE_UNAVAILABLE,

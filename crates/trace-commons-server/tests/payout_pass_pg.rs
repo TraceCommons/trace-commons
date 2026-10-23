@@ -45,8 +45,8 @@ use trace_commons_gate_enclave::MockKeyedPayoutRail;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
-    Database, PayoutLineWrite, PayoutLink, PayoutLinkInsert, PayoutLinkState, PayoutLinkWrite,
-    PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
+    Database, PayoutLineResolution, PayoutLineWrite, PayoutLink, PayoutLinkInsert, PayoutLinkState,
+    PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore, PendingPayoutLineInsert, SealedRecipient,
 };
 use trace_commons_server::near_ai_rail::near_ai_receipt_hash;
 use trace_commons_server::payout_pass::{
@@ -2219,6 +2219,116 @@ async fn an_unreadable_link_holds_that_rail_only() {
             .await
             .is_empty()
     );
+}
+
+/// A rail that, mid-send, ends its line by another path (as an operator or a
+/// second writer might), so the send commits on a line no longer pending.
+struct ResolveBeforeSend {
+    inner: Arc<MockKeyedPayoutRail>,
+    store: Arc<PgBackend>,
+    tenant: String,
+    link_id: Uuid,
+}
+
+#[async_trait]
+impl PayoutRail for ResolveBeforeSend {
+    fn descriptor(&self) -> &RailDescriptor {
+        self.inner.descriptor()
+    }
+    fn adapter_identity(&self) -> &str {
+        self.inner.adapter_identity()
+    }
+    fn program_for_link(&self, link_id: Uuid) -> String {
+        self.inner.program_for_link(link_id)
+    }
+    async fn preflight(&self) -> Result<RailCapacity, RailRefusal> {
+        self.inner.preflight().await
+    }
+    async fn read_total(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<AtomicUnits, RailRefusal> {
+        self.inner.read_total(recipient, program).await
+    }
+    async fn send(&self, line: &RailLine<'_>) -> Result<SendOutcome, RailRefusal> {
+        let pending = self
+            .store
+            .pending_payout_line_for_link(&self.tenant, self.link_id)
+            .await
+            .unwrap()
+            .expect("the pass wrote the line pending before the send");
+        self.store
+            .resolve_payout_line(&self.tenant, pending.line_id, &PayoutLineResolution::NoOp)
+            .await
+            .unwrap();
+        self.inner.send(line).await
+    }
+    async fn find_receipt(
+        &self,
+        line: &RailLine<'_>,
+        exclude: &[String],
+    ) -> Result<ReceiptLookup, RailRefusal> {
+        self.inner.find_receipt(line, exclude).await
+    }
+    async fn history(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<Vec<RailHistoryEntry>, RailRefusal> {
+        self.inner.history(recipient, program).await
+    }
+    async fn probe_recipient(&self, recipient: &RecipientRef) -> Result<(), RailRefusal> {
+        self.inner.probe_recipient(recipient).await
+    }
+}
+
+/// A send that committed on a line no longer pending moved money no row
+/// records: the pass never drops that receipt silently. It holds the
+/// account for an operator, who finds the record in the rail's history.
+#[tokio::test]
+async fn a_committed_send_on_a_line_no_longer_pending_holds_the_account() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let keyed = Arc::new(MockKeyedPayoutRail::new());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    settle(&fixture, &tenant, accounts[0], 1_000).await;
+    let made = link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        keyed.as_ref(),
+        &opener,
+        "keyed-not-pending",
+        PayoutLinkState::Active,
+    )
+    .await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(ResolveBeforeSend {
+        inner: keyed.clone(),
+        store: fixture.runtime.clone(),
+        tenant: tenant.clone(),
+        link_id: made.link_id,
+    });
+
+    let report = pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(keyed.effects(), 1, "the send moved money");
+    assert_eq!(report.confirmed, 0, "{report:?}");
+    assert_eq!(
+        holds(&fixture, &tenant, accounts[0], "test_keyed").await,
+        vec!["payout_receipt_unrecorded".to_string()]
+    );
+    // And the next pass sends nothing more to it.
+    completed(
+        &pass(&fixture, keyed.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(keyed.effects(), 1);
 }
 
 /// A credit ledger row with the submission it needs, as the owner.
