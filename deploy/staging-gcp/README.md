@@ -167,7 +167,9 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    before starting anything.
    `TC_ENV_INSTALL=0` keeps the files `render-env.sh` wrote.
    `TC_EXPECT_STAGING=1` stops the deploy unless the new ingest's `/health`
-   reports `near_ai_staging: true`. It ends with `STAGING DEPLOY OK`.
+   reports `near_ai_staging: true`, and then stops the ingest (on a later
+   run of `deploy.sh`, it puts back the binary it kept and restarts it). It
+   ends with `STAGING DEPLOY OK`.
 
 6. **Create the login-resolver role** (`docs/operator/login-resolver-role.md`).
    Until it exists every login redeem fails closed. The resolver pool
@@ -214,10 +216,17 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    pins; give the variable again to replace them, or delete the file to
    unpin.
 
-Later deploys: steps 1, then `sudo TC_ARTIFACT_BUCKET=tc-staging-artifacts-20261021
-deploy/pilot-gcp/pull-and-install.sh both <tag>`, which installs and
-restarts in place, then `curl -fsS http://127.0.0.1:3907/health` to confirm
-`near_ai_staging` is still `true`.
+Later deploys: step 1, then
+
+```bash
+sudo TC_ARTIFACT_BUCKET=tc-staging-artifacts-20261021 TC_EXPECT_STAGING=1 \
+  deploy/pilot-gcp/pull-and-install.sh both <tag>
+```
+
+which installs and restarts in place, reads the new ingest's `/health`, and,
+unless it reports `near_ai_staging: true`, puts the previous ingest binary
+back, restarts it and fails. The issuer, installed first, is not rolled back
+(it has no channel).
 
 ## Not here yet
 

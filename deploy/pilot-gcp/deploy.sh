@@ -49,7 +49,9 @@ set -euo pipefail
 #   TC_EXPECT_STAGING unset (default): refuse an ingest whose /health reports
 #                     near_ai_staging true. 1: refuse one that does not report
 #                     it true. A staging binary on the pilot, or the reverse,
-#                     stops the deploy before the public smoke.
+#                     stops the deploy before the public smoke, and the ingest
+#                     goes back to the binary step 0 kept (or is stopped, on a
+#                     first install).
 #   TC_ENV_INSTALL    1 (default): install ~/deploy/ingest.env and issuer.env.
 #                     0: they were rendered in place under /etc/tracecommons
 #                     (deploy/staging-gcp/render-env.sh); require them, never
@@ -114,14 +116,30 @@ check_health_channel() {
   fi
   if [ "$TC_EXPECT_STAGING" = 1 ] && [ "$staging" != true ]; then
     echo "REFUSING: TC_EXPECT_STAGING=1 but the ingest /health reports near_ai_staging=$staging." >&2
-    echo "  This binary is not the staging build. Stop the ingest and install the staging binary." >&2
-    exit 1
+    echo "  This binary is not the staging build." >&2
+    withdraw_ingest
   fi
   if [ -z "$TC_EXPECT_STAGING" ] && [ "$staging" = true ]; then
     echo "REFUSING: the ingest /health reports near_ai_staging=true on a deploy that does not expect it." >&2
-    echo "  A staging binary was installed here. Stop the ingest and roll back." >&2
-    exit 1
+    echo "  A staging binary was installed here." >&2
+    withdraw_ingest
   fi
+}
+
+# The ingest from the other environment is already running when /health
+# shows it, so refusing is not enough: put the binary step 0 kept back and
+# restart it, or, on a first install with nothing kept, stop the ingest.
+withdraw_ingest() {
+  if [ -n "$INGEST_BACKUP" ]; then
+    echo "  Putting back $INGEST_BACKUP and restarting the ingest." >&2
+    sudo install -o tracecommons -g tracecommons -m 755 "$INGEST_BACKUP" \
+      /opt/tracecommons/bin/trace-commons-ingest
+    sudo systemctl restart trace-commons-ingest.service
+  else
+    echo "  No earlier binary to put back; stopping the ingest." >&2
+    sudo systemctl stop trace-commons-ingest.service
+  fi
+  exit 1
 }
 
 # 0. Keep the outgoing binaries.
@@ -139,10 +157,13 @@ check_health_channel() {
 # before anything replaces it. `|| true` because a first-ever install has
 # nothing to preserve, and that must not abort the deploy under `set -e`.
 DEPLOY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+INGEST_BACKUP=""
 for b in trace-commons-ingest trace-commons-upload-claim-issuer; do
   if [ -f "/opt/tracecommons/bin/$b" ]; then
-    sudo cp -p "/opt/tracecommons/bin/$b" \
-      "/opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP" || true
+    if sudo cp -p "/opt/tracecommons/bin/$b" \
+      "/opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP" && [ "$b" = trace-commons-ingest ]; then
+      INGEST_BACKUP="/opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP"
+    fi
     echo "preserved /opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP"
   fi
 done

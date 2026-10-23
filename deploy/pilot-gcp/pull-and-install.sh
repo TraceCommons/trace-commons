@@ -43,6 +43,15 @@ EXPECT_TAG="${TC_EXPECT_TAG:-${2:-}}"
 # yet; deploy.sh then installs from here (TC_BINARY_DIR). In this mode a
 # missing sha256 sidecar refuses instead of warning.
 FETCH_ONLY_DIR="${TC_FETCH_ONLY_DIR:-}"
+# Optional, for the staging server: 1 reads the restarted ingest's /health
+# and, unless it reports near_ai_staging true, puts the previous binary back,
+# restarts it and refuses. Unset (the pilot): no health check, as before; a
+# staging binary on the pilot is refused by its own boot guard.
+EXPECT_STAGING="${TC_EXPECT_STAGING:-}"
+case "$EXPECT_STAGING" in
+  "" | 1) ;;
+  *) echo "REFUSING: TC_EXPECT_STAGING must be unset or 1" >&2; exit 2 ;;
+esac
 
 install_one() {
   local bin="$1" svc="$2"
@@ -99,6 +108,18 @@ install_one() {
   sudo systemctl restart "$svc"
   sleep 8
   echo "[$bin] $(systemctl is-active "$svc")"
+  if [ "$bin" = trace-commons-ingest ] && [ "$EXPECT_STAGING" = 1 ]; then
+    local health
+    health="$(curl -sfS http://127.0.0.1:3907/health || true)"
+    if ! printf '%s' "$health" | grep -Eq '"near_ai_staging"[[:space:]]*:[[:space:]]*true'; then
+      echo "[$bin] REFUSING: TC_EXPECT_STAGING=1 but /health does not report near_ai_staging=true." >&2
+      echo "[$bin] Putting back ${dest}.bak-${stamp}." >&2
+      sudo install -o root -g root -m 0755 "${dest}.bak-${stamp}" "$dest"
+      sudo systemctl restart "$svc"
+      return 1
+    fi
+    echo "[$bin] /health reports near_ai_staging=true"
+  fi
   echo "[$bin] rollback: sudo install -m0755 ${dest}.bak-${stamp} ${dest} && sudo systemctl restart $svc"
 }
 

@@ -169,6 +169,13 @@ if run_deploy "$scratch/wrong.trace" '{"status":"ok","near_ai_staging":true}'; t
 elif grep -q 'near_ai_staging' "$scratch/wrong.trace.err" \
   && ! grep -q 'DEPLOY OK' "$scratch/wrong.trace.out"; then
   pass "pilot deploy.sh refuses an ingest reporting a staging build"
+  # Refusing is not enough: the wrong binary is already running. With no
+  # earlier binary to go back to (none in this test), it is stopped.
+  if grep -qx 'sudo systemctl stop trace-commons-ingest.service' "$scratch/wrong.trace"; then
+    pass "pilot deploy.sh stops an ingest from the other environment"
+  else
+    fail "pilot deploy.sh leaves an ingest from the other environment running"
+  fi
 else
   fail "pilot deploy.sh failed for some other reason on a staging /health"
   cat "$scratch/wrong.trace.err" >&2
@@ -248,6 +255,11 @@ if run_deploy "$scratch/staging-wrong.trace" "$pilot_health" "${staging_args[@]}
   fail "staging deploy.sh accepted an ingest that is not a staging build"
 elif grep -q 'near_ai_staging' "$scratch/staging-wrong.trace.err"; then
   pass "staging deploy.sh refuses an ingest that is not a staging build"
+  if grep -qx 'sudo systemctl stop trace-commons-ingest.service' "$scratch/staging-wrong.trace"; then
+    pass "staging deploy.sh stops an ingest that is not a staging build"
+  else
+    fail "staging deploy.sh leaves an ingest that is not a staging build running"
+  fi
 else
   fail "staging deploy.sh failed for some other reason on a pilot /health"
 fi
@@ -260,6 +272,72 @@ if run_deploy "$scratch/badmode.trace" "$staging_health" TC_DB_MODE=sqlite; then
   fail "deploy.sh accepted an unknown TC_DB_MODE"
 else
   pass "deploy.sh refuses an unknown TC_DB_MODE"
+fi
+
+# 2b. pull-and-install.sh against the same stubs and a stub gcloud. With
+#     TC_EXPECT_STAGING=1 it reads the restarted ingest's /health and, when it
+#     is not a staging build, puts the previous binary back. Unset, as on the
+#     pilot, it issues no health check at all.
+pstubs="$scratch/pull-stubs"
+mkdir -p "$pstubs"
+cat >"$pstubs/gcloud" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "gcloud $*" >>"$TRACE"
+case "$1 $2" in
+  "storage cat") bin="$(basename "$(dirname "$3")")"; echo "gs://bucket/binaries/$bin/abc1234/$bin" ;;
+  "storage cp")
+    case "$3" in *.sha256) exit 1 ;; esac
+    echo binary >"$4" ;;
+esac
+STUB
+chmod +x "$pstubs/gcloud"
+run_pull() {
+  # $1: trace file; $2: fake /health body; the rest: NAME=value overrides.
+  local trace="$1" health="$2"
+  shift 2
+  : >"$trace"
+  env -i PATH="$pstubs:$stubs:/usr/bin:/bin" HOME="$scratch/home" TRACE="$trace" \
+    INSTALLED="$scratch/installed" FAKE_HEALTH="$health" "$@" \
+    bash "$repo/deploy/pilot-gcp/pull-and-install.sh" ingest abc1234 \
+    >"$trace.out" 2>"$trace.err"
+}
+rollback='sudo install -o root -g root -m 0755 /opt/tracecommons/bin/trace-commons-ingest.bak-20260101T000000Z /opt/tracecommons/bin/trace-commons-ingest'
+if run_pull "$scratch/pull-pilot.trace" "$pilot_health"; then
+  if grep -q '^curl ' "$scratch/pull-pilot.trace"; then
+    fail "pull-and-install.sh without TC_EXPECT_STAGING checks /health"
+  else
+    pass "pull-and-install.sh without TC_EXPECT_STAGING runs as before, with no health check"
+  fi
+else
+  fail "pull-and-install.sh failed without TC_EXPECT_STAGING"
+  cat "$scratch/pull-pilot.trace.err" >&2
+fi
+if run_pull "$scratch/pull-staging.trace" "$staging_health" TC_EXPECT_STAGING=1; then
+  if grep -q '/health' "$scratch/pull-staging.trace" && ! grep -qxF "$rollback" "$scratch/pull-staging.trace"; then
+    pass "pull-and-install.sh with TC_EXPECT_STAGING=1 keeps a staging build"
+  else
+    fail "pull-and-install.sh with TC_EXPECT_STAGING=1 did not check, or rolled back, a staging build"
+  fi
+else
+  fail "pull-and-install.sh with TC_EXPECT_STAGING=1 refused a staging build"
+  cat "$scratch/pull-staging.trace.err" >&2
+fi
+for health in "$pilot_health" '{"status":"ok"}' ''; do
+  if run_pull "$scratch/pull-wrong.trace" "$health" TC_EXPECT_STAGING=1; then
+    fail "pull-and-install.sh with TC_EXPECT_STAGING=1 accepted /health '$health'"
+  elif grep -qxF "$rollback" "$scratch/pull-wrong.trace" \
+    && [ "$(grep -c '^sudo systemctl restart trace-commons-ingest$' "$scratch/pull-wrong.trace")" = 2 ] \
+    && grep -q 'near_ai_staging' "$scratch/pull-wrong.trace.err"; then
+    pass "pull-and-install.sh with TC_EXPECT_STAGING=1 rolls back on /health '$health'"
+  else
+    fail "pull-and-install.sh with TC_EXPECT_STAGING=1 did not roll back on /health '$health'"
+    cat "$scratch/pull-wrong.trace" "$scratch/pull-wrong.trace.err" >&2
+  fi
+done
+if run_pull "$scratch/pull-bad.trace" "$staging_health" TC_EXPECT_STAGING=yes; then
+  fail "pull-and-install.sh accepted TC_EXPECT_STAGING=yes"
+else
+  pass "pull-and-install.sh refuses a TC_EXPECT_STAGING other than 1"
 fi
 
 # 3. render-env.sh with dummy secrets from the environment.
