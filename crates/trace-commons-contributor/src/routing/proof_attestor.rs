@@ -3737,6 +3737,111 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_staging_build_checks_every_entry_for_the_model() {
+            // Two entries for our model, the first of which passes. Each
+            // entry's own log and record are checked, so a bad second entry
+            // refuses the key rather than riding on the first.
+            let (key, nonce) = key_and_nonce();
+            let good_entry = || entry_json(&quote_hex(), &key, &nonce, MODEL);
+            let two = |second: serde_json::Value| {
+                serde_json::json!({ "model_attestations": [good_entry(), second] }).to_string()
+            };
+
+            // The control: two good entries earn the key.
+            let (answer, label) =
+                earn(two(good_entry()), verifier(ten_events(), actions(), |_| {})).await;
+            assert!(matches!(answer, Attestation::Keys(_)), "{answer:?}");
+            assert_eq!(label, ATTESTED);
+
+            // The second entry's log does not replay to its quote.
+            let mut bad_log = good_entry();
+            let mut altered = ten_events();
+            altered[8].1 = "00".to_string();
+            bad_log["event_log"] = event_log(&altered);
+            // The second entry has no compose-manager record.
+            let mut no_record = good_entry();
+            no_record
+                .as_object_mut()
+                .unwrap()
+                .remove("compose_manager_attestation");
+            // The second entry's record quote does not verify.
+            let mut bad_record = good_entry();
+            bad_record["compose_manager_attestation"]["quote"] = serde_json::json!("00");
+            for (second, expected) in [
+                (bad_log, "rtmr3_replay_mismatch"),
+                (no_record, "compose_manager_missing"),
+                (bad_record, "compose_manager_quote_unverified"),
+            ] {
+                assert_eq!(
+                    earn(two(second), verifier(ten_events(), actions(), |_| {})).await,
+                    (Attestation::NotAttested, expected),
+                    "{expected}"
+                );
+            }
+        }
+
+        /// The fixture, with collateral for the compose-manager quote alone
+        /// unavailable while `down` is set.
+        struct ComposeCollateralDown {
+            inner: Fixture,
+            down: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl AttestationSource for ComposeCollateralDown {
+            async fn report(&self, model: &str, nonce: &str) -> Result<String, SourceUnavailable> {
+                self.inner.report(model, nonce).await
+            }
+            async fn collateral(&self, quote: &[u8]) -> Result<Collateral, SourceUnavailable> {
+                if self.down.load(Ordering::SeqCst) && quote == compose_quote().as_slice() {
+                    return Err(SourceUnavailable);
+                }
+                self.inner.collateral(quote).await
+            }
+        }
+
+        #[tokio::test]
+        async fn compose_manager_collateral_unavailable_is_no_answer() {
+            // The model quote's collateral is there and the record's is not:
+            // the record cannot be checked, so there is no key and no
+            // verdict either, and the next call asks again.
+            let (report, verify) = good();
+            let (key, nonce) = key_and_nonce();
+            let reports = Arc::new(AtomicUsize::new(0));
+            let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let pins = Arc::new(fixed_pins(s16_pins()));
+            let attestor = NearAiQuoteAttestor::with_parts(
+                Box::new(ComposeCollateralDown {
+                    inner: Fixture {
+                        report,
+                        reports: Arc::clone(&reports),
+                        collateral_ok: true,
+                    },
+                    down: Arc::clone(&down),
+                }),
+                Arc::clone(&pins),
+                Box::new(|| FIXTURE_CAPTURED_AT),
+                Box::new(move || Some(nonce.clone())),
+                verify,
+            );
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::Unavailable
+            );
+            assert_eq!(pins.attestation_label(), ATTESTATION_NOT_CHECKED);
+            assert_eq!(reports.load(Ordering::SeqCst), 1);
+
+            // Nothing was remembered: with the collateral back, the next
+            // call fetches again and earns the key.
+            down.store(false, Ordering::SeqCst);
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::Keys(vec![key])
+            );
+            assert_eq!(reports.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
         async fn a_staging_build_never_takes_a_gateway_quote_for_the_model() {
             // A gateway attestation carrying a good quote, log and record,
             // and no model entry: no key.
