@@ -10243,6 +10243,7 @@ impl PipelineServiceBuilder {
             privacy_pass_timeout,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
             score_policies: self.score_policies,
+            payout_notifier: std::sync::OnceLock::new(),
         };
         service
             .construct(service.default_package.clone())
@@ -10381,9 +10382,20 @@ pub struct PipelineService {
     /// Score policies an embedding binary registered
     /// (`PipelineServiceBuilder::with_score_policies`).
     score_policies: ScorePolicyRegistry,
+    /// Wakes the payout rails after a credit batch is finalized
+    /// (`attach_payout_notifier`; payout spec section 7). Unset, nothing is
+    /// woken; the rails' retry tick still runs.
+    payout_notifier: std::sync::OnceLock<crate::payout_worker::PayoutNotifier>,
 }
 
 impl PipelineService {
+    /// Wakes `notifier`'s payout rails after every commit that finalizes a
+    /// credit settlement batch. Set once; false if one was already set.
+    /// The pipeline holds nothing else of the payout and never waits on it.
+    pub fn attach_payout_notifier(&self, notifier: crate::payout_worker::PayoutNotifier) -> bool {
+        self.payout_notifier.set(notifier).is_ok()
+    }
+
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
     }
@@ -16033,6 +16045,14 @@ impl PipelineService {
         )
         .await?;
         tx.commit().await?;
+        // A finalized batch is new credit for the payout rails to accrue
+        // and pay (payout spec section 7). After the commit, never inside
+        // it; a reused batch was announced when it was finalized.
+        if batch_id.is_some() && event_state != "final" {
+            if let Some(notifier) = self.payout_notifier.get() {
+                notifier.notify_all();
+            }
+        }
         // The leg's credit event needs `main`'s `CreditMutate` audit event,
         // which ingest's worker appends (Zaki review 1, round 2, N-5).
         self.wake_follow_ups(

@@ -49,6 +49,21 @@ All dated 2026-10-21. The owner's words are quoted.
   passkey before the server saves anything. An account with no passkey must
   add one first. The zero-strong-authenticator carve-out does not apply to
   this route (section 5).
+
+  **Superseded by the owner on 2026-10-23.** "We aren't using passkeys at
+  all in the app right now." The owner chose **signed-in session only**:
+  link, change and unlink are authorized by the contributor's normal
+  authenticated app session (the account session the daemon already uses
+  with the commons), with no passkey step-up, no step-up page section, and
+  nothing that requires the account to have a passkey. The server still
+  verifies org membership with NEAR AI (`/users/me`, using the
+  contributor's NEAR AI access token, handed over for that check and never
+  stored), keeps the org-changed-since-shown (`connection_revision`-style)
+  check, and audits every link, change and unlink. The owner accepted the
+  trade-off in the option's own words: "anyone holding the app session
+  could redirect future payouts." Section 5's passkey gate, step-up page
+  section and passkey consent lines are replaced accordingly when the link
+  routes are built; where they still say passkey, this note governs.
 - **(D6) Parallel to Trace Credit.** "Near ai payout is parallel to trace
   credit." A NEAR AI payout does not consume, redeem or convert Trace
   Credit. The contributor keeps their Trace Credit, and whatever pays it
@@ -370,7 +385,8 @@ tokens and the rate never go in the repository, in a PR, or in a log.
    `permissions: ["credits:read", "credits:transfer"]`, `expires_at` at most
    90 days out on staging, and `constraints["credits:transfer"]` with
    `max_amount_per_transfer`, `max_total_amount` (below the org's),
-   `allowed_source_types: ["grant"]` and, on staging,
+   `allowed_source_types` naming the source the sender is funded from
+   (see step 6) and, on staging,
    `allowed_recipient_ids` set to the test recipient orgs. Both permissions
    are needed: `credits:transfer` alone cannot read capacity or history.
 6. **Hold the secret.** The token is shown once. Put it straight into the
@@ -380,7 +396,15 @@ tokens and the rate never go in the repository, in a PR, or in a log.
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID` (the credential `id`; not
      secret, used only for its log hash);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG` (the reseller org UUID);
-   - `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` (`grant` or `payment`);
+   - `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` (`payment`, `grant` or
+     `staking_farm`; required, **no default**). It names the credit the
+     sender org sends from, which depends on how that org was funded and on
+     what its policy and the credential allow. Verified on staging on
+     2026-10-23: the sender org is funded with paid credit, its policy
+     allows `payment` and `staking_farm`, and the working credential allows
+     `payment` only, so staging runs `payment`. The capacity probe reports a
+     maximum per source (0 for a source the credential may not use) and
+     carries fields the client does not read, which it ignores;
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` (`disabled`, `dry_run` or `live`;
      section 4, "Modes and the kill switch");
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO` (section 4,

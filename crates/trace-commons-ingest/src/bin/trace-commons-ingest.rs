@@ -27,6 +27,8 @@ mod file_witness;
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
 mod legacy_invite_link_routes;
+#[path = "trace_commons_ingest_internal/payout_rails.rs"]
+mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -1487,6 +1489,8 @@ pub async fn run_ingest(
         &state,
         state.community_snapshot_invalidation_scheduler.clone(),
     );
+    // One worker per enabled payout rail; a disabled rail spawns nothing.
+    let _payout_rail_workers = payout_rails::spawn_payout_rail_workers(&state);
     tracing::info!(
         addr = %listener.local_addr()?,
         "Trace Commons ingestion service listening"
@@ -1713,6 +1717,13 @@ struct AppState {
     /// none is installed; the route then answers 404. No built-in.
     credit_settlement_table:
         Option<Arc<trace_commons_protocol::settlement_estimate::SettlementEstimateTable>>,
+    /// The payout rails (payout spec sections 3, 4 and 7): one entry per
+    /// rail this build knows, each `disabled` unless configured, with its
+    /// readiness status (`payout_rails::payout_rails_from_env`).
+    payout_rails: Arc<trace_commons_server::payout_worker::PayoutRails>,
+    /// The payout store the rails' workers and operator routes use: the
+    /// database mirror's PostgreSQL backend, or `None` without one.
+    payout_store: Option<Arc<dyn trace_commons_server::db::PayoutStore>>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -4875,31 +4886,19 @@ impl AppState {
         // without the payout writer role boots as before. Logs carry the
         // rail and a label, never the rate.
         let credit_settlement_table = credit_estimate::settlement_table_from_env()?;
-        let near_ai_payout_mode = trace_commons_server::payout_rate::PayoutMode::near_ai_from_env()
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "{} refused: {}",
-                    trace_commons_server::payout_rate::NEAR_AI_PAYOUT_MODE_ENV,
-                    error.label()
-                )
-            })?;
         let payout_store = db_connections.as_ref().map(|connections| {
-            connections.postgres.as_ref() as &dyn trace_commons_server::db::PayoutStore
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::PayoutStore>
         });
-        match trace_commons_server::payout_rate::near_ai_rate_epoch_at_boot(
-            near_ai_payout_mode,
-            credit_settlement_table.as_deref(),
-            payout_store,
-        )
-        .await
-        {
-            Ok(Some(outcome)) => tracing::info!(
-                rail = trace_commons_server::payout_rate::NEAR_AI_PAYOUT_RAIL_LABEL,
-                outcome = outcome.as_label(),
-                "payout rate epoch at boot"
-            ),
-            Ok(None) => {}
-            Err(error) => anyhow::bail!("near_ai payout refused to start: {}", error.label()),
+        let payout_rails = Arc::new(
+            payout_rails::payout_rails_from_env(
+                credit_settlement_table.as_deref(),
+                payout_store.as_deref(),
+            )
+            .await?,
+        );
+        // A finalized pipeline credit batch wakes every enabled rail.
+        if let Some(service) = pipeline_service.as_ref() {
+            service.attach_payout_notifier(payout_rails.notifier());
         }
 
         let state = Self {
@@ -5088,6 +5087,8 @@ impl AppState {
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
             credit_settlement_table,
+            payout_rails,
+            payout_store,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -9255,6 +9256,18 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-settlement-drill",
             post(credit_settlement_drill_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/halt",
+            post(payout_rails::payout_rail_halt_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/resume",
+            post(payout_rails::payout_rail_resume_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
+            post(payout_rails::payout_link_release_handler),
         )
         .route(
             "/v1/admin/near-attestation-drill",
@@ -30385,7 +30398,8 @@ async fn run_credit_settlement(
     // Live settlement serializes per tenant so two overlapping runs cannot both
     // pass the source-event conflict check and finalize divergent batches (or
     // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
-    let settlement_locks = if body.dry_run {
+    let dry_run = body.dry_run;
+    let settlement_locks = if dry_run {
         None
     } else {
         Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
@@ -30401,6 +30415,12 @@ async fn run_credit_settlement(
                 "failed to release credit settlement run locks after settlement"
             );
         }
+    }
+    // A live run that committed may have finalized a batch: wake every
+    // payout rail after the commit (payout spec section 7). A wake with
+    // nothing new costs each rail one enumeration query.
+    if !dry_run && result.is_ok() {
+        state.payout_rails.notifier().notify_all();
     }
     result
 }

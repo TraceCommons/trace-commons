@@ -103,6 +103,14 @@ impl std::fmt::Debug for PayoutNotifier {
 }
 
 impl PayoutNotifier {
+    /// A notifier over these rails' wakers. [`PayoutRails::notifier`] is the
+    /// one a deployment uses.
+    pub fn new(rails: Vec<Arc<Notify>>) -> Self {
+        Self {
+            rails: Arc::new(rails),
+        }
+    }
+
     /// Called after a settlement batch commits.
     pub fn notify_all(&self) {
         for rail in self.rails.iter() {

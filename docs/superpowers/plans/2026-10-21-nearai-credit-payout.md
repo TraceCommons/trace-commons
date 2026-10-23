@@ -10,6 +10,29 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-21-nearai-credit-payout-design.md` (draft PR #1532). Owner decisions D1-D8 are settled; do not re-litigate them. Section 12's three defaults are the current answers; build them, and keep each in one place so an owner override is a small change. Every implementer reads the spec sections their task cites.
 
+## Owner decisions after the plan was written
+
+- **2026-10-23, D5 superseded:** "We aren't using passkeys at all in the
+  app right now." Link, change and unlink are authorized by the
+  contributor's signed-in app session only. No passkey gate, no step-up
+  page section, and nothing may require the account to have a passkey. The
+  server still verifies org membership with NEAR AI (`/users/me`, the
+  contributor's NEAR AI token used for that check and never stored), keeps
+  the org-changed-since-shown check, and audits every link, change and
+  unlink. Every passkey step below (the goal line, Review Focus 7, Task 6's
+  `require_passkey_step_up` and step-up page section, Task 7's step-up
+  redirect, Task 8's passkey copy) is replaced by this when that task is
+  built; this note governs where they disagree.
+- **2026-10-23, payout source:** `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` is
+  `payment`, `grant` or `staking_farm`, required in `dry_run`/`live`, with
+  no default (the staging sender is funded with paid credit, so staging
+  runs `payment`). Built in task 5, which also tightened the staging render
+  to accept only an `oc_` plus 64 hex payout credential.
+- **2026-10-23, task 5 seam:** the pass opens a link's sealed recipient
+  through `PayoutRecipientOpener`. Task 5 ships `UnconfiguredRecipientOpener`
+  (opens nothing, so any link is held `payout_link_unreadable`); task 6,
+  which seals recipients, supplies the real opener.
+
 ## Global Constraints
 
 Repo and process rules (every task):
@@ -74,7 +97,7 @@ Tasks 4 and 9 depend only on tasks 1-3 and 1-5 respectively in code; they stay i
 4. **A credential 403 changes no row** on a read and on a send. Test: `a_credential_refusal_stops_the_rail_and_changes_no_row` (task 5).
 5. **Precision.** `u128` amounts near `10^38` round-trip through `NUMERIC(39,0)`; a `near_ai` target above `i64::MAX` holds as `payout_amount_out_of_range`, never wraps. Tests: `atomic_units_round_trip_numeric_39` (task 2), `near_ai_target_above_i64_holds` (task 4).
 6. **Rate immutability.** A rate version re-installed with a different rate refuses boot. Test: `a_changed_rate_under_one_version_refuses_boot` (task 3).
-7. **The passkey gate has no carve-out.** An account with zero passkeys cannot confirm a link; a `near` session cannot either. Tests in task 6.
+7. ~~**The passkey gate has no carve-out.**~~ Superseded 2026-10-23 (see "Owner decisions after the plan was written"): no passkey; the signed-in session authorizes a link, the server verifies org membership, and every change is audited. Tests in task 6.
 
 ---
 
@@ -247,7 +270,7 @@ Spec: section 2 step 6, section 4 ("The NEAR AI client", "`near_ai` refusal mapp
 - Modify: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/near_provisioning.rs` (drop the local `NEAR_AI_API_BASE_URL`, use the server constant; keep the `cfg(test)` override exactly as it is)
 - Create: `crates/trace-commons-server/src/near_ai_transfer.rs` (`NearAiTransferClient`: `SecretString` credential, sender org, source type; `send_cumulative`, `capacity`, `history_page`; `redirect(Policy::none())`, TLS-or-loopback, fixed user agent, 15 s timeout, `bearer_auth`; error body `error.type` into a closed `NearAiTransferError` enum; a `#[cfg(test)]`/test-only constructor taking a loopback base)
 - Create: `crates/trace-commons-server/src/near_ai_rail.rs` (`NearAiRail: PayoutRail`; program `tc1-` + first 32 hex of `sha256("nearai-payout-program-v1:" || link_id)`; probe program `tcprobe-v1`; metadata `{"tc": sha256("nearai-payout-line-v1:" || line_id)}`; memo empty; `receipt_hash = sha256("nearai-transfer-v1:" || id)`; `target_total` narrowed to `i64` or `HoldLine("payout_amount_out_of_range")`; the refusal table from the spec, verbatim)
-- Create: `crates/trace-commons-server/src/near_ai_rail_config.rs` (env parsing: `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` default `disabled`, `_CREDENTIAL` (`oc_` + 64 hex, `SecretString`), `_CREDENTIAL_ID`, `_SENDER_ORG` (UUID), `_SOURCE` (`grant`|`payment`), `_ACCOUNT_CEILING_NANO`; any missing or malformed in `dry_run`/`live` -> `near_ai_payout_config_missing`; no base-URL variable exists)
+- Create: `crates/trace-commons-server/src/near_ai_rail_config.rs` (env parsing: `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` default `disabled`, `_CREDENTIAL` (`oc_` + 64 hex, `SecretString`), `_CREDENTIAL_ID`, `_SENDER_ORG` (UUID), `_SOURCE` (`payment`|`grant`|`staking_farm`, no default; widened 2026-10-23), `_ACCOUNT_CEILING_NANO`; any missing or malformed in `dry_run`/`live` -> `near_ai_payout_config_missing`; no base-URL variable exists)
 - Modify: `crates/trace-commons-server/Cargo.toml`, `crates/trace-commons-ingest/Cargo.toml` (feature `near-ai-staging`, ingest forwards to server and contributor where it links them), `crates/trace-commons-contributor/Cargo.toml` (feature `near-ai-staging` switching `CLOUD_API_ORIGIN` in `src/daemon/nearai_credential/api.rs`; the daemon's status reports it)
 - Modify: `scripts/ci/check-release-credential-store.sh` or add `scripts/ci/check-release-staging-feature.sh` beside it (same shape, with its own self-test), and call it from the `cargo fmt --check` job in `.github/workflows/ci.yml`, so no release workflow or shipped manifest enables `near-ai-staging`
 - Create: `crates/trace-commons-server/tests/near_ai_rail_mock.rs` (a loopback mock #1271 server built on axum, which the server already depends on)
