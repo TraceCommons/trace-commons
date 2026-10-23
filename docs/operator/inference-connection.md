@@ -49,7 +49,14 @@ Keep the existing enrollment capability and response shape for old clients.
 reports wallet and NEAR AI login readiness independently of the legacy
 `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`, and returns versioned wallet
 and NEAR AI start/finish paths plus the authenticated connection route paths.
-The v2 login responses contain no installable witness fields. Legacy paths
+The v2 login responses contain no installable witness fields. When either v2
+ceremony is ready, the v2 capabilities document also publishes `issuer_url`
+and `audience` (and `inference_receipt_endpoint` when one is configured), from
+the same `TRACE_COMMONS_NEAR_PROVISIONING_*` settings the legacy route reads:
+a contributor enrolled without them cannot mint upload claims. A
+`near-ai-staging` contributor build signs up through this contract (it reads
+no witness, and does not yet implement connection selection); a default
+build keeps the legacy routes. Legacy paths
 still require the legacy witness and preserve their response shape. Route
 clients to this contract only after
 they implement explicit selection and installation. K12 must

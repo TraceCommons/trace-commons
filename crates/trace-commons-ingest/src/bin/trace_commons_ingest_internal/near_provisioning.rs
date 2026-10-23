@@ -409,13 +409,22 @@ pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::re
 /// Opt-in K12 contract. It reports login readiness separately from connection
 /// selection and intentionally omits the legacy installable witness material.
 /// The old capabilities endpoint keeps its exact response for deployed clients.
+///
+/// The issuer, audience and receipt endpoint are published exactly when
+/// either v2 ceremony is ready, under the same rules the old handler applies
+/// to them (`published_issuer`, `published_receipt_endpoint`). They are
+/// properties of the commons, not witness material: a client enrolled
+/// without them is enrolled and unable to upload, because upload claims are
+/// minted against the issuer and audience its config records. A commons that
+/// is not ready publishes none of them, and an unconfigured receipt endpoint
+/// is left out rather than sent as `null`.
 pub(super) async fn capabilities_v2(
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
     let wallet_ready = ready_for(&state, ProvisionContract::ExplicitSelection, true);
     let login_ready = ready_for(&state, ProvisionContract::ExplicitSelection, false);
     let network = account_near_config(&state).ok().map(|c| c.network.clone());
-    response(serde_json::json!({
+    let mut body = serde_json::json!({
         "contract_version": "near-provision-capabilities-v2",
         "ready": wallet_ready,
         "near_ai_login_ready": login_ready,
@@ -431,7 +440,22 @@ pub(super) async fn capabilities_v2(
         "inference_connection_disconnect_path_template": "/v1/account/inference-connection/{connection_id}",
         "offers_available": !state.inference_connection_catalog.is_empty(),
         "funding_available": false,
-    }))
+    });
+    // Both readiness checks already require `published_issuer`, so a ready
+    // commons always has one; the `if let` keeps a later readiness change
+    // from publishing half of the pair.
+    if wallet_ready || login_ready {
+        if let (Some((issuer_url, audience)), Some(object)) =
+            (published_issuer(), body.as_object_mut())
+        {
+            object.insert("issuer_url".into(), issuer_url.into());
+            object.insert("audience".into(), audience.into());
+            if let Some(endpoint) = published_receipt_endpoint() {
+                object.insert("inference_receipt_endpoint".into(), endpoint.into());
+            }
+        }
+    }
+    response(body)
 }
 
 #[derive(Deserialize)]
