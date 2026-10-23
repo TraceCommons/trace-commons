@@ -35,7 +35,7 @@
 //!   "issued_at": "2026-10-21T18:00:00Z",
 //!   "expires_at": "2026-10-28T18:00:00Z",
 //!   "sets": ["mrtd=<96 hex>,rtmr0=<96 hex>,rtmr1=<96 hex>,rtmr2=<96 hex>,mrconfigid=<96 hex>"],
-//!   "allowlist": {"rtmr3": {...}, "compose_actions": [...]}
+//!   "allowlist": {"rtmr3": {...}, "compose_actions": {"compose_manager_images": [...], "compose_files": [...]}}
 //! }
 //! ```
 //!
@@ -276,8 +276,12 @@ impl fmt::Debug for PinPayload {
             .field("expires_at", &self.expires_at)
             .field("set_count", &self.sets.len())
             .field(
-                "compose_action_count",
-                &self.allowlist.compose_actions.len(),
+                "compose_manager_image_count",
+                &self.allowlist.compose_actions.compose_manager_images.len(),
+            )
+            .field(
+                "compose_file_count",
+                &self.allowlist.compose_actions.compose_files.len(),
             )
             .finish()
     }
@@ -632,9 +636,12 @@ mod tests {
                 "key_provider": "6b6d73",
                 "markers": [{"name": "system-ready", "payload": "00"}],
             },
-            "compose_actions": [
-                {"action": "compose_up", "container": "app", "image": "registry.example/app"},
-            ],
+            "compose_actions": {
+                "compose_manager_images": [format!("registry.example/compose-manager@sha256:{}", "ab".repeat(32))],
+                "compose_files": [
+                    {"file": "example/models.yaml", "file_sha256": "f1".repeat(32), "commit": "c1".repeat(20)},
+                ],
+            },
         })
     }
 
@@ -776,7 +783,7 @@ mod tests {
         let mut missing: serde_json::Value = serde_json::from_slice(&good_payload()).unwrap();
         missing.as_object_mut().unwrap().remove("allowlist");
         let mut malformed = missing.clone();
-        malformed["allowlist"] = serde_json::json!({"rtmr3": {}, "compose_actions": []});
+        malformed["allowlist"] = serde_json::json!({"rtmr3": {}, "compose_actions": {}});
         for value in [missing, malformed] {
             assert_eq!(
                 check(&key, &signed(&key, value.to_string().as_bytes()), ISSUED).unwrap_err(),
@@ -789,7 +796,7 @@ mod tests {
         let mut placeholder: serde_json::Value = serde_json::from_slice(&good_payload()).unwrap();
         placeholder["allowlist"] = serde_json::json!({
             "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
-            "compose_actions": [],
+            "compose_actions": {"compose_manager_images": [], "compose_files": []},
         });
         let pins = check(
             &key,

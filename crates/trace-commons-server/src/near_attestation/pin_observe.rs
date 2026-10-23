@@ -36,7 +36,17 @@
 //! values instead, as a candidate allowlist ([`Observation::review`]) for
 //! the operator to review and commit (owner decision S16). The
 //! `instance-id` event's value is never part of it: it is the per-boot
-//! random value the replay exists to absorb.
+//! random value the replay exists to absorb. Its compose half (owner
+//! decision S17) lists the distinct compose-manager images and the
+//! distinct (file, SHA-256, commit) triples of the `compose_up` actions
+//! seen. A `compose_down` carries no file hash, so the run is refused
+//! (`review_compose_down_unlisted`) when one names a file and commit no
+//! `compose_up` in the run brought up: the allowlist could not list it, and
+//! a signed allowlist that silently refuses the live record would say
+//! nothing about why. A value the allowlist format cannot hold (an image not
+//! named by digest, a hash or commit not lower-case hex of its length, two
+//! hashes for one file and commit) refuses the run as
+//! `review_compose_actions_unlistable`.
 //!
 //! Refusals are labels. No key, nonce, quote, measurement or URL reaches
 //! one, so a refusal can be printed as it is. The tests are in
@@ -48,8 +58,9 @@ use trace_commons_attestation::quote::{
 };
 use trace_commons_attestation::receipt::{AttestedKeyError, model_ed25519_keys, quote_bound_keys};
 use trace_commons_attestation::staging_replay::{
-    Allowlist, ComposeAction, ComposeManagerRecord, MARKER_EVENTS, Marker, ReplayedEvent,
-    Rtmr3Allowlist, check_compose_manager, model_entry_evidence, replay_rtmr3,
+    Allowlist, ComposeAction, ComposeAllowlist, ComposeFile, ComposeManagerRecord, MARKER_EVENTS,
+    Marker, ReplayedEvent, Rtmr3Allowlist, check_compose_manager, model_entry_evidence,
+    replay_rtmr3,
 };
 
 use super::client::{AttestationClientError, AttestedKeyReportClient};
@@ -89,8 +100,9 @@ pub struct Observation {
     /// first model's first quote.
     pub ingest_pin: String,
     /// The candidate allowlist: the values every replayed log carried (one
-    /// value per event, the same across every entry and model) and every
-    /// compose action seen, first-seen order. Never the `instance-id`.
+    /// value per event, the same across every entry and model), the
+    /// distinct compose-manager images and the distinct `compose_up` files
+    /// seen, first-seen order. Never the `instance-id`.
     pub review: Allowlist,
 }
 
@@ -190,7 +202,9 @@ pub async fn observe_measurement_sets(
     Ok(Observation {
         sets,
         ingest_pin: ingest_pin.ok_or_else(|| refused(0, "no_models".to_string()))?,
-        review: review.finish(),
+        review: review
+            .finish()
+            .map_err(|label| refused(0, label.to_string()))?,
     })
 }
 
@@ -198,7 +212,10 @@ pub async fn observe_measurement_sets(
 #[derive(Default)]
 struct Review {
     rtmr3: Option<Rtmr3Allowlist>,
-    compose_actions: Vec<ComposeAction>,
+    compose_actions: ComposeAllowlist,
+    /// The (file, commit) of every `compose_down` seen: each must be a
+    /// listed file by the end of the run.
+    downs: Vec<(String, String)>,
 }
 
 impl Review {
@@ -234,15 +251,56 @@ impl Review {
             Some(_) => return Err("review_entries_disagree"),
         }
         for action in &entry.actions {
-            if !self.compose_actions.contains(action) {
-                self.compose_actions.push(action.clone());
+            match action {
+                ComposeAction::ManagerStarted { image, .. } => {
+                    let images = &mut self.compose_actions.compose_manager_images;
+                    if !images.contains(image) {
+                        images.push(image.clone());
+                    }
+                }
+                ComposeAction::Up {
+                    commit,
+                    file,
+                    file_sha256,
+                    ..
+                } => {
+                    let listed = ComposeFile {
+                        file: file.clone(),
+                        file_sha256: file_sha256.clone(),
+                        commit: commit.clone(),
+                    };
+                    let files = &mut self.compose_actions.compose_files;
+                    if !files.contains(&listed) {
+                        files.push(listed);
+                    }
+                }
+                ComposeAction::Down { commit, file, .. } => {
+                    let pair = (file.clone(), commit.clone());
+                    if !self.downs.contains(&pair) {
+                        self.downs.push(pair);
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn finish(self) -> Allowlist {
-        Allowlist {
+    /// The candidate allowlist, once every entry is in. Refused when it
+    /// would not allow every action seen, or could not be read back.
+    fn finish(self) -> Result<Allowlist, &'static str> {
+        let compose_actions = self.compose_actions;
+        if self.downs.iter().any(|(file, commit)| {
+            !compose_actions
+                .compose_files
+                .iter()
+                .any(|listed| listed.file == *file && listed.commit == *commit)
+        }) {
+            return Err("review_compose_down_unlisted");
+        }
+        // The review must be an allowlist `sign` accepts as it is.
+        let compose_actions = ComposeAllowlist::from_json(&compose_actions.to_json())
+            .map_err(|_| "review_compose_actions_unlistable")?;
+        Ok(Allowlist {
             rtmr3: self.rtmr3.unwrap_or(Rtmr3Allowlist {
                 app_id: Vec::new(),
                 mr_kms: Vec::new(),
@@ -250,8 +308,8 @@ impl Review {
                 key_provider: Vec::new(),
                 markers: Vec::new(),
             }),
-            compose_actions: self.compose_actions,
-        }
+            compose_actions,
+        })
     }
 }
 
