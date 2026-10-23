@@ -933,7 +933,7 @@ line first, which the rail contract makes safe:
 |---|---|---|---|
 | 429 `transfer_rate_limited`, 503 `transfer_unavailable` / `accounting_busy`, timeout | `Retry` | stays `pending` | retried next pass, same target |
 | 409 `insufficient_posted_capacity`, `sender_not_reconciled` | `StopPass` | stays `pending` | operator: fund or reconcile the sender |
-| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` | `HoldLine` | `held` | budget or recipient restriction; compare with `capacity` |
+| 409 `credential_transfer_limit_exceeded`, `organization_transfer_limit_exceeded` (on a send or a zero read) | `StopPass` | stays `pending` | a limit on our own credential or org (budget, source, or recipient list, which the link probe already checked); never the recipient's standing, so no account is held. Raise the limit; the next pass resends the line |
 | 409 `capacity_overflow` | `HoldLine` | `held` | the recipient's incoming total would overflow `i64`; operator review |
 | 404 `organization_unavailable` on a send | `RecipientUnavailable` | `held`, link marked `recipient_unavailable` | contributor must relink; #1271 raises this code for the recipient only |
 | 404 with any other code, or no JSON body | `StopPass` (`near_ai_route_unavailable`) | unchanged | a wrong route, a proxy page or a host without #1271; never marks a link |

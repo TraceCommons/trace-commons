@@ -1007,6 +1007,83 @@ async fn a_credential_refusal_stops_the_rail_and_changes_no_row() {
     );
 }
 
+/// A limit on our own credential or org refuses a send: that is the
+/// sender's budget, not the recipient's standing. The pass stops, holds no
+/// account, and leaves the line pending exactly as written; the next pass
+/// resends it and pays everyone.
+#[tokio::test]
+async fn a_sender_limit_stops_the_rail_and_holds_no_recipient() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    for code in [
+        "credential_transfer_limit_exceeded",
+        "organization_transfer_limit_exceeded",
+    ] {
+        let mock = Mock::start().await;
+        let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+        let opener = Arc::new(TestOpener::default());
+        let (tenant, accounts) = tenant_with_accounts(&fixture, 2).await;
+        for (n, account) in accounts.iter().enumerate() {
+            settle(&fixture, &tenant, *account, 1_000).await;
+            link(
+                &fixture,
+                &tenant,
+                *account,
+                rail.as_ref(),
+                &opener,
+                &org(10 + n as u128),
+                PayoutLinkState::Active,
+            )
+            .await;
+        }
+        // Capacity, the first zero read, then the first send is refused.
+        mock.script(Scripted::Pass);
+        mock.script(Scripted::Pass);
+        mock.script(Scripted::Error(409, code));
+        let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await;
+        assert!(
+            matches!(report.outcome, PayoutPassOutcome::Stopped { .. }),
+            "{code} {report:?}"
+        );
+        assert!(
+            !report
+                .held
+                .contains_key("near_ai_credential_transfer_limit_exceeded")
+                && !report
+                    .held
+                    .contains_key("near_ai_organization_transfer_limit_exceeded"),
+            "{code} {report:?}"
+        );
+        for account in &accounts {
+            assert!(
+                holds(&fixture, &tenant, *account, "near_ai")
+                    .await
+                    .is_empty(),
+                "{code}"
+            );
+        }
+        let rows = lines(&fixture, &tenant, "near_ai").await;
+        assert_eq!(rows.len(), 1, "{code}");
+        assert_eq!(rows[0].state, "pending", "{code}");
+        assert!(mock.transfers().is_empty());
+
+        completed(
+            &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert_eq!(mock.transfers().len(), 2, "{code}");
+        let rows = lines(&fixture, &tenant, "near_ai").await;
+        assert!(
+            rows.iter().all(|row| row.state == "confirmed"),
+            "{code} {rows:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn back_pay_steps_up_by_the_per_send_max() {
     let Some(fixture) = fixture().await else {
