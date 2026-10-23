@@ -162,6 +162,21 @@ pub(crate) fn chosen_organization(store: &ConfigStore) -> Option<String> {
         .and_then(|record| record.chosen_organization_id)
 }
 
+/// Forget the record. The caller holds the credential commit lock: this is
+/// the forget path's, which removes the session every revoke needs, and the
+/// forget sentence already says keys are not revoked at NEAR AI. Best
+/// effort -- a record left behind only names keys, and a forget must not fail
+/// over it.
+pub(crate) fn clear_locked(store: &ConfigStore) {
+    match std::fs::remove_file(store.daemon_path(SPEND_ORG_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_record_not_cleared")
+        }
+    }
+}
+
 pub(crate) fn record_pending(store: &ConfigStore, entries: &[PendingRevocation]) -> Result<()> {
     update(store, |record| {
         for entry in entries {

@@ -655,3 +655,30 @@ fn the_view_carries_every_word_the_mac_app_reads() {
     let unnamed = crate::private_inference_copy::spend_org_view(None);
     assert!(!unnamed["prompt_line"].as_str().unwrap().contains('{'));
 }
+
+/// Forgetting the sign-in forgets this record too. The sweep needs the
+/// account's session, and a different account signed in afterwards would be
+/// refused every revoke forever; the forget sentence already says keys are
+/// not revoked at NEAR AI by forgetting.
+#[tokio::test]
+async fn forgetting_the_sign_in_forgets_the_choice_and_the_pending_revocations() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::INTERNAL_SERVER_ERROR);
+    let outcome = select_with(&fixture.shared, &api, "org-b", Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(outcome.revoke_pending);
+    assert_eq!(
+        chosen_organization(&fixture.shared.store).as_deref(),
+        Some("org-b")
+    );
+    assert!(super::super::ceremony::forget(&fixture.shared.store).unwrap());
+    assert!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .is_empty()
+    );
+    assert_eq!(chosen_organization(&fixture.shared.store), None);
+}

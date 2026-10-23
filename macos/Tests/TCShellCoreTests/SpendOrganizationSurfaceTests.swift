@@ -113,7 +113,11 @@ final class SpendOrganizationSurfaceTests: XCTestCase {
         XCTAssertEqual(status.failureLine(for: "near_ai_spend_org_no_session"), "EXPIRED")
         XCTAssertEqual(status.failureLine(for: "near_ai_spend_org_refused"), "REFUSED")
         XCTAssertEqual(status.failureLine(for: "near_ai_spend_org_unavailable"), "FAILED")
-        XCTAssertEqual(status.failureLine(for: "something_new"), "FAILED")
+        XCTAssertEqual(status.failureLine(for: "near_ai_spend_org_something_new"), "FAILED")
+        // Not the daemon's refusal: the switch may have happened, so no line
+        // may say nothing changed.
+        XCTAssertNil(status.failureLine(for: "unparseable-response"))
+        XCTAssertNil(status.failureLine(for: ""))
         XCTAssertNil(SpendOrganizations.unreported.failureLine(for: "near_ai_spend_org_refused"))
     }
 

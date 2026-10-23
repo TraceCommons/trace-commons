@@ -340,9 +340,9 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                     // account still has it, so signing in again lands where the
                     // contributor chose. The listing is the one the mint already
                     // makes: no extra call, and no new way for a sign-in to fail.
-                    let preferred = super::spend_org::chosen_organization(&ConfigStore::open(
-                        finished_dir.to_path_buf(),
-                    )?);
+                    let preferred = ConfigStore::open(finished_dir.to_path_buf())
+                        .ok()
+                        .and_then(|store| super::spend_org::chosen_organization(&store));
                     let choice = match preferred.as_deref() {
                         Some(preferred) => super::api::OrganizationChoice::Prefer(preferred),
                         None => super::api::OrganizationChoice::FirstActive,
@@ -644,6 +644,8 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     cancel_locked(store.dir(), None);
     let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
+    // The spending-organization record goes with the session it needs.
+    super::spend_org::clear_locked(store);
     if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.

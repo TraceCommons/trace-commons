@@ -84,9 +84,12 @@ public struct SpendOrganizations: Equatable, Sendable {
     public var showsPrompt: Bool { showsPicker && prompt && !explicit }
 
     /// The sentence for a refused switch, by the daemon's label. Every
-    /// failure changed nothing, so an unfamiliar label gets the general line.
+    /// `near_ai_spend_org_*` refusal changed nothing, and the lines say so.
+    /// Anything else -- a transport that gave up waiting, say -- is not a
+    /// refusal the daemon made, and the switch may have happened, so it gets
+    /// no line: the re-read listing shows which organization is current.
     public func failureLine(for label: String) -> String? {
-        guard let words else { return nil }
+        guard let words, label.hasPrefix("near_ai_spend_org_") else { return nil }
         switch label {
         case "near_ai_spend_org_session_expired", "near_ai_spend_org_no_session":
             return words.sessionExpired
