@@ -1088,6 +1088,9 @@ final class AppModel: ObservableObject {
     private var daemon: TCDaemon?
     private var client: DaemonClient?
     var skillLearningClient: DaemonClient? { client }
+    /// The client the NEAR AI payout section calls through. Nil while no
+    /// daemon is running.
+    var payoutLinkDaemonClient: DaemonClient? { client }
     /// The client the first run's passkey sheets complete their ceremony
     /// with (`LivePasskeyAccount`). Nil while no daemon is running.
     var passkeyClient: DaemonClient? { client }

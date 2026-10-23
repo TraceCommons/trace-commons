@@ -44,4 +44,22 @@ final class ConsentCopyBridgeTests: XCTestCase {
         XCTAssertEqual(TCConsentCopy.gateHelp(pinned: true), copy.readyHelp)
         XCTAssertEqual(TCConsentCopy.gateHelp(pinned: false), copy.notPinnedHelp)
     }
+
+    /// The payout section's live export is exactly the fields this shell
+    /// consumes, decodes whole, and has no passkey wording.
+    func testThePayoutLinkCopyDecodesFromTheLiveExport() {
+        guard let json = TCConsentCopy.payoutLinkCopyJSON(),
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let copy = PayoutLinkCopy.decode(fromJSON: json)
+        else {
+            XCTFail("the live payout payload must decode")
+            return
+        }
+        XCTAssertEqual(object.keys.sorted(), PayoutLinkCopy.consumedFields.sorted())
+        for sentence in copy.sentences {
+            XCTAssertFalse(sentence.lowercased().contains("passkey"), sentence)
+        }
+        XCTAssertTrue(copy.body.contains("{org_name}"))
+    }
 }

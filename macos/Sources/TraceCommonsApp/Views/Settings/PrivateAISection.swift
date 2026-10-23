@@ -19,6 +19,9 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             PrivateAISettingsPanels(store: store)
+            // NEAR AI credit payout: hides itself unless the commons lists
+            // the rail as enabled.
+            PayoutLinkView()
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
             // switch waits for it (R-43): no Insights write is reachable

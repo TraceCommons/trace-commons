@@ -62,7 +62,7 @@ final class DaemonClient {
         }
     }
 
-    private let daemon: any DaemonCalling
+    let daemon: any DaemonCalling
 
     init(daemon: any DaemonCalling) {
         self.daemon = daemon

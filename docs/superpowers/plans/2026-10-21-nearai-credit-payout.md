@@ -495,18 +495,13 @@ Spec: section 5 ("Consent copy"), D1, D5 (superseded 2026-10-23), D7.
 
 **D5 superseded:** no passkey state, no "Continue with passkey", no step-up page and no add-passkey route; where this section says otherwise, the owner decisions note at the top governs. The daemon's five IPC calls and the copy (`tc_payout_link_copy_json`) are task 7's.
 
-**Files:**
-- Create: `macos/Sources/TraceCommonsApp/DaemonClient+PayoutLink.swift` (the five IPC calls through `DaemonCalling`)
-- Create: `macos/Sources/TCShellCore/PayoutLinkSurface.swift` (pure state: no org chosen / waiting for passkey / linked / unavailable; picker rows; nothing preselected with more than one org)
-- Create: `macos/Sources/TraceCommonsApp/Views/PayoutLinkView.swift` (Settings section: org picker, consent body, "Continue with passkey", "Not now", unlink; opens the step-up page)
-- Modify: `macos/Sources/TCBridge/TCConsentCopy.swift` (read the new keys)
-- Tests: `macos/Tests/TCShellCoreTests/PayoutLinkSurfaceTests.swift`
-
-- [ ] **Step 1: Write the failing Swift tests** — `testNothingIsPreselectedWithTwoOrgs`, `testOneOrgStillNeedsConfirm`, `testStatusLinesMapEachState`, `testNoPasskeyRoutesToAddPasskey`, `testCopyComesFromCoreKeys` (no literal English in the view model).
-- [ ] **Step 2: Run to verify they fail** — `cargo build -p trace-commons-contributor-ffi && swift test --package-path macos --filter PayoutLinkSurfaceTests`.
-- [ ] **Step 3: Implement.** The view hides itself unless status lists `near_ai` as enabled.
-- [ ] **Step 4: Verify** — `swift test --package-path macos` full run against baseline (rebuild the dylib first); global Rust checks unchanged.
-- [ ] **Step 5: Commit** — `Add the NEAR AI payout org picker to the macOS app`. The PR body says the copy is draft and asks the owner to review it.
+**As built:**
+- `macos/Sources/TCShellCore/PayoutLinkSurface.swift`: `PayoutLinkCopy` (decodes the core export, refuses a payload with a missing or blank field), the wire types for `payout_rails_status` and `payout_link_orgs`, `PayoutLinkSurface` (status line per rail state, when choosing and stopping are offered), `PayoutPicker` (nothing preselected even with one org; the consent for the selected org is built before the Choose button), `PayoutLinkRefusal` (routes the daemon's labels to the sign-in, changed and failed lines) and `PayoutLinkClient` (the five IPC calls over `DaemonTransport`, asserted with a fake transport).
+- `macos/Sources/TraceCommonsApp/DaemonClient+PayoutLink.swift`, `PayoutLinkModel.swift`, `Views/PayoutLinkView.swift`: the model drives the calls off the main actor; the view sits in the Private AI settings section and draws nothing unless the commons lists `near_ai` as `dry_run` or `live`.
+- `TCConsentCopy.payoutLinkCopyJSON()` reads `tc_payout_link_copy_json`.
+- Choose is one click that runs start then confirm, after the consent for the selected org is on screen. Stop sending credit does the same for an unlink. There is no separate waiting state to show: the confirm is the person's click.
+- The picker shows while no link is active (or a mismatch or a gone org needs a new choice). Changing an active link is stop, then choose.
+- Every visible string is a core draft marked for owner review.
 
 **Done when:** the picker works end to end against a local daemon and mock services (describe the manual run; no screenshots of the user's screen), Swift tests pass with output pasted, and every visible string comes from core copy.
 
