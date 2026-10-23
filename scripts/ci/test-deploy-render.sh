@@ -280,9 +280,15 @@ secret_env=(
 
 run_render() {
   # $1: output stem; the rest: NAME=value overrides.
+  # With KEEP_OUT=1 the output directory is kept, as a rerun on the VM
+  # finds it.
   local stem="$1"
   shift
-  rm -rf "$out" "$site" "$deploy_dir"
+  if [ "${KEEP_OUT:-0}" = 1 ]; then
+    rm -rf "$site" "$deploy_dir"
+  else
+    rm -rf "$out" "$site" "$deploy_dir"
+  fi
   mkdir -p "$out" "$site" "$deploy_dir"
   env -i PATH="/usr/bin:/bin:$(dirname "$envsubst_bin")" HOME="$scratch/home" \
     TC_RENDER_OUT_DIR="$out" TC_SITE_ROOT="$site" TC_DEPLOY_DIR="$deploy_dir" \
@@ -481,11 +487,44 @@ for unit in trace-commons-ingest.service trace-commons-upload-claim-issuer.servi
   fi
 done
 
-# Expected measurements go in only when given.
-if run_render measured TC_NEAR_AI_EXPECTED_MEASUREMENTS="mrtd=$(printf '%096d' 0)"; then
-  expect "$ingest" TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS "mrtd=$(printf '%096d' 0)"
+# Expected measurements go in only when given, and a later render without
+# them keeps them: rotating a secret must not quietly unpin the ingest.
+pins="mrtd=$(printf '%096d' 0)"
+if [ -n "$(value_of "$ingest" TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS)" ]; then
+  fail "render-env.sh pinned measurements nobody gave it"
+else
+  pass "render-env.sh pins no measurements until given them"
+fi
+if run_render measured TC_NEAR_AI_EXPECTED_MEASUREMENTS="$pins"; then
+  expect "$ingest" TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS "$pins"
 else
   fail "render-env.sh failed with expected measurements"
+fi
+if KEEP_OUT=1 run_render rerun; then
+  if [ "$(value_of "$ingest" TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS)" = "$pins" ]; then
+    pass "a rerun without TC_NEAR_AI_EXPECTED_MEASUREMENTS keeps the pinned measurements"
+  else
+    fail "a rerun without TC_NEAR_AI_EXPECTED_MEASUREMENTS dropped the pinned measurements"
+  fi
+else
+  fail "render-env.sh failed on a rerun after pinning measurements"
+  cat "$scratch/rerun.err" >&2
+fi
+pins2="mrtd=$(printf '%096d' 1)"
+if KEEP_OUT=1 run_render repin TC_NEAR_AI_EXPECTED_MEASUREMENTS="$pins2" \
+  && KEEP_OUT=1 run_render rerun2; then
+  expect "$ingest" TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS "$pins2"
+else
+  fail "render-env.sh failed to replace the pinned measurements"
+fi
+# A kept value that is not in the pin form refuses, as a given one does.
+printf 'mrtd=not hex\n' >"$out/near-ai-expected-measurements"
+if KEEP_OUT=1 run_render badpins; then
+  fail "render-env.sh used kept measurements that are not in the pin form"
+elif refused badpins; then
+  pass "render-env.sh refuses kept measurements that are not in the pin form"
+else
+  fail "render-env.sh failed on malformed kept measurements without refusing"
 fi
 
 # A missing or empty secret refuses and leaves nothing behind.

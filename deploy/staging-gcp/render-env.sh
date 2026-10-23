@@ -8,7 +8,7 @@
 #
 # Reads every tc-staging-* secret with
 # `gcloud secrets versions access latest` under the VM's runtime service
-# account, and writes, all or nothing:
+# account, and writes, each file replaced in one step:
 #
 #   /etc/tracecommons/ingest.env            the pilot's ingest template with
 #                                           staging values, then
@@ -43,6 +43,8 @@
 #   TC_NEAR_AI_EXPECTED_MEASUREMENTS
 #                       optional: the line `trace-commons-staging-pins sign`
 #                       prints for the ingest (staging design 5.9), value only.
+#                       Kept in <out dir>/near-ai-expected-measurements and
+#                       read back from there by every later render.
 #   TC_NEAR_AI_PAYOUT_MODE
 #                       default disabled. dry_run or live also require
 #                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID, _SENDER_ORG, _SOURCE
@@ -201,10 +203,24 @@ attestation_keys="$(printf '%s\n' "$attestation" | awk '
 # Settings appended after the staging overlay, each replacing the line of
 # the same key.
 extra=""
+# The measurement pins are not secret, and they outlive one render: a value
+# given here is kept in $pins_file, and a render without one reads it back,
+# so rerunning this to rotate a secret never unpins the ingest. Delete the
+# file to unpin.
+pins_file="$out_dir/near-ai-expected-measurements"
+pins=""
 if [ -n "${TC_NEAR_AI_EXPECTED_MEASUREMENTS:-}" ]; then
-  [[ "$TC_NEAR_AI_EXPECTED_MEASUREMENTS" =~ ^[a-z0-9=,]+$ ]] \
-    || refuse "TC_NEAR_AI_EXPECTED_MEASUREMENTS is not in the field=<hex>,... form"
-  extra+="TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=$TC_NEAR_AI_EXPECTED_MEASUREMENTS"$'\n'
+  pins="$TC_NEAR_AI_EXPECTED_MEASUREMENTS"
+  pins_from=TC_NEAR_AI_EXPECTED_MEASUREMENTS
+elif [ -f "$pins_file" ]; then
+  pins="$(cat "$pins_file")"
+  pins_from="$pins_file"
+  [ -n "$pins" ] || refuse "$pins_file is empty; delete it to unpin"
+fi
+if [ -n "$pins" ]; then
+  [[ "$pins" =~ ^[a-z0-9=,]+$ ]] \
+    || refuse "$pins_from is not in the field=<hex>,... form"
+  extra+="TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=$pins"$'\n'
 fi
 case "$TC_NEAR_AI_PAYOUT_MODE" in
   disabled) ;;
@@ -315,10 +331,23 @@ for f in ingest.env issuer.env issuer-signing-v1.pem issuer-signing.pub workload
   chmod 640 "$work/$f"
   [ "$skip_chown" = 1 ] || chown root:tracecommons "$work/$f"
 done
+# Each file is replaced in one step (a rename); the set is not. A failure
+# between two renames leaves some files new and some old, and a rerun puts
+# them in step.
 for f in ingest.env issuer.env issuer-signing-v1.pem issuer-signing.pub workload-signing.pub; do
   mv -f "$work/$f" "$out_dir/$f"
 done
+if [ -n "$pins" ]; then
+  printf '%s\n' "$pins" >"$work/near-ai-expected-measurements"
+  chmod 644 "$work/near-ai-expected-measurements"
+  mv -f "$work/near-ai-expected-measurements" "$pins_file"
+fi
 echo "render-env: wrote ingest.env, issuer.env and three key files to $out_dir"
+if [ -n "$pins" ]; then
+  echo "render-env: pinned the NEAR AI measurements from $pins_from"
+else
+  echo "render-env: no NEAR AI measurements pinned yet (bring-up step 8)"
+fi
 
 # The site's static files and the operator's deploy directory.
 install -d -m 0755 "$TC_SITE_ROOT" "$TC_SITE_ROOT/.well-known" "$TC_SITE_ROOT/near-ai-pins"

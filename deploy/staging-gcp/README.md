@@ -29,7 +29,8 @@ fork (design 3.6). This directory holds only what is staging's own.
   `KXSWJN7WY8.ai.tracecommons.shell.staging`.
 - `render-env.sh` -- reads the `tc-staging-*` secrets from Secret Manager on
   the VM and writes `/etc/tracecommons/ingest.env`, `issuer.env` and the
-  issuer key files (0640 root:tracecommons), the site files under
+  issuer key files (0640 root:tracecommons), the kept measurement pins
+  (`near-ai-expected-measurements`, 0644, not secret), the site files under
   `/var/lib/tracecommons-site`, and the Caddyfile and unit files into the
   operator's `~/deploy` for `deploy.sh`. It prints no secret value, and
   refuses by name, writing nothing, when a secret is missing or malformed.
@@ -103,6 +104,8 @@ unset pw
 ```
 
 Rotation: add a secret version, rerun `render-env.sh`, restart the service.
+The rerun keeps the measurement pins from step 8 (it reads them back from
+`/etc/tracecommons/near-ai-expected-measurements`).
 Rotating the artifact key, the gate master key or the pepper strands what was
 written under the old one; do not rotate them on a staging server holding
 data you want to keep.
@@ -202,7 +205,11 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    (`docs/operator/staging-pin-signing.md`), copy `current.json` to
    `/var/lib/tracecommons-site/near-ai-pins/current.json` (0644), then rerun
    step 4 with `TC_NEAR_AI_EXPECTED_MEASUREMENTS=<the value sign printed>`
-   and `sudo systemctl restart trace-commons-ingest`.
+   and `sudo systemctl restart trace-commons-ingest`. `render-env.sh` keeps
+   that value in `/etc/tracecommons/near-ai-expected-measurements` and every
+   later render reads it back, so a rerun without the variable keeps the
+   pins; give the variable again to replace them, or delete the file to
+   unpin.
 
 Later deploys: steps 1, then `sudo TC_ARTIFACT_BUCKET=tc-staging-artifacts-20261021
 deploy/pilot-gcp/pull-and-install.sh both <tag>`, which installs and
