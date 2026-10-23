@@ -339,7 +339,12 @@ impl DrainFixture {
         held_retention_policy_ids: &[String],
     ) -> LegacyDrainReport {
         self.store
-            .legacy_drain_report(tenant, gate_driver_max_attempts, held_retention_policy_ids)
+            .legacy_drain_report(
+                tenant,
+                gate_driver_max_attempts,
+                held_retention_policy_ids,
+                self.state.novelty_utility_settle_from,
+            )
             .await
             .expect("the drain report reads")
     }
@@ -1335,7 +1340,7 @@ async fn a_drain_report_is_tenant_scoped() {
     for gate_driver_max_attempts in [Some(GATE_MAX_ATTEMPTS), None] {
         let unknown = fixture
             .store
-            .legacy_drain_report(&unknown_tenant, gate_driver_max_attempts, &[])
+            .legacy_drain_report(&unknown_tenant, gate_driver_max_attempts, &[], None)
             .await
             .expect("a tenant with no rows");
         assert_eq!(total(&unknown), 0);
@@ -1693,11 +1698,12 @@ async fn the_vector_and_credit_counts_select_the_workers_own_sets() {
 
 /// The gate's scoring award (`NoveltyUtility`) is owed like the reviewed
 /// delayed types once it carries value, by the report and by the worker. A
-/// zero-valued award (the default delta) and an award shaped as a pipeline
-/// run writes it are owed by neither.
+/// zero-valued award (the default delta), an award shaped as a pipeline
+/// run writes it, and any award written before the configured cut-over (or
+/// with none configured) are owed by neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_credit_count_and_the_worker_agree_on_the_gate_scoring_award() {
-    let Some(fixture) = DrainFixture::new().await else {
+    let Some(mut fixture) = DrainFixture::new().await else {
         return;
     };
     let tenant = fixture.tenant.clone();
@@ -1767,6 +1773,25 @@ async fn the_credit_count_and_the_worker_agree_on_the_gate_scoring_award() {
             .expect("credit event mirrors");
     }
 
+    // No cut-over configured (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`
+    // unset): no scoring award is owed, by either.
+    assert_eq!(fixture.state.novelty_utility_settle_from, None);
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
+    );
+    // A cut-over after the awards were written: still owed by neither.
+    Arc::make_mut(&mut fixture.state).novelty_utility_settle_from =
+        Some(Utc::now() + chrono::Duration::hours(1));
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
+    );
+    // A cut-over before them: the valued gate award is owed by both.
+    Arc::make_mut(&mut fixture.state).novelty_utility_settle_from =
+        Some(Utc::now() - chrono::Duration::hours(1));
     assert_eq!(fixture.settlement_would_settle().await, 1);
     assert_eq!(
         fixture.report(tenant).await.pending["delayed_credit_unsettled"],
@@ -4509,7 +4534,7 @@ async fn the_legacy_drain_route_returns_the_report() {
             serde_json::from_value(body).expect("the route answers a drain report");
         let expected = fixture
             .store()
-            .legacy_drain_report(tenant, ceiling, &[])
+            .legacy_drain_report(tenant, ceiling, &[], None)
             .await
             .expect("the store's report");
         assert_eq!(

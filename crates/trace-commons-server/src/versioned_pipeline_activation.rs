@@ -490,6 +490,10 @@ enum DrainParams {
     Tenant,
     TenantAndGateCeiling,
     TenantAndHeldRetentionPolicies,
+    /// The tenant and the scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`, `NULL` when unset) as
+    /// `$2`.
+    TenantAndNoveltySettleFrom,
 }
 
 /// Where a count's number goes in the report, and in which mode of the gate
@@ -719,7 +723,13 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
     // `source_credit_event_ids`. A `NoveltyUtility` event counts only with the
     // legacy gate's `external_ref` prefix `novelty_utility:`
     // (`trace_credit_event_counts_toward_settlement`): a pipeline run's
-    // `NoveltyUtility` leg is the pipeline's, which never batches it. The settled ids are unnested once
+    // `NoveltyUtility` leg is the pipeline's, which never batches it. It also
+    // counts only at or after the cut-over `$2`
+    // (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`), and never with none. The
+    // ledger row's `occurred_at` is the mirror's insert time, at or after
+    // the event's own `created_at` that the worker compares, so an award
+    // written just before the cut-over can be counted here and not settled:
+    // more, never less. The settled ids are unnested once
     // and anti-joined, not searched for each event. The worker also skips an
     // event of an account with an active credit hold, a ranking event its
     // calibration gate excludes, and what the per-account cap holds back;
@@ -740,7 +750,9 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
                      'training_utility', 'ranking_utility', 'novelty_utility'
                  )
                  AND (l.event_type <> 'novelty_utility'
-                      OR l.external_ref LIKE 'novelty\\_utility:%')
+                      OR (l.external_ref LIKE 'novelty\\_utility:%'
+                          AND $2::timestamptz IS NOT NULL
+                          AND l.occurred_at >= $2::timestamptz))
                  AND l.points_delta::numeric > 0
                  AND s.status = 'accepted'
                  AND NOT EXISTS (
@@ -750,7 +762,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        params: DrainParams::Tenant,
+        params: DrainParams::TenantAndNoveltySettleFrom,
         counted: DrainCounted::Blocking,
     },
     // `list_due_trace_revocation_propagation_items` (db/trace_corpus_pg.rs)
@@ -2039,7 +2051,11 @@ impl PipelineActivationStore {
     /// policies a legal hold keeps (`legal_hold_retention_policy_ids`), as the
     /// withdrawal worker receives them: a withdrawn submission's token
     /// attachment under one of them is not owed deletion, so it is not
-    /// counted. An empty list holds nothing.
+    /// counted. An empty list holds nothing. `novelty_utility_settle_from` is
+    /// the scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`) as the settlement worker
+    /// holds it: a `NoveltyUtility` award is owed only at or after it, and
+    /// none is owed with `None`.
     ///
     /// The report runs as the ingest runtime role in one tenant transaction:
     /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
@@ -2060,6 +2076,7 @@ impl PipelineActivationStore {
         tenant_id: &str,
         gate_driver_max_attempts: Option<i32>,
         held_retention_policy_ids: &[String],
+        novelty_utility_settle_from: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<LegacyDrainReport, DatabaseError> {
         let gate_driver_enabled = gate_driver_max_attempts.is_some();
         let mut client = self.backend.trace_pool().get().await?;
@@ -2095,6 +2112,9 @@ impl PipelineActivationStore {
                     }
                     (DrainParams::TenantAndHeldRetentionPolicies, _) => {
                         &[&tenant_id, &held_retention_policy_ids]
+                    }
+                    (DrainParams::TenantAndNoveltySettleFrom, _) => {
+                        &[&tenant_id, &novelty_utility_settle_from]
                     }
                 };
                 let counted: i64 = tx
