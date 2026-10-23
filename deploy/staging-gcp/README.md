@@ -56,8 +56,13 @@ fork (design 3.6). This directory holds only what is staging's own.
   closed until someone has looked at it. The procedure is in
   `docs/operator/staging-pin-signing.md`.
 
+- `backup-db.sh`, `restore-check.sh` and `systemd/tc-staging-db-*` -- the
+  nightly database backup to the private bucket and its weekly restore
+  check (design 3.2). Installed at bring-up step 9.
+
 `scripts/ci/test-deploy-render.sh` renders all of it with dummy values, no
-network, on every PR.
+network, on every PR. `scripts/ci/test-staging-db-backup.sh` runs the
+backup and the restore check against stubs, on every PR.
 
 ## Secrets
 
@@ -259,6 +264,97 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    pins; give the variable again to replace them, or delete the file to
    unpin.
 
+9. **Database backups.** From a checkout of the commit being deployed:
+
+   ```bash
+   sudo install -m 0755 -o root -g root deploy/staging-gcp/backup-db.sh \
+     /usr/local/sbin/tc-staging-db-backup
+   sudo install -m 0755 -o root -g root deploy/staging-gcp/restore-check.sh \
+     /usr/local/sbin/tc-staging-db-restore-check
+   sudo install -m 0644 -o root -g root \
+     deploy/staging-gcp/systemd/tc-staging-db-backup.service \
+     deploy/staging-gcp/systemd/tc-staging-db-backup.timer \
+     deploy/staging-gcp/systemd/tc-staging-db-restore-check.service \
+     deploy/staging-gcp/systemd/tc-staging-db-restore-check.timer \
+     /etc/systemd/system/
+   sudo systemctl daemon-reload
+   # The first backup and restore check, now. Each blocks until it is done
+   # and fails if the script does.
+   sudo systemctl start tc-staging-db-backup.service
+   sudo journalctl -u tc-staging-db-backup.service -n 5 --no-pager
+   #   backup-db: uploaded gs://.../backups/postgres/<ts>.dump bytes=... tables=... sha256=...
+   sudo systemctl start tc-staging-db-restore-check.service
+   sudo journalctl -u tc-staging-db-restore-check.service -n 5 --no-pager
+   #   restore-check: OK <ts> tables=... rows=... sha256=...
+   sudo systemctl enable --now tc-staging-db-backup.timer tc-staging-db-restore-check.timer
+   systemctl list-timers 'tc-staging-db-*'
+   ```
+
+   The backup runs nightly at 03:17 UTC and writes `<ts>.dump` (`pg_dump
+   -Fc`), `<ts>.counts` (every table's row count, taken in the dump's own
+   snapshot) and, last, `<ts>.dump.sha256` to
+   `gs://tc-staging-artifacts-20261021/backups/postgres/`. A backup without
+   its `.dump.sha256` is incomplete and the restore check skips it. The
+   restore check runs Sundays at 05:17 UTC: it verifies the newest complete
+   backup's sha256, restores it into a throwaway `tc_restore_check_<time>`
+   database, requires every table's row count to equal the dump-time count,
+   reports how far the live database has drifted since (not a failure), and
+   drops the throwaway database. A failure leaves the unit failed
+   (`systemctl --failed`); there is no alert yet.
+
+   Both run as root and reach PostgreSQL only as `postgres`, through
+   `runuser -u postgres --` over the local socket. They must: every Trace
+   Commons table has FORCE ROW LEVEL SECURITY, which binds the table owner
+   too, so `pg_dump` as `app` refuses ("query would be affected by
+   row-level security policy"), and with `--enable-row-security` it would
+   write only the rows `app` can see. Both scripts refuse a session that is
+   not a superuser.
+
+   No client-side encryption: the bucket is private, only the runtime
+   service account holds a role on it, and it encrypts at rest under
+   `tc-staging/kek-v1`. Nothing is ever written to a public bucket.
+
+   **Retention** (design 3.2: 14 days) is a bucket lifecycle rule, set by an
+   operator, never by these scripts. The bucket also holds the binaries and
+   the artifact store, so every rule names the prefix, and because the
+   bucket is versioned a second rule removes the noncurrent versions. Look
+   at what is there first: `--lifecycle-file` replaces the whole
+   configuration.
+
+   ```bash
+   B=gs://tc-staging-artifacts-20261021
+   gcloud storage buckets describe "$B" --format='json(lifecycle_config)'
+   cat >lifecycle.json <<'JSON'
+   {"rule": [
+     {"action": {"type": "Delete"},
+      "condition": {"age": 14, "matchesPrefix": ["backups/postgres/"]}},
+     {"action": {"type": "Delete"},
+      "condition": {"isLive": false, "daysSinceNoncurrentTime": 7,
+                    "matchesPrefix": ["backups/postgres/"]}}
+   ]}
+   JSON
+   # Add any rules the describe printed to lifecycle.json first.
+   gcloud storage buckets update "$B" --lifecycle-file=lifecycle.json
+   ```
+
+   **Restoring for real.** `pg_dump` carries no roles. On this cluster the
+   roles exist and ownership and grants restore as they were. On a new
+   cluster, create `app` and the narrow roles first
+   (`docs/operator/login-resolver-role.md`), then, with the ingest and
+   issuer stopped:
+
+   ```bash
+   TS=<timestamp of a backup that has its .dump.sha256>
+   P=gs://tc-staging-artifacts-20261021/backups/postgres
+   gcloud storage cp "$P/$TS.dump.sha256" "$P/$TS.dump" "$P/$TS.counts" .
+   sha256sum -c "$TS.dump.sha256"
+   sudo -u postgres createdb -O app -T template0 tracecommons
+   sudo -u postgres pg_restore --exit-on-error -d tracecommons <"$TS.dump"
+   ```
+
+   Then compare the row counts with `$TS.counts` the way `restore-check.sh`
+   does before starting the services.
+
 Later deploys: step 1, then
 
 ```bash
@@ -281,8 +377,8 @@ back, restarts it and fails. The issuer, installed first, is not rolled back
   `TC_NEAR_AI_PAYOUT_MODE=dry_run` and `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`,
   `_SENDER_ORG`, `_SOURCE` and `_ACCOUNT_CEILING_NANO`, which also reads
   `tc-staging-nearai-reseller-key`.
-- The nightly `pg_dump` (design 3.2). A follow-up: dumps go to the private
-  bucket `tc-staging-artifacts-20261021` only, never to anything public.
+- Alerting on a failed backup or restore check: today a failure shows only
+  as a failed unit (`systemctl --failed`) and in the journal.
 - Open sign-up from the app (step 7).
 - The staging environment runbook, `docs/operator/staging-environment.md`
   (plan Task 12), which will take this order over.

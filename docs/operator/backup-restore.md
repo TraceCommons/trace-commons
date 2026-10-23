@@ -25,6 +25,12 @@ parallel instance from a recent backup.
 
 For self-hosted Postgres, `pg_basebackup` + WAL archiving to GCS.
 
+The staging server's PostgreSQL, on its VM, takes a nightly `pg_dump` as
+the `postgres` superuser (FORCE ROW LEVEL SECURITY hides rows from every
+other role, the owner included) to its private bucket, with a weekly
+restore check that compares row counts: `deploy/staging-gcp/README.md`,
+bring-up step 9.
+
 ### Restore
 
 ```sh
