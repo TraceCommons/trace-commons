@@ -115,6 +115,22 @@ final class SpendOrganizationTests: XCTestCase {
             daemon.calls.contains { $0.method == "near_ai_spend_organizations" && $0.params.contains("fresh") })
     }
 
+    /// Choosing the organization already in use ends the prompt at once,
+    /// before the re-read lands, even if that re-read still says otherwise.
+    func testChoosingTheCurrentOrganizationEndsThePromptImmediately() async {
+        let daemon = Daemon(
+            listing: Self.listing([("org-a", true), ("org-b", false)]),
+            selectReply: #"{"id":1,"result":{"switched":false,"revoke_pending":false}}"#)
+        let model = model(daemon)
+        model.refreshSpendOrganizations()
+        await settle(model) { model.spendOrganizations.state == "listed" }
+        XCTAssertTrue(model.spendOrganizations.showsPrompt)
+        await model.selectSpendOrganization("org-a")
+        XCTAssertFalse(model.spendOrganizations.showsPrompt)
+        XCTAssertTrue(model.spendOrganizations.showsPicker)
+        XCTAssertNil(model.spendOrganizationFailure)
+    }
+
     func testARefusedSwitchSaysSoInTheDaemonsWords() async {
         let daemon = Daemon(
             listing: Self.listing([("org-a", true), ("org-b", false)]),

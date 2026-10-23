@@ -79,9 +79,19 @@ public struct SpendOrganizations: Equatable, Sendable {
     }
 
     /// Whether the Private AI screen asks the contributor to choose. The
-    /// daemon decides (`prompt`); this only refuses to draw it without a
+    /// daemon decides (`prompt`: several organizations and no choice ever
+    /// recorded for this sign-in); this only refuses to draw it without a
     /// picker to send the contributor to.
-    public var showsPrompt: Bool { showsPicker && prompt && !explicit }
+    public var showsPrompt: Bool { showsPicker && prompt }
+
+    /// This answer with the prompt ended, for the moment a choice has been
+    /// accepted and before the re-read lands: once anything is chosen the
+    /// prompt never shows again (owner, on #1590).
+    public func withPromptEnded() -> SpendOrganizations {
+        SpendOrganizations(
+            state: state, organizations: organizations, currentOrganizationID: currentOrganizationID,
+            explicit: explicit, prompt: false, revokePending: revokePending, words: words)
+    }
 
     /// The sentence for a refused switch, by the daemon's label. Every
     /// `near_ai_spend_org_*` refusal changed nothing, and the lines say so.

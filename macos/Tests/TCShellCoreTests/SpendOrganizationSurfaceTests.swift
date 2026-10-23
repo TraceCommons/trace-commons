@@ -51,6 +51,17 @@ final class SpendOrganizationSurfaceTests: XCTestCase {
         XCTAssertEqual(status.words?.promptLine, "PROMPT-LINE")
     }
 
+    func testEndingThePromptKeepsEverythingElse() {
+        let status = SpendOrganizations.parse(
+            fromJSON: Self.payload(organizations: [("org-a", true), ("org-b", false)]))
+        XCTAssertTrue(status.showsPrompt)
+        let ended = status.withPromptEnded()
+        XCTAssertFalse(ended.showsPrompt)
+        XCTAssertTrue(ended.showsPicker)
+        XCTAssertEqual(ended.organizations, status.organizations)
+        XCTAssertEqual(ended.words, status.words)
+    }
+
     func testAnExplicitChoiceKeepsThePickerAndEndsThePrompt() {
         let status = SpendOrganizations.parse(
             fromJSON: Self.payload(organizations: [("org-a", true), ("org-b", false)], explicit: true))

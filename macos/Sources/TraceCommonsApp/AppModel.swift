@@ -789,7 +789,12 @@ final class AppModel: ObservableObject {
         }.value
         guard self.client === client else { return }
         spendOrganizationSwitching = false
-        if case .failure(let error) = outcome {
+        switch outcome {
+        case .success:
+            // The choice is recorded, so the prompt ends now, not on the
+            // re-read below.
+            publishIfChanged(\.spendOrganizations, spendOrganizations.withPromptEnded())
+        case .failure(let error):
             let label = (error as? DaemonClient.Failure)?.message ?? ""
             spendOrganizationFailure = spendOrganizations.failureLine(for: label)
         }

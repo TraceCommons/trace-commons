@@ -221,6 +221,10 @@ pub enum OrganizationsReport {
         current: Option<String>,
         /// The contributor chose `current` themselves.
         explicit: bool,
+        /// A choice has been recorded for this sign-in, wherever the key now
+        /// is. Any choice ends the prompt for good (owner, on #1590); only
+        /// forgetting the sign-in, which clears the record, brings it back.
+        chosen: bool,
         /// A replaced key is still waiting to be revoked.
         revoke_pending: bool,
     },
@@ -242,8 +246,10 @@ impl OrganizationsReport {
     }
 
     /// Whether the Private AI screen asks the contributor to choose: several
-    /// organizations, a key spending from one of them, and no choice made.
-    /// Never for one organization, and never for a listing that failed.
+    /// organizations, a key spending from one of them, and no choice ever
+    /// recorded for this sign-in. Never for one organization, never for a
+    /// listing that failed, and never once anything has been chosen -- even
+    /// if the key later spends from another organization.
     #[must_use]
     pub fn prompt(&self) -> bool {
         self.multiple()
@@ -251,7 +257,7 @@ impl OrganizationsReport {
                 self,
                 Self::Listed {
                     current: Some(_),
-                    explicit: false,
+                    chosen: false,
                     ..
                 }
             )
@@ -261,19 +267,21 @@ impl OrganizationsReport {
     /// has to tell an old daemon from a state that has nothing to say.
     #[must_use]
     pub fn to_value(&self) -> serde_json::Value {
-        let (organizations, current, explicit, revoke_pending) = match self {
+        let (organizations, current, explicit, chosen, revoke_pending) = match self {
             Self::Listed {
                 organizations,
                 current,
                 explicit,
+                chosen,
                 revoke_pending,
             } => (
                 organizations.as_slice(),
                 current.as_deref(),
                 *explicit,
+                *chosen,
                 *revoke_pending,
             ),
-            Self::NotListed(_) => (&[][..], None, false, false),
+            Self::NotListed(_) => (&[][..], None, false, false, false),
         };
         let current_name = current.and_then(|id| {
             organizations
@@ -294,6 +302,7 @@ impl OrganizationsReport {
                 .collect::<Vec<_>>(),
             "current_organization_id": current,
             "explicit": explicit,
+            "chosen": chosen,
             "multiple": self.multiple(),
             "prompt": self.prompt(),
             "revoke_pending": revoke_pending,
@@ -328,10 +337,13 @@ pub(crate) async fn organizations_with(
     // An unreadable record is no choice and no claim about revocations; the
     // sweep below refuses to act on it.
     let record = load(&shared.store).ok();
-    let explicit = record
+    let recorded = record
         .as_ref()
-        .and_then(|record| record.chosen_organization_id.as_deref())
-        .is_some_and(|chosen| current.as_deref() == Some(chosen));
+        .and_then(|record| record.chosen_organization_id.as_deref());
+    let explicit = recorded.is_some_and(|chosen| current.as_deref() == Some(chosen));
+    // An unreadable record counts as no choice: the prompt only asks, and
+    // asking again is the safe side of not knowing.
+    let chosen = recorded.is_some();
     let revoke_pending = match &record {
         Some(record) if !record.pending_revocations.is_empty() => {
             balance::with_management_session(shared, api, |tokens| sweep(shared, api, tokens))
@@ -345,6 +357,7 @@ pub(crate) async fn organizations_with(
         organizations,
         current,
         explicit,
+        chosen,
         revoke_pending,
     }
 }

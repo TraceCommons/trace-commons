@@ -682,3 +682,69 @@ async fn forgetting_the_sign_in_forgets_the_choice_and_the_pending_revocations()
     );
     assert_eq!(chosen_organization(&fixture.shared.store), None);
 }
+
+// ---- Owner ruling on #1590: once an organization is chosen, no prompt ----
+
+/// A choice recorded for this sign-in ends the prompt for good, even when
+/// the key now spends from another organization (a sign-in that could not
+/// use the remembered one, say). Only forgetting the sign-in brings it back.
+#[tokio::test]
+async fn a_recorded_choice_suppresses_the_prompt_even_when_the_key_is_elsewhere() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    remember_choice(&fixture.shared.store, "org-b").unwrap();
+    let value = organizations_with(&fixture.shared, &api, false)
+        .await
+        .to_value();
+    assert_eq!(value["multiple"], true);
+    assert_eq!(value["current_organization_id"], "org-a");
+    assert_eq!(
+        value["explicit"], false,
+        "the key is not where the choice was"
+    );
+    assert_eq!(value["chosen"], true);
+    assert_eq!(value["prompt"], false);
+}
+
+#[tokio::test]
+async fn a_recorded_choice_of_the_current_organization_suppresses_the_prompt() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    remember_choice(&fixture.shared.store, "org-a").unwrap();
+    let value = organizations_with(&fixture.shared, &api, false)
+        .await
+        .to_value();
+    assert_eq!(value["explicit"], true);
+    assert_eq!(value["chosen"], true);
+    assert_eq!(value["prompt"], false);
+}
+
+#[tokio::test]
+async fn no_recorded_choice_with_several_organizations_prompts() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    let value = organizations_with(&fixture.shared, &api, false)
+        .await
+        .to_value();
+    assert_eq!(value["chosen"], false);
+    assert_eq!(value["prompt"], true);
+}
+
+/// Choosing ends the prompt on the very next read, inside the listing's
+/// cache window: the choice is read from the record on every call.
+#[tokio::test]
+async fn choosing_ends_the_prompt_on_the_next_read_without_waiting_out_the_cache() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    let before = organizations_with(&fixture.shared, &api, false)
+        .await
+        .to_value();
+    assert_eq!(before["prompt"], true);
+    select_with(&fixture.shared, &api, "org-a", Duration::ZERO)
+        .await
+        .unwrap();
+    let after = organizations_with(&fixture.shared, &api, false)
+        .await
+        .to_value();
+    assert_eq!(after["prompt"], false);
+}

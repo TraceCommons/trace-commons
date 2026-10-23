@@ -679,7 +679,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
-| `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
+| `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
 | `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
@@ -6688,8 +6688,9 @@ is cached for a minute (`fresh: true` goes back after five seconds).
 | `organizations[]` | `id`, `name` (control characters removed, at most 80 characters; the id when blank), `role` (`owner`, `admin`, `member`), `current` |
 | `current_organization_id` | the stored key's organization, or `null` with no key |
 | `explicit` | the contributor chose the current organization (the remembered choice equals the key's organization) |
+| `chosen` | a choice has been recorded for this sign-in, whatever the key's organization is now. Cleared only by forgetting the sign-in. |
 | `multiple` | `listed` with two or more organizations. An unknown count is never `true`: a page that does not carry every organization is refused as `unavailable`. |
-| `prompt` | `multiple`, a key, and not `explicit`: the Private AI screen asks the contributor to choose in Settings |
+| `prompt` | `multiple`, a key, and not `chosen`: the Private AI screen asks the contributor to choose in Settings. Once anything is chosen it is never `true` again for this sign-in, even if a later sign-in mints elsewhere. |
 | `revoke_pending` | a key this install replaced could not be revoked yet; it is retried on each listing |
 | `view` | the words: `title`, `what`, `picker`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
 
