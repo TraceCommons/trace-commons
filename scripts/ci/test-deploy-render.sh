@@ -50,7 +50,7 @@ fi
 dummy_env=()
 while IFS= read -r line; do
   [ -n "$line" ] && dummy_env+=("$line")
-done <"$fixtures/dummy.env"
+done <"$fixtures/dummy-values.txt"
 
 render_pilot() {
   env -i "${dummy_env[@]}" "$envsubst_bin" <"$1"
@@ -65,11 +65,12 @@ for pair in \
   name="${pair%%:*}"
   template="${pair#*:}"
   render_pilot "$repo/$template" >"$scratch/pilot-$name"
-  if cmp -s "$scratch/pilot-$name" "$fixtures/$name"; then
+  # Fixtures carry .rendered: the repository ignores *.env.
+  if cmp -s "$scratch/pilot-$name" "$fixtures/$name.rendered"; then
     pass "pilot $name renders byte-identical"
   else
     fail "pilot $name render differs from the fixture"
-    diff "$fixtures/$name" "$scratch/pilot-$name" >&2 || true
+    diff "$fixtures/$name.rendered" "$scratch/pilot-$name" >&2 || true
   fi
 done
 
