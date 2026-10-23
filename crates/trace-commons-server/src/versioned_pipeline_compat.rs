@@ -36,7 +36,9 @@ use trace_commons_gate_api::{
 use trace_commons_gate_enclave::chunk_aggregate::{
     aggregate_chunked_novelty, aggregate_chunked_perplexity,
 };
-use trace_commons_gate_enclave::chunker::{ChunkerConfig, TraceChunk, chunk_envelope_plaintext};
+use trace_commons_gate_enclave::chunker::{
+    ChunkPlan, ChunkerConfig, TraceChunk, chunk_envelope_plaintext,
+};
 use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
 use uuid::Uuid;
 
@@ -421,95 +423,155 @@ impl CompatibilityScorePolicy {
             &token_counts,
             &novelty_config,
         )?;
-        let novelty_score_micros = novelty.novelty_score_micros;
         let quality_passed = perplexity.representative_perplexity_micros
             >= self.config.perplexity_floor_micros
             && perplexity.tail_fraction_micros >= self.config.tail_fraction_floor_micros;
-        let novelty_passed = novelty_score_micros >= self.config.novelty_floor_micros;
         let constants = constants_at(now);
         let shadow = credit_quality(
             i64::try_from(perplexity.representative_perplexity_micros).unwrap_or(i64::MAX),
             i64::try_from(perplexity.peak_perplexity_micros).unwrap_or(i64::MAX),
-            i64::try_from(novelty_score_micros).unwrap_or(i64::MAX),
+            i64::try_from(novelty.novelty_score_micros).unwrap_or(i64::MAX),
             constants,
         );
         // P3-D7: membership ignores anomaly_withheld, as main does. It is
         // shadow-only credit-quality evidence, never a gate.
-        let command = if quality_passed && novelty_passed {
-            novelty_index_command(
-                &novelty,
-                &plan.chunks,
-                &novelty_config,
-                self.embedder.model_id(),
-                input.registry_revision_id,
-            )?
-        } else {
-            None
-        };
-        // P3-D6: the award is the configured NoveltyUtility delta, never q.
-        let awards =
-            if quality_passed && novelty_passed && self.config.novelty_utility_microcredits > 0 {
-                InstrumentAwards::new(vec![
-                    InstrumentAward::new(
-                        InstrumentId::trace_credit(),
-                        AtomicUnits::from_raw(u128::from(self.config.novelty_utility_microcredits)),
-                    )
-                    .map_err(|_| permanent("score_output_invalid"))?,
-                ])
-            } else {
-                InstrumentAwards::new(Vec::new())
-            }
-            .map_err(|_| permanent("score_output_invalid"))?;
-        let mut evidence = ScoreEvidence::fixed(awards.clone());
-        evidence.embedding_artifact_hash = command
-            .as_ref()
-            .map(SealedIndexCommand::content_hash)
-            .transpose()
-            .map_err(|_| permanent("score_output_invalid"))?;
-        evidence.index_id = Some(self.config.index_id.clone());
-        evidence.index_snapshot_id = Some(novelty.snapshot.snapshot_id);
-        evidence.index_snapshot_hash = Some(novelty.snapshot.snapshot_hash);
-        evidence.index_cardinality = Some(novelty.snapshot.cardinality);
+        let mut outcome = apply_novelty_rule(
+            quality_passed,
+            novelty,
+            &plan,
+            &novelty_config,
+            self.embedder.model_id(),
+            input,
+        )?;
+        let evidence = &mut outcome.evidence;
         evidence.scorer_model_id = Some(self.config.scorer_model_id.clone());
-        evidence.embedder_model_id = Some(self.embedder.model_id().to_string());
-        evidence.projection_id = Some(self.config.projection_id.clone());
-        evidence.projection_input_hash = Some(input.source_content_hash.clone());
         evidence.perplexity_micros = Some(perplexity.representative_perplexity_micros);
         evidence.tail_fraction_micros = Some(perplexity.tail_fraction_micros);
-        evidence.novelty_score_micros = Some(novelty_score_micros);
         evidence.peak_perplexity_micros = Some(perplexity.peak_perplexity_micros);
-        evidence.peak_novelty_micros = Some(novelty.peak_novelty_micros);
         evidence.quality_passed = Some(quality_passed);
-        evidence.novelty_passed = Some(novelty_passed);
-        evidence.nearest_neighbor_hash = Some(novelty.nearest_neighbor_hash);
         evidence.coverage_tokens = Some(perplexity.tokens_scored);
-        let chunk_count =
-            u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
-        evidence.chunk_count = Some(chunk_count);
-        evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
-        evidence.chunks_capped = Some(plan.chunks_capped);
-        evidence.include_eligible = Some(command.is_some());
         evidence.credit_quality_micros = Some(u64::try_from(shadow.q_micros.max(0)).unwrap_or(0));
         evidence.credit_quality_version = Some(constants.version);
-        evidence.neighbor_artifact_hash = Some(novelty.neighbor_artifact_hash);
-        let decision = ScoreDecision::for_bundle(&self.manifest, awards.clone())
-            .map_err(|_| permanent("score_output_invalid"))?;
-        let result = PhaseResult {
-            decision,
-            evidence,
-            evaluation: ScoreEvaluation {
-                rule_id: COMPATIBILITY_SCORE_RULE.to_string(),
-                awards,
-            },
-        };
-        ScoreOutput::new(result, command, Some(novelty.neighbor_bytes))
-            .map_err(|_| permanent("score_output_invalid"))
+        novelty_score_output(&self.manifest, COMPATIBILITY_SCORE_RULE, outcome)
     }
+}
+
+/// What [`apply_novelty_rule`] decides for one trace: the index command, the
+/// awards, the evidence with the shared novelty, index and chunk fields
+/// filled, and the neighbour artifact. A Score policy adds its own evidence
+/// fields, then builds its output with [`novelty_score_output`].
+pub(crate) struct NoveltyRuleOutcome {
+    pub command: Option<SealedIndexCommand>,
+    pub awards: InstrumentAwards,
+    pub evidence: ScoreEvidence,
+    pub neighbor_bytes: Vec<u8>,
+}
+
+/// The membership and award rule that the compatibility and substance Score
+/// policies share. A trace is eligible when the policy's own gate
+/// (`quality_passed`) and the novelty gate both pass. An eligible trace
+/// proposes its index command, and earns the configured `NoveltyUtility`
+/// delta when that delta is above 0. The evidence holds the awards, the
+/// index command hash, the index snapshot, the embedder and projection, the
+/// novelty values, the chunk counts and `include_eligible`; the policy's own
+/// gate, its coverage and its credit quality are left to the caller.
+pub(crate) fn apply_novelty_rule(
+    quality_passed: bool,
+    novelty: NoveltyEvaluation,
+    plan: &ChunkPlan,
+    config: &NoveltyScoringConfig,
+    embedder_model_id: &str,
+    input: &ScoreInput,
+) -> Result<NoveltyRuleOutcome, PolicyError> {
+    let novelty_score_micros = novelty.novelty_score_micros;
+    let novelty_passed = novelty_score_micros >= config.novelty_floor_micros;
+    let eligible = quality_passed && novelty_passed;
+    let command = if eligible {
+        novelty_index_command(
+            &novelty,
+            &plan.chunks,
+            config,
+            embedder_model_id,
+            input.registry_revision_id,
+        )?
+    } else {
+        None
+    };
+    // P3-D6: the award is the configured NoveltyUtility delta, never q.
+    let awards = if eligible && config.novelty_utility_microcredits > 0 {
+        InstrumentAwards::new(vec![
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(u128::from(config.novelty_utility_microcredits)),
+            )
+            .map_err(|_| permanent("score_output_invalid"))?,
+        ])
+    } else {
+        InstrumentAwards::new(Vec::new())
+    }
+    .map_err(|_| permanent("score_output_invalid"))?;
+    let mut evidence = ScoreEvidence::fixed(awards.clone());
+    evidence.embedding_artifact_hash = command
+        .as_ref()
+        .map(SealedIndexCommand::content_hash)
+        .transpose()
+        .map_err(|_| permanent("score_output_invalid"))?;
+    evidence.index_id = Some(config.index_id.clone());
+    evidence.index_snapshot_id = Some(novelty.snapshot.snapshot_id);
+    evidence.index_snapshot_hash = Some(novelty.snapshot.snapshot_hash);
+    evidence.index_cardinality = Some(novelty.snapshot.cardinality);
+    evidence.embedder_model_id = Some(embedder_model_id.to_string());
+    evidence.projection_id = Some(config.projection_id.clone());
+    evidence.projection_input_hash = Some(input.source_content_hash.clone());
+    evidence.novelty_score_micros = Some(novelty_score_micros);
+    evidence.peak_novelty_micros = Some(novelty.peak_novelty_micros);
+    evidence.novelty_passed = Some(novelty_passed);
+    evidence.nearest_neighbor_hash = Some(novelty.nearest_neighbor_hash);
+    let chunk_count =
+        u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
+    evidence.chunk_count = Some(chunk_count);
+    evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
+    evidence.chunks_capped = Some(plan.chunks_capped);
+    evidence.include_eligible = Some(command.is_some());
+    evidence.neighbor_artifact_hash = Some(novelty.neighbor_artifact_hash);
+    Ok(NoveltyRuleOutcome {
+        command,
+        awards,
+        evidence,
+        neighbor_bytes: novelty.neighbor_bytes,
+    })
+}
+
+/// Builds the Score output of `outcome` under `manifest`, with `rule_id`.
+pub(crate) fn novelty_score_output(
+    manifest: &BundleManifest,
+    rule_id: &str,
+    outcome: NoveltyRuleOutcome,
+) -> Result<ScoreOutput, PolicyError> {
+    let NoveltyRuleOutcome {
+        command,
+        awards,
+        evidence,
+        neighbor_bytes,
+    } = outcome;
+    let decision = ScoreDecision::for_bundle(manifest, awards.clone())
+        .map_err(|_| permanent("score_output_invalid"))?;
+    let result = PhaseResult {
+        decision,
+        evidence,
+        evaluation: ScoreEvaluation {
+            rule_id: rule_id.to_string(),
+            awards,
+        },
+    };
+    ScoreOutput::new(result, command, Some(neighbor_bytes))
+        .map_err(|_| permanent("score_output_invalid"))
 }
 
 /// The novelty values a Score policy reads from its configuration. The
 /// compatibility and substance Score policies both build one, so both run
-/// the same novelty code ([`evaluate_novelty`], [`novelty_index_command`]).
+/// the same novelty code ([`evaluate_novelty`], [`novelty_index_command`])
+/// and the same membership and award rule ([`apply_novelty_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NoveltyScoringConfig {
     pub index_id: String,
@@ -517,6 +579,8 @@ pub(crate) struct NoveltyScoringConfig {
     pub top_k: u32,
     pub chunk_min_tokens: u64,
     pub embed_insert_novelty_micros: u64,
+    pub novelty_floor_micros: u64,
+    pub novelty_utility_microcredits: u64,
 }
 
 impl CompatibilityBundleConfig {
@@ -527,6 +591,8 @@ impl CompatibilityBundleConfig {
             top_k: self.top_k,
             chunk_min_tokens: self.chunk_min_tokens,
             embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+            novelty_floor_micros: self.novelty_floor_micros,
+            novelty_utility_microcredits: self.novelty_utility_microcredits,
         }
     }
 }

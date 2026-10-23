@@ -627,54 +627,15 @@ impl MinimalPolicyBundle {
         embedder: &dyn IdentifiedEmbedder,
     ) -> anyhow::Result<BundlePackage> {
         config.validate()?;
-        let config_bytes = serde_json::to_vec(config)?;
-        let config_hash = dependency_content_hash(&config_bytes);
-        let scorer_descriptor = scorer.content_descriptor();
-        let embedder_descriptor = embedder.content_descriptor();
-        let scorer_hash = dependency_content_hash(&scorer_descriptor);
-        let embedder_hash = dependency_content_hash(&embedder_descriptor);
-
-        let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
-            policy_id: format!("trace_commons.{phase}.compatibility"),
-            implementation_id: implementation_id.to_string(),
-            configuration_hash: config_hash.clone(),
-            data_artifact_hashes: Vec::new(),
-            projection_ids: Vec::new(),
-        };
-
-        let mut instruments = BTreeMap::new();
-        instruments.insert(
-            InstrumentId::trace_credit(),
-            config.instrument.descriptor.clone(),
-        );
-
-        let manifest = BundleManifest {
-            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
-            admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
-            review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
-            score: PolicyRef {
-                policy_id: "trace_commons.score.compatibility".to_string(),
-                implementation_id: COMPATIBILITY_SCORE_IMPLEMENTATION.to_string(),
-                configuration_hash: config_hash.clone(),
-                data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
-                projection_ids: vec![config.projection_id.clone()],
-            },
-            settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
-            instruments,
-        };
-
-        let mut artifacts = BTreeMap::new();
-        artifacts.insert(config_hash, config_bytes);
-        artifacts.insert(scorer_hash, scorer_descriptor);
-        artifacts.insert(embedder_hash, embedder_descriptor);
-
-        let package = BundlePackage {
-            bundle_id: manifest.bundle_id()?,
-            manifest,
-            artifacts,
-        };
-        package.validate()?;
-        Ok(package)
+        compatibility_family_package(
+            serde_json::to_vec(config)?,
+            "trace_commons.score.compatibility",
+            COMPATIBILITY_SCORE_IMPLEMENTATION,
+            &config.projection_id,
+            &config.instrument.descriptor,
+            scorer,
+            embedder,
+        )
     }
 
     /// Builds a runnable bundle from `package` and the runtime dependencies
@@ -893,6 +854,73 @@ impl MinimalPolicyBundle {
             anyhow::bail!("bundle_policy_not_runnable")
         }
     }
+}
+
+/// Builds an unsigned package of the compatibility family: the
+/// compatibility Admission, Review and Settle policies, and the Score policy
+/// `score_policy_id` / `score_implementation_id`. It names `config_bytes`,
+/// `scorer` and `embedder` by content hash, projects under `projection_id`,
+/// and pins `trace_credit` to `trace_credit_descriptor`, so the Score
+/// policy's awards are accepted at Score time (`ScoreDecision::for_bundle`,
+/// Ruling S3). `MinimalPolicyBundle::compatibility_package` and
+/// `versioned_pipeline_substance::substance_package` both build through it,
+/// after each validates its own configuration.
+pub(crate) fn compatibility_family_package(
+    config_bytes: Vec<u8>,
+    score_policy_id: &str,
+    score_implementation_id: &str,
+    projection_id: &str,
+    trace_credit_descriptor: &InstrumentDescriptor,
+    scorer: &dyn IdentifiedPerplexityScorer,
+    embedder: &dyn IdentifiedEmbedder,
+) -> anyhow::Result<BundlePackage> {
+    let config_hash = dependency_content_hash(&config_bytes);
+    let scorer_descriptor = scorer.content_descriptor();
+    let embedder_descriptor = embedder.content_descriptor();
+    let scorer_hash = dependency_content_hash(&scorer_descriptor);
+    let embedder_hash = dependency_content_hash(&embedder_descriptor);
+
+    let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
+        policy_id: format!("trace_commons.{phase}.compatibility"),
+        implementation_id: implementation_id.to_string(),
+        configuration_hash: config_hash.clone(),
+        data_artifact_hashes: Vec::new(),
+        projection_ids: Vec::new(),
+    };
+
+    let mut instruments = BTreeMap::new();
+    instruments.insert(
+        InstrumentId::trace_credit(),
+        trace_credit_descriptor.clone(),
+    );
+
+    let manifest = BundleManifest {
+        format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+        admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
+        review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
+        score: PolicyRef {
+            policy_id: score_policy_id.to_string(),
+            implementation_id: score_implementation_id.to_string(),
+            configuration_hash: config_hash.clone(),
+            data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
+            projection_ids: vec![projection_id.to_string()],
+        },
+        settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
+        instruments,
+    };
+
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(config_hash, config_bytes);
+    artifacts.insert(scorer_hash, scorer_descriptor);
+    artifacts.insert(embedder_hash, embedder_descriptor);
+
+    let package = BundlePackage {
+        bundle_id: manifest.bundle_id()?,
+        manifest,
+        artifacts,
+    };
+    package.validate()?;
+    Ok(package)
 }
 
 /// Whether a bundle whose Score policy ref names `score_implementation_id`

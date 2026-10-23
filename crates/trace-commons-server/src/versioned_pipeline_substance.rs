@@ -18,10 +18,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, BUNDLE_MANIFEST_FORMAT_VERSION, BundleManifest, BundlePackage, InstrumentAward,
-    InstrumentAwards, InstrumentId, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult, PolicyError,
-    PolicyRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput, ScoreOutput, ScorePolicy,
-    ScoreWitnessClass, SealedIndexCommand,
+    BundleManifest, BundlePackage, MAX_TRACE_CREDIT_MICROCREDITS, PolicyError, ScoreInput,
+    ScoreOutput, ScorePolicy, ScoreWitnessClass,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, ReferenceEmbedder,
@@ -41,12 +39,11 @@ use crate::credit_quality::{
     CREDIT_QUALITY_VERSION_SUBSTANCE, NoveltyCreditParams, substance_credit_quality,
 };
 use crate::versioned_pipeline_bundle::{
-    PIPELINE_BUNDLE_INVALID_LABEL, PipelineInstrumentAwardConfig, dependency_content_hash,
+    PIPELINE_BUNDLE_INVALID_LABEL, PipelineInstrumentAwardConfig, compatibility_family_package,
 };
 use crate::versioned_pipeline_compat::{
-    COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
-    COMPATIBILITY_SETTLE_IMPLEMENTATION, CompatibilityBundleConfig, CompatibilityQualification,
-    NoveltyScoringConfig, evaluate_novelty, novelty_index_command,
+    CompatibilityBundleConfig, CompatibilityQualification, NoveltyScoringConfig,
+    apply_novelty_rule, evaluate_novelty, novelty_score_output,
 };
 
 pub const SUBSTANCE_SCORE_IMPLEMENTATION: &str = "trace_commons.score.substance.v1";
@@ -357,6 +354,8 @@ impl SubstanceNoveltyConfig {
             top_k: self.top_k,
             chunk_min_tokens: self.chunk_min_tokens,
             embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+            novelty_floor_micros: self.novelty_floor_micros,
+            novelty_utility_microcredits: self.novelty_utility_microcredits,
         }
     }
 
@@ -564,7 +563,7 @@ impl SubstanceScorePolicy {
         let plan =
             chunk_envelope_plaintext(&input.reviewed_artifact, &self.config.novelty.chunker());
         // One weight per chunk, over the same chunk slice that
-        // `evaluate_novelty` and `novelty_index_command` read (SQ-3).
+        // `evaluate_novelty` and `apply_novelty_rule` read (SQ-3).
         let token_weights: Vec<u64> = plan.chunks.iter().map(estimated_chunk_tokens).collect();
         let novelty = evaluate_novelty(
             self.embedder.as_ref(),
@@ -575,81 +574,38 @@ impl SubstanceScorePolicy {
             &token_weights,
             &novelty_config,
         )?;
-        let novelty_score_micros = novelty.novelty_score_micros;
-        let novelty_passed = novelty_score_micros >= self.config.novelty.novelty_floor_micros;
         let credit_quality_micros = substance_credit_quality(
             substance_micros,
-            i64::try_from(novelty_score_micros).unwrap_or(i64::MAX),
+            i64::try_from(novelty.novelty_score_micros).unwrap_or(i64::MAX),
             self.config.sub_ceil_micros,
             self.config.sub_floor_mult_micros,
             &self.config.novelty.credit,
         );
         // The compatibility rule, with `substance_passed` in place of
         // `quality_passed`: index membership and the award need both gates.
-        let eligible = substance_passed && novelty_passed;
-        let command = if eligible {
-            novelty_index_command(
-                &novelty,
-                &plan.chunks,
-                &novelty_config,
-                self.embedder.model_id(),
-                input.registry_revision_id,
-            )?
-        } else {
-            None
-        };
-        let novelty_utility_microcredits = self.config.novelty.novelty_utility_microcredits;
-        let awards = if eligible && novelty_utility_microcredits > 0 {
-            InstrumentAwards::new(vec![
-                InstrumentAward::new(
-                    InstrumentId::trace_credit(),
-                    AtomicUnits::from_raw(u128::from(novelty_utility_microcredits)),
-                )
-                .map_err(|_| permanent("score_output_invalid"))?,
-            ])
-        } else {
-            InstrumentAwards::new(Vec::new())
-        }
-        .map_err(|_| permanent("score_output_invalid"))?;
-
-        let mut evidence = ScoreEvidence::fixed(awards.clone());
-        evidence.embedding_artifact_hash = command
-            .as_ref()
-            .map(SealedIndexCommand::content_hash)
-            .transpose()
-            .map_err(|_| permanent("score_output_invalid"))?;
-        evidence.index_id = Some(self.config.novelty.index_id.clone());
-        evidence.index_snapshot_id = Some(novelty.snapshot.snapshot_id);
-        evidence.index_snapshot_hash = Some(novelty.snapshot.snapshot_hash);
-        evidence.index_cardinality = Some(novelty.snapshot.cardinality);
-        evidence.embedder_model_id = Some(self.embedder.model_id().to_string());
-        evidence.projection_id = Some(self.config.novelty.projection_id.clone());
-        evidence.projection_input_hash = Some(input.source_content_hash.clone());
+        let mut outcome = apply_novelty_rule(
+            substance_passed,
+            novelty,
+            &plan,
+            &novelty_config,
+            self.embedder.model_id(),
+            input,
+        )?;
+        let evidence = &mut outcome.evidence;
         // The legacy gate-decision row needs a perplexity and a tail
         // fraction; the family runs no scorer, so both are the fixed
         // sentinel 0 (spec section 8.1), told apart by the credit quality
         // version.
         evidence.perplexity_micros = Some(0);
         evidence.tail_fraction_micros = Some(0);
-        evidence.novelty_score_micros = Some(novelty_score_micros);
-        evidence.peak_novelty_micros = Some(novelty.peak_novelty_micros);
         evidence.quality_passed = Some(substance_passed);
-        evidence.novelty_passed = Some(novelty_passed);
-        evidence.nearest_neighbor_hash = Some(novelty.nearest_neighbor_hash);
         evidence.coverage_tokens = Some(
             token_weights
                 .iter()
                 .fold(0_u64, |total, tokens| total.saturating_add(*tokens)),
         );
-        let chunk_count =
-            u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
-        evidence.chunk_count = Some(chunk_count);
-        evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
-        evidence.chunks_capped = Some(plan.chunks_capped);
-        evidence.include_eligible = Some(command.is_some());
         evidence.credit_quality_micros = Some(credit_quality_micros);
         evidence.credit_quality_version = Some(CREDIT_QUALITY_VERSION_SUBSTANCE);
-        evidence.neighbor_artifact_hash = Some(novelty.neighbor_artifact_hash);
         evidence.substance_micros = Some(substance_micros);
         evidence.substance_passed = Some(substance_passed);
         evidence.substance_version = Some(self.config.substance_version);
@@ -657,27 +613,15 @@ impl SubstanceScorePolicy {
         evidence.substance_replay_micros = Some(to_micros(terms.replay));
         evidence.substance_tool_calls = Some(projection.tool_calls);
         evidence.witness_provenance_class = Some(witness);
-
-        let decision = ScoreDecision::for_bundle(&self.manifest, awards.clone())
-            .map_err(|_| permanent("score_output_invalid"))?;
-        let result = PhaseResult {
-            decision,
-            evidence,
-            evaluation: ScoreEvaluation {
-                rule_id: SUBSTANCE_SCORE_RULE.to_string(),
-                awards,
-            },
-        };
-        ScoreOutput::new(result, command, Some(novelty.neighbor_bytes))
-            .map_err(|_| permanent("score_output_invalid"))
+        novelty_score_output(&self.manifest, SUBSTANCE_SCORE_RULE, outcome)
     }
 }
 
 /// Builds an unsigned substance package naming `config`, `scorer`, and
-/// `embedder` by content hash. As `MinimalPolicyBundle::compatibility_package`:
-/// the compatibility Admission, Review and Settle policies, the substance
-/// Score policy, and `trace_credit` pinned to
-/// `config.novelty.instrument.descriptor`. The package names the scorer so
+/// `embedder` by content hash, with the builder of
+/// `MinimalPolicyBundle::compatibility_package`: the compatibility
+/// Admission, Review and Settle policies, the substance Score policy, and
+/// `trace_credit` pinned to `config.novelty.instrument.descriptor`. The package names the scorer so
 /// that it binds with the same runtime dependencies as a compatibility
 /// package; the substance Score never calls it.
 pub fn substance_package(
@@ -686,54 +630,15 @@ pub fn substance_package(
     embedder: &dyn IdentifiedEmbedder,
 ) -> anyhow::Result<BundlePackage> {
     config.validate()?;
-    let config_bytes = serde_json::to_vec(config)?;
-    let config_hash = dependency_content_hash(&config_bytes);
-    let scorer_descriptor = scorer.content_descriptor();
-    let embedder_descriptor = embedder.content_descriptor();
-    let scorer_hash = dependency_content_hash(&scorer_descriptor);
-    let embedder_hash = dependency_content_hash(&embedder_descriptor);
-
-    let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
-        policy_id: format!("trace_commons.{phase}.compatibility"),
-        implementation_id: implementation_id.to_string(),
-        configuration_hash: config_hash.clone(),
-        data_artifact_hashes: Vec::new(),
-        projection_ids: Vec::new(),
-    };
-
-    let mut instruments = BTreeMap::new();
-    instruments.insert(
-        InstrumentId::trace_credit(),
-        config.novelty.instrument.descriptor.clone(),
-    );
-
-    let manifest = BundleManifest {
-        format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
-        admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
-        review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
-        score: PolicyRef {
-            policy_id: SUBSTANCE_SCORE_POLICY_ID.to_string(),
-            implementation_id: SUBSTANCE_SCORE_IMPLEMENTATION.to_string(),
-            configuration_hash: config_hash.clone(),
-            data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
-            projection_ids: vec![config.novelty.projection_id.clone()],
-        },
-        settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
-        instruments,
-    };
-
-    let mut artifacts = BTreeMap::new();
-    artifacts.insert(config_hash, config_bytes);
-    artifacts.insert(scorer_hash, scorer_descriptor);
-    artifacts.insert(embedder_hash, embedder_descriptor);
-
-    let package = BundlePackage {
-        bundle_id: manifest.bundle_id()?,
-        manifest,
-        artifacts,
-    };
-    package.validate()?;
-    Ok(package)
+    compatibility_family_package(
+        serde_json::to_vec(config)?,
+        SUBSTANCE_SCORE_POLICY_ID,
+        SUBSTANCE_SCORE_IMPLEMENTATION,
+        &config.novelty.projection_id,
+        &config.novelty.instrument.descriptor,
+        scorer,
+        embedder,
+    )
 }
 
 /// The substance candidate package: [`SubstanceScoreConfig::local_reference`]
@@ -765,7 +670,9 @@ mod tests {
     };
 
     use super::*;
-    use trace_commons_gate_api::pipeline::SealedIndexEntry;
+    use trace_commons_gate_api::pipeline::{
+        AtomicUnits, InstrumentId, SealedIndexCommand, SealedIndexEntry,
+    };
     use trace_commons_gate_api::{
         ChunkPerplexity, PerplexityResult, PerplexityScorer, VectorIndexWriter,
     };
@@ -775,7 +682,11 @@ mod tests {
     use crate::versioned_pipeline::{PipelineGateDecisionScoreValues, pipeline_tenant_storage_ref};
     use crate::versioned_pipeline_bundle::{
         MinimalPolicyBundle, PIPELINE_DEPENDENCY_MISSING_LABEL, PipelineTraceCreditEvent,
-        package_configuration_is_qualifiable, package_substance_config,
+        dependency_content_hash, package_configuration_is_qualifiable, package_substance_config,
+    };
+    use crate::versioned_pipeline_compat::{
+        COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
+        COMPATIBILITY_SETTLE_IMPLEMENTATION,
     };
     use crate::versioned_pipeline_index::IsolatedPipelineIndex;
     use crate::versioned_pipeline_score_registry::{
