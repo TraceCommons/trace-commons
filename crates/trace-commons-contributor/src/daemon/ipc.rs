@@ -433,6 +433,11 @@ pub const METHODS: &[&str] = &[
     "inference_connection_select",
     "inference_connection_install",
     "inference_connection_disconnect",
+    "payout_rails_status",
+    "payout_link_orgs",
+    "payout_link_start",
+    "payout_link_confirm",
+    "payout_link_unlink",
     "inference_calls",
     "inference_activity",
     "insights_glance",
@@ -1003,6 +1008,10 @@ pub struct DaemonShared {
     /// config and `daemon-inference-connection.json` after their network
     /// calls. A `std` mutex: it is never held across an await.
     pub(crate) inference_connection_lock: Mutex<()>,
+    /// The payout-link flow's in-memory org list and started requests, and
+    /// the guard over `daemon-payout-link.json` (`daemon::payout_link`).
+    /// Never held across an await.
+    pub(crate) payout_link: Mutex<super::payout_link::PayoutLinkMemory>,
     /// Held for the whole of every watcher pass, full or scoped, and by the
     /// legacy invite migration's identity switch. So no pass reads the old
     /// config and then sweeps grants the switch has already re-recorded, or
@@ -1493,6 +1502,7 @@ impl DaemonShared {
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
             inference_connection_lock: Mutex::new(()),
+            payout_link: Mutex::new(Default::default()),
             pass_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
@@ -3667,6 +3677,11 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "inference_connection_disconnect",
         "inference-connection-requires-async",
     ),
+    ("payout_rails_status", "payout-link-requires-async"),
+    ("payout_link_orgs", "payout-link-requires-async"),
+    ("payout_link_start", "payout-link-requires-async"),
+    ("payout_link_confirm", "payout-link-requires-async"),
+    ("payout_link_unlink", "payout-link-requires-async"),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
     ("skill_evaluate", "skill-evaluation-requires-async"),
@@ -6576,6 +6591,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "inference_connection_disconnect" => {
             super::inference_connection::handle_disconnect(shared, req).await
         }
+        "payout_rails_status" => super::payout_link::handle_status(shared, req).await,
+        "payout_link_orgs" => super::payout_link::handle_orgs(shared, req).await,
+        "payout_link_start" => super::payout_link::handle_start(shared, req).await,
+        "payout_link_confirm" => super::payout_link::handle_confirm(shared, req).await,
+        "payout_link_unlink" => super::payout_link::handle_unlink(shared, req).await,
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
@@ -18196,7 +18216,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 68, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 73, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

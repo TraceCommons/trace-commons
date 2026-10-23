@@ -97,6 +97,7 @@ pub mod nudge_copy;
 pub mod nudge_render;
 pub mod onboarding_copy;
 pub mod outcome_copy;
+pub mod payout_link;
 pub mod picker;
 pub mod preview_copy;
 pub mod pricing;
