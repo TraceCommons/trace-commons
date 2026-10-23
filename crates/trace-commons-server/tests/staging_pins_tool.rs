@@ -1491,9 +1491,12 @@ fn sign_embeds_the_allowlist_file() {
     assert!(!stderr.contains(&"3b".repeat(48)), "{stderr}");
     assert!(!stderr.contains("registry.example"), "{stderr}");
 
-    // The placeholder the repository ships signs, and refuses every entry
-    // in the app (its values match no event, its lists are empty).
-    let placeholder = include_str!("../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json");
+    // The refuse-everything placeholder signs, and refuses every entry in
+    // the app (its values match no event, its lists are empty).
+    let placeholder = r#"{
+  "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
+  "compose_actions": {"compose_manager_images": [], "compose_files": []}
+}"#;
     std::fs::write(dir.path().join("allowlist.json"), placeholder).unwrap();
     let signed = run(&args("placeholder.json"), &seed, dir.path());
     assert!(signed.status.success(), "stderr: {}", text(&signed.stderr));
