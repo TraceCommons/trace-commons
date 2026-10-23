@@ -11,8 +11,9 @@ use std::ffi::{CStr, c_char};
 
 use trace_commons_contributor::{channel, health_copy};
 use trace_commons_contributor_ffi::{
-    tc_build_channel_json, tc_channel_mismatch_line, tc_channel_window_label, tc_resolve_state_dir,
-    tc_state_dir_override_refused_line, tc_string_free,
+    tc_build_channel_json, tc_channel_mismatch_line, tc_channel_window_label,
+    tc_near_ai_pin_status_line, tc_resolve_state_dir, tc_state_dir_override_refused_line,
+    tc_string_free,
 };
 
 fn take_owned(out: *mut c_char) -> String {
@@ -110,6 +111,37 @@ fn the_window_label_is_the_core_word_on_staging_and_empty_on_production() {
         label.is_empty(),
         channel::CHANNEL == "production",
         "only a staging build shows a label"
+    );
+}
+
+#[test]
+fn the_pin_status_line_is_the_core_sentence_on_staging_and_empty_on_production() {
+    let line = |label: &str| {
+        let label = std::ffi::CString::new(label).unwrap();
+        take_owned(unsafe { tc_near_ai_pin_status_line(label.as_ptr()) })
+    };
+    for label in [
+        "pinned",
+        "pins_unavailable",
+        "pins_expired",
+        "pins_bad_signature",
+        "",
+        "a_label_from_a_later_daemon",
+    ] {
+        assert_eq!(
+            line(label),
+            health_copy::pin_status_line(label).unwrap_or(""),
+            "{label:?}"
+        );
+        assert_eq!(
+            line(label).is_empty(),
+            channel::CHANNEL == "production",
+            "{label:?}: only a staging build shows a line"
+        );
+    }
+    assert_eq!(
+        take_owned(unsafe { tc_near_ai_pin_status_line(std::ptr::null()) }),
+        health_copy::pin_status_line("").unwrap_or("")
     );
 }
 

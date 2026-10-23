@@ -25,6 +25,17 @@ public enum TCBuildChannel {
         return label
     }
 
+    /// `tc_near_ai_pin_status_line`: the core's sentence for one
+    /// `status.near_ai_pins` label. Nil on production, whose answer is empty
+    /// (it shows no line), and on a caught panic. A label the core does not
+    /// know reads as its not-available sentence, so the label is never shown.
+    public static func pinStatusLine(label: String) -> String? {
+        guard let raw = label.withCString({ tc_near_ai_pin_status_line($0) }) else { return nil }
+        defer { tc_string_free(raw) }
+        let line = String(cString: raw)
+        return line.isEmpty ? nil : line
+    }
+
     /// Whether `dir`, taken from this build's override variable, may be the
     /// state directory: nil to allow it, or the label `tc_resolve_state_dir`
     /// refused it with (`state-dir-other-channel` when it names the other

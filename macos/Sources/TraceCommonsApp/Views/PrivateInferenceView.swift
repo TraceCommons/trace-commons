@@ -63,6 +63,9 @@ struct PrivateAISwitchCard: View {
     let calls: PrivateInferenceCalls
     let busy: Bool
     let refusal: String?
+    /// Staging builds only: the core's pin-status sentence, under the state
+    /// line. Nil on production, which draws nothing here.
+    var pinLine: String?
     let onSet: (Bool) -> Void
     let onDismiss: () -> Void
     /// Re-reads the connection. With it the card wears #1146's panel header
@@ -99,6 +102,12 @@ struct PrivateAISwitchCard: View {
                     }
                     GlassStatusLabel(label.line, status: label.status)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let pinLine {
+                        Text(pinLine)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Text(copy.offerWhat)
                         .glassType(GlassTokens.TypeScale.body)
                         .foregroundStyle(GlassColor.textPrimary)

@@ -342,6 +342,16 @@ char*       tc_channel_mismatch_line(void);
  */
 char*       tc_channel_window_label(void);
 
+/* The pin-status sentence for one status.near_ai_pins label: one of four plain
+ * sentences on a staging build (an unfamiliar or NULL label reads as "not
+ * available", never shown raw), and the empty string on production, which shows
+ * no line. A shell must not map or show the label itself.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_near_ai_pin_status_line(const char* label);
+
 /* The state directory the core would pick, so a shell that chooses its own
  * directory still gets the core's refusal of the other channel's.
  *

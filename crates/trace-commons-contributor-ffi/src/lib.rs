@@ -847,6 +847,31 @@ pub extern "C" fn tc_channel_window_label() -> *mut c_char {
     })
 }
 
+/// The pin-status sentence for one `status.near_ai_pins` label
+/// (`health_copy::pin_status_line`): one of four plain sentences on a staging
+/// build, the not-available sentence for a label it does not know, and the
+/// empty string on production, which shows no line. A shell must not map the
+/// label itself and must not show it.
+///
+/// A NULL or non-UTF-8 label reads as empty. Returns an owned string; free it
+/// with [`tc_string_free`]. NULL only on a caught panic.
+///
+/// # Safety
+/// `label`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_near_ai_pin_status_line(label: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let label = if label.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(label) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::health_copy::pin_status_line(label).unwrap_or(""),
+        ))
+    })
+}
+
 /// The state directory the contributor crate's `ConfigStore::resolve` would
 /// pick (`config::resolve_state_dir`), so a shell that chooses its own
 /// directory still gets the core's refusal of the other channel's.

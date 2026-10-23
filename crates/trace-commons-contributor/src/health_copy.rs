@@ -278,6 +278,52 @@ pub const fn window_label() -> Option<&'static str> {
     }
 }
 
+/// The pin-status line a staging build shows where the app explains Private
+/// AI status, for `status.near_ai_pins` = `pinned`. PROPOSED 2026-10-22:
+/// pending the owner's approval (`docs/ui-copy-guide.md` section 9), for the
+/// line existing and for each of its four sentences.
+pub const PIN_STATUS_VERIFIED: &str = "Private AI checks are verified.";
+/// The line for a pin set not fetched yet, not reachable, absent, or a label
+/// this build does not know. PROPOSED 2026-10-22, pending approval.
+pub const PIN_STATUS_NOT_AVAILABLE: &str =
+    "Private AI checks aren't available yet, so Private AI is off.";
+/// The line for a pin set that reached its own expiry. PROPOSED 2026-10-22,
+/// pending approval.
+pub const PIN_STATUS_OUT_OF_DATE: &str = "Private AI checks are out of date, so Private AI is off.";
+/// The line for a pin set the verifier or the rollback guard refused.
+/// PROPOSED 2026-10-22, pending approval.
+pub const PIN_STATUS_REFUSED: &str = "Private AI checks were refused, so Private AI is off.";
+
+/// The sentence for one `status.near_ai_pins` label, or `None` on production,
+/// whose daemon never sends the field and whose app shows no line. A label
+/// this build does not know reads as not available and is never shown raw.
+pub fn pin_status_line(label: &str) -> Option<&'static str> {
+    if !crate::channel::near_ai_staging() {
+        return None;
+    }
+    Some(match label {
+        "pinned" => PIN_STATUS_VERIFIED,
+        "pins_expired" => PIN_STATUS_OUT_OF_DATE,
+        "pins_malformed"
+        | "pins_unknown_key"
+        | "pins_bad_signature"
+        | "pins_wrong_format"
+        | "pins_wrong_channel"
+        | "pins_wrong_gateway_host"
+        | "pins_issued_in_future"
+        | "pins_lifetime_invalid"
+        | "pins_set_unparseable"
+        | "pins_no_sets"
+        | "pins_rollback"
+        | "pins_sequence_conflict"
+        | "pins_sequence_unreadable"
+        | "pins_sequence_unwritable" => PIN_STATUS_REFUSED,
+        // `pins_not_fetched`, `pins_none`, `pins_unavailable`, and anything
+        // a later daemon sends.
+        _ => PIN_STATUS_NOT_AVAILABLE,
+    })
+}
+
 /// The button beside [`core_down_copy`] in a shell that can ask its
 /// background service to start again, and the same button while it is
 /// asking. Not part of [`core_down_copy`] itself: nothing in the core
@@ -533,6 +579,133 @@ mod tests {
         assert!(!STAGING_WINDOW_LABEL.ends_with('.'));
         for internal in ["near-ai", "tracecommons", "channel", "feature"] {
             assert!(!STAGING_WINDOW_LABEL.to_lowercase().contains(internal));
+        }
+    }
+
+    const EMITTED_LABELS: &[&str] = &[
+        "pinned",
+        "pins_not_fetched",
+        "pins_none",
+        "pins_unavailable",
+        "pins_expired",
+        "pins_rollback",
+        "pins_sequence_conflict",
+        "pins_sequence_unreadable",
+        "pins_sequence_unwritable",
+        "pins_malformed",
+        "pins_unknown_key",
+        "pins_bad_signature",
+        "pins_wrong_format",
+        "pins_wrong_channel",
+        "pins_wrong_gateway_host",
+        "pins_issued_in_future",
+        "pins_lifetime_invalid",
+        "pins_set_unparseable",
+        "pins_no_sets",
+    ];
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_channel_shows_no_pin_line() {
+        for label in EMITTED_LABELS.iter().chain(&["", "anything"]) {
+            assert_eq!(pin_status_line(label), None, "{label:?}");
+        }
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn every_pin_label_maps_to_one_of_four_sentences() {
+        let four = [
+            PIN_STATUS_VERIFIED,
+            PIN_STATUS_NOT_AVAILABLE,
+            PIN_STATUS_OUT_OF_DATE,
+            PIN_STATUS_REFUSED,
+        ];
+        for label in EMITTED_LABELS {
+            let line = pin_status_line(label).expect(label);
+            assert!(four.contains(&line), "{label}");
+            assert!(!line.contains("pins_"), "{label}: {line}");
+        }
+        assert_eq!(pin_status_line("pinned"), Some(PIN_STATUS_VERIFIED));
+        for label in ["pins_not_fetched", "pins_none", "pins_unavailable"] {
+            assert_eq!(pin_status_line(label), Some(PIN_STATUS_NOT_AVAILABLE));
+        }
+        assert_eq!(
+            pin_status_line("pins_expired"),
+            Some(PIN_STATUS_OUT_OF_DATE)
+        );
+        for label in [
+            "pins_rollback",
+            "pins_unknown_key",
+            "pins_bad_signature",
+            "pins_no_sets",
+        ] {
+            assert_eq!(pin_status_line(label), Some(PIN_STATUS_REFUSED), "{label}");
+        }
+    }
+
+    /// Every label the verifier can give is in the table above, so a new
+    /// refusal cannot silently read as "not available".
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn every_verifier_refusal_reads_as_refused() {
+        use trace_commons_attestation::staging_pins::PinRefusal as R;
+        for refusal in [
+            R::Malformed,
+            R::UnknownKey,
+            R::BadSignature,
+            R::WrongFormat,
+            R::WrongChannel,
+            R::WrongGatewayHost,
+            R::IssuedInFuture,
+            R::LifetimeInvalid,
+            R::SetUnparseable,
+            R::NoSets,
+        ] {
+            assert_eq!(
+                pin_status_line(refusal.label()),
+                Some(PIN_STATUS_REFUSED),
+                "{refusal:?}"
+            );
+        }
+        assert_eq!(
+            pin_status_line(R::Expired.label()),
+            Some(PIN_STATUS_OUT_OF_DATE)
+        );
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn an_unknown_or_empty_label_is_not_available_and_never_shown_raw() {
+        for label in ["", "pins_from_a_later_daemon", "PINNED", "pinned "] {
+            let line = pin_status_line(label).unwrap();
+            assert_eq!(line, PIN_STATUS_NOT_AVAILABLE, "{label:?}");
+            assert!(label.is_empty() || !line.contains(label.trim()));
+        }
+    }
+
+    #[test]
+    fn the_pin_sentences_are_plain() {
+        for line in [
+            PIN_STATUS_VERIFIED,
+            PIN_STATUS_NOT_AVAILABLE,
+            PIN_STATUS_OUT_OF_DATE,
+            PIN_STATUS_REFUSED,
+        ] {
+            assert!(line.ends_with('.'));
+            let lower = line.to_lowercase();
+            for internal in [
+                "pin",
+                "signed",
+                "signature",
+                "key",
+                "near",
+                "staging",
+                "attest",
+                "measurement",
+            ] {
+                assert!(!lower.contains(internal), "{line}: {internal}");
+            }
         }
     }
 }

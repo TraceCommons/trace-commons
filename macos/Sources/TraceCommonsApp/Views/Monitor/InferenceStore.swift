@@ -31,6 +31,11 @@ final class InferenceStore {
     /// not confirmed never moves it, so the switch never reads as on before
     /// the daemon said so.
     private(set) var privateAI: DaemonData.PrivateAISwitch?
+    /// Staging builds only: the core's sentence for where the signed NEAR AI
+    /// pin set stands (`status.near_ai_pins`), drawn under the Private AI
+    /// state line. Nil on production, which never sends the field, and while
+    /// nothing has been read.
+    private(set) var pinLine: String?
     /// A switch write is in flight; the switch takes no other.
     private(set) var privateAIBusy = false
     /// The core's words for a write that was not confirmed
@@ -74,6 +79,7 @@ final class InferenceStore {
         summary = nil
         destinations = nil
         privateAI = nil
+        pinLine = nil
         privateAIRefusal = nil
         // A write to the old client is dropped when it answers, so it must
         // not hold the new client's switch.
@@ -125,7 +131,19 @@ final class InferenceStore {
         async let summary: Void = loadSummary()
         async let destinations: Void = loadDestinations()
         async let privateAI: Void = loadPrivateAI()
-        _ = await (harnesses, calls, summary, destinations, privateAI)
+        async let pins: Void = loadPinLine()
+        _ = await (harnesses, calls, summary, destinations, privateAI, pins)
+    }
+
+    private func loadPinLine() async {
+        await read("status", { try await $0.status() }) { self.landStatusRead($0) }
+    }
+
+    /// A `status` read's answer. The pin line is the core's sentence for the
+    /// reported label and nothing otherwise: a status without the field
+    /// (production, an older daemon) or a failed read draws no line.
+    func landStatusRead(_ status: DaemonData.Status?) {
+        pinLine = status?.nearAiPins.flatMap { TCBuildChannel.pinStatusLine(label: $0) }
     }
 
     private func loadPrivateAI() async {

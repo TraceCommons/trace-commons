@@ -91,6 +91,7 @@ struct PrivateAISettingsPanels: View {
                     calls: model.privateInferenceCalls,
                     busy: store.privateAIBusy,
                     refusal: store.privateAIRefusal,
+                    pinLine: store.pinLine,
                     onSet: { on in
                         Task { @MainActor in
                             await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)

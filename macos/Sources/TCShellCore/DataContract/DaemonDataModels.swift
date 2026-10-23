@@ -505,6 +505,12 @@ extension DaemonData {
         /// run. A release daemon never sends it. The app's notice reads it
         /// rather than the environment.
         public let devDryRun: Bool?
+        /// Staging builds only: where the signed NEAR AI pin set stands, as a
+        /// label (`pinned`, `pins_unavailable`, `pins_expired`, ...). A label,
+        /// never shown as text: the core's `tc_near_ai_pin_status_line` turns
+        /// it into the sentence. A default daemon never sends it, so `nil` is
+        /// production (or an older daemon) and draws nothing.
+        public let nearAiPins: String?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case schemaVersion = "schema_version"
@@ -534,6 +540,7 @@ extension DaemonData {
             case contributionMode = "contribution_mode"
             case contributionModePartial = "contribution_mode_partial"
             case devDryRun = "dev_dry_run"
+            case nearAiPins = "near_ai_pins"
         }
     }
 
