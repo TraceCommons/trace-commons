@@ -25,21 +25,50 @@ fn public_key(seed_hex: &str) -> Vec<u8> {
     pair.public_key().as_ref().to_vec()
 }
 
+/// A synthetic set in the S16 form, canonical order.
 fn synthetic_set(byte: &str) -> String {
-    ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+    ["mrtd", "mrconfigid", "rtmr0", "rtmr1", "rtmr2"]
         .iter()
         .map(|field| format!("{field}={}", byte.repeat(48)))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn sets_text() -> String {
-    format!("{}\n{}\n", synthetic_set("a1"), synthetic_set("b2"))
+/// The staging ingest's own pin, production's form.
+fn synthetic_ingest_pin() -> String {
+    ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+        .iter()
+        .map(|field| format!("{field}={}", "c3".repeat(48)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
+
+fn sets_text() -> String {
+    format!(
+        "{}\n{}\ningest={}\n",
+        synthetic_set("a1"),
+        synthetic_set("b2"),
+        synthetic_ingest_pin()
+    )
+}
+
+const ALLOWLIST: &str = r#"{
+  "rtmr3": {
+    "app_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "mr_kms": "3b3b",
+    "os_image_hash": "0505",
+    "key_provider": "6b6d73",
+    "markers": [{"name": "system-ready", "payload": "00"}]
+  },
+  "compose_actions": [
+    {"action": "compose_up", "container": "model", "image": "registry.example/model"}
+  ]
+}"#;
 
 fn request<'a>(sets_text: &'a str, sequence: u64, served: Option<&'a [u8]>) -> SignRequest<'a> {
     SignRequest {
         sets_text,
+        allowlist_text: ALLOWLIST,
         sequence,
         ttl_days: 7,
         served,
@@ -76,8 +105,9 @@ fn sign_then_verify_round_trips() {
         signed.expected_measurements_line,
         format!(
             "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS={}",
-            synthetic_set("a1")
-        )
+            synthetic_ingest_pin()
+        ),
+        "the ingest's pin is the production-form line, never an S16 set"
     );
 
     // And through this tool's own verify, which is the app's check.
@@ -196,7 +226,12 @@ fn sign_refuses_sets_that_do_not_parse_or_are_none() {
         Some("set_unparseable:line_2")
     );
     // A repeated set is signed once.
-    let twice = format!("{}\n{}\n", synthetic_set("a1"), synthetic_set("a1"));
+    let twice = format!(
+        "{}\n{}\ningest={}\n",
+        synthetic_set("a1"),
+        synthetic_set("a1"),
+        synthetic_ingest_pin()
+    );
     let signed = sign(seed.as_bytes(), &request(&twice, 1, None)).unwrap();
     let verified = staging_pins::verify(
         &signed.document,
@@ -328,6 +363,14 @@ fn nothing_logs_a_key_or_a_measurement() {
         sign(b"", &request(&sets, 6, None)).unwrap_err(),
         sign(format!("{seed}0").as_bytes(), &request(&sets, 6, None)).unwrap_err(),
         sign(seed.as_bytes(), &request("mrtd=zz", 6, None)).unwrap_err(),
+        sign(
+            seed.as_bytes(),
+            &SignRequest {
+                allowlist_text: "{}",
+                ..request(&sets, 6, None)
+            },
+        )
+        .unwrap_err(),
         verify_document(&signed.document, &key, NOW + 30 * DAY).unwrap_err(),
         verify_document(b"{}", &key, NOW).unwrap_err(),
         verify_document(&signed.document, "not-hex", NOW).unwrap_err(),
@@ -343,6 +386,9 @@ fn nothing_logs_a_key_or_a_measurement() {
         );
         assert!(!line.contains(&"a1".repeat(48)), "a measurement: {line}");
         assert!(!line.contains(&"b2".repeat(48)), "a measurement: {line}");
+        assert!(!line.contains(&"c3".repeat(48)), "a measurement: {line}");
+        assert!(!line.contains("3b3b"), "an allowlist value: {line}");
+        assert!(!line.contains("registry.example"), "an image: {line}");
     }
     // The summary identifies the document by hash, and the key by its id.
     assert!(signed.summary.contains("payload_sha256=sha256:"));
@@ -364,7 +410,7 @@ fn registers_parse_by_name_and_refuse_unknowns_and_repeats() {
         ]
     );
     assert_eq!(
-        parse_registers("mrtd,rtmr0,rtmr1,rtmr2,rtmr3").unwrap(),
+        parse_registers("mrtd,rtmr0,rtmr1,rtmr2,mrconfigid").unwrap(),
         trace_commons_server::near_attestation::pin_observe::DEFAULT_REGISTERS
     );
     assert_eq!(
@@ -380,9 +426,20 @@ fn registers_parse_by_name_and_refuse_unknowns_and_repeats() {
 
 #[test]
 fn observe_defaults_to_the_shared_register_list() {
-    // The default is DEFAULT_REGISTERS itself, not a second copy of it.
-    let cli = Cli::try_parse_from(["trace-commons-staging-pins", "observe", "--model", "m"])
-        .expect("observe with only a model parses");
+    // The default is DEFAULT_REGISTERS itself, not a second copy of it. A
+    // review file is required: observe always writes what it saw.
+    assert!(
+        Cli::try_parse_from(["trace-commons-staging-pins", "observe", "--model", "m"]).is_err()
+    );
+    let cli = Cli::try_parse_from([
+        "trace-commons-staging-pins",
+        "observe",
+        "--model",
+        "m",
+        "--review",
+        "review.json",
+    ])
+    .expect("observe with only a model parses");
     let Command::Observe { registers, .. } = cli.command else {
         panic!("parsed as observe");
     };
@@ -411,4 +468,118 @@ fn an_existing_output_is_never_overwritten() {
     let fresh = dir.path().join("next.json");
     write_new(&fresh, b"new document").expect("a new path is written");
     assert_eq!(std::fs::read(&fresh).unwrap(), b"new document");
+}
+
+#[test]
+fn the_default_registers_are_the_s16_set() {
+    use trace_commons_attestation::measurements::MeasurementField;
+    // Owner decision S16: mrtd, rtmr0-2 and mrconfigid, with RTMR3 replayed
+    // rather than pinned. It ships only with the replay, in this change.
+    assert_eq!(
+        trace_commons_server::near_attestation::pin_observe::DEFAULT_REGISTERS,
+        [
+            MeasurementField::Mrtd,
+            MeasurementField::Rtmr0,
+            MeasurementField::Rtmr1,
+            MeasurementField::Rtmr2,
+            MeasurementField::MrConfigId,
+        ]
+    );
+    assert!(
+        !trace_commons_server::near_attestation::pin_observe::DEFAULT_REGISTERS
+            .contains(&MeasurementField::Rtmr3)
+    );
+    // And it is exactly what a v2 set must name at least.
+    assert_eq!(
+        trace_commons_server::near_attestation::pin_observe::DEFAULT_REGISTERS,
+        staging_pins::REQUIRED_REGISTERS
+    );
+    // The staging ingest's pin keeps production's registers (spec 5.9).
+    assert_eq!(
+        trace_commons_server::near_attestation::pin_observe::INGEST_REGISTERS,
+        [
+            MeasurementField::Mrtd,
+            MeasurementField::Rtmr0,
+            MeasurementField::Rtmr1,
+            MeasurementField::Rtmr2,
+            MeasurementField::Rtmr3,
+        ]
+    );
+}
+
+#[test]
+fn sign_embeds_the_allowlist_file() {
+    let seed = seed_hex();
+    let sets = sets_text();
+    let signed = sign(seed.as_bytes(), &request(&sets, 9, None)).expect("signs");
+    let verified = staging_pins::verify(
+        &signed.document,
+        &public_key(&seed),
+        NOW,
+        &staging_gateway_host(),
+    )
+    .unwrap();
+    let file: serde_json::Value = serde_json::from_str(ALLOWLIST).unwrap();
+    assert_eq!(verified.allowlist.to_json(), file);
+    assert!(signed.summary.contains("allowlist_sha256=sha256:"));
+
+    // A file that is not an allowlist signs nothing.
+    for (text, label) in [
+        ("not json", "allowlist_malformed"),
+        ("{}", "allowlist_malformed"),
+        (
+            r#"{"rtmr3": {"app_id": "AB", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []}, "compose_actions": []}"#,
+            "allowlist_malformed",
+        ),
+    ] {
+        let req = SignRequest {
+            allowlist_text: text,
+            ..request(&sets, 9, None)
+        };
+        assert_eq!(sign(seed.as_bytes(), &req).err().as_deref(), Some(label));
+    }
+}
+
+#[test]
+fn sign_refuses_sets_without_the_s16_registers_or_an_ingest_pin() {
+    let seed = seed_hex();
+    // A production-form set is not a v2 set: it does not pin mrconfigid.
+    let production = format!(
+        "{}\ningest={}\n",
+        synthetic_ingest_pin(),
+        synthetic_ingest_pin()
+    );
+    assert_eq!(
+        sign(seed.as_bytes(), &request(&production, 1, None))
+            .err()
+            .as_deref(),
+        Some("set_missing_register:line_1")
+    );
+    // No ingest line: the ingest cannot be pinned to an S16 set.
+    let no_ingest = format!("{}\n", synthetic_set("a1"));
+    assert_eq!(
+        sign(seed.as_bytes(), &request(&no_ingest, 1, None))
+            .err()
+            .as_deref(),
+        Some("ingest_pin_missing")
+    );
+    // An ingest line in the S16 form, or two ingest lines.
+    for text in [
+        format!("{}\ningest={}\n", synthetic_set("a1"), synthetic_set("a1")),
+        format!(
+            "{}\ningest={}\ningest={}\n",
+            synthetic_set("a1"),
+            synthetic_ingest_pin(),
+            synthetic_ingest_pin()
+        ),
+        format!("{}\ningest=mrtd=zz\n", synthetic_set("a1")),
+    ] {
+        assert_eq!(
+            sign(seed.as_bytes(), &request(&text, 1, None))
+                .err()
+                .as_deref(),
+            Some("ingest_pin_malformed"),
+            "{text}"
+        );
+    }
 }

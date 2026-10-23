@@ -29,6 +29,10 @@ use trace_commons_attestation::quote::{
     Collateral, QuoteVerifyError, VerifiedQuote, parse_collateral, verify_quote,
 };
 use trace_commons_attestation::staging_pins;
+use trace_commons_attestation::staging_replay::{
+    MARKER_EVENTS, RTMR3_EVENT_TYPE, RTMR3_EVENTS, compose_actions_hash, event_digest,
+    replay_digests,
+};
 use trace_commons_server::near_attestation::client::{
     AttestationClientError, AttestedKeyReportClient, HttpAttestationClient, INTEL_PCS_URL,
 };
@@ -138,16 +142,98 @@ fn json(text: &str) -> serde_json::Value {
     serde_json::from_str(text).expect("fixture parses")
 }
 
+// Synthetic RTMR3 payloads and compose actions: none is a real
+// measurement.
+const APP_ID: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+const COMPOSE_HASH: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+/// The per-boot value observe must never print, in any case.
+const INSTANCE_ID: &str = "1d5ec2e71d5ec2e71d5ec2e71d5ec2e71d5ec2e7";
+const MR_KMS: &str = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b";
+const OS_IMAGE_HASH: &str = "0505050505050505050505050505050505050505050505050505050505050505";
+const KEY_PROVIDER: &str = "7b226e616d65223a226b6d73222c226964223a2273796e746865746963227d";
+
+fn marker_payload(name: &str) -> String {
+    hex::encode(format!("synthetic {name}"))
+}
+
+/// The ten RTMR3 events, in order, with synthetic payloads.
+fn ten_events() -> Vec<(String, String)> {
+    RTMR3_EVENTS
+        .iter()
+        .map(|name| {
+            let payload = match *name {
+                "app-id" => APP_ID.to_string(),
+                "compose-hash" => COMPOSE_HASH.to_string(),
+                "instance-id" => INSTANCE_ID.to_string(),
+                "mr-kms" => MR_KMS.to_string(),
+                "os-image-hash" => OS_IMAGE_HASH.to_string(),
+                "key-provider" => KEY_PROVIDER.to_string(),
+                marker => marker_payload(marker),
+            };
+            (name.to_string(), payload)
+        })
+        .collect()
+}
+
+fn event_log(events: &[(String, String)]) -> serde_json::Value {
+    let mut log = vec![serde_json::json!({
+        "imr": 0, "event_type": 1, "digest": "ee".repeat(48), "event": "", "event_payload": ""
+    })];
+    for (name, payload) in events {
+        log.push(serde_json::json!({
+            "imr": 3, "event_type": RTMR3_EVENT_TYPE, "digest": "",
+            "event": name, "event_payload": payload,
+        }));
+    }
+    serde_json::Value::Array(log)
+}
+
+fn replayed(events: &[(String, String)]) -> String {
+    let digests: Vec<[u8; 48]> = events
+        .iter()
+        .map(|(n, p)| event_digest(RTMR3_EVENT_TYPE, n, &hex::decode(p).unwrap()))
+        .collect();
+    hex::encode(replay_digests(&digests))
+}
+
+fn actions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"action": "compose_manager_started", "container": null, "image": null, "timestamp": 1}),
+        serde_json::json!({"action": "compose_up", "container": "model", "image": "registry.example/model@sha256:ab", "timestamp": 2}),
+    ]
+}
+
+/// The capture's quote bytes, and the compose-manager quote's: the same
+/// quote with one byte appended, so the staged verifier below can tell the
+/// two apart by their bytes and verify the real quote for both.
+fn fixture_quote() -> Vec<u8> {
+    hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap()
+}
+
+fn compose_quote() -> Vec<u8> {
+    let mut quote = fixture_quote();
+    quote.push(0);
+    quote
+}
+
+/// A gateway quote: the capture's with two bytes appended.
+fn gateway_quote() -> Vec<u8> {
+    let mut quote = fixture_quote();
+    quote.extend([0, 1]);
+    quote
+}
+
 /// A **synthetic** ed25519 report over the ECDSA capture's quote, which
 /// verifies. The key is the quote's own `report_data[0..32]` and the nonce
 /// its `[32..64]`, so the report is consistent by construction. Same recipe
-/// as `near_attestation::key_drift_tests`.
+/// as `near_attestation::key_drift_tests`. The model entry carries its own
+/// RTMR3 log and compose-manager record, as NEAR AI staging's do.
 fn synthetic_ed25519_report() -> (String, String) {
-    let quote_hex = json(ECDSA_REPORT)["intel_quote"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let quote = hex::decode(&quote_hex).unwrap();
+    report_with(&ten_events(), &actions())
+}
+
+fn report_with(events: &[(String, String)], actions: &[serde_json::Value]) -> (String, String) {
+    let quote = fixture_quote();
     let report_data = &quote[568..632];
     let key = hex::encode(&report_data[0..32]);
     let nonce = hex::encode(&report_data[32..64]);
@@ -156,39 +242,177 @@ fn synthetic_ed25519_report() -> (String, String) {
         "signing_algo": "ed25519",
         "signing_address": key,
         "request_nonce": nonce,
-        "intel_quote": quote_hex,
+        "intel_quote": hex::encode(&quote),
+        "event_log": event_log(events),
+        "compose_manager_attestation": {
+            "actions": actions,
+            "actions_hash": hex::encode(compose_actions_hash(actions).unwrap()),
+            "nonce": nonce,
+            "nonce_source": "client",
+            "quote": hex::encode(compose_quote()),
+        },
+    });
+    let gateway = serde_json::json!({
+        "signing_algo": "ed25519",
+        "signing_address": key,
+        "request_nonce": nonce,
+        "intel_quote": hex::encode(gateway_quote()),
+        "event_log": event_log(events),
     });
     let document = serde_json::json!({
-        "gateway_attestation": entry,
+        "gateway_attestation": gateway,
         "model_attestations": [entry],
     });
     (document.to_string(), nonce)
 }
 
+type Alter = Box<dyn Fn(usize, &mut VerifiedQuote) + Send + Sync>;
+
+/// The quote verifier a staged report needs. Every quote is verified for
+/// real against the capture's collateral; then the registers the synthetic
+/// log and record describe are staged on the verified result:
+///
+/// - the model quote (the capture's bytes) gets RTMR3 replayed from
+///   `events` and a config-id v1 MRCONFIGID over the synthetic compose hash;
+/// - the compose-manager quote gets the model quote's registers (the same
+///   TD, the same boot), our nonce and the actions hash in `report_data`;
+/// - the gateway quote gets registers of its own.
+///
+/// `alter(n, quote)` runs on the `n`th model quote's staged result (from 0)
+/// and the compose-manager quote that follows it takes the altered
+/// registers, as one TD's would.
+struct Staged {
+    events: Vec<(String, String)>,
+    actions: Vec<serde_json::Value>,
+    alter: Alter,
+    alter_compose: Alter,
+    models: std::sync::atomic::AtomicUsize,
+    last: std::sync::Mutex<Option<VerifiedQuote>>,
+}
+
+impl Staged {
+    fn new() -> Self {
+        Self::over(ten_events(), actions())
+    }
+
+    fn over(events: Vec<(String, String)>, actions: Vec<serde_json::Value>) -> Self {
+        Staged {
+            events,
+            actions,
+            alter: Box::new(|_, _| {}),
+            alter_compose: Box::new(|_, _| {}),
+            models: std::sync::atomic::AtomicUsize::new(0),
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn altering(
+        mut self,
+        alter: impl Fn(usize, &mut VerifiedQuote) + Send + Sync + 'static,
+    ) -> Self {
+        self.alter = Box::new(alter);
+        self
+    }
+
+    fn altering_compose(
+        mut self,
+        alter: impl Fn(usize, &mut VerifiedQuote) + Send + Sync + 'static,
+    ) -> Self {
+        self.alter_compose = Box::new(alter);
+        self
+    }
+
+    fn verify(
+        &self,
+        quote: &[u8],
+        collateral: &Collateral,
+        now: u64,
+    ) -> Result<VerifiedQuote, QuoteVerifyError> {
+        let real = fixture_quote();
+        let mut verified = verify_quote(&real, collateral, now)?;
+        if quote == real.as_slice() {
+            verified.rtmr[3] = replayed(&self.events);
+            verified.mr_config_id = format!("01{COMPOSE_HASH}{}", "00".repeat(15));
+            let n = self
+                .models
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.alter)(n, &mut verified);
+            *self.last.lock().unwrap() = Some(verified.clone());
+            Ok(verified)
+        } else if quote == compose_quote().as_slice() {
+            let model = self
+                .last
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("model quote first");
+            let mut staged = model.clone();
+            staged.report_data[0..32]
+                .copy_from_slice(&compose_actions_hash(&self.actions).unwrap());
+            staged.report_data[32..64].copy_from_slice(&real[600..632]);
+            let n = self.models.load(std::sync::atomic::Ordering::SeqCst) - 1;
+            (self.alter_compose)(n, &mut staged);
+            Ok(staged)
+        } else if quote == gateway_quote().as_slice() {
+            verified.mrtd = "6a".repeat(48);
+            verified.rtmr = [
+                "6b".repeat(48),
+                "6c".repeat(48),
+                "6d".repeat(48),
+                "6e".repeat(48),
+            ];
+            verified.mr_config_id = "6f".repeat(48);
+            Ok(verified)
+        } else {
+            verify_quote(quote, collateral, now)
+        }
+    }
+}
+
+fn staged_verify(
+    staged: &Staged,
+) -> impl Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync + '_ {
+    move |quote, collateral, now| staged.verify(quote, collateral, now)
+}
+
 #[tokio::test]
 async fn observe_reads_the_registers_of_a_verified_quote() {
-    // The control for the two refusals below: the same path, over a quote
-    // that verifies and binds the nonce asked for, prints its registers.
+    // The control for the refusals below: the same path, over a quote that
+    // verifies and binds the nonce asked for, with a log that replays to it
+    // and a compose-manager record bound to it, prints its registers.
     let (report, nonce) = synthetic_ed25519_report();
     let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::new();
 
-    let sets = observe_measurement_sets(
+    let observed = observe_measurement_sets(
         &[&gateway],
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
-        &verify_quote,
+        &staged_verify(&staged),
     )
     .await
-    .expect("a verified, bound quote is observed");
+    .expect("a verified, bound, replayed quote is observed");
 
-    assert_eq!(sets.len(), 1);
-    let set = ExpectedMeasurements::from_env_value(Some(&sets[0]))
+    assert_eq!(observed.sets.len(), 1);
+    let set = ExpectedMeasurements::from_env_value(Some(&observed.sets[0]))
         .expect("an observed set parses")
         .expect("and is not empty");
     let names: Vec<&str> = set.pinned_fields().iter().map(|f| f.as_str()).collect();
+    assert_eq!(names, ["mrtd", "mrconfigid", "rtmr0", "rtmr1", "rtmr2"]);
+    assert_eq!(set.to_pin_string(), observed.sets[0], "printed canonically");
+    assert!(
+        observed.sets[0].contains(&format!("mrconfigid=01{COMPOSE_HASH}")),
+        "MRCONFIGID read out of the verified quote"
+    );
+    // The staging ingest's own pin keeps production's form, from the same
+    // observation (spec 5.9): rtmr3 included, as the ingest does not replay.
+    let ingest = ExpectedMeasurements::from_env_value(Some(&observed.ingest_pin))
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = ingest.pinned_fields().iter().map(|f| f.as_str()).collect();
     assert_eq!(names, ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]);
-    assert_eq!(set.to_pin_string(), sets[0], "printed canonically");
+    assert!(observed.ingest_pin.contains(&replayed(&ten_events())));
 }
 
 #[tokio::test]
@@ -222,13 +446,14 @@ async fn observe_refuses_a_report_not_bound_to_its_nonce() {
     let (report, _its_own_nonce) = synthetic_ed25519_report();
     let ours = "9f3c1d2e4b5a60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
     let (_server, gateway) = gateway_serving(&report, ours).await;
+    let staged = Staged::new();
 
     let refusal = observe_measurement_sets(
         &[&gateway],
         &FixedNonce(ours.to_string()),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
-        &verify_quote,
+        &staged_verify(&staged),
     )
     .await
     .expect_err("a report for another nonce yields no set");
@@ -249,13 +474,14 @@ async fn one_refused_model_prints_nothing_for_any() {
         }
     }
     let nonces = Sequence(std::sync::Mutex::new(vec![good_nonce, "0".repeat(64)]));
+    let staged = Staged::new();
 
     let refusal = observe_measurement_sets(
         &[&good, &bad],
         &nonces,
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
-        &verify_quote,
+        &staged_verify(&staged),
     )
     .await
     .expect_err("the second model's refusal refuses the run");
@@ -302,13 +528,14 @@ async fn observe_refuses_a_verified_quote_bound_to_another_nonce() {
     // against the verified report data, not the JSON one.
     let (report, nonce) = synthetic_ed25519_report();
     let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::new().altering(|_, quote| quote.report_data[32..64].fill(0x5a));
 
     let refusal = observe_measurement_sets(
         &[&gateway],
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
-        &verify_then(|quote| quote.report_data[32..64].fill(0x5a)),
+        &staged_verify(&staged),
     )
     .await
     .expect_err("a quote bound to another nonce yields no set");
@@ -319,37 +546,257 @@ async fn observe_refuses_a_verified_quote_bound_to_another_nonce() {
 
 #[tokio::test]
 async fn observe_keeps_the_sets_in_model_order() {
-    // The staging ingest is pinned to the first set, so the first set must
-    // be the first model's, not whichever sorts lowest. The second model's
-    // set is altered to sort first.
+    // The staging ingest is pinned to the first model's quote, so the first
+    // set must be the first model's, not whichever sorts lowest. The second
+    // model's set is altered to sort first.
     let (report, nonce) = synthetic_ed25519_report();
     let (_first_server, first) = gateway_serving(&report, &nonce).await;
     let (_second_server, second) = gateway_serving(&report, &nonce).await;
-
-    let calls = std::sync::atomic::AtomicUsize::new(0);
-    let verify = |quote: &[u8], collateral: &Collateral, now: u64| {
-        let mut verified = verify_quote(quote, collateral, now)?;
-        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-            verified.mrtd = "00".repeat(48);
+    let staged = Staged::new().altering(|n, quote| {
+        if n == 1 {
+            quote.mrtd = "00".repeat(48);
         }
-        Ok(verified)
-    };
+    });
 
-    let sets = observe_measurement_sets(
+    let observed = observe_measurement_sets(
         &[&first, &second],
         &FixedNonce(nonce),
         FIXTURE_CAPTURED_AT,
         &DEFAULT_REGISTERS,
-        &verify,
+        &staged_verify(&staged),
     )
     .await
     .expect("both models observed");
 
+    let sets = observed.sets;
     assert_eq!(sets.len(), 2);
     assert!(sets[1] < sets[0], "the second model's set sorts first");
     assert!(
         sets[1].starts_with(&format!("mrtd={}", "00".repeat(48))),
         "and is listed second, after the first model's"
+    );
+    assert!(
+        !observed
+            .ingest_pin
+            .starts_with(&format!("mrtd={}", "00".repeat(48))),
+        "the ingest pin is the first model's"
+    );
+}
+
+#[tokio::test]
+async fn observe_refuses_a_run_whose_replay_does_not_match() {
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    // The quote measured another log: its RTMR3 is not what the report's
+    // log replays to.
+    let staged = Staged::new().altering(|_, quote| quote.rtmr[3] = "77".repeat(48));
+
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce.clone()),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("a log that does not replay to the quote yields no set");
+    assert_eq!(refusal.model_position, 1);
+    assert_eq!(refusal.label, "rtmr3_replay_mismatch");
+
+    // A log that replays but is not the ten events in order is refused too.
+    let mut nine = ten_events();
+    nine.remove(7);
+    let (report, nonce) = report_with(&nine, &actions());
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::over(nine, actions());
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("a log missing its key-provider event yields no set");
+    assert_eq!(refusal.label, "rtmr3_event_sequence");
+}
+
+#[tokio::test]
+async fn observe_refuses_a_run_whose_compose_manager_check_fails() {
+    let cases: [(&str, Staged); 4] = [
+        (
+            "compose_manager_other_td",
+            Staged::new().altering_compose(|_, quote| quote.rtmr[2] = "44".repeat(48)),
+        ),
+        (
+            "compose_manager_nonce_mismatch",
+            Staged::new().altering_compose(|_, quote| quote.report_data[32..64].fill(0x11)),
+        ),
+        (
+            "compose_actions_hash_mismatch",
+            Staged::new().altering_compose(|_, quote| quote.report_data[0..32].fill(0x22)),
+        ),
+        (
+            "compose_manager_tcb_not_up_to_date",
+            Staged::new().altering_compose(|_, quote| quote.tcb_status = "OutOfDate".to_string()),
+        ),
+    ];
+    for (label, staged) in cases {
+        let (report, nonce) = synthetic_ed25519_report();
+        let (_server, gateway) = gateway_serving(&report, &nonce).await;
+        let refusal = observe_measurement_sets(
+            &[&gateway],
+            &FixedNonce(nonce),
+            FIXTURE_CAPTURED_AT,
+            &DEFAULT_REGISTERS,
+            &staged_verify(&staged),
+        )
+        .await
+        .expect_err("a compose-manager record that does not check yields no set");
+        assert_eq!(refusal.label, label);
+    }
+
+    // A record whose quote does not verify: the record's quote is the
+    // ed25519 capture's, which the checked-in collateral refuses for real.
+    let (report, nonce) = synthetic_ed25519_report();
+    let mut document = json(&report);
+    document["model_attestations"][0]["compose_manager_attestation"]["quote"] =
+        json(ED25519_REPORT)["model_attestations"][0]["intel_quote"].clone();
+    let (_server, gateway) = gateway_serving(&document.to_string(), &nonce).await;
+    let staged = Staged::new();
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce.clone()),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("an unverified compose-manager quote yields no set");
+    assert_eq!(refusal.label, "compose_manager_quote_unverified");
+
+    // And a model entry with no record at all.
+    let mut document = json(&report);
+    document["model_attestations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("compose_manager_attestation");
+    let (_server, gateway) = gateway_serving(&document.to_string(), &nonce).await;
+    let staged = Staged::new();
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("no compose-manager record, no set");
+    assert_eq!(refusal.label, "compose_manager_missing");
+}
+
+#[tokio::test]
+async fn observe_prints_the_compose_actions_for_review() {
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::new();
+
+    let observed = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect("observed");
+
+    // The review is a candidate allowlist in the exact shape `sign` reads:
+    // the replayed events' values and every compose action seen.
+    let review = observed.review.to_json();
+    assert_eq!(review["rtmr3"]["app_id"], APP_ID);
+    assert_eq!(review["rtmr3"]["mr_kms"], MR_KMS);
+    assert_eq!(review["rtmr3"]["os_image_hash"], OS_IMAGE_HASH);
+    assert_eq!(review["rtmr3"]["key_provider"], KEY_PROVIDER);
+    let markers: Vec<&str> = review["rtmr3"]["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(markers, MARKER_EVENTS);
+    assert_eq!(
+        review["compose_actions"],
+        serde_json::json!([
+            {"action": "compose_manager_started", "container": null, "image": null},
+            {"action": "compose_up", "container": "model", "image": "registry.example/model@sha256:ab"},
+        ])
+    );
+    assert_eq!(
+        trace_commons_attestation::staging_replay::Allowlist::from_json(&review).unwrap(),
+        observed.review,
+        "the review reads back as an allowlist"
+    );
+}
+
+#[tokio::test]
+async fn observe_never_emits_a_gateway_or_compose_manager_quote_as_a_pin_set() {
+    // The report's gateway quote verifies and carries registers of its own
+    // (the staged verifier gives it 6a.. 6f..); the compose-manager quote
+    // verifies with the actions hash in its report data. Neither is a set.
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::new();
+
+    let observed = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect("observed");
+    assert_eq!(observed.sets.len(), 1, "one set: the model entry's");
+    let printed = format!("{}\n{}", observed.sets.join("\n"), observed.ingest_pin);
+    for register in ["6a", "6b", "6c", "6d", "6e", "6f"] {
+        assert!(
+            !printed.contains(&register.repeat(48)),
+            "a gateway register reached the output"
+        );
+    }
+    let actions_hash = hex::encode(compose_actions_hash(&actions()).unwrap());
+    assert!(!printed.contains(&actions_hash));
+}
+
+#[tokio::test]
+async fn observe_never_prints_the_instance_id_value() {
+    let (report, nonce) = synthetic_ed25519_report();
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::new();
+
+    let observed = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect("observed");
+    let everything = format!(
+        "{}\n{}\n{}\n{:?}",
+        observed.sets.join("\n"),
+        observed.ingest_pin,
+        serde_json::to_string_pretty(&observed.review.to_json()).unwrap(),
+        observed,
+    );
+    for form in [INSTANCE_ID.to_string(), INSTANCE_ID.to_ascii_uppercase()] {
+        assert!(!everything.contains(&form), "the instance id was printed");
+    }
+    assert!(
+        !everything.contains("instance"),
+        "not even its name has a field"
     );
 }
 
@@ -393,16 +840,43 @@ fn public_key_hex(seed_hex: &str) -> String {
     hex::encode(pair.public_key().as_ref())
 }
 
-/// Two synthetic sets: registers no enclave has, 96 hex characters each.
+/// Two synthetic sets in the S16 form: registers no enclave has, 96 hex
+/// characters each.
 fn synthetic_sets() -> [String; 2] {
     let set = |byte: &str| {
-        ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+        ["mrtd", "mrconfigid", "rtmr0", "rtmr1", "rtmr2"]
             .iter()
             .map(|field| format!("{field}={}", byte.repeat(48)))
             .collect::<Vec<_>>()
             .join(",")
     };
     [set("a1"), set("b2")]
+}
+
+/// The staging ingest's own pin, in production's form, as `observe` prints
+/// it.
+fn synthetic_ingest_pin() -> String {
+    ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+        .iter()
+        .map(|field| format!("{field}={}", "c3".repeat(48)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A synthetic allowlist file, in the shape `sign --allowlist` reads.
+fn synthetic_allowlist() -> serde_json::Value {
+    serde_json::json!({
+        "rtmr3": {
+            "app_id": "a1".repeat(20),
+            "mr_kms": "3b".repeat(48),
+            "os_image_hash": "05".repeat(32),
+            "key_provider": "6b6d73",
+            "markers": [{"name": "system-ready", "payload": "00"}],
+        },
+        "compose_actions": [
+            {"action": "compose_up", "container": "model", "image": "registry.example/model"},
+        ],
+    })
 }
 
 fn run(args: &[&str], stdin: &str, dir: &Path) -> Output {
@@ -430,7 +904,20 @@ fn text(bytes: &[u8]) -> String {
 
 fn write_sets(dir: &Path) -> std::path::PathBuf {
     let sets = dir.join("observed.txt");
-    std::fs::write(&sets, synthetic_sets().join("\n") + "\n").unwrap();
+    std::fs::write(
+        &sets,
+        format!(
+            "{}\ningest={}\n",
+            synthetic_sets().join("\n"),
+            synthetic_ingest_pin()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("allowlist.json"),
+        serde_json::to_vec_pretty(&synthetic_allowlist()).unwrap(),
+    )
+    .unwrap();
     sets
 }
 
@@ -443,6 +930,8 @@ fn sign_then_verify_round_trips_through_the_binary() {
     let signed = run(
         &[
             "sign",
+            "--allowlist",
+            "allowlist.json",
             "--sets",
             "observed.txt",
             "--sequence",
@@ -467,6 +956,12 @@ fn sign_then_verify_round_trips_through_the_binary() {
     assert_eq!(verified.sequence, 7);
     assert_eq!(verified.sets.len(), 2);
     assert_eq!(verified.expires_at - verified.issued_at, 7 * 86_400);
+    assert_eq!(
+        verified.allowlist,
+        trace_commons_attestation::staging_replay::Allowlist::from_json(&synthetic_allowlist())
+            .unwrap(),
+        "the allowlist file is inside the signed payload"
+    );
 
     let checked = run(
         &[
@@ -511,6 +1006,8 @@ fn sign_never_reads_a_key_from_argv() {
     write_sets(dir.path());
     let base = [
         "sign",
+        "--allowlist",
+        "allowlist.json",
         "--sets",
         "observed.txt",
         "--sequence",
@@ -553,6 +1050,8 @@ fn sign_refuses_an_existing_output_before_reading_the_key() {
     write_sets(dir.path());
     let args = [
         "sign",
+        "--allowlist",
+        "allowlist.json",
         "--sets",
         "observed.txt",
         "--sequence",
@@ -589,10 +1088,31 @@ fn sign_refuses_an_existing_output_before_reading_the_key() {
 #[test]
 fn observe_without_a_key_prints_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run(&["observe", "--model", "m"], "", dir.path());
+    let out = run(
+        &["observe", "--model", "m", "--review", "review.json"],
+        "",
+        dir.path(),
+    );
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert_eq!(text(&out.stderr).trim(), "refused: api_key_missing");
+    assert!(
+        !dir.path().join("review.json").exists(),
+        "no review written"
+    );
+
+    // An existing review file is refused before the key is read.
+    std::fs::write(dir.path().join("review.json"), b"kept").unwrap();
+    let out = run(
+        &["observe", "--model", "m", "--review", "review.json"],
+        "",
+        dir.path(),
+    );
+    assert_eq!(text(&out.stderr).trim(), "refused: review_exists");
+    assert_eq!(
+        std::fs::read(dir.path().join("review.json")).unwrap(),
+        b"kept"
+    );
 }
 
 #[test]
@@ -608,6 +1128,8 @@ fn nothing_logs_a_key_or_a_measurement() {
     outputs.push(run(
         &[
             "sign",
+            "--allowlist",
+            "allowlist.json",
             "--sets",
             "observed.txt",
             "--sequence",
@@ -631,6 +1153,8 @@ fn nothing_logs_a_key_or_a_measurement() {
     outputs.push(run(
         &[
             "sign",
+            "--allowlist",
+            "allowlist.json",
             "--sets",
             "observed.txt",
             "--sequence",
@@ -648,6 +1172,8 @@ fn nothing_logs_a_key_or_a_measurement() {
     outputs.push(run(
         &[
             "sign",
+            "--allowlist",
+            "allowlist.json",
             "--sets",
             "observed.txt",
             "--sequence",
@@ -665,6 +1191,8 @@ fn nothing_logs_a_key_or_a_measurement() {
     outputs.push(run(
         &[
             "sign",
+            "--allowlist",
+            "allowlist.json",
             "--sets",
             "observed.txt",
             "--sequence",
@@ -683,6 +1211,7 @@ fn nothing_logs_a_key_or_a_measurement() {
 
     let measurement_values: Vec<String> = sets
         .iter()
+        .chain(std::iter::once(&synthetic_ingest_pin()))
         .flat_map(|set| {
             set.split(',')
                 .map(|kv| kv.split_once('=').unwrap().1.to_string())
@@ -733,15 +1262,80 @@ fn nothing_logs_a_key_or_a_measurement() {
         }
     }
 
-    // sign's stdout is the one line the staging ingest's drop-in takes, for
-    // the first set, and nothing else.
+    // sign's stdout is the one line the staging ingest's drop-in takes, in
+    // production's form from the `ingest=` line, and nothing else: never an
+    // S16 set, which the ingest cannot use without the replay.
     let stdout = text(&signed.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines,
         [format!(
             "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS={}",
-            sets[0]
+            synthetic_ingest_pin()
         )]
     );
+}
+
+#[test]
+fn sign_embeds_the_allowlist_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = synthetic_seed_hex();
+    write_sets(dir.path());
+    let args = |out: &'static str| {
+        [
+            "sign",
+            "--allowlist",
+            "allowlist.json",
+            "--sets",
+            "observed.txt",
+            "--sequence",
+            "5",
+            "--ttl-days",
+            "7",
+            "--first",
+            "--out",
+            out,
+        ]
+    };
+
+    let signed = run(&args("current.json"), &seed, dir.path());
+    assert!(signed.status.success(), "stderr: {}", text(&signed.stderr));
+    let document = std::fs::read(dir.path().join("current.json")).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let public_key = hex::decode(public_key_hex(&seed)).unwrap();
+    let verified =
+        staging_pins::verify(&document, &public_key, now, STAGING_GATEWAY_HOST).expect("verifies");
+    assert_eq!(verified.allowlist.to_json(), synthetic_allowlist());
+    // The summary names the allowlist by hash, never its values.
+    let stderr = text(&signed.stderr);
+    assert!(stderr.contains("allowlist_sha256=sha256:"), "{stderr}");
+    assert!(!stderr.contains(&"3b".repeat(48)), "{stderr}");
+    assert!(!stderr.contains("registry.example"), "{stderr}");
+
+    // The placeholder the repository ships signs, and refuses every entry
+    // in the app (its values match no event, its lists are empty).
+    let placeholder = include_str!("../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json");
+    std::fs::write(dir.path().join("allowlist.json"), placeholder).unwrap();
+    let signed = run(&args("placeholder.json"), &seed, dir.path());
+    assert!(signed.status.success(), "stderr: {}", text(&signed.stderr));
+    let document = std::fs::read(dir.path().join("placeholder.json")).unwrap();
+    let verified = staging_pins::verify(&document, &public_key, now, STAGING_GATEWAY_HOST)
+        .expect("the placeholder verifies");
+    assert!(verified.allowlist.compose_actions.is_empty());
+    assert!(verified.allowlist.rtmr3.markers.is_empty());
+    assert!(verified.allowlist.rtmr3.app_id.is_empty());
+
+    // A malformed or missing allowlist file signs nothing.
+    std::fs::write(dir.path().join("allowlist.json"), b"{\"rtmr3\": {}}").unwrap();
+    let refused = run(&args("bad.json"), &seed, dir.path());
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(text(&refused.stderr).contains("refused: allowlist_malformed"));
+    assert!(!dir.path().join("bad.json").exists());
+    std::fs::remove_file(dir.path().join("allowlist.json")).unwrap();
+    let refused = run(&args("bad.json"), &seed, dir.path());
+    assert!(text(&refused.stderr).contains("refused: allowlist_unreadable"));
+    assert!(!dir.path().join("bad.json").exists());
 }
