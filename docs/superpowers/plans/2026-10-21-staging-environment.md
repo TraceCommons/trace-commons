@@ -468,7 +468,9 @@ Spec: sections 3, 5.4, 7.
 - Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`; no invite step: a tester makes a staging NEAR AI account and signs in)
 - Modify: `docs/operator/README.md` (index), `README.md` if its operator checklist lists environments
 
-- [ ] **Step 1:** Walk the runbook against the merged tasks; every command names a real script or flag (grep for each).
-- [ ] **Step 2: Commit** — `Add the staging environment runbook and tester guide`.
+**Progress (2026-10-22):** drafted as `docs/operator/staging-tester-guide.md` (the tester guide, in the operator directory so the index lists it) and `docs/operator/staging-runbook.md`, both listed in `docs/operator/README.md`. Done: tester install, checksum check, staging account, what works and what does not, removal; operator build, publish check, update feed, pin re-sign pointer, shutdown. Remaining: the "Server bring-up (pending Task 11)" and "Serving the first pin set (pending Task 6b)" sections; the report channel (open item 6, written as TBD); a final walk of every command once Task 11 lands.
+
+- [x] **Step 1 (partly):** The build, publish and feed commands were checked against `staging-macos.yml`; the server commands wait for Task 11.
+- [ ] **Step 2: Commit** — `Add the staging environment runbook and tester guide`. The first part is committed; the rest follows Task 11.
 
 **Done when:** an operator can bring up the VM, deploy, sign pins and publish a build from the runbook alone, and a tester can install and sign in from the guide alone.
