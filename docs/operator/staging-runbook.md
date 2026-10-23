@@ -115,6 +115,34 @@ AASA file. Rollback is the pilot's: each install keeps a timestamped
 payout rail stays `disabled` until the ingest reads its settings (payout
 design section 2).
 
+## Database backups
+
+Staging's PostgreSQL runs on the VM, so its backups are ours (design 3.2).
+`tc-staging-db-backup.timer` runs `deploy/staging-gcp/backup-db.sh`
+nightly: a `pg_dump -Fc` as the `postgres` superuser, with every table's row
+count taken in the same snapshot, uploaded to
+`gs://tc-staging-artifacts-20261021/backups/postgres/` with a sha256 sidecar
+written last. `tc-staging-db-restore-check.timer` runs
+`deploy/staging-gcp/restore-check.sh` weekly: it restores the newest
+complete backup into a throwaway database and fails unless every table's
+row count equals the dump-time count. Install, retention (a 14-day lifecycle
+rule on the prefix) and a real restore: bring-up step 9 in
+[`deploy/staging-gcp/README.md`](../../deploy/staging-gcp/README.md).
+
+Checking on them:
+
+```bash
+systemctl list-timers 'tc-staging-db-*'
+systemctl --failed
+sudo journalctl -u tc-staging-db-backup.service -u tc-staging-db-restore-check.service \
+  --since -8d --no-pager | grep -E 'backup-db:|restore-check:'
+```
+
+Both must reach PostgreSQL as a superuser: every Trace Commons table has
+FORCE ROW LEVEL SECURITY, which binds its owner `app` too, so a dump as
+`app` is refused (or, with `--enable-row-security`, holds only the rows
+`app` can see). Do not change either script to connect as `app`.
+
 ## Serving the first pin set
 
 Private AI proof marks stay off until a signed pin set is served. The RTMR3

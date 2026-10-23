@@ -1,0 +1,27 @@
+[Unit]
+Description=Staging database restore check: restore the newest backup and compare row counts
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tc-staging-db-restore-check
+TimeoutStartSec=4h
+# Runs as root: runuser needs it to become postgres, and the dump stays in a
+# root-only directory. runuser does not use setuid, so NoNewPrivileges holds.
+# ProtectHome hides /root, so gcloud keeps its configuration in the state
+# directory. The local PostgreSQL socket is reachable under ProtectSystem.
+StateDirectory=tracecommons-db-backup
+StateDirectoryMode=0700
+Environment=CLOUDSDK_CONFIG=/var/lib/tracecommons-db-backup/gcloud
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
