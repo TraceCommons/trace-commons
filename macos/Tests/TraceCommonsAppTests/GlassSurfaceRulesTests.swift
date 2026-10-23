@@ -85,6 +85,12 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Monitor/SettingsModal.swift",
         // Every notice as a popover over its tab (owner, 2026-10-19).
         "Views/Monitor/MonitorNotices.swift",
+        // The animated first run (Ron's 2026-10-21 canvas): its stage and
+        // the steps it added.
+        "Views/FirstRun/FirstRunStage.swift",
+        "Views/FirstRun/WelcomeScreen.swift",
+        "Views/FirstRun/TracesScreen.swift",
+        "Views/FirstRun/PrivateAIScreen.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

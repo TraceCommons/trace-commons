@@ -49,6 +49,13 @@
 //!   sessions on this Mac, and the card says they wait there; and
 //!   `not_listed`, how many older sessions a folder has beyond the newest
 //!   500 the picker lists.
+//! - The animated first run (Ron's 2026-10-21 canvas, owner request
+//!   2026-10-22) adds `welcome`, the splash before Tools; `traces`, what the
+//!   watched tools' traces could earn, with `traces.estimate`, the owner's
+//!   default range before an invite gives one; `frame.step_traces` and
+//!   `frame.step_private_ai` for the two new steps; the Uses graphic's three
+//!   labels and `automatic_after_sign_in`; and the Private AI screen's title
+//!   and tool count. Sign-in moves last, so Join's words are unchanged.
 //! - Join adds `passkey_unavailable` for a Create passkey whose daemon start
 //!   failed, so the sheets could not open over Join.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
@@ -107,7 +114,14 @@ pub struct FrameCopy {
     pub step_tools: &'static str,
     pub step_rules: &'static str,
     pub step_uses: &'static str,
-    /// Approved 2026-10-08 (button rule).
+    /// The animated first run's Traces step. DRAFT, NEEDS APPROVAL.
+    pub step_traces: &'static str,
+    /// The animated first run's Private AI step. The same words as
+    /// `private_ai.title_bold`, and free to diverge: one names a step, the
+    /// other ends a title. DRAFT, NEEDS APPROVAL.
+    pub step_private_ai: &'static str,
+    /// Approved 2026-10-08 (button rule). On Tools it opens the per-repo
+    /// rules in place (Ron, 2026-10-21).
     pub custom_setup_instead: &'static str,
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
@@ -186,6 +200,49 @@ pub struct JoinCopy {
     pub skip: &'static str,
     /// After the passkey verification is cancelled (`ftux-page.tsx`).
     pub signed_out: &'static str,
+}
+
+/// Welcome, the animated first run's splash (Ron's 2026-10-21 canvas).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WelcomeCopy {
+    /// Ron's words (2026-10-21). The shell raises it a word at a time.
+    pub title: &'static str,
+    /// Ron's words (2026-10-21).
+    pub body: &'static str,
+    /// DRAFT, NEEDS APPROVAL.
+    pub start: &'static str,
+}
+
+/// Traces: what the watched tools' traces could earn. Every string is
+/// DRAFT, NEEDS APPROVAL.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TracesCopy {
+    pub title_light: &'static str,
+    pub title_bold: &'static str,
+    /// Under the count of the watched tools' traces.
+    pub on_this_mac: &'static str,
+    /// `{min}`, `{max}`: the count times the invite's range, in the one unit
+    /// the daemon accepts (`points_per_accepted_trace`).
+    pub points: &'static str,
+    /// `{min}`: the same, when the range is a single figure.
+    pub points_one: &'static str,
+    /// `{min}`, `{max}`: the range per trace, an estimate: the invite's, or
+    /// `estimate` before one.
+    pub rate: &'static str,
+    /// `{min}`: the same, when the range is a single figure.
+    pub rate_one: &'static str,
+    /// The estimate Traces shows before an invite's lookup gives a range,
+    /// in points per accepted trace (owner, 2026-10-22: 3 to 8, marked as
+    /// an estimate). An invite's own range replaces it. The owner's figure,
+    /// so the DRAFT note above covers this struct's strings only.
+    pub estimate: EstimateRange,
+}
+
+/// A range of points per accepted trace, the one unit the daemon accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct EstimateRange {
+    pub min: u32,
+    pub max: u32,
 }
 
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
@@ -338,6 +395,15 @@ pub struct UsesCopy {
     pub private_ai_failed: &'static str,
     /// Every call succeeded but setup could not be marked finished.
     pub complete_failed: &'static str,
+    /// The Uses graphic's three labels: where traces start, the review gate
+    /// (on Ask; Automatic reads the mode table's word), and where they go.
+    /// DRAFT, NEEDS APPROVAL.
+    pub this_mac: &'static str,
+    pub you_review: &'static str,
+    pub the_commons: &'static str,
+    /// Under Automatic before sign-in: sign-in is the last step, and the
+    /// grant needs the enrollment it makes. DRAFT, NEEDS APPROVAL.
+    pub automatic_after_sign_in: &'static str,
 }
 
 /// The passkey popups P-1, P-2, P-5 and P-7 (`passkey-flow.tsx`). P-3, P-4
@@ -410,17 +476,27 @@ pub struct PrivateAiCopy {
     /// Discloses the rest of the Private AI offer in place. Approved
     /// 2026-10-08 (owner).
     pub learn_more: &'static str,
+    /// The Private AI step's title. Ron's words (2026-10-21 canvas).
+    pub title_light: &'static str,
+    pub title_bold: &'static str,
+    /// `{total}`: the tools found on this Mac. After the figure of those
+    /// Private AI can route. DRAFT, NEEDS APPROVAL.
+    pub can_connect: &'static str,
+    /// The same, when one tool was found. DRAFT, NEEDS APPROVAL.
+    pub can_connect_one: &'static str,
 }
 
 /// Every first-run string, grouped by screen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FirstRunCopy {
     pub frame: FrameCopy,
+    pub welcome: WelcomeCopy,
     pub join: JoinCopy,
     pub folders: FoldersCopy,
     pub tools: ToolsCopy,
     pub rules: RulesCopy,
     pub uses: UsesCopy,
+    pub traces: TracesCopy,
     pub passkey: PasskeyCopy,
     pub private_ai: PrivateAiCopy,
 }
@@ -436,6 +512,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             step_tools: "Tools",
             step_rules: "Rules",
             step_uses: "Uses",
+            step_traces: "Traces",
+            step_private_ai: "Private AI",
             custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
@@ -443,6 +521,11 @@ pub fn first_run_copy() -> FirstRunCopy {
             undo: "Undo",
             choose: "Choose…",
             back: "Back",
+        },
+        welcome: WelcomeCopy {
+            title: "Welcome to Near AI",
+            body: "Private AI solutions that put you in control of your data.",
+            start: "Get started",
         },
         join: JoinCopy {
             title_light: "Get started on ",
@@ -504,7 +587,8 @@ pub fn first_run_copy() -> FirstRunCopy {
         },
         tools: ToolsCopy {
             title_light: "Connect your ",
-            title_bold: "tools and folders.",
+            // Ron, 2026-10-21: "Connect your tools", under the graphic.
+            title_bold: "tools",
             add_tool: "Not seeing your tool above? Click to add or drag & drop.",
             add_tool_caption: "OpenCode, a moved Claude Code or Codex folder, or a folder of exported traces",
             add_tool_refused: concat!(crate::app_name!(), " can't read this folder yet."),
@@ -544,7 +628,8 @@ pub fn first_run_copy() -> FirstRunCopy {
         },
         uses: UsesCopy {
             title_light: "How your data is ",
-            title_bold: "used & permissioned.",
+            // Titles under the animated graphics carry no period.
+            title_bold: "used & permissioned",
             eyebrow: "How your traces may be used",
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
@@ -561,6 +646,20 @@ pub fn first_run_copy() -> FirstRunCopy {
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
             complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
+            this_mac: "This Mac",
+            you_review: "You review",
+            the_commons: "The commons",
+            automatic_after_sign_in: "Turns on once you sign in.",
+        },
+        traces: TracesCopy {
+            title_light: "What your traces ",
+            title_bold: "could earn",
+            on_this_mac: "traces on this Mac",
+            points: "{min}–{max} points",
+            points_one: "{min} points",
+            rate: "An estimated {min}–{max} points per accepted trace, not yet settled.",
+            rate_one: "An estimated {min} points per accepted trace, not yet settled.",
+            estimate: EstimateRange { min: 3, max: 8 },
         },
         passkey: PasskeyCopy {
             close: "Close",
@@ -596,6 +695,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             offer_lead: "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it.",
             offer_more: "Requests are logged on this computer.",
             learn_more: "Learn more",
+            title_light: "Connect to ",
+            title_bold: "Private AI",
+            can_connect: "of {total} tools can connect",
+            can_connect_one: "of {total} tool can connect",
         },
     }
 }
@@ -977,6 +1080,46 @@ mod tests {
         assert!(!passkey.refused.contains('-'), "{}", passkey.refused);
     }
 
+    /// The animated first run (Ron's 2026-10-21 canvas): Ron's own Welcome
+    /// and Tools words, titles without a period now that they sit under a
+    /// graphic, and a points estimate worded like Join's pay range, so a
+    /// figure never reads as a promise.
+    #[test]
+    fn the_animated_first_run_has_its_words() {
+        let copy = first_run_copy();
+        assert_eq!(copy.welcome.title, "Welcome to Near AI");
+        assert_eq!(
+            copy.welcome.body,
+            "Private AI solutions that put you in control of your data."
+        );
+        assert_eq!(copy.tools.title_bold, "tools");
+        for bold in [
+            copy.tools.title_bold,
+            copy.uses.title_bold,
+            copy.traces.title_bold,
+            copy.private_ai.title_bold,
+            copy.join.title_bold,
+        ] {
+            assert!(!bold.ends_with('.'), "{bold}");
+        }
+        for line in [copy.traces.rate, copy.traces.rate_one] {
+            assert!(line.contains("{min}"), "{line}");
+            assert!(line.contains("estimated"), "{line}");
+            assert!(line.contains("per accepted trace"), "{line}");
+            assert!(line.contains("not yet settled"), "{line}");
+        }
+        assert!(copy.traces.rate.contains("{max}"));
+        assert!(copy.traces.points.contains("{max}"));
+        // The owner's default before an invite (2026-10-22), worded by the
+        // same estimated, not-yet-settled line as an invite's range.
+        assert_eq!(copy.traces.estimate, EstimateRange { min: 3, max: 8 });
+        assert!(copy.traces.estimate.min <= copy.traces.estimate.max);
+        for line in [copy.private_ai.can_connect, copy.private_ai.can_connect_one] {
+            assert!(line.contains("{total}"), "{line}");
+        }
+        assert_eq!(copy.frame.step_private_ai, copy.private_ai.title_bold);
+    }
+
     /// One string, one key. A pair that must be able to diverge is listed
     /// with its reason.
     #[test]
@@ -984,7 +1127,12 @@ mod tests {
         // Join's near.ai sign-in and Welcome back's passkey sign-in both
         // read "Sign in" under the button rule (2026-10-08); they start
         // different ceremonies and may diverge.
-        const MAY_DIVERGE: &[&[&str]] = &[&[".join.near_ai_sign_in", ".passkey.welcome_sign_in"]];
+        // The Private AI step's name and its title's bold half read the
+        // same; one names a step, the other ends a sentence.
+        const MAY_DIVERGE: &[&[&str]] = &[
+            &[".join.near_ai_sign_in", ".passkey.welcome_sign_in"],
+            &[".frame.step_private_ai", ".private_ai.title_bold"],
+        ];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),

@@ -3,9 +3,10 @@ import XCTest
 @testable import TCShellCore
 
 final class FirstRunPlanTests: XCTestCase {
-    /// A Quick state that has answered Folders and holds an invite.
-    private func answered(tier: FirstRunTier = .quick) -> FirstRunState {
-        var state = FirstRunState(tier: tier, step: tier == .quick ? .folders : .tools)
+    /// A state on Join that answered Tools, holds an invite and chose
+    /// near.ai: what Sign in commits.
+    private func answered() -> FirstRunState {
+        var state = FirstRunState(step: .join)
         state.invite = "INVITE-1"
         state.account = .nearAI
         state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/.claude/projects")
@@ -13,11 +14,10 @@ final class FirstRunPlanTests: XCTestCase {
         return state
     }
 
-    /// `answered` on Uses, after leaving the roots enrolled its invite: the
-    /// enrollment Start's scopes, grant and marker belong to.
-    private func onUses(tier: FirstRunTier = .quick) -> FirstRunState {
-        var state = answered(tier: tier)
-        state.step = .uses
+    /// `answered` after Sign in enrolled its invite: the enrollment Start's
+    /// scopes, grant and marker belong to.
+    private func signedIn() -> FirstRunState {
+        var state = answered()
         state.daemonStarted = true
         state.enrolledInvite = "INVITE-1"
         state.signedIn = true
@@ -38,8 +38,26 @@ final class FirstRunPlanTests: XCTestCase {
         return false
     }
 
+    /// Continue on Tools and Customize send the roots and nothing else:
+    /// sign-in is Join's, the last step.
+    func test_leavingToolsDeclaresTheRootsOnly() throws {
+        for point in [CommitPoint.leaveTools, .declareRoots] {
+            let calls = FirstRunPlan.calls(for: answered(), at: point)
+            XCTAssertEqual(calls.count, 1, "\(point)")
+            let decoded = try settings(calls.first)
+            XCTAssertEqual(decoded["codex_source"] as? [String: String], ["mode": "off"])
+        }
+        var started = answered()
+        started.daemonStarted = true
+        started.startedSettingsJSON = started.sessionRoots.settingsJSON()
+        XCTAssertEqual(FirstRunPlan.calls(for: started, at: .leaveTools), [], "nothing changed, nothing sent")
+        started.answer(.codex, .watch(path: "/Users/someone/.codex/sessions"))
+        XCTAssertEqual(try sourceSettings(FirstRunPlan.calls(for: started, at: .declareRoots).first).keys.sorted(),
+            ["codex_source"])
+    }
+
     func test_theDaemonStartsBeforeAnyJoinCall() throws {
-        let calls = FirstRunPlan.calls(for: answered(), at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: answered(), at: .signIn)
         XCTAssertEqual(calls.count, 4)
         let decoded = try settings(calls.first)
         XCTAssertEqual(decoded["claude_source"] as? [String: String],
@@ -52,31 +70,32 @@ final class FirstRunPlanTests: XCTestCase {
     func test_unfinishedRootsPlanNothing() {
         var state = answered()
         state.toolAnswers[.codex] = nil
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [],
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [],
             "no join call runs without a daemon to run it")
     }
 
     func test_anAddedTrajectoryFolderIsDeclared() throws {
-        var state = answered(tier: .custom)
+        var state = answered()
         state.addedFolders = [AddedFolder(kind: .trajectory, path: "/Users/someone/exports")]
-        let decoded = try settings(FirstRunPlan.calls(for: state, at: .leaveRoots).first)
+        let decoded = try settings(FirstRunPlan.calls(for: state, at: .signIn).first)
         XCTAssertEqual(decoded["trajectory_source"] as? [String: String],
             ["mode": "watch", "path": "/Users/someone/exports"])
     }
 
-    /// An invite pasted on Join and then "watch only" chosen: the invite is
-    /// kept, so only the account answer stops the join.
+    /// An invite held on Join with "watch only" recorded (an earlier build's
+    /// answer): the invite is kept, so only the account answer stops the
+    /// join.
     func test_watchOnlyJoinsNothing() throws {
         var state = answered()
         state.account = .watchOnly
         XCTAssertEqual(state.invite, "INVITE-1")
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots),
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn),
             [.startDaemon(settingsJSON: json)])
     }
 
-    /// Create passkey is chosen on Join and its sheets open after the daemon
-    /// starts, in the near.ai sign-in's place: the two are one account, so
+    /// A passkey an earlier build recorded as chosen opens its sheets at
+    /// Sign in, in the near.ai sign-in's place: the two are one account, so
     /// the one chosen is the one planned. A created passkey, or none chosen,
     /// opens nothing.
     func test_aChosenPasskeyIsCreatedOnceTheDaemonStarts() throws {
@@ -84,7 +103,7 @@ final class FirstRunPlanTests: XCTestCase {
         state.invite = ""
         state.account = .passkeyChosen
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [
             .startDaemon(settingsJSON: json), .openPasskeySheets,
         ])
 
@@ -92,11 +111,11 @@ final class FirstRunPlanTests: XCTestCase {
         // behind no second start or sign-in.
         state.daemonStarted = true
         state.startedSettingsJSON = json
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.openPasskeySheets])
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [.openPasskeySheets])
 
         for account in [AccountAnswer.none, .watchOnly, .nearAI, .passkey(name: "Mac"), .passkey(name: ""), .enrolled] {
             state.account = account
-            XCTAssertFalse(FirstRunPlan.calls(for: state, at: .leaveRoots).contains(.openPasskeySheets),
+            XCTAssertFalse(FirstRunPlan.calls(for: state, at: .signIn).contains(.openPasskeySheets),
                 "\(account)")
         }
     }
@@ -138,16 +157,16 @@ final class FirstRunPlanTests: XCTestCase {
         }
     }
 
-    /// The daemon Join started holds `off` for both roots. Folders then sends
-    /// only what differs from that, never a second start, and a row
-    /// answered `off` again is not resent.
-    func test_foldersAfterAPasskeyStartSendsOnlyTheChangedRoots() throws {
+    /// A daemon a passkey started holds `off` for both roots. The next
+    /// commit then sends only what differs from that, never a second start,
+    /// and a row answered `off` again is not resent.
+    func test_rootsAfterAPasskeyStartSendOnlyTheChangedRoots() throws {
         var state = answered()
         state.invite = ""
         state.account = .passkey(name: "Mac")
         state.daemonStarted = true
         state.startedSettingsJSON = FirstRunPlan.watchNothingSettingsJSON
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .signIn)
         guard case .setSourceSettings(let json)? = calls.first else {
             return XCTFail("expected setSourceSettings, got \(calls)")
         }
@@ -166,7 +185,7 @@ final class FirstRunPlanTests: XCTestCase {
         var state = answered()
         state.account = .passkeyChosen
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [
             .startDaemon(settingsJSON: json), .lookupInvite("INVITE-1"), .enroll("INVITE-1"),
         ])
 
@@ -174,9 +193,9 @@ final class FirstRunPlanTests: XCTestCase {
         state.daemonStarted = true
         state.startedSettingsJSON = json
         state.enrolledInvite = "INVITE-1"
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [])
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [])
         state.invite = ""
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [])
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [])
     }
 
     /// A plan-level stand-in only: the plan is pure, so this pins that a
@@ -185,7 +204,7 @@ final class FirstRunPlanTests: XCTestCase {
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() throws {
         let state = answered()
         let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
-        let first = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let first = FirstRunPlan.calls(for: state, at: .signIn)
         XCTAssertEqual(first, [
             .startDaemon(settingsJSON: json),
             .lookupInvite("INVITE-1"),
@@ -197,10 +216,10 @@ final class FirstRunPlanTests: XCTestCase {
         // same plan, invite intact, and no join call runs ahead of the start.
         XCTAssertFalse(state.daemonStarted)
         XCTAssertNil(state.enrolledInvite)
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), first)
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), first)
     }
 
-    /// The state after every `leaveRoots` call succeeded.
+    /// The state after every `signIn` call succeeded.
     private func joined(_ state: FirstRunState) throws -> FirstRunState {
         var joined = state
         joined.daemonStarted = true
@@ -210,16 +229,16 @@ final class FirstRunPlanTests: XCTestCase {
         return joined
     }
 
-    func test_backAfterStartDoesNotEnrollTwice() throws {
+    func test_backAfterSignInDoesNotEnrollTwice() throws {
         var state = try joined(answered())
-        state.step = .uses
         state = FirstRunNavigation.back(state)
         state = FirstRunNavigation.back(state)
-        XCTAssertEqual(state.step, .join)
+        XCTAssertEqual(state.step, .traces)
         XCTAssertEqual(state.invite, "INVITE-1")
-        state = FirstRunNavigation.next(state)
+        state = FirstRunNavigation.next(FirstRunNavigation.next(state))
+        XCTAssertEqual(state.step, .join)
 
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [],
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [],
             "started, joined and signed in: nothing runs twice")
     }
 
@@ -227,14 +246,14 @@ final class FirstRunPlanTests: XCTestCase {
         var state = try joined(answered())
         state.invite = "  INVITE-1\n"
         state.signedIn = false
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots), [.signInNearAI],
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn), [.signInNearAI],
             "a used-up invite would answer exhausted")
     }
 
     func test_aNewInviteAfterEnrollingIsLookedUpAndEnrolled() throws {
         var state = try joined(answered())
         state.invite = "INVITE-2"
-        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .leaveRoots),
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .signIn),
             [.lookupInvite("INVITE-2"), .enroll("INVITE-2")])
     }
 
@@ -251,24 +270,23 @@ final class FirstRunPlanTests: XCTestCase {
         var state = answered()
         state.toolAnswers[.codex] = .watch(path: "/Users/someone/.codex/sessions")
         state = try joined(state)
-        state.step = .uses
-        state = FirstRunNavigation.back(state)
-        XCTAssertEqual(state.step, .folders)
+        state = FirstRunNavigation.back(to: .tools, from: state)
+        XCTAssertEqual(state.step, .tools)
         state.answer(.codex, .off)
 
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .leaveTools)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(try sourceSettings(calls.first), ["codex_source": ["mode": "off"]],
             "only the changed answer is sent")
     }
 
     func test_aFolderWithdrawnAfterStartIsTurnedOff() throws {
-        var state = answered(tier: .custom)
+        var state = answered()
         state.add(AddedFolder(kind: .trajectory, path: "/Users/someone/exports"))
         state = try joined(state)
         state.addedFolders = []
 
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .signIn)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(try sourceSettings(calls.first), ["trajectory_source": ["mode": "off"]],
             "an absent key leaves the daemon watching, so a withdrawn folder is sent as off")
@@ -277,7 +295,7 @@ final class FirstRunPlanTests: XCTestCase {
     func test_aStartedDaemonWithNoRecordedDeclarationIsSentTheWholeOne() throws {
         var state = try joined(answered())
         state.startedSettingsJSON = nil
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .signIn)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(try sourceSettings(calls.first), [
             "claude_source": ["mode": "watch", "path": "/Users/someone/.claude/projects"],
@@ -286,7 +304,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_scopesAreSavedBeforeTheGrant() {
-        var state = onUses(tier: .custom)
+        var state = signedIn()
         state.scopes = ["research", "evaluation"]
         state.rules = ["p2": .ask, "p1": .autoUpload]
         state.pastSelections = ["p1": ["s2", "s1"]]
@@ -309,7 +327,7 @@ final class FirstRunPlanTests: XCTestCase {
     /// Automatic is not enough on its own: the grant is sent only once the
     /// core answered ready after both disclosures, which sets `grantReady`.
     func test_automaticWithoutTheCoresReadyAnswerNeverGrants() {
-        var state = onUses()
+        var state = signedIn()
         state.scopes = ["research"]
         state.sharing = .automatic
         state.witnessSigningAddress = "witness-1"
@@ -331,7 +349,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     func test_askMeNeverGrants() {
-        var state = onUses()
+        var state = signedIn()
         state.scopes = ["research"]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start),
             [.setConsentScopes(["research"]), .markComplete])
@@ -340,19 +358,17 @@ final class FirstRunPlanTests: XCTestCase {
     /// Review Focus 5: Start finishes watching. Watch only holds no
     /// enrollment, so nothing goes to the enrollment's config (the daemon
     /// refuses consent scopes without one) and nothing is granted; Start
-    /// ends in the watch-only marker, which needs no tenant. Custom's local
+    /// ends in the watch-only marker, which needs no tenant. The local
     /// choices (folder rules, past sessions, Private AI) are still sent.
     func test_watchOnlyStartFinishesWithoutAnEnrolment() {
-        var quick = answered()
-        quick.step = .uses
-        quick.account = .watchOnly
-        quick.scopes = ["research"]
-        quick.sharing = .automatic
-        quick.grantReady = true
-        XCTAssertEqual(FirstRunPlan.calls(for: quick, at: .start), [.markWatchOnlyComplete])
+        var plain = answered()
+        plain.account = .watchOnly
+        plain.scopes = ["research"]
+        plain.sharing = .automatic
+        plain.grantReady = true
+        XCTAssertEqual(FirstRunPlan.calls(for: plain, at: .start), [.markWatchOnlyComplete])
 
-        var custom = answered(tier: .custom)
-        custom.step = .uses
+        var custom = answered()
         custom.account = .watchOnly
         custom.scopes = ["research"]
         custom.rules = ["p1": .ask]
@@ -376,8 +392,7 @@ final class FirstRunPlanTests: XCTestCase {
     /// finish while the daemon is logged in. Start is not offered for it
     /// either (`canContinue`).
     func test_watchOnlyUnderAHeldEnrolmentSendsNothing() {
-        var afterFailedSignIn = answered(tier: .custom)
-        afterFailedSignIn.step = .uses
+        var afterFailedSignIn = answered()
         afterFailedSignIn.daemonStarted = true
         afterFailedSignIn.enrolledInvite = "INVITE-1"
         afterFailedSignIn.account = .watchOnly
@@ -423,25 +438,61 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertTrue(FirstRunState(account: .watchOnly, signedOutOfEnrolment: true).daemonHoldsEnrolment)
     }
 
-    func test_quickNeverSetsARuleOrIncludesPastSessions() {
-        var state = onUses()
+    /// Every first run passes Customize's rules (when it was opened) and the
+    /// Private AI step, so Start sends what they hold; a first run that never
+    /// opened Customize holds no rule and sends none, and a Private AI switch
+    /// left off sends nothing.
+    func test_startSendsCustomizesRulesAndThePrivateAISwitch() {
+        var state = signedIn()
         state.scopes = ["research"]
+        XCTAssertEqual(
+            FirstRunPlan.calls(for: state, at: .start),
+            [.setConsentScopes(["research"]), .markComplete])
         state.rules = ["p1": .autoUpload]
         state.pastSelections = ["p1": ["s1"]]
         state.privateAI = true
-        let calls = FirstRunPlan.calls(for: state, at: .start)
-        XCTAssertEqual(calls, [.setConsentScopes(["research"]), .markComplete])
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p1", .autoUpload),
+            .includePastSessions(projectID: "p1", ["s1"]),
+            .setPrivateAI(true),
+            .markComplete,
+        ])
+    }
+
+    /// A folder's Automatic is picked and confirmed before sign-in (Ron,
+    /// 2026-10-22) and armed at Start after the scopes, once an enrollment
+    /// is held; watching only holds none, so its Automatic folder is not
+    /// armed while its other rules are still sent.
+    func test_aFoldersAutomaticIsArmedOnlyWithAnEnrolment() {
+        var state = signedIn()
+        state.scopes = ["research"]
+        state.rules = ["p1": .autoUpload, "p2": .ask]
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p1", .autoUpload),
+            .setProjectMode(projectID: "p2", .ask),
+            .markComplete,
+        ])
+
+        var watching = answered()
+        watching.account = .watchOnly
+        watching.rules = ["p1": .autoUpload, "p2": .ask]
+        XCTAssertFalse(watching.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .start), [
+            .setProjectMode(projectID: "p2", .ask),
+            .markWatchOnlyComplete,
+        ])
     }
 
     func test_aNeverFolderIncludesNothing() {
-        var state = onUses(tier: .custom)
+        var state = signedIn()
         state.scopes = ["research"]
         state.rules = ["p1": .ignore]
         state.pastSelections = ["p1": ["s1"], "p2": []]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
             .setConsentScopes(["research"]),
             .setProjectMode(projectID: "p1", .ignore),
-            .setPrivateAI(false),
             .markComplete,
         ])
         XCTAssertFalse(FirstRunPlan.calls(for: state, at: .start).contains(where: isGrant))
@@ -452,9 +503,8 @@ final class FirstRunPlanTests: XCTestCase {
     /// and sends nothing else -- no scopes, no grant, no marker -- since the
     /// sheets are not awaited and nothing after them may run.
     func test_aChosenPasskeyAtStartReopensTheSheetsAndNothingElse() {
-        var state = answered(tier: .custom)
+        var state = answered()
         state.invite = ""
-        state.step = .uses
         state.account = .passkeyChosen
         state.daemonStarted = true
         state.scopes = ["research"]
@@ -470,7 +520,6 @@ final class FirstRunPlanTests: XCTestCase {
     /// without one sends none of them.
     func test_noEnrolmentNoScopesGrantOrMarker() {
         var state = answered()
-        state.step = .uses
         state.scopes = ["research"]
         state.sharing = .automatic
         state.grantReady = true

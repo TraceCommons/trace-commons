@@ -264,6 +264,13 @@ Every runbook in this directory, with a one-line description.
 - [`./staging-pin-signing.md`](./staging-pin-signing.md) — the staging NEAR AI
   pin-signing key (creating it, who may read it) and re-signing the pin set a
   staging app trusts with `trace-commons-staging-pins`.
+- [`./staging-runbook.md`](./staging-runbook.md) — the staging environment
+  for the operator: making a staging macOS build, checking it published, the
+  update feed, and pointers to pin re-signing. Server bring-up and the first
+  pin set are placeholders until their tasks land.
+- [`./staging-tester-guide.md`](./staging-tester-guide.md) — for staging
+  testers: installing the staging app, making a NEAR AI staging account, what
+  works and what does not yet, and removing it.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —
   Cloudflare Pages deployment and pilot playbook for the public
   pseudonymous leaderboard, contributor profiles, and aggregate analytics.

@@ -10,6 +10,11 @@ final class FirstRunCopyExportTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(json))
         XCTAssertEqual(copy.frame.quickSetup, "Quick setup")
         XCTAssertEqual(copy.frame.back, "Back")
+        // The animated first run's own groups decode from the same table.
+        XCTAssertEqual(copy.welcome.title, "Welcome to Near AI")
+        XCTAssertEqual(copy.frame.stepTraces, "Traces")
+        XCTAssertEqual([copy.traces.estimate.min, copy.traces.estimate.max], [3, 8])
+        XCTAssertTrue(copy.privateAi.canConnect.contains("{total}"))
     }
 
     /// Folders' sign-in line is the core's existing one, read through the

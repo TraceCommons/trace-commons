@@ -3924,7 +3924,8 @@ extension AppModel: FirstRunDaemon {
     /// the screen keeps waiting rather than showing an empty list nobody
     /// reported.
     func rulesProjects() async -> [ProjectRow]? {
-        guard case .success(let projects) = await firstRunCall({ try $0.listProjects() }) else { return nil }
+        guard case .success(let projects) = await firstRunCall({ try $0.listProjects(includeFound: true) })
+        else { return nil }
         publishIfChanged(\.projects, projects)
         return projects
     }

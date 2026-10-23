@@ -6294,6 +6294,84 @@ mod tests {
         assert!(rows.iter().all(|r| r["selectable"] == true));
     }
 
+    /// Customize lists a repo's rule seconds after the first run started
+    /// the daemon, before a session has queued. Asked with `include_found`,
+    /// the listing walks the declared sources for repos with past
+    /// sessions; asked without, it stays the configured and queued ones.
+    #[tokio::test]
+    async fn list_projects_includes_repos_found_on_disk_when_asked() {
+        let f = WatcherFixture::new();
+        for name in [
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ] {
+            backdate(&f.write_session("alpha", name, 0));
+        }
+        assert!(f.shared.queue.lock().unwrap().all().is_empty());
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+
+        let plain = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        assert!(
+            plain["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["project_id"] != serde_json::json!(project_id)),
+            "{plain}"
+        );
+
+        let found = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let rows: Vec<&serde_json::Value> = found["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["project_id"] == serde_json::json!(project_id))
+            .collect();
+        assert_eq!(rows.len(), 1, "{found}");
+        let row = rows[0];
+        assert_eq!(row["configured"], false);
+        assert_eq!(row["mode"], "notify_only");
+        assert_eq!(row["session_count"], 2);
+        assert_eq!(row["project_label"], "alpha");
+        assert_eq!(row["tools"][0]["source"], "claude-code");
+        assert_eq!(row["tools"][0]["session_count"], 2);
+    }
+
+    /// A rule set on a repo only the walk has found is kept, and the repo
+    /// then lists without `include_found` as a configured row.
+    #[tokio::test]
+    async fn set_project_mode_takes_the_id_of_a_repo_found_on_disk() {
+        let f = WatcherFixture::new();
+        backdate(&f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0));
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": project_id, "mode": "ignore"}),
+        );
+        let listed = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        let row = listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["project_id"] == serde_json::json!(project_id))
+            .expect("the repo lists once it has a rule")
+            .clone();
+        assert_eq!(row["configured"], true);
+        assert_eq!(row["mode"], "ignore");
+
+        let resp = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": "proj_0000000000000000", "mode": "ignore"}),
+        );
+        assert!(resp.error.is_some(), "an id nothing places is refused");
+    }
+
     /// Fail closed: an id the daemon cannot place is refused, never answered
     /// with an empty list a shell would draw as "no past sessions".
     #[tokio::test]

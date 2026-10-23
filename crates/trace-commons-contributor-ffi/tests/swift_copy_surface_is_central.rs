@@ -998,8 +998,9 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_arming_offer_copy_json",
     ),
     (
+        // A repo's rule under Customize on Tools, where Rules now lives.
         "first-run arming confirmation",
-        "TraceCommonsApp/Views/FirstRun/RulesScreen.swift",
+        "TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",

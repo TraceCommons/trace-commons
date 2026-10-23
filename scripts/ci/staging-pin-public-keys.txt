@@ -5,7 +5,8 @@
 # public key per line, as 64 hex characters; `#` comments and blank lines
 # are ignored, and any other line fails the scan.
 #
-# None yet: the staging key pair has not been generated. The change that
-# compiles the staging public key into the contributor adds it here in the
-# same commit, so the production scan looks for it from then on. A public
-# key only; the private key never enters the repository.
+# Keep a retired key listed after a rotation. Public keys only; the
+# private key never enters the repository.
+#
+# Generated 2026-10-22, key id f4325194de2624f3:
+153e60b61f65bd5f2829d0f2378a3cc17058a06eaa868eb12eb35bf103e1e586
