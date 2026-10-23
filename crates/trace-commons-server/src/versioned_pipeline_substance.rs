@@ -42,8 +42,8 @@ use crate::versioned_pipeline_bundle::{
     PIPELINE_BUNDLE_INVALID_LABEL, PipelineInstrumentAwardConfig, compatibility_family_package,
 };
 use crate::versioned_pipeline_compat::{
-    CompatibilityBundleConfig, CompatibilityQualification, NoveltyScoringConfig,
-    apply_novelty_rule, evaluate_novelty, novelty_score_output,
+    COMPATIBILITY_ZERO_FLOOR_LABEL, CompatibilityBundleConfig, CompatibilityQualification,
+    NoveltyScoringConfig, apply_novelty_rule, evaluate_novelty, novelty_score_output,
 };
 
 pub const SUBSTANCE_SCORE_IMPLEMENTATION: &str = "trace_commons.score.substance.v1";
@@ -448,8 +448,10 @@ impl SubstanceScoreConfig {
         self
     }
 
-    /// Refuses (`bundle_package_invalid`) a configuration the formula
-    /// cannot run safely: invalid parameters (a zero ceiling gives a NaN
+    /// Refuses a production-compatible configuration whose substance and
+    /// novelty floors are both zero (`compatibility_zero_floor`), and refuses
+    /// (`bundle_package_invalid`) a configuration the formula cannot run
+    /// safely: invalid parameters (a zero ceiling gives a NaN
     /// term, which `to_micros` turns into 0), a `sub_ceil` of 0 (the credit
     /// half would count it as one micro and raise credit) or above one
     /// whole, a floor or floor multiplier above one whole, another
@@ -470,6 +472,15 @@ impl SubstanceScoreConfig {
                 && self.sub_floor_mult_micros <= MICROS,
             PIPELINE_BUNDLE_INVALID_LABEL
         );
+        // As the compatibility guard: a production-compatible configuration
+        // whose two floors are both zero would pass every trace through both
+        // gates, so it is refused. Either floor positive is enough.
+        if self.qualification == CompatibilityQualification::ProductionCompatible {
+            anyhow::ensure!(
+                self.substance_floor_micros > 0 || self.novelty.novelty_floor_micros > 0,
+                COMPATIBILITY_ZERO_FLOOR_LABEL
+            );
+        }
         if let Some(calibration) = &self.calibration {
             anyhow::ensure!(
                 !calibration.corpus_pin_digest.trim().is_empty()
@@ -1628,6 +1639,7 @@ mod tests {
 
         let mut uncalibrated = SubstanceScoreConfig::local_reference();
         uncalibrated.qualification = CompatibilityQualification::ProductionCompatible;
+        uncalibrated.substance_floor_micros = 300_000;
         assert!(uncalibrated.validate().is_ok());
         assert!(!uncalibrated.is_qualifiable());
 
@@ -1652,6 +1664,42 @@ mod tests {
             assert_eq!(package_substance_config(package), None);
             assert!(!package_configuration_is_qualifiable(package));
         }
+    }
+
+    /// As the compatibility guard (`compatibility_zero_floor`): a
+    /// production-compatible configuration whose substance and novelty
+    /// floors are both zero passes every trace, so it is refused. Either
+    /// floor positive is accepted, and the local reference, whose floors
+    /// are both zero, stays valid because it is not production-compatible.
+    #[test]
+    fn a_production_config_with_zero_floors_is_refused() {
+        let mut values = calibrated_values();
+        values.substance_floor_micros = 0;
+        let zero = production(&values);
+        assert_eq!(zero.novelty.novelty_floor_micros, 0);
+        let error = zero.validate().expect_err("both floors zero is refused");
+        assert_eq!(error.to_string(), COMPATIBILITY_ZERO_FLOOR_LABEL);
+        assert!(!zero.is_qualifiable());
+        assert!(
+            substance_package(
+                &zero,
+                &ReferencePerplexityScorer::new(),
+                &ReferenceEmbedder::new(),
+            )
+            .is_err(),
+            "no package is built for it"
+        );
+
+        let mut novelty_only = zero.clone();
+        novelty_only.novelty.novelty_floor_micros = 500_000;
+        assert!(novelty_only.validate().is_ok());
+        assert!(novelty_only.is_qualifiable());
+        assert!(production(&calibrated_values()).validate().is_ok());
+
+        let local = SubstanceScoreConfig::local_reference();
+        assert_eq!(local.substance_floor_micros, 0);
+        assert_eq!(local.novelty.novelty_floor_micros, 0);
+        assert!(local.validate().is_ok());
     }
 
     #[test]
