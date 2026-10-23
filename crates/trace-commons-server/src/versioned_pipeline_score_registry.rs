@@ -6,8 +6,9 @@
 //! The open build runs three Score policies, all built in: the minimal
 //! reference (`trace_commons.score.minimal.v1`), the compatibility policy
 //! (`trace_commons.score.compatibility.v1`), and the substance policy of the
-//! compatibility family (`trace_commons.score.substance.v1`). An embedding binary that holds
-//! a substituted backend supplies its own [`ScorePolicy`] through a
+//! compatibility family (`trace_commons.score.substance.v1`). An embedding
+//! binary that holds a substituted backend supplies its own [`ScorePolicy`]
+//! through a
 //! [`ScorePolicyRegistry`]: a factory keyed by the implementation id a
 //! bundle manifest's Score [`PolicyRef`] names. The registry supplies code
 //! for an implementation id; the signed, content-addressed manifest still

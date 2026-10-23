@@ -177,7 +177,7 @@ pub fn project_tool_calls(envelope: &TraceContributionEnvelope) -> ToolCallProje
         let name = call.tool_name.clone().unwrap_or_default();
         let arguments = tool_call_arguments(call);
         let canonical = arguments
-            .map(|value| to_canonical_string(value).unwrap_or_else(|_| value.to_string()))
+            .map(|value| to_canonical_string(value).expect("canonical JSON of a serde_json::Value"))
             .unwrap_or_default();
         let call_id = replay_call_id(call);
         let slot = results.iter_mut().find(|slot| {
@@ -691,9 +691,10 @@ impl SubstanceScorePolicy {
 /// `embedder` by content hash, with the builder of
 /// `MinimalPolicyBundle::compatibility_package`: the compatibility
 /// Admission, Review and Settle policies, the substance Score policy, and
-/// `trace_credit` pinned to `config.novelty.instrument.descriptor`. The package names the scorer so
-/// that it binds with the same runtime dependencies as a compatibility
-/// package; the substance Score never calls it.
+/// `trace_credit` pinned to `config.novelty.instrument.descriptor`. The
+/// package names the scorer so that it binds with the same runtime
+/// dependencies as a compatibility package; the substance Score never
+/// calls it.
 pub fn substance_package(
     config: &SubstanceScoreConfig,
     scorer: &dyn IdentifiedPerplexityScorer,
@@ -1799,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn substance_bundle_id_hashes_every_parameter() {
+    fn substance_bundle_id_changes_with_a_weight_or_the_floor() {
         let bundle_id = |config: &SubstanceScoreConfig| {
             substance_package(
                 config,

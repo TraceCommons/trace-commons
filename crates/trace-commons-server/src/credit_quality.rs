@@ -677,6 +677,11 @@ mod tests {
             assert_eq!(q, to_micros(h * g), "novelty {nov}");
             assert!(q <= 1_000_000);
         }
+        // By hand from the spec formula: h = 0.25 + 0.75 * ln(1.435557) /
+        // ln(2) = 0.641208, g = 0.30 + 0.70 * ln(1.25) / ln(1.5) =
+        // 0.685238 (cq3 novelty 0.75), q = h * g = 0.439380.
+        let q = substance_credit_quality(substance, m(0.75), sub_ceil, sub_floor_mult, &novelty);
+        assert!(q.abs_diff(439_380) <= 1, "hand-computed q, got {q}");
         // The extremes stay inside `[0, 1_000_000]`.
         assert_eq!(
             substance_credit_quality(u64::MAX, i64::MAX, 1, 0, &novelty),

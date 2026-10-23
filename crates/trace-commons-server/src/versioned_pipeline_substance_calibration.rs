@@ -120,12 +120,12 @@ impl GuardrailRecipe {
         }
     }
 
+    /// The SHA-256 of the canonical JSON of the whole recipe, so a field
+    /// added later changes the id too (spec 7.1).
     pub fn recipe_id(&self) -> String {
-        let canonical = json!({
-            "noise_bytes": self.noise_bytes,
-            "scaffold_calls": self.scaffold_calls,
-        })
-        .to_string();
+        let value = serde_json::to_value(self).expect("a guardrail recipe serializes");
+        let canonical = trace_commons_protocol::canonical_json::to_canonical_string(&value)
+            .expect("canonical JSON of a serde_json::Value");
         format!(
             "sha256:{}",
             hex::encode(Sha256::digest(canonical.as_bytes()))

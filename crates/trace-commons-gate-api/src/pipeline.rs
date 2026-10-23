@@ -1822,9 +1822,17 @@ pub const SUBSTANCE_MICROS_MAX: u64 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreWitnessClass {
+    /// A verified v2 certificate for a final call that the provider's TEE
+    /// signed with the key of the named model. It earns the witness weight.
     ProviderTeeFinalCall,
+    /// A verified v2 certificate for a final call that NEAR AI's attested
+    /// gateway signed. It does not name the model. It earns the witness
+    /// weight.
     GatewayFinalCall,
+    /// No verified final-call certificate, or one that no longer applies.
+    /// It earns no witness weight.
     Unattested,
+    /// A certificate of the legacy v1 format. It earns no witness weight.
     LegacyV1,
 }
 

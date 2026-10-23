@@ -1338,8 +1338,9 @@ impl ProductionDependencyProfile {
 /// compatibility family (the compatibility Score, or the built-in substance
 /// Score with a qualifiable configuration, else
 /// `bundle_configuration_not_qualifiable`), or which carries any
-/// development or synthetic dependency marker: a Score or Settle projection id containing `test` or
-/// `reference`, or an artifact whose bytes contain `local_reference`,
+/// development or synthetic dependency marker: a Score or Settle
+/// projection id containing `test` or `reference`, or an artifact whose
+/// bytes contain `local_reference`,
 /// `reference_`, `pipeline-test`, `mock_`, or `synthetic`. The open build's
 /// rule: no Score policy is registered
 /// ([`validate_production_package_with_score_policies`] with an empty
