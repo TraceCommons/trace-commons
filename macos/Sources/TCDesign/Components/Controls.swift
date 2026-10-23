@@ -152,7 +152,11 @@ public struct GlassButtonStyle: ButtonStyle {
 
     /// The submit pill's label ink: green once sent, `statusOff` while it
     /// cannot be used (on top of the shared disabled dimming), text otherwise.
-    static func submitInk(done: Bool, enabled: Bool) -> GlassRGBA {
+    /// On a selected row, the row's own ink whatever its state (owner,
+    /// 2026-10-22: the white label sat at 3.5:1 on the dark theme's light
+    /// blue), so the label reads on the deeper pill there.
+    static func submitInk(done: Bool, enabled: Bool, ground: GlassGround = .pane) -> GlassRGBA {
+        if ground == .selection { return ground.controlInk }
         if done { return GlassTokens.Color.statusOnText }
         return enabled ? GlassTokens.Color.textPrimary : GlassTokens.Color.statusOff
     }
@@ -175,6 +179,7 @@ private struct GlassButtonBody: View {
     let stage: Bool
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.glassGround) private var ground
     @State private var hovering = false
 
     var body: some View {
@@ -218,11 +223,11 @@ private struct GlassButtonBody: View {
                         .glassPressedFill())
         case .glass:
             box
-                .foregroundStyle(GlassColor.textPrimary)
+                .foregroundStyle(ground.controlInk.color)
                 .glassSurface(.control, hover: GlassButtonStyle.hoverFill(kind, selected: selected))
         case let .submit(done):
             box
-                .foregroundStyle(GlassButtonStyle.submitInk(done: done, enabled: isEnabled).color)
+                .foregroundStyle(GlassButtonStyle.submitInk(done: done, enabled: isEnabled, ground: ground).color)
                 .glassSurface(.control)
         case .destructive:
             box
@@ -507,6 +512,7 @@ public struct GlassKebab: View {
     private let action: () -> Void
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.glassGround) private var ground
 
     /// `label` names the button for VoiceOver and the help tag, from the
     /// core's copy.
@@ -523,16 +529,28 @@ public struct GlassKebab: View {
         open || hovering
     }
 
+    /// The glyph's ink and the lit fill: on a selected row, the row's own
+    /// ink and the control's fill on the selection (owner, 2026-10-22: the
+    /// grey glyph sat at 1.2:1 on the dark theme's light blue).
+    static func ink(lit: Bool, ground: GlassGround) -> GlassRGBA {
+        if ground == .selection { return ground.controlInk }
+        return lit ? GlassTokens.Color.textPrimary : GlassTokens.Color.statusOff
+    }
+
+    static func litFill(ground: GlassGround) -> Color {
+        ground == .selection ? GlassTokens.Color.controlOnSelection.color : GlassColor.ink(0.14)
+    }
+
     public var body: some View {
         let lit = Self.lit(open: open, hovering: hovering && isEnabled)
         Button(action: action) {
             // #1146's three 1.6pt dots in a 4×14 box.
             GlassGlyphView(.kebab)
-                .foregroundStyle(lit ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
+                .foregroundStyle(Self.ink(lit: lit, ground: ground).color)
                 .frame(width: 22, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(lit ? GlassColor.ink(0.14) : .clear)
+                        .fill(lit ? Self.litFill(ground: ground) : .clear)
                 )
                 .glassPressedFill()
                 .contentShape(Rectangle())
@@ -752,6 +770,7 @@ public struct GlassSplitButton<MenuContent: View>: View {
     private let menu: MenuContent
     private let onMenu: (() -> Void)?
     private let menuOpen: Bool
+    @Environment(\.glassGround) private var ground
 
     public init(
         _ title: String, menuLabel: String, action: @escaping () -> Void,
@@ -788,7 +807,7 @@ public struct GlassSplitButton<MenuContent: View>: View {
             }
             .buttonStyle(GlassPressStyle())
             Rectangle()
-                .fill(GlassColor.ink(0.14))
+                .fill(ground == .selection ? GlassTokens.Color.textOnAccent.color.opacity(0.3) : GlassColor.ink(0.14))
                 .frame(width: 1)
                 .padding(.vertical, 6)
                 .accessibilityHidden(true)
@@ -814,14 +833,15 @@ public struct GlassSplitButton<MenuContent: View>: View {
             }
         }
         .glassType(metrics.type)
-        .foregroundStyle(GlassColor.textPrimary)
+        .foregroundStyle(ground.controlInk.color)
         .glassSurface(.control)
         .fixedSize()
     }
 
     private func chevron(minHeight: CGFloat?) -> some View {
         GlassGlyphView(.chevronDown)
-            .foregroundStyle(GlassColor.textSecondary)
+            // On a selected row, the row's own ink (owner, 2026-10-22).
+            .foregroundStyle(ground == .selection ? ground.controlInk.color : GlassColor.textSecondary)
             .padding(.leading, GlassTokens.Space.s3)
             .padding(.trailing, GlassTokens.Space.s4)
             .frame(minHeight: minHeight)
