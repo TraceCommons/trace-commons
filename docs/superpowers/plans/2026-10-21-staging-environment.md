@@ -282,7 +282,7 @@ Owner decision S16: the re-sign tool and the app both replay the RTMR3 event log
 - Tests: in the attestation crate, `crates/trace-commons-server/tests/staging_pins_tool.rs`, and `proof_attestor.rs`
 
 - [x] **Step 1: Settle which log replays the model quote's RTMR3.** Done 2026-10-22, from a live capture with a fresh nonce kept out of the repo; recorded in the spec (Verified on 2026-10-22: the RTMR3 replay). Findings: the model entry's own top-level `event_log` (30 events) replays to the model quote's RTMR3, and so do the compose-manager record's copy of it and the gateway's log against the gateway quote. Its ten RTMR3 events, in order: `system-preparing`, `app-id`, `compose-hash`, `instance-id`, `boot-mr-done`, `mr-kms`, `os-image-hash`, `key-provider`, `storage-fs`, `system-ready`, all `event_type` `0x08000001`. NEAR AI ships them with an empty `digest`, so each is recomputed as SHA-384(event_type LE32 || ":" || name || ":" || payload bytes) before the replay. Post-boot compose actions do not extend RTMR3: they are the compose-manager record's `actions` list, whose quote has the model quote's registers, our nonce at `report_data[32..64]`, and at `report_data[0..32]` the SHA-256 of the actions as sorted-keys compact JSON. That capture's compose-manager quote was not itself verified against Intel collateral; this task's code verifies it. Open: whether a compose action can happen between the compose-manager quote and the model's use of its key (spec 5.2); the app fetches both from one report with one nonce.
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests** (every test below exists and runs under `--features near-ai-staging`)
 
 ```rust
 // attestation crate
@@ -326,8 +326,8 @@ Owner decision S16: the re-sign tool and the app both replay the RTMR3 event log
 #[test] fn status_names_the_replay_and_allowlist_refusals()
 ```
 
-- [ ] **Steps 3-5** as in task 2, for each touched crate with and without `--features near-ai-staging`; `--no-default-features` for the attestation crate; the release check and the marker scan (the v2 format string is a new staging marker).
-- [ ] **Step 6: Commit** — `Replay RTMR3 against a signed allowlist in staging pins`.
+- [x] **Steps 3-5** as in task 2, for each touched crate with and without `--features near-ai-staging`; `--no-default-features` for the attestation crate; the release check and the marker scan (the v2 format string is a new staging marker).
+- [x] **Step 6: Commit** — `Replay RTMR3 against a signed allowlist in staging pins` (landed as several commits on `staging-rtmr3-replay`).
 
 ---
 
@@ -468,7 +468,7 @@ Spec: sections 3, 5.4, 7.
 - Create: `docs/staging-testers.md` (the spec's section 7, in plain words, following `docs/ui-copy-guide.md`; no invite step: a tester makes a staging NEAR AI account and signs in)
 - Modify: `docs/operator/README.md` (index), `README.md` if its operator checklist lists environments
 
-**Progress (2026-10-22):** drafted as `docs/operator/staging-tester-guide.md` (the tester guide, in the operator directory so the index lists it) and `docs/operator/staging-runbook.md`, both listed in `docs/operator/README.md`. Done: tester install, checksum check, staging account, what works and what does not, removal; operator build, publish check, update feed, pin re-sign pointer, shutdown. Remaining: the "Server bring-up (pending Task 11)" and "Serving the first pin set (pending Task 6b)" sections; the report channel (open item 6, written as TBD); a final walk of every command once Task 11 lands.
+**Progress (2026-10-22):** drafted as `docs/operator/staging-tester-guide.md` (the tester guide, in the operator directory so the index lists it) and `docs/operator/staging-runbook.md`, both listed in `docs/operator/README.md`. Done: tester install, checksum check, staging account, what works and what does not, removal; operator build, publish check, update feed, pin re-sign pointer, shutdown. Remaining: the "Server bring-up (pending Task 11)" section (Task 6b filled "Serving the first pin set"); the report channel (open item 6, written as TBD); a final walk of every command once Task 11 lands.
 
 - [x] **Step 1 (partly):** The build, publish and feed commands were checked against `staging-macos.yml`; the server commands wait for Task 11.
 - [ ] **Step 2: Commit** — `Add the staging environment runbook and tester guide`. The first part is committed; the rest follows Task 11.
