@@ -1345,6 +1345,77 @@ async fn a_spent_send_window_writes_no_line_and_waits() {
     assert_eq!(mock.transfers().len(), 1);
 }
 
+/// Every write call spends the rail's send window, not just a send: on
+/// `near_ai` the zero read before a new line and the read that closes a
+/// link are POSTs too. A pass never makes more of them than the window it
+/// was given, and the next pass picks up the rest.
+#[tokio::test]
+async fn reads_and_sends_together_stay_inside_the_send_window() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 3).await;
+    for (n, account) in accounts.iter().enumerate() {
+        settle(&fixture, &tenant, *account, 1_000).await;
+        let made = link(
+            &fixture,
+            &tenant,
+            *account,
+            rail.as_ref(),
+            &opener,
+            &org(20 + n as u128),
+            PayoutLinkState::Active,
+        )
+        .await;
+        if n == 2 {
+            // Paid in full already, and unlinking: closing it is one read.
+            mock.seed(recipient_org(22), &made.program, 1_000);
+            fixture
+                .runtime
+                .mark_payout_link_unlink_requested(&tenant, made.link_id, ACTOR)
+                .await
+                .unwrap();
+        }
+    }
+    // Two new lines (a read and a send each) and one close (a read) want
+    // five write calls; the window has three.
+    mock.set_sends_remaining(3);
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert!(
+        mock.posts() <= 3,
+        "{} write calls: {report:?}",
+        mock.posts()
+    );
+    assert!(
+        report.skipped.contains_key("payout_send_window_exhausted"),
+        "{report:?}"
+    );
+    assert!(mock.posts() >= 2, "the window was used: {report:?}");
+
+    // The next passes, each with a fresh window, finish the work.
+    for _ in 0..3 {
+        mock.set_sends_remaining(3);
+        let before = mock.posts();
+        completed(
+            &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert!(mock.posts() - before <= 3);
+    }
+    // Two sends, beside the seeded record on the closed link.
+    assert_eq!(mock.transfers().len(), 3);
+    let rows = lines(&fixture, &tenant, "near_ai").await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.state == "confirmed"), "{rows:?}");
+}
+
 #[tokio::test]
 async fn a_credit_hold_or_closed_account_stops_sends_on_every_rail() {
     let Some(fixture) = fixture().await else {

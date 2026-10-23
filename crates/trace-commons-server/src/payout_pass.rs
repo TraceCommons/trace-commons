@@ -51,8 +51,9 @@ use crate::db::{
 use crate::payout_accrual::accrue_rail;
 use crate::payout_rate::PayoutMode;
 
-/// The most sends one pass makes on a rail, below `near_ai`'s per-minute
-/// quota (#1271 `max_sends_per_minute`), whatever the capacity reports.
+/// The most write calls (sends and zero reads) one pass makes on a rail,
+/// below `near_ai`'s per-minute quota (#1271 `max_sends_per_minute`),
+/// whatever the capacity reports.
 pub const PAYOUT_LOCAL_SEND_LIMIT: u32 = 50;
 
 /// How many already-claimed external records recovery skips before it
@@ -67,6 +68,7 @@ pub const PAYOUT_PROGRAM_TOTAL_MISMATCH: &str = "payout_program_total_mismatch";
 pub const PAYOUT_RECOVERY_UNMATCHED: &str = "payout_recovery_unmatched";
 pub const PAYOUT_LINK_CLOSE_BLOCKED: &str = "payout_link_close_blocked";
 pub const PAYOUT_RECEIPT_UNRECORDED: &str = "payout_receipt_unrecorded";
+const PAYOUT_SEND_WINDOW_EXHAUSTED: &str = "payout_send_window_exhausted";
 const PAYOUT_STORE_FAILED: &str = "payout_store_failed";
 const PAYOUT_RAIL_SENDING_DISABLED: &str = "payout_rail_sending_disabled";
 pub const PAYOUT_RATE_UNAVAILABLE: &str = "payout_rate_unavailable";
@@ -227,10 +229,20 @@ fn safe(refusal: RailRefusal) -> &'static str {
     refusal.safe_label()
 }
 
-/// What this pass may still send.
+/// What this pass may still send. `remaining` counts every write call to
+/// the rail -- a send, and a zero read of a program total, which on
+/// `near_ai` is a POST in the same per-minute window -- so a pass stays
+/// inside the window the rail reported. Reads of our own org (capacity,
+/// history, receipts) are GETs and do not count.
 struct SendBudget {
     per_send_max: u128,
     remaining: u32,
+}
+
+impl SendBudget {
+    fn spend(&mut self) {
+        self.remaining = self.remaining.saturating_sub(1);
+    }
 }
 
 /// An account's links on the rail, by state.
@@ -611,8 +623,14 @@ impl PayoutPass {
         }
 
         if let Some(link) = closing {
+            // Closing reads the program total with a zero send, which spends
+            // the window like any send.
+            if budget.remaining == 0 {
+                report.skip(PAYOUT_SEND_WINDOW_EXHAUSTED);
+                return Ok(());
+            }
             if !self
-                .close_link(tenant, account, &link, waiting.as_ref(), report)
+                .close_link(tenant, account, &link, waiting.as_ref(), budget, report)
                 .await?
             {
                 report.close_blocked += 1;
@@ -660,6 +678,7 @@ impl PayoutPass {
         account: Uuid,
         link: &PayoutLink,
         successor: Option<&PayoutLink>,
+        budget: &mut SendBudget,
         report: &mut PayoutPassReport,
     ) -> Step<bool> {
         let Some(recipient) = self.opener.open(link) else {
@@ -667,6 +686,7 @@ impl PayoutPass {
                 .await?;
             return Ok(false);
         };
+        budget.spend();
         let total = match self.rail.read_total(&recipient, &link.program).await {
             Ok(total) => total.get(),
             // The old recipient is gone: the program total comes from our
@@ -816,7 +836,7 @@ impl PayoutPass {
                 .await,
         )? {
             if budget.remaining == 0 {
-                report.skip("payout_send_window_exhausted");
+                report.skip(PAYOUT_SEND_WINDOW_EXHAUSTED);
                 return Ok(());
             }
             return self
@@ -842,14 +862,18 @@ impl PayoutPass {
             }
             return Ok(());
         };
-        if budget.remaining == 0 {
-            report.skip("payout_send_window_exhausted");
+        // A new line costs two write calls: the zero read of the program
+        // total (a POST on `near_ai`), then the send. Start one only when
+        // the window has room for both.
+        if budget.remaining < 2 {
+            report.skip(PAYOUT_SEND_WINDOW_EXHAUSTED);
             return Ok(());
         }
         if budget.per_send_max == 0 {
             report.skip("payout_per_send_max_zero");
             return Ok(());
         }
+        budget.spend();
         let program_total = match self.rail.read_total(&recipient, &link.program).await {
             Ok(total) => total.get(),
             Err(refusal) => {
@@ -938,7 +962,7 @@ impl PayoutPass {
                 .fail_line(tenant, account, line, "payout_line_invalid", report)
                 .await;
         };
-        budget.remaining = budget.remaining.saturating_sub(1);
+        budget.spend();
         report.sent += 1;
         match self.rail.send(&rail_line).await {
             Ok(SendOutcome::Committed {
