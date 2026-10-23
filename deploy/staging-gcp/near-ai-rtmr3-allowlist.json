@@ -6,5 +6,8 @@
     "key_provider": "",
     "markers": []
   },
-  "compose_actions": []
+  "compose_actions": {
+    "compose_manager_images": [],
+    "compose_files": []
+  }
 }

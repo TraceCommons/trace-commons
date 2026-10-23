@@ -196,10 +196,28 @@ fn replayed(events: &[(String, String)]) -> String {
     hex::encode(replay_digests(&digests))
 }
 
+/// Synthetic compose-action values, in the live record's formats.
+const COMPOSE_FILE: &str = "example/models.yaml";
+const FILE_SHA256: &str = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+const COMMIT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+fn manager_image() -> String {
+    format!(
+        "registry.example/compose-manager@sha256:{}",
+        "ab".repeat(32)
+    )
+}
+
+/// One action of each kind, structurally exact to the live record (string
+/// timestamps, a digest-pinned compose-manager image, compose files named by
+/// path, commit and SHA-256), all values synthetic. The second `compose_up`
+/// repeats the first file, so the review lists it once.
 fn actions() -> Vec<serde_json::Value> {
     vec![
-        serde_json::json!({"action": "compose_manager_started", "container": null, "image": null, "timestamp": 1}),
-        serde_json::json!({"action": "compose_up", "container": "model", "image": "registry.example/model@sha256:ab", "timestamp": 2}),
+        serde_json::json!({"action": "compose_manager_started", "container": "compose-manager", "image": manager_image(), "timestamp": "2026-01-01T00:00:00Z"}),
+        serde_json::json!({"action": "compose_up", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "services": ["model-a", "proxy"], "timestamp": "2026-01-01T00:00:01Z"}),
+        serde_json::json!({"action": "compose_down", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "services": ["proxy"], "timestamp": "2026-01-01T00:00:02Z"}),
+        serde_json::json!({"action": "compose_up", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "services": ["proxy"], "timestamp": "2026-01-01T00:00:03Z"}),
     ]
 }
 
@@ -247,9 +265,13 @@ fn report_with(events: &[(String, String)], actions: &[serde_json::Value]) -> (S
         "compose_manager_attestation": {
             "actions": actions,
             "actions_hash": hex::encode(compose_actions_hash(actions).unwrap()),
+            // A JSON-encoded string, as the live record carries it.
+            "event_log": event_log(events).to_string(),
             "nonce": nonce,
             "nonce_source": "client",
             "quote": hex::encode(compose_quote()),
+            "report_data": "00",
+            "vm_config": "{}",
         },
     });
     let gateway = serde_json::json!({
@@ -811,18 +833,78 @@ async fn observe_prints_the_compose_actions_for_review() {
         .map(|m| m["name"].as_str().unwrap())
         .collect();
     assert_eq!(markers, MARKER_EVENTS);
+    // Owner decision S17: the distinct compose-manager images and the
+    // distinct compose files brought up, never services, tags or times.
     assert_eq!(
         review["compose_actions"],
-        serde_json::json!([
-            {"action": "compose_manager_started", "container": null, "image": null},
-            {"action": "compose_up", "container": "model", "image": "registry.example/model@sha256:ab"},
-        ])
+        serde_json::json!({
+            "compose_manager_images": [manager_image()],
+            "compose_files": [
+                {"file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "commit": COMMIT},
+            ],
+        })
     );
     assert_eq!(
         trace_commons_attestation::staging_replay::Allowlist::from_json(&review).unwrap(),
         observed.review,
         "the review reads back as an allowlist"
     );
+}
+
+#[tokio::test]
+async fn observe_refuses_a_compose_down_no_compose_up_in_the_run_brought_up() {
+    // A compose_down carries no file hash, so the review cannot list it
+    // unless a compose_up of the same file and commit did. Rather than write
+    // an allowlist that refuses the live record, observe refuses the run.
+    let mut downed = actions();
+    downed[2]["commit"] = serde_json::json!("c2".repeat(20));
+    let (report, nonce) = report_with(&ten_events(), &downed);
+    let (_server, gateway) = gateway_serving(&report, &nonce).await;
+    let staged = Staged::over(ten_events(), downed);
+    let refusal = observe_measurement_sets(
+        &[&gateway],
+        &FixedNonce(nonce),
+        FIXTURE_CAPTURED_AT,
+        &DEFAULT_REGISTERS,
+        &staged_verify(&staged),
+    )
+    .await
+    .expect_err("a compose_down the review cannot list");
+    assert_eq!(refusal.model_position, 0);
+    assert_eq!(refusal.label, "review_compose_down_unlisted");
+}
+
+#[tokio::test]
+async fn observe_refuses_an_unknown_or_malformed_compose_action() {
+    let mut unknown = actions();
+    unknown[1]["action"] = serde_json::json!("compose_restart");
+    let mut extra = actions();
+    extra[1]["container"] = serde_json::json!("model");
+    let mut numeric_time = actions();
+    numeric_time[0]["timestamp"] = serde_json::json!(1);
+    let mut tagged_image = actions();
+    tagged_image[0]["image"] = serde_json::json!("registry.example/compose-manager:latest");
+    for (actions, label) in [
+        (unknown, "compose_action_unknown"),
+        (extra, "compose_manager_malformed"),
+        (numeric_time, "compose_manager_malformed"),
+        // Readable, but not a value the allowlist can list.
+        (tagged_image, "review_compose_actions_unlistable"),
+    ] {
+        let (report, nonce) = report_with(&ten_events(), &actions);
+        let (_server, gateway) = gateway_serving(&report, &nonce).await;
+        let staged = Staged::over(ten_events(), actions);
+        let refusal = observe_measurement_sets(
+            &[&gateway],
+            &FixedNonce(nonce),
+            FIXTURE_CAPTURED_AT,
+            &DEFAULT_REGISTERS,
+            &staged_verify(&staged),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(refusal.label, label);
+    }
 }
 
 #[tokio::test]
@@ -964,9 +1046,12 @@ fn synthetic_allowlist() -> serde_json::Value {
                 {"name": "system-ready", "payload": "00"},
             ],
         },
-        "compose_actions": [
-            {"action": "compose_up", "container": "model", "image": "registry.example/model"},
-        ],
+        "compose_actions": {
+            "compose_manager_images": [manager_image()],
+            "compose_files": [
+                {"file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "commit": COMMIT},
+            ],
+        },
     })
 }
 

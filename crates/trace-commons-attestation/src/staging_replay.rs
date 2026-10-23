@@ -42,9 +42,16 @@
 //! the model quote's (the same TD and the same boot), our nonce at
 //! `report_data[32..64]`, and at `report_data[0..32]` the SHA-256 of the
 //! `actions` list serialised as JSON with sorted keys and compact separators
-//! ([`compose_actions_hash`]). The record's own `actions_hash` must equal that
-//! recomputed value. With an allowlist, every action (kind, container, image;
-//! never the timestamp) must be listed in it.
+//! ([`compose_actions_hash`]), over the raw actions exactly as received. The
+//! record's own `actions_hash` must equal that recomputed value.
+//!
+//! Each action is parsed by kind ([`ComposeAction`]) with exactly that
+//! kind's keys; an unknown kind, a missing or extra key or a wrong type
+//! refuses. With an allowlist, every action must be allowed by it (owner
+//! decision S17, [`ComposeAllowlist`]): the compose manager's image by
+//! digest, a `compose_up`'s compose file by path, SHA-256 and commit, a
+//! `compose_down`'s by path and commit. Services, tag and timestamp are not
+//! compared.
 //!
 //! # Failing closed
 //!
@@ -91,8 +98,22 @@ pub const MARKER_EVENTS: [&str; 4] = [
 /// The one RTMR3 event whose value is never checked and never printed.
 pub const INSTANCE_ID_EVENT: &str = "instance-id";
 
-/// The keys every compose action carries, and no others.
-const ACTION_KEYS: [&str; 4] = ["action", "container", "image", "timestamp"];
+/// The container a `compose_manager_started` action must name.
+pub const COMPOSE_MANAGER_CONTAINER: &str = "compose-manager";
+
+/// The keys of each compose-action kind, and no others (the live record of
+/// 2026-10-22). Every action carries `action` and a string `timestamp`.
+const MANAGER_STARTED_KEYS: [&str; 4] = ["action", "container", "image", "timestamp"];
+const COMPOSE_UP_KEYS: [&str; 7] = [
+    "action",
+    "tag",
+    "commit",
+    "file",
+    "file_sha256",
+    "services",
+    "timestamp",
+];
+const COMPOSE_DOWN_KEYS: [&str; 6] = ["action", "tag", "commit", "file", "services", "timestamp"];
 
 /// Why an entry's RTMR3 log or compose-manager record was refused. Every
 /// refusal earns no key for that entry.
@@ -134,8 +155,12 @@ pub enum ReplayRefusal {
     ComposeManagerMissing,
     /// The record is not the expected shape: a field missing or of the wrong
     /// type, a quote that is not hex, or an action that is not an object with
-    /// exactly the keys `action`, `container`, `image` and `timestamp`.
+    /// a string `action` and exactly its kind's keys, each of its type (see
+    /// [`ComposeAction`]).
     ComposeManagerMalformed,
+    /// An action's kind is none of `compose_manager_started`, `compose_up`
+    /// and `compose_down`.
+    ComposeActionUnknown,
     /// The record's quote did not verify against Intel collateral.
     ComposeManagerQuoteUnverified,
     /// The record's quote verified, on a platform whose TCB is not
@@ -149,7 +174,11 @@ pub enum ReplayRefusal {
     /// The recomputed actions hash is not at the quote's `report_data[0..32]`,
     /// or the record's own `actions_hash` is not the recomputed one.
     ActionsHashMismatch,
-    /// A compose action is not in the allowlist.
+    /// A compose action is not allowed: a `compose_manager_started` whose
+    /// container is not [`COMPOSE_MANAGER_CONTAINER`] (refused with or
+    /// without an allowlist) or whose image is not listed, a `compose_up`
+    /// whose file, file hash and commit are not listed together, or a
+    /// `compose_down` whose file and commit are not.
     ComposeActionNotAllowed,
     /// The quote's own registers could not be read as hex.
     QuoteUnreadable,
@@ -176,6 +205,7 @@ impl ReplayRefusal {
             ReplayRefusal::MarkerNotAllowed => "rtmr3_marker_not_allowed",
             ReplayRefusal::ComposeManagerMissing => "compose_manager_missing",
             ReplayRefusal::ComposeManagerMalformed => "compose_manager_malformed",
+            ReplayRefusal::ComposeActionUnknown => "compose_action_unknown",
             ReplayRefusal::ComposeManagerQuoteUnverified => "compose_manager_quote_unverified",
             ReplayRefusal::ComposeManagerTcbNotUpToDate => "compose_manager_tcb_not_up_to_date",
             ReplayRefusal::ComposeManagerOtherTd => "compose_manager_other_td",
@@ -187,7 +217,7 @@ impl ReplayRefusal {
     }
 
     /// Every refusal, for tests that hold the labels stable.
-    pub const ALL: [ReplayRefusal; 23] = [
+    pub const ALL: [ReplayRefusal; 24] = [
         ReplayRefusal::LogMissing,
         ReplayRefusal::LogMalformed,
         ReplayRefusal::EventDigestMismatch,
@@ -204,6 +234,7 @@ impl ReplayRefusal {
         ReplayRefusal::MarkerNotAllowed,
         ReplayRefusal::ComposeManagerMissing,
         ReplayRefusal::ComposeManagerMalformed,
+        ReplayRefusal::ComposeActionUnknown,
         ReplayRefusal::ComposeManagerQuoteUnverified,
         ReplayRefusal::ComposeManagerTcbNotUpToDate,
         ReplayRefusal::ComposeManagerOtherTd,
@@ -284,23 +315,321 @@ impl fmt::Debug for Rtmr3Allowlist {
     }
 }
 
-/// One compose action: its kind, container and image reference. The
-/// timestamp is never compared. `container` and `image` are `None` where the
-/// record carries JSON `null`.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ComposeAction {
-    pub action: String,
-    pub container: Option<String>,
-    pub image: Option<String>,
+/// One compose action, parsed by kind (the live record of 2026-10-22).
+/// The `timestamp` every kind carries is read as a string and not kept: it
+/// is never compared. It still counts in the actions hash, which is taken
+/// over the raw record, never over these.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ComposeAction {
+    /// `compose_manager_started`: the compose manager's own container and
+    /// image reference.
+    ManagerStarted { container: String, image: String },
+    /// `compose_up`: a compose file from NEAR AI's repository, named by
+    /// repository path, commit and the file's SHA-256, brought up with the
+    /// named services.
+    Up {
+        tag: String,
+        commit: String,
+        file: String,
+        file_sha256: String,
+        services: Vec<String>,
+    },
+    /// `compose_down`: services of a compose file stopped. It carries no
+    /// file hash.
+    Down {
+        tag: String,
+        commit: String,
+        file: String,
+        services: Vec<String>,
+    },
+}
+
+impl ComposeAction {
+    /// The record's name for this kind.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ComposeAction::ManagerStarted { .. } => "compose_manager_started",
+            ComposeAction::Up { .. } => "compose_up",
+            ComposeAction::Down { .. } => "compose_down",
+        }
+    }
+
+    /// Parse one raw action: a string `action` naming a known kind, exactly
+    /// that kind's keys, each a string (`services` a list of strings).
+    fn parse(value: &Value) -> Result<Self, ReplayRefusal> {
+        let malformed = ReplayRefusal::ComposeManagerMalformed;
+        let object = value.as_object().ok_or(malformed)?;
+        let kind = object
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or(malformed)?;
+        let keys: &[&str] = match kind {
+            "compose_manager_started" => &MANAGER_STARTED_KEYS,
+            "compose_up" => &COMPOSE_UP_KEYS,
+            "compose_down" => &COMPOSE_DOWN_KEYS,
+            _ => return Err(ReplayRefusal::ComposeActionUnknown),
+        };
+        exact_keys(object, keys).ok_or(malformed)?;
+        let text = |name: &str| -> Result<String, ReplayRefusal> {
+            object
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or(malformed)
+        };
+        // Read for its type only.
+        text("timestamp")?;
+        let services = || -> Result<Vec<String>, ReplayRefusal> {
+            object
+                .get("services")
+                .and_then(Value::as_array)
+                .ok_or(malformed)?
+                .iter()
+                .map(|service| service.as_str().map(str::to_string).ok_or(malformed))
+                .collect()
+        };
+        Ok(match kind {
+            "compose_manager_started" => ComposeAction::ManagerStarted {
+                container: text("container")?,
+                image: text("image")?,
+            },
+            "compose_up" => ComposeAction::Up {
+                tag: text("tag")?,
+                commit: text("commit")?,
+                file: text("file")?,
+                file_sha256: text("file_sha256")?,
+                services: services()?,
+            },
+            _ => ComposeAction::Down {
+                tag: text("tag")?,
+                commit: text("commit")?,
+                file: text("file")?,
+                services: services()?,
+            },
+        })
+    }
 }
 
 impl fmt::Debug for ComposeAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ComposeAction")
-            .field("action_len", &self.action.len())
-            .field("container_len", &self.container.as_ref().map(String::len))
-            .field("image_len", &self.image.as_ref().map(String::len))
+        let mut out = f.debug_struct("ComposeAction");
+        out.field("kind", &self.kind());
+        match self {
+            ComposeAction::ManagerStarted { container, image } => out
+                .field("container_len", &container.len())
+                .field("image_len", &image.len()),
+            ComposeAction::Up {
+                tag,
+                commit,
+                file,
+                file_sha256,
+                services,
+            } => out
+                .field("tag_len", &tag.len())
+                .field("commit_len", &commit.len())
+                .field("file_len", &file.len())
+                .field("file_sha256_len", &file_sha256.len())
+                .field("service_count", &services.len()),
+            ComposeAction::Down {
+                tag,
+                commit,
+                file,
+                services,
+            } => out
+                .field("tag_len", &tag.len())
+                .field("commit_len", &commit.len())
+                .field("file_len", &file.len())
+                .field("service_count", &services.len()),
+        };
+        out.finish()
+    }
+}
+
+/// One compose file the allowlist lets the compose manager bring up: its
+/// path in NEAR AI's repository, the commit it is taken at and the SHA-256
+/// of its contents there (owner decision S17).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ComposeFile {
+    /// The repository path, as the action carries it. Not empty.
+    pub file: String,
+    /// 64 lower-case hex characters.
+    pub file_sha256: String,
+    /// 40 lower-case hex characters.
+    pub commit: String,
+}
+
+impl fmt::Debug for ComposeFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComposeFile")
+            .field("file_len", &self.file.len())
+            .field("file_sha256_len", &self.file_sha256.len())
+            .field("commit_len", &self.commit.len())
             .finish()
+    }
+}
+
+/// What post-boot compose actions are allowed (owner decision S17, "Pin
+/// compose file hashes"). Its JSON form, the allowlist's `compose_actions`:
+///
+/// ```json
+/// {
+///   "compose_manager_images": ["<name>@sha256:<64 hex>"],
+///   "compose_files": [{"file": "<repository path>", "file_sha256": "<64 hex>", "commit": "<40 hex>"}]
+/// }
+/// ```
+///
+/// - `compose_manager_started` is allowed when its container is
+///   [`COMPOSE_MANAGER_CONTAINER`] and its image is listed in
+///   `compose_manager_images`, exactly; an image is listed by digest.
+/// - `compose_up` is allowed when its `file`, `file_sha256` and `commit`
+///   are one listed entry. Which `services` it starts is free: the pinned
+///   file defines them all.
+/// - `compose_down` is allowed when its `file` and `commit` are a listed
+///   entry's: stopping containers adds no code. `services` is free.
+/// - The `tag` is not matched: a tag is a movable name, the commit is the
+///   immutable one, and the file's hash is taken at that commit.
+/// - Any other kind refuses ([`ReplayRefusal::ComposeActionUnknown`]).
+///
+/// Format strictness sits here, not in the record parser: a listed value
+/// is lower-case hex of its length, so a record value spelled any other way
+/// matches nothing and is refused. Empty lists allow nothing.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ComposeAllowlist {
+    /// Distinct digest references, `<name>@sha256:<64 lower-case hex>`.
+    pub compose_manager_images: Vec<String>,
+    /// At most one entry per (`file`, `commit`).
+    pub compose_files: Vec<ComposeFile>,
+}
+
+impl fmt::Debug for ComposeAllowlist {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComposeAllowlist")
+            .field(
+                "compose_manager_image_count",
+                &self.compose_manager_images.len(),
+            )
+            .field("compose_files", &self.compose_files)
+            .finish()
+    }
+}
+
+impl ComposeAllowlist {
+    /// Whether both lists are empty: the placeholder, which allows nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.compose_manager_images.is_empty() && self.compose_files.is_empty()
+    }
+
+    /// Whether this allowlist allows `action` (rules above).
+    #[must_use]
+    pub fn allows(&self, action: &ComposeAction) -> bool {
+        match action {
+            ComposeAction::ManagerStarted { container, image } => {
+                container == COMPOSE_MANAGER_CONTAINER
+                    && self.compose_manager_images.iter().any(|i| i == image)
+            }
+            ComposeAction::Up {
+                commit,
+                file,
+                file_sha256,
+                ..
+            } => self.compose_files.iter().any(|listed| {
+                listed.file == *file
+                    && listed.file_sha256 == *file_sha256
+                    && listed.commit == *commit
+            }),
+            ComposeAction::Down { commit, file, .. } => self
+                .compose_files
+                .iter()
+                .any(|listed| listed.file == *file && listed.commit == *commit),
+        }
+    }
+
+    /// Parse the allowlist's `compose_actions` value.
+    pub fn from_json(value: &Value) -> Result<Self, AllowlistMalformed> {
+        let object = value.as_object().ok_or(AllowlistMalformed)?;
+        exact_keys(object, &["compose_manager_images", "compose_files"])
+            .ok_or(AllowlistMalformed)?;
+        let mut images: Vec<String> = Vec::new();
+        for image in object
+            .get("compose_manager_images")
+            .and_then(Value::as_array)
+            .ok_or(AllowlistMalformed)?
+        {
+            let image = image.as_str().ok_or(AllowlistMalformed)?;
+            if !is_digest_reference(image) || images.iter().any(|i| i == image) {
+                return Err(AllowlistMalformed);
+            }
+            images.push(image.to_string());
+        }
+        let mut files: Vec<ComposeFile> = Vec::new();
+        for entry in object
+            .get("compose_files")
+            .and_then(Value::as_array)
+            .ok_or(AllowlistMalformed)?
+        {
+            let entry = entry.as_object().ok_or(AllowlistMalformed)?;
+            exact_keys(entry, &["file", "file_sha256", "commit"]).ok_or(AllowlistMalformed)?;
+            let text = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or(AllowlistMalformed)
+            };
+            let listed = ComposeFile {
+                file: text("file")?,
+                file_sha256: text("file_sha256")?,
+                commit: text("commit")?,
+            };
+            if listed.file.is_empty()
+                || !is_lower_hex_of(&listed.file_sha256, 64)
+                || !is_lower_hex_of(&listed.commit, 40)
+                || files
+                    .iter()
+                    .any(|f| f.file == listed.file && f.commit == listed.commit)
+            {
+                return Err(AllowlistMalformed);
+            }
+            files.push(listed);
+        }
+        Ok(ComposeAllowlist {
+            compose_manager_images: images,
+            compose_files: files,
+        })
+    }
+
+    /// The JSON value [`ComposeAllowlist::from_json`] reads, fields in a
+    /// fixed order.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let mut out = Map::new();
+        out.insert(
+            "compose_manager_images".into(),
+            Value::Array(
+                self.compose_manager_images
+                    .iter()
+                    .map(|image| Value::from(image.as_str()))
+                    .collect(),
+            ),
+        );
+        out.insert(
+            "compose_files".into(),
+            Value::Array(
+                self.compose_files
+                    .iter()
+                    .map(|f| {
+                        let mut o = Map::new();
+                        o.insert("file".into(), f.file.clone().into());
+                        o.insert("file_sha256".into(), f.file_sha256.clone().into());
+                        o.insert("commit".into(), f.commit.clone().into());
+                        Value::Object(o)
+                    })
+                    .collect(),
+            ),
+        );
+        Value::Object(out)
     }
 }
 
@@ -312,7 +641,7 @@ impl fmt::Debug for ComposeAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allowlist {
     pub rtmr3: Rtmr3Allowlist,
-    pub compose_actions: Vec<ComposeAction>,
+    pub compose_actions: ComposeAllowlist,
 }
 
 impl Allowlist {
@@ -373,20 +702,8 @@ impl Allowlist {
                 payload,
             });
         }
-        let mut compose_actions: Vec<ComposeAction> = Vec::new();
-        for action in object
-            .get("compose_actions")
-            .and_then(Value::as_array)
-            .ok_or(AllowlistMalformed)?
-        {
-            let action = action.as_object().ok_or(AllowlistMalformed)?;
-            exact_keys(action, &["action", "container", "image"]).ok_or(AllowlistMalformed)?;
-            let parsed = compose_action_fields(action).ok_or(AllowlistMalformed)?;
-            if compose_actions.contains(&parsed) {
-                return Err(AllowlistMalformed);
-            }
-            compose_actions.push(parsed);
-        }
+        let compose_actions =
+            ComposeAllowlist::from_json(object.get("compose_actions").ok_or(AllowlistMalformed)?)?;
         Ok(Allowlist {
             rtmr3: Rtmr3Allowlist {
                 app_id: hex_field("app_id")?,
@@ -403,8 +720,6 @@ impl Allowlist {
     /// in a fixed order, so the signing tool writes it field for field.
     #[must_use]
     pub fn to_json(&self) -> Value {
-        let optional =
-            |v: &Option<String>| v.as_ref().map_or(Value::Null, |s| Value::from(s.as_str()));
         let mut rtmr3 = Map::new();
         rtmr3.insert("app_id".into(), hex::encode(&self.rtmr3.app_id).into());
         rtmr3.insert("mr_kms".into(), hex::encode(&self.rtmr3.mr_kms).into());
@@ -433,21 +748,7 @@ impl Allowlist {
         );
         let mut out = Map::new();
         out.insert("rtmr3".into(), Value::Object(rtmr3));
-        out.insert(
-            "compose_actions".into(),
-            Value::Array(
-                self.compose_actions
-                    .iter()
-                    .map(|a| {
-                        let mut o = Map::new();
-                        o.insert("action".into(), a.action.clone().into());
-                        o.insert("container".into(), optional(&a.container));
-                        o.insert("image".into(), optional(&a.image));
-                        Value::Object(o)
-                    })
-                    .collect(),
-            ),
-        );
+        out.insert("compose_actions".into(), self.compose_actions.to_json());
         Value::Object(out)
     }
 }
@@ -727,7 +1028,9 @@ impl ComposeManagerRecord {
         // `quote`, `actions` and `actions_hash` are required, each read
         // below. Other keys the record may carry (`nonce`, `nonce_source`,
         // `event_log`, `report_data`, `vm_config`) are not read: the quote
-        // is the authority for what they claim.
+        // is the authority for what they claim. So the record's
+        // `event_log`, a JSON-encoded string in the live record (the model
+        // entry's is a list, and that one is replayed), reads in any form.
         let quote = record
             .get("quote")
             .and_then(Value::as_str)
@@ -764,7 +1067,8 @@ impl ComposeManagerRecord {
 ///
 /// # Errors
 ///
-/// [`ReplayRefusal::ComposeManagerMalformed`],
+/// [`ReplayRefusal::ComposeManagerMalformed`] or
+/// [`ReplayRefusal::ComposeActionUnknown`] (an action's shape),
 /// [`ReplayRefusal::ComposeManagerQuoteUnverified`],
 /// [`ReplayRefusal::ComposeManagerTcbNotUpToDate`],
 /// [`ReplayRefusal::ComposeManagerOtherTd`],
@@ -776,20 +1080,15 @@ pub fn check_compose_manager(
     verify: impl FnOnce(&[u8]) -> Option<VerifiedQuote>,
     model_quote: &VerifiedQuote,
     nonce_hex: &str,
-    allowlist: Option<&[ComposeAction]>,
+    allowlist: Option<&ComposeAllowlist>,
 ) -> Result<Vec<ComposeAction>, ReplayRefusal> {
     // The actions' shape first: nothing below is worth a quote verification
     // if they cannot be read.
     let actions = record
         .actions
         .iter()
-        .map(|action| {
-            let object = action.as_object()?;
-            exact_keys(object, &ACTION_KEYS)?;
-            compose_action_fields(object)
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or(ReplayRefusal::ComposeManagerMalformed)?;
+        .map(ComposeAction::parse)
+        .collect::<Result<Vec<_>, _>>()?;
 
     let quote = verify(&record.quote).ok_or(ReplayRefusal::ComposeManagerQuoteUnverified)?;
     if quote.tcb_status != REQUIRED_TCB_STATUS {
@@ -812,14 +1111,23 @@ pub fn check_compose_manager(
     if quote.report_data.get(32..64) != Some(nonce.as_slice()) {
         return Err(ReplayRefusal::ComposeManagerNonceMismatch);
     }
+    // Over the raw actions as received, every field included: never over
+    // the parsed ones, which drop the timestamp.
     let recomputed = compose_actions_hash(&record.actions)?;
     if quote.report_data.get(0..32) != Some(&recomputed[..])
         || record.actions_hash != hex::encode(recomputed)
     {
         return Err(ReplayRefusal::ActionsHashMismatch);
     }
+    // The compose manager runs in its own named container, allowlist or not.
+    if actions.iter().any(|action| {
+        matches!(action, ComposeAction::ManagerStarted { container, .. }
+            if container != COMPOSE_MANAGER_CONTAINER)
+    }) {
+        return Err(ReplayRefusal::ComposeActionNotAllowed);
+    }
     if let Some(allowed) = allowlist {
-        if actions.iter().any(|action| !allowed.contains(action)) {
+        if actions.iter().any(|action| !allowed.allows(action)) {
             return Err(ReplayRefusal::ComposeActionNotAllowed);
         }
     }
@@ -1024,18 +1332,17 @@ fn exact_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<()> {
     (object.len() == keys.len() && keys.iter().all(|k| object.contains_key(*k))).then_some(())
 }
 
-/// `action` a string; `container` and `image` a string or `null`.
-fn compose_action_fields(object: &Map<String, Value>) -> Option<ComposeAction> {
-    let optional = |name: &str| match object.get(name)? {
-        Value::Null => Some(None),
-        Value::String(s) => Some(Some(s.clone())),
-        _ => None,
-    };
-    Some(ComposeAction {
-        action: object.get("action")?.as_str()?.to_string(),
-        container: optional("container")?,
-        image: optional("image")?,
-    })
+/// `text` is `len` lower-case hex characters.
+fn is_lower_hex_of(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `<name>@sha256:<64 lower-case hex>`, the name not empty: an image named
+/// by its content, never by a movable tag.
+fn is_digest_reference(image: &str) -> bool {
+    image
+        .rsplit_once("@sha256:")
+        .is_some_and(|(name, digest)| !name.is_empty() && is_lower_hex_of(digest, 64))
 }
 
 /// Hex in either case, as a log or quote carries it.
@@ -1068,6 +1375,17 @@ mod tests {
     /// event carries it.
     const KEY_PROVIDER: &str = "7b226e616d65223a226b6d73222c226964223a2273796e746865746963227d";
     const NONCE: &str = "9f3c1d2e4b5a60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+    /// Synthetic compose-action values, in the live record's formats.
+    const COMPOSE_FILE: &str = "example/models.yaml";
+    const FILE_SHA256: &str = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+    const COMMIT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+    fn manager_image() -> String {
+        format!(
+            "registry.example/compose-manager@sha256:{}",
+            "ab".repeat(32)
+        )
+    }
 
     fn marker_payload(name: &str) -> String {
         hex::encode(format!("synthetic {name}"))
@@ -1154,10 +1472,12 @@ mod tests {
                     .map(|name| json!({"name": name, "payload": marker_payload(name)}))
                     .collect::<Vec<_>>(),
             },
-            "compose_actions": [
-                {"action": "compose_manager_started", "container": null, "image": null},
-                {"action": "compose_up", "container": "app", "image": "registry.example/app@sha256:ab"},
-            ],
+            "compose_actions": {
+                "compose_manager_images": [manager_image()],
+                "compose_files": [
+                    {"file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "commit": COMMIT},
+                ],
+            },
         }))
         .expect("the synthetic allowlist parses")
     }
@@ -1531,16 +1851,22 @@ mod tests {
 
     // -- the compose-manager record ----------------------------------------
 
+    /// One action of each kind, structurally exact to the live record:
+    /// string timestamps, a digest-pinned compose-manager image, and a
+    /// compose file named by path, commit and SHA-256. Keys are deliberately
+    /// out of order, as a provider may send them. Every value is synthetic.
     fn actions() -> Vec<Value> {
-        // Keys deliberately out of order, as a provider may send them.
         vec![
-            json!({"timestamp": 1_700_000_000u64, "image": "registry.example/app@sha256:ab", "container": "app", "action": "compose_up"}),
-            json!({"action": "compose_manager_started", "container": null, "image": null, "timestamp": 1_699_999_999.5}),
+            json!({"timestamp": "2026-01-01T00:00:00Z", "image": manager_image(), "container": "compose-manager", "action": "compose_manager_started"}),
+            json!({"action": "compose_up", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "services": ["model-a", "proxy"], "timestamp": "2026-01-01T00:00:01Z"}),
+            json!({"services": ["proxy"], "file": COMPOSE_FILE, "commit": COMMIT, "tag": "v0.0.1", "action": "compose_down", "timestamp": "2026-01-01T00:00:02Z"}),
         ]
     }
 
     /// A record whose quote is the model quote's TD, bound to our nonce and
-    /// to `actions`.
+    /// to `actions`, carrying every key the live record carries: its
+    /// `event_log` a JSON-encoded **string** (unlike the model entry's list)
+    /// and `vm_config` a string.
     fn record_over(
         actions: Vec<Value>,
         model: &VerifiedQuote,
@@ -1552,9 +1878,12 @@ mod tests {
             "compose_manager_attestation": {
                 "actions": actions,
                 "actions_hash": hex::encode(hash),
+                "event_log": "[{\"imr\":3,\"event\":\"app-id\"}]",
                 "nonce": NONCE,
                 "nonce_source": "client",
                 "quote": "0badc0de",
+                "report_data": hex::encode(&quote.report_data),
+                "vm_config": "{\"cpu_count\":1}",
             }
         }))
         .expect("the record reads");
@@ -1563,6 +1892,19 @@ mod tests {
 
     fn model_quote() -> VerifiedQuote {
         quote_replaying(&ten_events())
+    }
+
+    /// The record's check, against the synthetic allowlist.
+    fn check_listed(actions: Vec<Value>) -> Result<Vec<ComposeAction>, ReplayRefusal> {
+        let model = model_quote();
+        let (record, quote) = record_over(actions, &model);
+        check_compose_manager(
+            &record,
+            |_| Some(quote.clone()),
+            &model,
+            NONCE,
+            Some(&allowlist().compose_actions),
+        )
     }
 
     #[test]
@@ -1585,7 +1927,7 @@ mod tests {
             Some(&allowed),
         )
         .expect("bound to the model's TD, our nonce and its actions");
-        assert_eq!(checked.len(), 2);
+        assert_eq!(checked.len(), 3);
 
         // Another nonce at [32..64].
         let mut stale = quote.clone();
@@ -1640,6 +1982,37 @@ mod tests {
                 ReplayRefusal::ComposeManagerMalformed
             );
         }
+    }
+
+    #[test]
+    fn the_record_reads_with_its_event_log_as_a_json_string_or_a_list() {
+        // The live record's own `event_log` is a JSON-encoded string, and
+        // `vm_config` a string; `record_over` builds it that way, and it
+        // reads and passes. The record's copy of the log is never replayed
+        // (the model entry's is), so a list there reads too.
+        let model = model_quote();
+        let (record, quote) = record_over(actions(), &model);
+        assert!(
+            check_compose_manager(
+                &record,
+                |_| Some(quote.clone()),
+                &model,
+                NONCE,
+                Some(&allowlist().compose_actions)
+            )
+            .is_ok()
+        );
+        let hash = hex::encode(compose_actions_hash(&actions()).unwrap());
+        let listed = ComposeManagerRecord::from_entry(&json!({
+            "compose_manager_attestation": {
+                "actions": actions(),
+                "actions_hash": hash,
+                "event_log": [{"imr": 3, "event": "app-id"}],
+                "quote": "0badc0de",
+            }
+        }))
+        .expect("a list-form log reads too");
+        assert_eq!(listed.actions, record.actions);
     }
 
     #[test]
@@ -1707,11 +2080,43 @@ mod tests {
     }
 
     #[test]
-    fn actions_hash_is_recomputed_as_sorted_compact_json() {
-        // Known answer, computed with Python:
-        //   hashlib.sha256(json.dumps(actions, separators=(",", ":"),
-        //                             sort_keys=True).encode()).hexdigest()
-        let sorted = "fa6e8d7482ede9f28ee5edf39549432ebd338af6664e8c2b49c1fec70fef9c83";
+    fn actions_hash_is_recomputed_as_sorted_compact_json_over_the_raw_actions() {
+        // Known answer over the three heterogeneous actions of `actions()`,
+        // computed with Python 3 over the same list (keys in any order):
+        //   img = "registry.example/compose-manager@sha256:" + "ab" * 32
+        //   actions = [
+        //     {"action": "compose_manager_started", "container": "compose-manager",
+        //      "image": img, "timestamp": "2026-01-01T00:00:00Z"},
+        //     {"action": "compose_up", "tag": "v0.0.1", "commit": "c1" * 20,
+        //      "file": "example/models.yaml", "file_sha256": "f1" * 32,
+        //      "services": ["model-a", "proxy"], "timestamp": "2026-01-01T00:00:01Z"},
+        //     {"action": "compose_down", "tag": "v0.0.1", "commit": "c1" * 20,
+        //      "file": "example/models.yaml", "services": ["proxy"],
+        //      "timestamp": "2026-01-01T00:00:02Z"}]
+        //   text = json.dumps(actions, separators=(",", ":"), sort_keys=True)
+        //   hashlib.sha256(text.encode()).hexdigest()
+        let text = format!(
+            concat!(
+                "[{{\"action\":\"compose_manager_started\",\"container\":\"compose-manager\",",
+                "\"image\":\"registry.example/compose-manager@sha256:{ab}\",",
+                "\"timestamp\":\"2026-01-01T00:00:00Z\"}},",
+                "{{\"action\":\"compose_up\",\"commit\":\"{c1}\",\"file\":\"example/models.yaml\",",
+                "\"file_sha256\":\"{f1}\",\"services\":[\"model-a\",\"proxy\"],\"tag\":\"v0.0.1\",",
+                "\"timestamp\":\"2026-01-01T00:00:01Z\"}},",
+                "{{\"action\":\"compose_down\",\"commit\":\"{c1}\",\"file\":\"example/models.yaml\",",
+                "\"services\":[\"proxy\"],\"tag\":\"v0.0.1\",\"timestamp\":\"2026-01-01T00:00:02Z\"}}]"
+            ),
+            ab = "ab".repeat(32),
+            c1 = COMMIT,
+            f1 = FILE_SHA256,
+        );
+        let mut written = String::new();
+        write_python_json(&Value::Array(actions()), &mut written).unwrap();
+        assert_eq!(
+            written, text,
+            "Python's sort_keys compact form, byte for byte"
+        );
+        let sorted = "9cf4b48c50f1923664a8fdd332c5ac40760ff53c92f6e3482eed369d4d77242b";
         assert_eq!(
             hex::encode(compose_actions_hash(&actions()).unwrap()),
             sorted
@@ -1719,17 +2124,17 @@ mod tests {
         // The same actions unsorted, and with Python's default separators,
         // hash to other values (also from Python), which is why neither is
         // used.
-        let unsorted = "83adc550fa06cf100365eaddaa76bf10843d251d72f41fe21df9c6a91041731b";
-        let default = "b5004acd996f94bdb37367a628fef7cea52e3e31f612912a8d0a0ed80b881d32";
+        let unsorted = "9dd5d2628f58795cd0259b017a17d52f468627c167ebcee0375bbbd8d42e30b4";
+        let default = "ff1ecfaeb38190b43227b699b1b5d30fbbe64dee1aafadc6ec0418841474831b";
         assert_ne!(sorted, unsorted);
         assert_ne!(sorted, default);
         // serde_json's own compact form keeps this crate's insertion order,
-        // so it is the unsorted one, not the sorted one.
+        // so it is not the sorted one.
         let serde_form = serde_json::to_vec(&Value::Array(actions())).unwrap();
         assert_ne!(hex::encode(Sha256::digest(&serde_form)), sorted);
 
         // Python's escaping and float forms, character for character:
-        //   json.dumps(["caf\u00e9\U0001F600\x01\x7f/", 1e16, 1.5e-5, 0.0,
+        //   json.dumps(["café\U0001F600\x01\x7f/", 1e16, 1.5e-5, 0.0,
         //               -2.0, 123.25], separators=(",", ":"))
         let mut text = String::new();
         write_python_json(
@@ -1766,7 +2171,7 @@ mod tests {
         // longer hashes to what the quote binds, whatever its own
         // `actions_hash` field claims.
         let mut grown = record.clone();
-        grown.actions.push(json!({"action": "compose_up", "container": "logger", "image": "registry.example/logger", "timestamp": 1}));
+        grown.actions.push(actions()[1].clone());
         grown.actions_hash = hex::encode(compose_actions_hash(&grown.actions).unwrap());
         assert_eq!(
             check_compose_manager(&grown, |_| Some(quote.clone()), &model, NONCE, None),
@@ -1779,99 +2184,237 @@ mod tests {
             check_compose_manager(&claimed, |_| Some(quote.clone()), &model, NONCE, None),
             Err(ReplayRefusal::ActionsHashMismatch)
         );
-        // An action with a key the format does not define is not read.
-        let mut extra = record.clone();
-        extra.actions[0]["command"] = json!("sh");
+        // A field the parsed action does not keep (the timestamp) still
+        // counts: the hash is over the raw action, not a re-serialised one.
+        let mut retimed = record.clone();
+        retimed.actions[0]["timestamp"] = json!("2026-01-01T00:00:09Z");
         assert_eq!(
-            check_compose_manager(&extra, |_| Some(quote.clone()), &model, NONCE, None),
+            check_compose_manager(&retimed, |_| Some(quote.clone()), &model, NONCE, None),
+            Err(ReplayRefusal::ActionsHashMismatch)
+        );
+    }
+
+    #[test]
+    fn each_kind_is_accepted_when_listed() {
+        let checked = check_listed(actions()).expect("every action is listed");
+        assert_eq!(
+            checked,
+            vec![
+                ComposeAction::ManagerStarted {
+                    container: "compose-manager".into(),
+                    image: manager_image(),
+                },
+                ComposeAction::Up {
+                    tag: "v0.0.1".into(),
+                    commit: COMMIT.into(),
+                    file: COMPOSE_FILE.into(),
+                    file_sha256: FILE_SHA256.into(),
+                    services: vec!["model-a".into(), "proxy".into()],
+                },
+                ComposeAction::Down {
+                    tag: "v0.0.1".into(),
+                    commit: COMMIT.into(),
+                    file: COMPOSE_FILE.into(),
+                    services: vec!["proxy".into()],
+                },
+            ]
+        );
+        // Each kind alone.
+        for action in actions() {
+            assert!(check_listed(vec![action.clone()]).is_ok(), "{action}");
+        }
+        // An empty list of actions has nothing to refuse.
+        assert_eq!(check_listed(Vec::new()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn an_unknown_action_kind_is_refused() {
+        for kind in ["compose_restart", "Compose_up", ""] {
+            let mut unknown = actions();
+            unknown[1]["action"] = json!(kind);
+            assert_eq!(
+                check_listed(unknown),
+                Err(ReplayRefusal::ComposeActionUnknown),
+                "{kind}"
+            );
+        }
+        // An action with no kind, or a kind that is not a string, is not an
+        // unknown kind but a malformed action.
+        let mut kindless = actions();
+        kindless[0].as_object_mut().unwrap().remove("action");
+        assert_eq!(
+            check_listed(kindless),
+            Err(ReplayRefusal::ComposeManagerMalformed)
+        );
+        let mut numbered = actions();
+        numbered[0]["action"] = json!(1);
+        assert_eq!(
+            check_listed(numbered),
+            Err(ReplayRefusal::ComposeManagerMalformed)
+        );
+        let mut not_object = actions();
+        not_object[0] = json!("compose_up");
+        assert_eq!(
+            check_listed(not_object),
             Err(ReplayRefusal::ComposeManagerMalformed)
         );
     }
 
     #[test]
-    fn an_allowlisted_compose_action_is_accepted() {
-        let model = model_quote();
-        let (record, quote) = record_over(actions(), &model);
-        let checked = check_compose_manager(
-            &record,
-            |_| Some(quote.clone()),
-            &model,
-            NONCE,
-            Some(&allowlist().compose_actions),
-        )
-        .expect("every action is listed");
-        assert_eq!(
-            checked[0],
-            ComposeAction {
-                action: "compose_up".into(),
-                container: Some("app".into()),
-                image: Some("registry.example/app@sha256:ab".into()),
+    fn an_extra_or_missing_key_is_refused_per_kind() {
+        for (index, action) in actions().iter().enumerate() {
+            let object = action.as_object().unwrap();
+            // Every key but `action` dropped in turn.
+            for key in object.keys().filter(|k| *k != "action") {
+                let mut missing = actions();
+                missing[index].as_object_mut().unwrap().remove(key);
+                assert_eq!(
+                    check_listed(missing),
+                    Err(ReplayRefusal::ComposeManagerMalformed),
+                    "{index} without {key}"
+                );
             }
-        );
-        // The timestamp is not compared: the same action at another time.
-        let mut later = actions();
-        later[0]["timestamp"] = json!(1_800_000_000u64);
-        let (record, quote) = record_over(later, &model);
-        assert!(
-            check_compose_manager(
-                &record,
-                |_| Some(quote.clone()),
-                &model,
-                NONCE,
-                Some(&allowlist().compose_actions)
-            )
-            .is_ok()
-        );
+            // A key the kind does not define, including another kind's.
+            for key in ["command", "file_sha256", "container", "image", "tag"] {
+                if object.contains_key(key) {
+                    continue;
+                }
+                let mut extra = actions();
+                extra[index][key] = json!("x");
+                assert_eq!(
+                    check_listed(extra),
+                    Err(ReplayRefusal::ComposeManagerMalformed),
+                    "{index} with {key}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn a_compose_action_with_a_disallowed_image_is_refused() {
-        let model = model_quote();
+    fn a_key_of_the_wrong_type_is_refused() {
+        let cases: [(usize, &str, Value); 9] = [
+            // A timestamp is a string in the live record; a number is not.
+            (0, "timestamp", json!(1_700_000_000u64)),
+            (0, "image", Value::Null),
+            (0, "container", Value::Null),
+            (1, "file_sha256", json!(1)),
+            (1, "services", json!("model-a")),
+            (1, "services", json!(["model-a", 1])),
+            (1, "commit", Value::Null),
+            (2, "tag", json!(["v0.0.1"])),
+            (2, "file", json!({})),
+        ];
+        for (index, key, value) in cases {
+            let mut wrong = actions();
+            wrong[index][key] = value.clone();
+            assert_eq!(
+                check_listed(wrong),
+                Err(ReplayRefusal::ComposeManagerMalformed),
+                "{index} {key} = {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_manager_image_not_listed_is_refused() {
         let mut swapped = actions();
-        swapped[0]["image"] = json!("registry.example/app-that-logs@sha256:cd");
-        let (record, quote) = record_over(swapped, &model);
+        swapped[0]["image"] = json!(format!(
+            "registry.example/compose-manager@sha256:{}",
+            "cd".repeat(32)
+        ));
         assert_eq!(
-            check_compose_manager(
-                &record,
-                |_| Some(quote.clone()),
-                &model,
-                NONCE,
-                Some(&allowlist().compose_actions)
-            ),
+            check_listed(swapped),
+            Err(ReplayRefusal::ComposeActionNotAllowed)
+        );
+        // The listed image under a tag rather than its digest is not it.
+        let mut tagged = actions();
+        tagged[0]["image"] = json!("registry.example/compose-manager:latest");
+        assert_eq!(
+            check_listed(tagged),
+            Err(ReplayRefusal::ComposeActionNotAllowed)
+        );
+        // The listed image in another container is not the compose manager,
+        // with or without an allowlist.
+        let mut renamed = actions();
+        renamed[0]["container"] = json!("sidecar");
+        assert_eq!(
+            check_listed(renamed.clone()),
+            Err(ReplayRefusal::ComposeActionNotAllowed)
+        );
+        let model = model_quote();
+        let (record, quote) = record_over(renamed, &model);
+        assert_eq!(
+            check_compose_manager(&record, |_| Some(quote.clone()), &model, NONCE, None),
             Err(ReplayRefusal::ComposeActionNotAllowed)
         );
     }
 
     #[test]
-    fn a_compose_action_of_an_unlisted_kind_or_container_is_refused() {
-        let model = model_quote();
-        for (field, value) in [
-            ("action", json!("compose_down")),
-            ("container", json!("sidecar")),
-            ("container", Value::Null),
+    fn compose_up_with_an_unlisted_file_hash_commit_or_path_is_refused() {
+        for (key, value) in [
+            ("file_sha256", "f2".repeat(32)),
+            ("commit", "c2".repeat(20)),
+            ("file", "example/other.yaml".to_string()),
         ] {
             let mut altered = actions();
-            altered[0][field] = value;
-            let (record, quote) = record_over(altered, &model);
+            altered[1][key] = json!(value);
+            assert_eq!(
+                check_listed(vec![altered[1].clone()]),
+                Err(ReplayRefusal::ComposeActionNotAllowed),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_down_for_an_unlisted_file_or_commit_is_refused() {
+        for (key, value) in [
+            ("commit", "c2".repeat(20)),
+            ("file", "example/other.yaml".to_string()),
+        ] {
+            let mut altered = actions();
+            altered[2][key] = json!(value);
+            assert_eq!(
+                check_listed(vec![altered[2].clone()]),
+                Err(ReplayRefusal::ComposeActionNotAllowed),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn services_tag_and_timestamp_are_free() {
+        // Which services a listed file starts or stops is free: the pinned
+        // file defines them all. The tag is informational, the commit is
+        // what is pinned. The timestamp is never compared.
+        let mut free = actions();
+        free[1]["services"] = json!(["model-b", "logger", "proxy"]);
+        free[2]["services"] = json!([]);
+        free[1]["tag"] = json!("v9.9.9");
+        free[2]["tag"] = json!("");
+        free[0]["timestamp"] = json!("2027-06-01T12:00:00Z");
+        free[1]["timestamp"] = json!("not a time at all");
+        assert!(check_listed(free).is_ok());
+    }
+
+    #[test]
+    fn the_placeholder_allowlist_refuses_every_action() {
+        let placeholder = ComposeAllowlist::default();
+        let model = model_quote();
+        for action in actions() {
+            let (record, quote) = record_over(vec![action.clone()], &model);
             assert_eq!(
                 check_compose_manager(
                     &record,
                     |_| Some(quote.clone()),
                     &model,
                     NONCE,
-                    Some(&allowlist().compose_actions)
+                    Some(&placeholder)
                 ),
                 Err(ReplayRefusal::ComposeActionNotAllowed),
-                "{field}"
+                "{action}"
             );
         }
-        // The placeholder allowlist, which lists nothing, refuses every
-        // action.
-        let (record, quote) = record_over(actions(), &model);
-        assert_eq!(
-            check_compose_manager(&record, |_| Some(quote.clone()), &model, NONCE, Some(&[])),
-            Err(ReplayRefusal::ComposeActionNotAllowed)
-        );
     }
 
     // -- the allowlist ------------------------------------------------------
@@ -1880,16 +2423,25 @@ mod tests {
     fn the_placeholder_allowlist_parses_and_matches_nothing() {
         let placeholder = Allowlist::from_json(&json!({
             "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
-            "compose_actions": [],
+            "compose_actions": {"compose_manager_images": [], "compose_files": []},
         }))
         .expect("the shape-valid placeholder parses");
         let events = ten_events();
         let replayed = replay_rtmr3(Some(&log_of(&events)), &quote_replaying(&events)).unwrap();
         assert!(check_rtmr3_allowlist(&replayed, &placeholder.rtmr3).is_err());
+        assert!(placeholder.compose_actions.is_empty());
         assert_eq!(
             Allowlist::from_json(&placeholder.to_json()),
             Ok(placeholder)
         );
+        // The repository's committed placeholder is exactly this.
+        let committed: Value = serde_json::from_str(include_str!(
+            "../../../deploy/staging-gcp/near-ai-rtmr3-allowlist.json"
+        ))
+        .unwrap();
+        let committed = Allowlist::from_json(&committed).expect("the committed placeholder parses");
+        assert!(committed.compose_actions.is_empty());
+        assert!(committed.rtmr3.app_id.is_empty());
     }
 
     #[test]
@@ -1917,22 +2469,79 @@ mod tests {
             .unwrap()
             .push(first);
         cases.push(repeated_marker);
-        let mut timestamped = good.clone();
-        timestamped["compose_actions"][0]["timestamp"] = json!(1);
-        cases.push(timestamped);
-        let mut repeated_action = good.clone();
-        let first = repeated_action["compose_actions"][0].clone();
-        repeated_action["compose_actions"]
-            .as_array_mut()
-            .unwrap()
-            .push(first);
-        cases.push(repeated_action);
         let mut missing = good.clone();
         missing["rtmr3"]
             .as_object_mut()
             .unwrap()
             .remove("key_provider");
         cases.push(missing);
+        // The #1575 list form of `compose_actions` is not this schema.
+        let mut old_form = good.clone();
+        old_form["compose_actions"] =
+            json!([{"action": "compose_up", "container": "app", "image": "registry.example/app"}]);
+        cases.push(old_form);
+        let mut compose_extra = good.clone();
+        compose_extra["compose_actions"]["compose_services"] = json!([]);
+        cases.push(compose_extra);
+        let mut compose_missing = good.clone();
+        compose_missing["compose_actions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("compose_files");
+        cases.push(compose_missing);
+        // An image listed by tag, not by digest; a digest of the wrong
+        // length or case; no name before the digest.
+        for image in [
+            "registry.example/compose-manager:latest".to_string(),
+            format!(
+                "registry.example/compose-manager@sha256:{}",
+                "ab".repeat(31)
+            ),
+            format!(
+                "registry.example/compose-manager@sha256:{}",
+                "AB".repeat(32)
+            ),
+            format!("@sha256:{}", "ab".repeat(32)),
+        ] {
+            let mut case = good.clone();
+            case["compose_actions"]["compose_manager_images"] = json!([image]);
+            cases.push(case);
+        }
+        let mut repeated_image = good.clone();
+        repeated_image["compose_actions"]["compose_manager_images"] =
+            json!([manager_image(), manager_image()]);
+        cases.push(repeated_image);
+        // A compose file whose hash or commit is not lower-case hex of its
+        // length, whose path is empty, with a key missing or extra.
+        for (key, value) in [
+            ("file_sha256", json!("f1".repeat(31))),
+            ("file_sha256", json!("F1".repeat(32))),
+            ("commit", json!("c1".repeat(32))),
+            ("commit", json!("C1".repeat(20))),
+            ("file", json!("")),
+            ("file", json!(1)),
+            ("tag", json!("v0.0.1")),
+        ] {
+            let mut case = good.clone();
+            case["compose_actions"]["compose_files"][0][key] = value;
+            cases.push(case);
+        }
+        let mut file_missing = good.clone();
+        file_missing["compose_actions"]["compose_files"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("commit");
+        cases.push(file_missing);
+        // Two entries for one (file, commit): compose_down matches on that
+        // pair, so two hashes for it are a contradiction, not a choice.
+        let mut contradictory = good.clone();
+        let mut second = contradictory["compose_actions"]["compose_files"][0].clone();
+        second["file_sha256"] = json!("f2".repeat(32));
+        contradictory["compose_actions"]["compose_files"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        cases.push(contradictory);
         for case in cases {
             assert_eq!(
                 Allowlist::from_json(&case),
@@ -1940,6 +2549,15 @@ mod tests {
                 "{case}"
             );
         }
+        // The same file at another commit is another entry.
+        let mut two_commits = good.clone();
+        let mut second = two_commits["compose_actions"]["compose_files"][0].clone();
+        second["commit"] = json!("c2".repeat(20));
+        two_commits["compose_actions"]["compose_files"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert!(Allowlist::from_json(&two_commits).is_ok());
     }
 
     #[test]
@@ -1960,7 +2578,8 @@ mod tests {
         // Debug of what a check reads carries no payload.
         let events = ten_events();
         let replayed = replay_rtmr3(Some(&log_of(&events)), &quote_replaying(&events)).unwrap();
-        let shown = format!("{replayed:?} {:?}", allowlist());
+        let checked = check_listed(actions()).unwrap();
+        let shown = format!("{replayed:?} {:?} {checked:?}", allowlist());
         for value in [
             APP_ID,
             INSTANCE_ID,
@@ -1968,9 +2587,14 @@ mod tests {
             OS_IMAGE_HASH,
             KEY_PROVIDER,
             COMPOSE_HASH,
+            COMPOSE_FILE,
+            FILE_SHA256,
+            COMMIT,
+            "registry.example",
+            "model-a",
+            "v0.0.1",
         ] {
-            assert!(!shown.contains(value), "Debug carries a payload");
+            assert!(!shown.contains(value), "Debug carries {value}");
         }
-        assert!(!format!("{:?}", allowlist().compose_actions).contains("registry.example"));
     }
 }
