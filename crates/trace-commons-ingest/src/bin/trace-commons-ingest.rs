@@ -30514,7 +30514,7 @@ async fn run_credit_settlement_unlocked(
         .map_err(internal_error)?;
     let candidate_events = credit_events
         .into_iter()
-        .filter(|event| trace_credit_event_counts_toward_settlement(event))
+        .filter(trace_credit_event_counts_toward_settlement)
         .filter(|event| event.credit_points_delta > 0.0)
         .filter(|event| !already_settled_event_ids.contains(&event.event_id))
         .filter(|event| {

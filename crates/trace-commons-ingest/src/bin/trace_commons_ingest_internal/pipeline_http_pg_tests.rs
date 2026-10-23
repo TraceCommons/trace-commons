@@ -8719,7 +8719,9 @@ fn credit_presentation(
 /// (`attempt_emit_novelty_utility_credit`). P's comes from the live worker.
 ///
 /// Differences by design are pinned per side with their ruling (T15-2,
-/// T15-3); everything else must be equal. The status document is also read
+/// T15-3, and the owner's 2026-10-23 decision that `main`'s gate scoring
+/// award settles while the pipeline's compatibility leg still does not);
+/// everything else must be equal. The status document is also read
 /// with contributor reads from files (Ruling T15-7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
@@ -9182,8 +9184,25 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
             serde_json::json!(legacy_code.as_u16()),
             serde_json::json!(pipeline_code.as_u16()),
         );
+        // Owner decision 2026-10-23: `main`'s gate scoring award
+        // (`NoveltyUtility`) is settlement-eligible, so with model training
+        // allowed `main` holds an unsettled award that the withdrawal
+        // forfeits. The pipeline's compatibility leg still never settles
+        // (Ruling S10, unchanged), so it has nothing to forfeit. Without
+        // model training no award is written on either side.
+        parity.pin(
+            &format!("{case}: withdrawal credit_retained"),
+            "scoring award settles on main only",
+            (
+                legacy_withdrawal["credit_retained"].clone(),
+                serde_json::json!(!model_training),
+            ),
+            (
+                pipeline_withdrawal["credit_retained"].clone(),
+                serde_json::json!(true),
+            ),
+        );
         for field in [
-            "credit_retained",
             "prior_status",
             "distribution_reach",
             "already_distributed",
