@@ -165,7 +165,7 @@ POSTGRES_STEPS = (
         "postgres_legacy_parity",
         "cargo",
         cargo_args=("-p", "trace-commons-ingest", "--lib"),
-        test_filter="legacy_and_pipeline_tenants_match_under_equivalent_configuration",
+        test_filter="legacy_and_pipeline_tenants_match_except_pinned_differences",
         needs_login_resolver=True,
         needs_pilot_check=True,
     ),

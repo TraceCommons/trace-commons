@@ -557,7 +557,7 @@ fn compare_baseline_config(
 /// on the old path, with an in-process gate that holds `gate`. The candidate
 /// tenant is on the receipts list, so its receipts go to the pipeline, whose
 /// compatibility bundle holds the same `gate`. The model is
-/// `legacy_and_pipeline_tenants_match_under_equivalent_configuration`.
+/// `legacy_and_pipeline_tenants_match_except_pinned_differences`.
 ///
 /// This function takes no value of the two sides from an environment
 /// variable. The receipt handler builds a redactor for each receipt

@@ -509,7 +509,7 @@ jobs:
       - name: versioned pipeline parity with legacy
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_except_pinned_differences 2>&1 | tee pipeline-parity.log
           grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
