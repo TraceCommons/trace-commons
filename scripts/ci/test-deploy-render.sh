@@ -706,6 +706,13 @@ if run_render payout-ok "${payout_settings[@]}" \
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_PROVISIONING_ENABLED true
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER ZHVtbXktc3RhZ2luZy1wZXBwZXItMDEyMzQ1Njc4OWFiY2RlZg==
   expect "$out/ingest.env" TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY "$hex_name_kek"
+  # dry_run sends nothing, so it renders without the operator's control
+  # token and does not read its secret.
+  if grep -q '^TRACE_COMMONS_PAYOUT_CONTROL_TOKEN=' "$out/ingest.env"; then
+    fail "render-env.sh wrote a payout control token for dry_run"
+  else
+    pass "render-env.sh renders payout dry_run without the control token"
+  fi
 else
   fail "render-env.sh failed on payout dry_run with every setting"
   cat "$scratch/payout-ok.err" >&2
@@ -756,6 +763,36 @@ payout_refused relative-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_
   TC_CREDIT_SETTLEMENT_TABLE_PATH=settlement-table.json
 payout_refused missing-table "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   "TC_CREDIT_SETTLEMENT_TABLE_PATH=$scratch/no-such-table.json"
+# A live rail needs the operator's payout control token, or its kill switch
+# is unreachable (the ingest refuses to boot without it): the render reads
+# tc-staging-payout-control-token, 32 or more characters on one line, and
+# refuses without it. Synthetic tokens only.
+control_token_ok="$(printf 'k7%.0s' $(seq 20))"
+if run_render payout-live "${payout_settings[@]}" TC_NEAR_AI_PAYOUT_MODE=live \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  "TC_SECRET_tc_staging_payout_control_token=$control_token_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE live
+  expect "$out/ingest.env" TRACE_COMMONS_PAYOUT_CONTROL_TOKEN "$control_token_ok"
+else
+  fail "render-env.sh failed on payout live with every setting"
+  cat "$scratch/payout-live.err" >&2
+fi
+payout_refused live-no-control-token TC_NEAR_AI_PAYOUT_MODE=live \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok"
+if grep -q 'tc-staging-payout-control-token' "$scratch/payout-live-no-control-token.err"; then
+  pass "the live refusal names the control token secret"
+else
+  fail "the live refusal does not name the control token secret"
+fi
+payout_refused live-short-control-token TC_NEAR_AI_PAYOUT_MODE=live \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  "TC_SECRET_tc_staging_payout_control_token=$(printf 'k%.0s' $(seq 31))"
+payout_refused live-two-line-control-token TC_NEAR_AI_PAYOUT_MODE=live \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  "TC_SECRET_tc_staging_payout_control_token=$control_token_ok"$'\n'"TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=disabled"
+payout_refused live-spaced-control-token TC_NEAR_AI_PAYOUT_MODE=live \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  "TC_SECRET_tc_staging_payout_control_token=$control_token_ok with spaces"
 # Every setting the rail reads from the environment is one the render knows
 # (NearAiRailConfig's names, the rate table's path), so a setting added later
 # cannot reach an enabled rail unrendered.

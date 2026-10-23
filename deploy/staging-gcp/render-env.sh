@@ -59,6 +59,11 @@ set +x
 #                       path of the installed settlement table (an existing
 #                       file; it carries the payout rate), written as
 #                       TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH.
+#                       live also reads the secret
+#                       tc-staging-payout-control-token (32 or more
+#                       characters on one line), the operator's token for
+#                       halt and resume, written as
+#                       TRACE_COMMONS_PAYOUT_CONTROL_TOKEN; dry_run does not.
 #   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
 #                       optional, both or neither: the first run's estimated
 #                       NEAR AI credit per accepted trace, in micro-dollars,
@@ -304,6 +309,16 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG=$TC_NEAR_AI_PAYOUT_SENDER_ORG"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE=$TC_NEAR_AI_PAYOUT_SOURCE"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO=$TC_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO"$'\n'
+    # A live rail must be haltable: the operator's payout control token is
+    # the only credential halt and resume accept, and the ingest refuses to
+    # boot a live rail without one (payout_control_token_unconfigured).
+    # dry_run sends nothing, so it neither needs nor reads it.
+    if [ "$TC_NEAR_AI_PAYOUT_MODE" = live ]; then
+      control_token="$(secret tc-staging-payout-control-token)"
+      shaped tc-staging-payout-control-token "$control_token" \
+        '^[A-Za-z0-9._~+/=-]{32,}$' "32 or more characters of letters, digits and ._~+/=- (openssl rand -hex 32)"
+      extra+="TRACE_COMMONS_PAYOUT_CONTROL_TOKEN=$control_token"$'\n'
+    fi
     ;;
   *) refuse "TC_NEAR_AI_PAYOUT_MODE must be disabled, dry_run or live" ;;
 esac
