@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# First, before anything is read: `bash -x` or an inherited xtrace would
+# print every secret as it is assigned.
+set +x
 # Render the staging server's configuration from Secret Manager (staging
 # design 3.7). Run on the staging VM, as root, from a checkout of the commit
 # being deployed:
@@ -103,6 +106,16 @@ TC_KMS_KEY_NAME="projects/$TC_GCP_PROJECT/locations/$TC_KMS_LOCATION/keyRings/tc
 TC_RUNTIME_SA="tc-staging-runtime@$TC_GCP_PROJECT.iam.gserviceaccount.com"
 TC_WEBAUTHN_RP_ID="$TC_PUBLIC_HOST"
 
+# A private directory for gcloud's error output, removed on exit with the
+# render's working directory.
+private="$(mktemp -d)"
+work=""
+cleanup() {
+  rm -rf "$private"
+  [ -z "$work" ] || rm -rf "$work"
+}
+trap cleanup EXIT
+
 # One secret's value, or a refusal naming the secret. Never echoed.
 secret() {
   local name="$1" value
@@ -110,8 +123,18 @@ secret() {
     local var="TC_SECRET_${name//-/_}"
     value="${!var:-}"
   else
-    value="$(gcloud secrets versions access latest --secret="$name" \
-      --project="$TC_GCP_PROJECT" 2>/dev/null)" || value=""
+    # gcloud's error output holds no secret value, but it does name the
+    # secret's full resource path, so only its error class is repeated.
+    local errors class
+    errors="$(mktemp "$private/gcloud.XXXXXX")"
+    if ! value="$(gcloud secrets versions access latest --secret="$name" \
+      --project="$TC_GCP_PROJECT" 2>"$errors")"; then
+      class="$(grep -o -E 'PERMISSION_DENIED|NOT_FOUND|UNAUTHENTICATED|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE' \
+        "$errors" | head -n 1 || true)"
+      rm -f "$errors"
+      refuse "secret $name could not be read (${class:-missing, empty or not readable by the runtime service account})"
+    fi
+    rm -f "$errors"
   fi
   [ -n "$value" ] || refuse "secret $name is missing or empty"
   printf '%s' "$value"
@@ -265,7 +288,6 @@ caddy_vars='${TC_PUBLIC_HOST} ${TC_LE_EMAIL} ${TC_SITE_ROOT}'
 # renamed, so a refusal at any point leaves the live files as they were.
 mkdir -p "$out_dir"
 work="$(mktemp -d "$out_dir/.render-env.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
 umask 027
 
 # The pilot render with the staging overlay applied: an overlay key replaces

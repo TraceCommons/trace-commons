@@ -315,7 +315,7 @@ run_render() {
     TC_RENDER_OUT_DIR="$out" TC_SITE_ROOT="$site" TC_DEPLOY_DIR="$deploy_dir" \
     TC_RENDER_SKIP_CHOWN=1 TC_LE_EMAIL=ops@example.invalid TC_GCP_REGION=us-central1 \
     "${secret_env[@]}" "$@" \
-    bash "$render" --secrets-from-env >"$scratch/$stem.out" 2>"$scratch/$stem.err"
+    bash ${RENDER_XTRACE:+-x} "$render" --secrets-from-env >"$scratch/$stem.out" 2>"$scratch/$stem.err"
 }
 
 if run_render render; then
@@ -462,6 +462,20 @@ else
   pass "render-env.sh prints no secret value"
 fi
 
+# Run under `bash -x`, as an operator debugging it might, it still prints
+# no secret: the script turns tracing off before it reads one.
+if RENDER_XTRACE=1 run_render xtrace; then
+  if grep -q -F -e dummy-staging -e dummystaging -e "$hex_gate" -e "$hex_artifact" \
+    -e "$hex_name_kek" -e ZHVtbXkt -e 'PRIVATE KEY' "$scratch/xtrace.out" "$scratch/xtrace.err"; then
+    fail "render-env.sh under bash -x printed a secret value"
+  else
+    pass "render-env.sh under bash -x prints no secret value"
+  fi
+else
+  fail "render-env.sh failed under bash -x"
+fi
+run_render render >/dev/null || fail "render-env.sh failed on the second render"
+
 aasa="$site/.well-known/apple-app-site-association"
 if [ -f "$aasa" ] && [ "$(cat "$aasa")" = '{"webcredentials":{"apps":["KXSWJN7WY8.ai.tracecommons.shell.staging"]}}' ]; then
   pass "render-env.sh staged the staging AASA file"
@@ -607,6 +621,35 @@ for bad in \
     fail "render-env.sh left an env file behind after refusing tc-staging-${name//_/-}"
   else
     pass "render-env.sh refuses a malformed tc-staging-${name//_/-} by name and writes nothing"
+  fi
+done
+
+# Read through gcloud, a refusal says why a secret could not be read: a
+# permission denial is not a missing secret. gcloud's message names the
+# secret's full resource path; only its error class is repeated.
+gstubs="$scratch/gcloud-stubs"
+mkdir -p "$gstubs"
+cat >"$gstubs/gcloud" <<'STUB'
+#!/usr/bin/env bash
+echo "ERROR: (gcloud.secrets.versions.access) $FAKE_GCLOUD_ERROR: Permission 'secretmanager.versions.access' denied for resource 'projects/000000000000/secrets/x/versions/latest'" >&2
+exit 1
+STUB
+chmod +x "$gstubs/gcloud"
+for class in PERMISSION_DENIED NOT_FOUND; do
+  rm -rf "$out" "$site" "$deploy_dir"
+  mkdir -p "$out" "$site" "$deploy_dir"
+  if env -i PATH="$gstubs:/usr/bin:/bin:$(dirname "$envsubst_bin")" HOME="$scratch/home" \
+    TC_RENDER_OUT_DIR="$out" TC_SITE_ROOT="$site" TC_DEPLOY_DIR="$deploy_dir" \
+    TC_RENDER_SKIP_CHOWN=1 TC_LE_EMAIL=ops@example.invalid TC_GCP_REGION=us-central1 \
+    FAKE_GCLOUD_ERROR="$class" \
+    bash "$render" >"$scratch/gcloud.out" 2>"$scratch/gcloud.err"; then
+    fail "render-env.sh rendered with gcloud failing $class"
+  elif grep -qx "render-env: refusing: secret tc-staging-db-app-password could not be read ($class)" "$scratch/gcloud.err" \
+    && ! grep -q 'projects/' "$scratch/gcloud.err"; then
+    pass "render-env.sh names gcloud's $class, and nothing else of its message"
+  else
+    fail "render-env.sh did not name gcloud's $class alone"
+    cat "$scratch/gcloud.err" >&2
   fi
 done
 
