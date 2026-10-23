@@ -638,11 +638,9 @@ impl DistributionSummary {
             p75_micros: percentile_micros(sorted, 75),
             p90_micros: percentile_micros(sorted, 90),
             max_micros: sorted.last().copied().unwrap_or(0),
-            mean_micros: if count == 0 {
-                0
-            } else {
-                ((sum + count / 2) / count) as u64
-            },
+            mean_micros: (sum + count / 2)
+                .checked_div(count)
+                .map_or(0, |mean| mean as u64),
         }
     }
 }
