@@ -142,8 +142,9 @@ session.
 
 1. Quit Near.ai Staging.
 2. Delete Near.ai Staging from Applications.
-3. Delete the `trace-commons-staging` data folder, if you want your staging
-   state gone.
+3. Delete the data folder `~/Library/Application Support/trace-commons-staging`,
+   if you want your staging state gone. The released app's folder,
+   `trace-commons` beside it, is separate; leave it alone.
 4. Delete the Near.ai Staging items from Keychain Access, if you want your
    staging keys gone.
 
