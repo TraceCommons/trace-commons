@@ -3633,6 +3633,40 @@ fn production_package_build_needs_no_network() {
 }
 
 /// SQ-17: with the six selection variables of the env file set,
+/// The production compatibility package over the pilot's descriptors and
+/// gate (the package variables of `deploy/pilot-gcp/ingest.env.template`,
+/// with its `NoveltyUtility` delta of 0) keeps the bundle id that `main`
+/// (`4dc7ff810`) builds from that file with `pipeline.py package --bundle
+/// production`. A byte change in the compatibility builder fails here.
+#[test]
+fn the_pilot_compatibility_package_keeps_mains_bundle_id() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+
+    let env = BTreeMap::from([
+        ("TRACE_COMMONS_NEAR_AI_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8"),
+        ("TRACE_COMMONS_EMBEDDER_MODEL_ID", "BAAI/bge-large-en-v1.5"),
+        ("TRACE_COMMONS_VECTOR_INDEX_DIM", "1024"),
+    ]);
+    let lookup = |var: &str| env.get(var).map(|value| value.to_string());
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 0,
+    };
+    let package = production_bundle_package(&lookup, &gate).expect("builds offline");
+    assert_eq!(
+        package.bundle_id,
+        "sha256:92c0f9d7ebc41975481b71093558e86d8c86941db8168ccc25a4d3086aa7064b"
+    );
+}
+
 /// `pipeline.py package --bundle production` builds the calibrated
 /// substance package offline, as it builds the compatibility package: the
 /// descriptors through the deployed parsers, no model loaded, no network

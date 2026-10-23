@@ -94,6 +94,11 @@ SubstanceEvaluateOK: report=.local/substance-calibration-report.json values=.loc
 The two files are also in the run directory. A failure prints one
 `PipelineFailure:` line with a label.
 
+`.local/` holds the files of the last `evaluate` run only. A trial run with
+another percentile replaces the values file of the run that you chose, so
+copy that file before a trial run, or run `evaluate` again with the chosen
+percentile.
+
 ## The two files
 
 `substance-calibration-report.json` is the report
