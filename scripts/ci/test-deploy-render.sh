@@ -296,7 +296,7 @@ issuer="$out/issuer.env"
 
 value_of() {
   # The value of one assignment in a rendered env file, quotes as written.
-  grep -E "^$2=" "$1" | tail -n 1 | sed "s/^$2=//"
+  { grep -E "^$2=" "$1" || true; } | tail -n 1 | sed "s/^$2=//"
 }
 
 expect() {
