@@ -1818,12 +1818,9 @@ pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check agai
 pub const SPEND_ORG_TITLE: &str = "Spending organization";
 /// What the card is a choice about. DRAFT.
 pub const SPEND_ORG_WHAT: &str = "Private AI spends from this organization's NEAR AI balance.";
-/// The picker's label, also its accessible name. DRAFT.
+/// The picker's label, also its accessible name. Picking an organization
+/// switches to it; there is no separate button. DRAFT.
 pub const SPEND_ORG_PICKER: &str = "Organization to spend from";
-/// The button that applies the picked organization. DRAFT.
-pub const SPEND_ORG_SWITCH: &str = "Switch";
-/// The button's accessible name, distinct from other Switch controls. DRAFT.
-pub const SPEND_ORG_SWITCH_ACCESSIBILITY: &str = "Switch spending organization";
 /// Shown while a switch is in flight; it takes about ten seconds. DRAFT.
 pub const SPEND_ORG_SWITCHING: &str = "Switching. This takes a few seconds.";
 /// A switch that failed. Every failure changes nothing. DRAFT.
@@ -1860,8 +1857,6 @@ pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
         "title": SPEND_ORG_TITLE,
         "what": SPEND_ORG_WHAT,
         "picker": SPEND_ORG_PICKER,
-        "switch": SPEND_ORG_SWITCH,
-        "switch_accessibility": SPEND_ORG_SWITCH_ACCESSIBILITY,
         "switching": SPEND_ORG_SWITCHING,
         "failed": SPEND_ORG_FAILED,
         "session_expired": SPEND_ORG_SESSION_EXPIRED,

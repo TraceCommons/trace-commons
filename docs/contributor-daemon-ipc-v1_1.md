@@ -6691,7 +6691,7 @@ is cached for a minute (`fresh: true` goes back after five seconds).
 | `multiple` | `listed` with two or more organizations. An unknown count is never `true`: a page that does not carry every organization is refused as `unavailable`. |
 | `prompt` | `multiple`, a key, and not `explicit`: the Private AI screen asks the contributor to choose in Settings |
 | `revoke_pending` | a key this install replaced could not be revoked yet; it is retried on each listing |
-| `view` | the words: `title`, `what`, `picker`, `switch`, `switch_accessibility`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
+| `view` | the words: `title`, `what`, `picker`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
 
 `near_ai_spend_organization_select` switches. Its order keeps one working key
 at every step:

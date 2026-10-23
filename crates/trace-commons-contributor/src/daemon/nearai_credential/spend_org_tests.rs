@@ -614,3 +614,44 @@ fn the_record_holds_ids_only_and_drops_any_that_are_not_ids() {
     assert_eq!(record.pending_revocations.len(), 1);
     assert_eq!(record.pending_revocations[0].key_id, "key-1");
 }
+
+/// The words the macOS app's `SpendOrganizations.Words` requires, all of
+/// them, non-empty. The app draws nothing if one is missing, so a key
+/// renamed here would silently remove the picker and the prompt.
+#[test]
+fn the_view_carries_every_word_the_mac_app_reads() {
+    let view = crate::private_inference_copy::spend_org_view(Some("Example org"));
+    let object = view.as_object().unwrap();
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "failed",
+            "picker",
+            "prompt_action",
+            "prompt_action_accessibility",
+            "prompt_line",
+            "prompt_title",
+            "refused",
+            "revoke_pending",
+            "session_expired",
+            "switching",
+            "title",
+            "what",
+        ]
+    );
+    assert!(
+        object
+            .values()
+            .all(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+    );
+    assert!(
+        view["prompt_line"]
+            .as_str()
+            .unwrap()
+            .contains("Example org")
+    );
+    let unnamed = crate::private_inference_copy::spend_org_view(None);
+    assert!(!unnamed["prompt_line"].as_str().unwrap().contains('{'));
+}
