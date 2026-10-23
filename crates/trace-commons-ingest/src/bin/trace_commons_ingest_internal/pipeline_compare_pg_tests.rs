@@ -20,6 +20,15 @@
 //! before each trace. It writes two records for each trace to the records
 //! file, and it writes the report before it fails for a difference.
 //!
+//! `substance_evaluate_run` is `pipeline.py evaluate`: the offline
+//! calibration of the substance Score over the same pin. It builds each
+//! envelope with `compare_envelope`, projects it, and drops it.
+//!
+//! SQ-16: the legacy removal (#1330) deletes this harness. Before it does, it
+//! must move `compare_raw` and `compare_envelope` to the library, because
+//! `substance_evaluate_run` calls them and does not go away with the old
+//! path.
+//!
 //! Code marked `// baseline-old-path:` applies to the old path only and goes
 //! away with it. Nested inside `tests` beside `pipeline_corpus_pg_tests`.
 
@@ -63,6 +72,10 @@ use trace_commons_server::versioned_pipeline_credit::{
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_product::PipelineProductStore;
 use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, is_safe_label};
+use trace_commons_server::versioned_pipeline_substance::{
+    SubstanceParams, ToolCallProjection, project_tool_calls,
+};
+use trace_commons_server::versioned_pipeline_substance_calibration::{EvaluateInputs, evaluate};
 
 use super::pipeline_corpus_pg_tests::{
     ARTIFACT_ROOT_VAR, CHECK_RESULT_DIR_VAR, TEST_MASTER_KEY_VAR, sha256_bytes, write_atomically,
@@ -2267,6 +2280,164 @@ async fn pipeline_compare_run() {
 }
 
 // ---------------------------------------------------------------------------
+// `pipeline.py evaluate`: the substance calibration over the pin.
+// ---------------------------------------------------------------------------
+
+const SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR: &str =
+    "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH";
+const SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH";
+const SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH";
+const SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR: &str =
+    "TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE";
+const SUBSTANCE_EVALUATE_REPORT_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH";
+const SUBSTANCE_EVALUATE_VALUES_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH";
+
+const SUBSTANCE_EVALUATE_ENVIRONMENT_INCOMPLETE: &str = "substance_evaluate_environment_incomplete";
+const SUBSTANCE_EVALUATE_ENVELOPE_FAILED: &str = "substance_evaluate_envelope_failed";
+
+/// The `sub_floor_mult` of spec section 6, in micros.
+const SUBSTANCE_EVALUATE_SUB_FLOOR_MULT_MICROS: u32 = 250_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubstanceEvaluateConfig {
+    bootstrap: PathBuf,
+    holdout: PathBuf,
+    manifest: PathBuf,
+    floor_percentile: u32,
+    report_path: PathBuf,
+    values_path: PathBuf,
+}
+
+impl SubstanceEvaluateConfig {
+    /// `Ok(None)` when none of the six variables is set (nothing to run).
+    /// When one is set, each must be set and not empty
+    /// (`substance_evaluate_environment_incomplete`). A floor percentile
+    /// that is not a whole number is `substance_evaluate_floor_percentile_invalid`;
+    /// `evaluate` refuses one above 100.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
+        const VARS: [&str; 6] = [
+            SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR,
+            SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR,
+            SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR,
+            SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR,
+            SUBSTANCE_EVALUATE_REPORT_PATH_VAR,
+            SUBSTANCE_EVALUATE_VALUES_PATH_VAR,
+        ];
+        if VARS.iter().all(|name| var(name).is_none()) {
+            return Ok(None);
+        }
+        let required = |name: &str| {
+            var(name)
+                .filter(|value| !value.is_empty())
+                .ok_or(SUBSTANCE_EVALUATE_ENVIRONMENT_INCOMPLETE)
+        };
+        let bootstrap = required(SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR)?;
+        let holdout = required(SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR)?;
+        let manifest = required(SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR)?;
+        let floor_percentile = required(SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR)?;
+        let report = required(SUBSTANCE_EVALUATE_REPORT_PATH_VAR)?;
+        let values = required(SUBSTANCE_EVALUATE_VALUES_PATH_VAR)?;
+        let floor_percentile = floor_percentile
+            .parse::<u32>()
+            .map_err(|_| "substance_evaluate_floor_percentile_invalid")?;
+        Ok(Some(Self {
+            bootstrap: PathBuf::from(bootstrap),
+            holdout: PathBuf::from(holdout),
+            manifest: PathBuf::from(manifest),
+            floor_percentile,
+            report_path: PathBuf::from(report),
+            values_path: PathBuf::from(values),
+        }))
+    }
+}
+
+/// One projection for each fixture of the readers, in order (SQ-14): each
+/// fixture is read, built into an envelope, projected, and dropped before
+/// the next one, so the corpus is never in memory. A line that the reader
+/// refuses gives the reader's label, and an envelope that cannot be built
+/// gives `substance_evaluate_envelope_failed`. Either refuses the whole
+/// corpus: a skipped trace would move the percentiles without a record
+/// (Review Focus 5).
+async fn project_corpus(
+    readers: Vec<CompareCorpusReader>,
+) -> Result<Vec<ToolCallProjection>, &'static str> {
+    let mut projections = Vec::new();
+    for mut reader in readers {
+        while let Some(fixture) = reader.next_fixture()? {
+            let envelope = compare_envelope(&fixture)
+                .await
+                .map_err(|_| SUBSTANCE_EVALUATE_ENVELOPE_FAILED)?;
+            projections.push(project_tool_calls(&envelope));
+        }
+    }
+    Ok(projections)
+}
+
+/// `pipeline.py evaluate`. Checks the two corpus files against the export
+/// manifest, projects each trace, runs `evaluate` at the RLVR parameters
+/// with `sub_floor_mult` 0.25 and the floor percentile of the environment,
+/// and writes two files: the canonical bytes of the report, whose SHA-256
+/// is the `report_digest` of the values, and the pretty JSON of the
+/// calibrated values. It needs no database: it reads only the corpus.
+#[tokio::test]
+#[ignore = "the implementation of `pipeline.py evaluate`: run it through that command"]
+async fn substance_evaluate_run() {
+    fn fail<T>(label: &'static str) -> T {
+        panic!("{label}")
+    }
+
+    let config = match SubstanceEvaluateConfig::from_vars(|name| std::env::var(name).ok()) {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(label) => fail(label),
+    };
+    let pin = read_compare_manifest(&config.manifest).unwrap_or_else(fail);
+    let partitions = [
+        ("bootstrap", &config.bootstrap),
+        ("holdout", &config.holdout),
+    ];
+    // The two corpus files are the files of the export, before the first
+    // envelope: a streamed read with no parse.
+    for (partition, path) in partitions {
+        let digest = CompareCorpusReader::open(partition, path)
+            .and_then(CompareCorpusReader::finish)
+            .unwrap_or_else(fail);
+        assert!(
+            digest == pin.digests[&format!("{partition}_corpus")],
+            "substance_evaluate_corpus_digest_mismatch"
+        );
+    }
+    let readers = partitions
+        .map(|(partition, path)| CompareCorpusReader::open(partition, path).unwrap_or_else(fail))
+        .into_iter()
+        .collect();
+    let projections = project_corpus(readers).await.unwrap_or_else(fail);
+    assert!(
+        projections.len() as u64 == pin.trace_count,
+        "substance_evaluate_count_mismatch"
+    );
+
+    let evaluation = evaluate(&EvaluateInputs {
+        projections,
+        corpus_pin_digest: pin.digests["source"].clone(),
+        params: SubstanceParams::rlvr_v1(),
+        sub_floor_mult_micros: SUBSTANCE_EVALUATE_SUB_FLOOR_MULT_MICROS,
+        substance_floor_percentile: config.floor_percentile,
+    })
+    .unwrap_or_else(fail);
+    let report_bytes = evaluation.report.canonical_bytes().unwrap_or_else(fail);
+    assert!(
+        sha256_bytes(&report_bytes) == evaluation.values.calibration.report_digest,
+        "substance_evaluate_report_digest_mismatch"
+    );
+    let mut values_bytes =
+        serde_json::to_vec_pretty(&evaluation.values).expect("the values serialise");
+    values_bytes.push(b'\n');
+    write_atomically(&config.report_path, &report_bytes);
+    write_atomically(&config.values_path, &values_bytes);
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
@@ -2339,6 +2510,106 @@ fn the_corpus_reader_refuses_bad_fixtures() {
     let mut reader = CompareCorpusReader::open("bootstrap", &path).unwrap();
     assert!(reader.next_fixture().unwrap().is_none());
     assert_eq!(reader.finish().unwrap(), sha256_bytes(&[]));
+}
+
+/// Review Focus 5: a corpus trace that cannot be read or built into an
+/// envelope refuses the whole calibration with a label. It is never
+/// skipped, and the good line before it gives no projection.
+#[tokio::test]
+async fn a_corpus_with_an_unbuildable_trace_is_refused() {
+    let good = fixture_line("evaluate_good", "low", tool_steps());
+    let mut bad = serde_json::from_str::<serde_json::Value>(&fixture_line(
+        "evaluate_bad",
+        "low",
+        prose_steps("x"),
+    ))
+    .unwrap();
+    bad["privacy_risk"] = serde_json::json!("critical");
+    let (_dir, path) = write_corpus(&[good.clone(), bad.to_string()]);
+    let reader = CompareCorpusReader::open("bootstrap", &path).unwrap();
+    assert_eq!(
+        project_corpus(vec![reader]).await.err(),
+        Some("compare_corpus_line_invalid")
+    );
+
+    // The same path for the envelope: a credential in the model name makes
+    // the redactor refuse the trace.
+    let mut unbuildable = serde_json::from_str::<serde_json::Value>(&fixture_line(
+        "evaluate_secret",
+        "low",
+        prose_steps("y"),
+    ))
+    .unwrap();
+    unbuildable["trace_file"]["model_name"] =
+        serde_json::json!("sk-ant-EXPOSEDsecret0123456789abcdefghij");
+    assert!(
+        compare_envelope(&fixture_from(unbuildable.to_string()))
+            .await
+            .is_err(),
+        "the redactor refuses the fixture"
+    );
+    let (_dir, path) = write_corpus(&[good.clone(), unbuildable.to_string()]);
+    let reader = CompareCorpusReader::open("holdout", &path).unwrap();
+    assert_eq!(
+        project_corpus(vec![reader]).await.err(),
+        Some("substance_evaluate_envelope_failed")
+    );
+
+    // A corpus that builds gives one projection for each line, in order.
+    let (_dir, first) = write_corpus(&[good]);
+    let (_dir2, second) = write_corpus(&[fixture_line("evaluate_prose", "low", prose_steps("z"))]);
+    let projections = project_corpus(vec![
+        CompareCorpusReader::open("bootstrap", &first).unwrap(),
+        CompareCorpusReader::open("holdout", &second).unwrap(),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(projections.len(), 2);
+    assert_eq!(projections[0].tool_calls, 1);
+    assert_eq!(projections[1].tool_calls, 0);
+}
+
+#[test]
+fn the_evaluate_environment_is_complete_or_absent() {
+    let all = [
+        (SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR, "b.jsonl"),
+        (SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR, "h.jsonl"),
+        (SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR, "m.json"),
+        (SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR, "10"),
+        (SUBSTANCE_EVALUATE_REPORT_PATH_VAR, "r.json"),
+        (SUBSTANCE_EVALUATE_VALUES_PATH_VAR, "v.json"),
+    ];
+    let from = |vars: &[(&str, &str)]| {
+        let vars: BTreeMap<String, String> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        SubstanceEvaluateConfig::from_vars(|name| vars.get(name).cloned())
+    };
+    assert_eq!(from(&[]), Ok(None));
+    let config = from(&all).unwrap().unwrap();
+    assert_eq!(config.floor_percentile, 10);
+    assert_eq!(config.values_path, PathBuf::from("v.json"));
+    for index in 0..all.len() {
+        let mut missing = all.to_vec();
+        missing.remove(index);
+        assert_eq!(
+            from(&missing),
+            Err("substance_evaluate_environment_incomplete")
+        );
+        let mut empty = all.to_vec();
+        empty[index].1 = "";
+        assert_eq!(
+            from(&empty),
+            Err("substance_evaluate_environment_incomplete")
+        );
+    }
+    let mut word = all.to_vec();
+    word[3].1 = "ten";
+    assert_eq!(
+        from(&word),
+        Err("substance_evaluate_floor_percentile_invalid")
+    );
 }
 
 #[test]

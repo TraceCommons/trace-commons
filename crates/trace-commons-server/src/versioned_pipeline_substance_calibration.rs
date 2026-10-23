@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Offline calibration checks of the substance Score: the pairwise regression
-//! guardrail of spec section 7.1 (check 1) on synthetic bases, and the
-//! monotonicity sweep (check 2).
+//! guardrail of spec section 7.1 (check 1) on synthetic bases, the
+//! monotonicity sweep (check 2), and [`evaluate`], which runs both and the
+//! real-corpus distribution (check 3) and calibrates `sub_ceil` and
+//! `substance_floor` from it.
 //!
-//! The committed fixture, the corpus bases and `dataset generate` of
-//! section 7.1 are in the later plan. Nothing here runs a model, an embedder
-//! or the index, and the generator never runs the score.
+//! The committed fixture, the corpus bases, `dataset generate` of
+//! section 7.1 and the sensitivity analysis (check 4) are in the later plan.
+//! Nothing here runs a model, an embedder or the index, and the generator
+//! never runs the score. [`evaluate`] reads only tool-call projections, one
+//! for each trace, so no trace text can reach its report (SQ-14).
 
 use std::collections::BTreeMap;
 
@@ -27,7 +31,9 @@ use trace_commons_protocol::trace_contribution::{
 use uuid::Uuid;
 
 use crate::versioned_pipeline_substance::{
-    SubstanceParams, composite, project_tool_calls, substance_terms, to_micros,
+    CalibratedSubstanceValues, SUBSTANCE_SUB_CEIL_PERCENTILE, SUBSTANCE_VERSION,
+    SubstanceCalibration, SubstanceParams, ToolCallProjection, composite, project_tool_calls,
+    substance_terms, to_micros,
 };
 
 /// The fixed paragraph of the template filler.
@@ -558,6 +564,257 @@ pub fn monotonicity_sweep(params: &SubstanceParams) -> bool {
     true
 }
 
+pub const SUBSTANCE_CALIBRATION_REPORT_SCHEMA: &str =
+    "trace_commons.substance_calibration_report.v1";
+
+pub const EVALUATE_CORPUS_EMPTY_LABEL: &str = "evaluate_corpus_empty";
+pub const EVALUATE_FLOOR_PERCENTILE_INVALID_LABEL: &str = "evaluate_floor_percentile_invalid";
+pub const EVALUATE_PARAMS_INVALID_LABEL: &str = "evaluate_params_invalid";
+pub const EVALUATE_GUARDRAIL_FAILED_LABEL: &str = "evaluate_guardrail_failed";
+pub const EVALUATE_MONOTONICITY_FAILED_LABEL: &str = "evaluate_monotonicity_failed";
+pub const EVALUATE_REPORT_UNSERIALIZABLE_LABEL: &str = "evaluate_report_unserializable";
+
+/// The checks that [`evaluate`] runs, in order. The later plan adds
+/// `sensitivity` (check 4).
+pub const EVALUATE_CHECKS: [&str; 3] = ["guardrail", "monotonicity", "distribution"];
+
+/// What [`evaluate`] reads: one projection for each trace of the pinned
+/// corpus, the pin, the set parameters, and the owner's floor percentile.
+#[derive(Debug, Clone)]
+pub struct EvaluateInputs {
+    pub projections: Vec<ToolCallProjection>,
+    pub corpus_pin_digest: String,
+    pub params: SubstanceParams,
+    pub sub_floor_mult_micros: u32,
+    /// The percentile of substance over the corpus that `substance_floor`
+    /// comes from (spec section 11), from 0 to 100.
+    pub substance_floor_percentile: u32,
+}
+
+/// Check 1 in the report: the synthetic guardrail at the evaluated
+/// parameters.
+#[derive(Debug, Clone, Serialize)]
+pub struct GuardrailCheckReport {
+    pub recipe_id: String,
+    /// `synthetic`: the bases of [`synthetic_guardrail_bases`]. The corpus
+    /// bases are in the later plan.
+    pub source: &'static str,
+    pub transforms: Vec<GuardrailTransformSummary>,
+}
+
+/// Check 2 in the report.
+#[derive(Debug, Clone, Serialize)]
+pub struct MonotonicityCheckReport {
+    pub sweep_passed: bool,
+    /// `m_work`, `m_rep` and `att_floor_mult` are each above 0, so no term
+    /// vetoes a trace.
+    pub floors_above_zero: bool,
+}
+
+/// One value over the corpus, in micros. The percentiles are nearest rank
+/// ([`percentile_micros`]); the mean is rounded to the nearest micro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DistributionSummary {
+    pub min_micros: u64,
+    pub p10_micros: u64,
+    pub p25_micros: u64,
+    pub p50_micros: u64,
+    pub p75_micros: u64,
+    pub p90_micros: u64,
+    pub max_micros: u64,
+    pub mean_micros: u64,
+}
+
+impl DistributionSummary {
+    /// Of a sorted, non-empty slice.
+    fn of_sorted(sorted: &[u64]) -> Self {
+        let count = sorted.len() as u128;
+        let sum: u128 = sorted.iter().map(|value| u128::from(*value)).sum();
+        Self {
+            min_micros: sorted.first().copied().unwrap_or(0),
+            p10_micros: percentile_micros(sorted, 10),
+            p25_micros: percentile_micros(sorted, 25),
+            p50_micros: percentile_micros(sorted, 50),
+            p75_micros: percentile_micros(sorted, 75),
+            p90_micros: percentile_micros(sorted, 90),
+            max_micros: sorted.last().copied().unwrap_or(0),
+            mean_micros: if count == 0 {
+                0
+            } else {
+                ((sum + count / 2) / count) as u64
+            },
+        }
+    }
+}
+
+/// Check 3 in the report: the distribution of substance and of its two
+/// value terms over the corpus.
+#[derive(Debug, Clone, Serialize)]
+pub struct DistributionCheckReport {
+    pub substance: DistributionSummary,
+    pub work: DistributionSummary,
+    pub replay: DistributionSummary,
+    /// The traces with no tool call (`tool_calls == 0`).
+    pub tool_free_count: u64,
+}
+
+/// The two calibrated values and their percentiles.
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibratedValuesReport {
+    pub sub_ceil_micros: u64,
+    pub sub_ceil_percentile: u32,
+    pub substance_floor_micros: u64,
+    pub substance_floor_percentile: u32,
+}
+
+/// The calibration report (spec section 7). It holds labels, digests,
+/// counts and micros only: no trace text and no contributor identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubstanceCalibrationReport {
+    pub schema: &'static str,
+    pub corpus_pin_digest: String,
+    pub trace_count: u64,
+    pub substance_version: u32,
+    pub params: SubstanceParams,
+    pub sub_floor_mult_micros: u32,
+    pub checks_run: Vec<&'static str>,
+    pub guardrail: GuardrailCheckReport,
+    pub monotonicity: MonotonicityCheckReport,
+    pub distribution: DistributionCheckReport,
+    pub calibrated: CalibratedValuesReport,
+}
+
+impl SubstanceCalibrationReport {
+    /// The canonical JSON bytes of the report. Its digest is
+    /// `SubstanceCalibration::report_digest`.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        let value = serde_json::to_value(self).map_err(|_| EVALUATE_REPORT_UNSERIALIZABLE_LABEL)?;
+        trace_commons_protocol::canonical_json::to_canonical_vec(&value)
+            .map_err(|_| EVALUATE_REPORT_UNSERIALIZABLE_LABEL)
+    }
+}
+
+/// What [`evaluate`] gives: the report, and the calibrated values with the
+/// digest of that report.
+#[derive(Debug, Clone)]
+pub struct SubstanceEvaluation {
+    pub report: SubstanceCalibrationReport,
+    pub values: CalibratedSubstanceValues,
+}
+
+/// The nearest-rank percentile of a sorted slice (SQ-9): the value at index
+/// `ceil(p / 100 * n) - 1`, clamped to `[0, n - 1]`. A percentile above 100
+/// reads as 100. An empty slice gives 0; [`evaluate`] refuses an empty
+/// corpus before it reads a percentile.
+pub fn percentile_micros(sorted: &[u64], p: u32) -> u64 {
+    let Some(last) = sorted.len().checked_sub(1) else {
+        return 0;
+    };
+    let rank = (u64::from(p.min(100)) * sorted.len() as u64).div_ceil(100);
+    let index = (rank.saturating_sub(1) as usize).min(last);
+    sorted[index]
+}
+
+/// Checks 1 to 3 of spec section 7 over the projections of a pinned corpus,
+/// and the two calibrated values: `sub_ceil` at the 90th percentile of
+/// substance and `substance_floor` at the owner's percentile. Every
+/// projection is scored as `Unattested` (SQ-13). A check that fails refuses
+/// the whole run, so no value comes from parameters that fail a check.
+pub fn evaluate(inputs: &EvaluateInputs) -> Result<SubstanceEvaluation, &'static str> {
+    if inputs.projections.is_empty() {
+        return Err(EVALUATE_CORPUS_EMPTY_LABEL);
+    }
+    if inputs.substance_floor_percentile > 100 {
+        return Err(EVALUATE_FLOOR_PERCENTILE_INVALID_LABEL);
+    }
+    let params = &inputs.params;
+    if params.validate().is_err() || inputs.sub_floor_mult_micros > 1_000_000 {
+        return Err(EVALUATE_PARAMS_INVALID_LABEL);
+    }
+
+    // Check 1.
+    let transforms = run_synthetic_guardrail(params);
+    if transforms
+        .iter()
+        .any(|summary| summary.met_count != summary.pair_count)
+    {
+        return Err(EVALUATE_GUARDRAIL_FAILED_LABEL);
+    }
+
+    // Check 2.
+    let monotonicity = MonotonicityCheckReport {
+        sweep_passed: monotonicity_sweep(params),
+        floors_above_zero: params.m_work_micros > 0
+            && params.m_rep_micros > 0
+            && params.att_floor_mult_micros > 0,
+    };
+    if !(monotonicity.sweep_passed && monotonicity.floors_above_zero) {
+        return Err(EVALUATE_MONOTONICITY_FAILED_LABEL);
+    }
+
+    // Check 3.
+    let count = inputs.projections.len();
+    let mut substance = Vec::with_capacity(count);
+    let mut work = Vec::with_capacity(count);
+    let mut replay = Vec::with_capacity(count);
+    let mut tool_free_count = 0u64;
+    for projection in &inputs.projections {
+        let terms = substance_terms(projection, ScoreWitnessClass::Unattested, params);
+        substance.push(to_micros(composite(&terms, params)));
+        work.push(to_micros(terms.work));
+        replay.push(to_micros(terms.replay));
+        tool_free_count += u64::from(projection.tool_calls == 0);
+    }
+    substance.sort_unstable();
+    work.sort_unstable();
+    replay.sort_unstable();
+
+    let sub_ceil_micros = percentile_micros(&substance, SUBSTANCE_SUB_CEIL_PERCENTILE);
+    let substance_floor_micros = percentile_micros(&substance, inputs.substance_floor_percentile);
+    let report = SubstanceCalibrationReport {
+        schema: SUBSTANCE_CALIBRATION_REPORT_SCHEMA,
+        corpus_pin_digest: inputs.corpus_pin_digest.clone(),
+        trace_count: count as u64,
+        substance_version: SUBSTANCE_VERSION,
+        params: params.clone(),
+        sub_floor_mult_micros: inputs.sub_floor_mult_micros,
+        checks_run: EVALUATE_CHECKS.to_vec(),
+        guardrail: GuardrailCheckReport {
+            recipe_id: GuardrailRecipe::v1().recipe_id(),
+            source: "synthetic",
+            transforms,
+        },
+        monotonicity,
+        distribution: DistributionCheckReport {
+            substance: DistributionSummary::of_sorted(&substance),
+            work: DistributionSummary::of_sorted(&work),
+            replay: DistributionSummary::of_sorted(&replay),
+            tool_free_count,
+        },
+        calibrated: CalibratedValuesReport {
+            sub_ceil_micros,
+            sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+            substance_floor_micros,
+            substance_floor_percentile: inputs.substance_floor_percentile,
+        },
+    };
+    let report_digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(report.canonical_bytes()?))
+    );
+    let values = CalibratedSubstanceValues {
+        sub_ceil_micros,
+        substance_floor_micros,
+        calibration: SubstanceCalibration {
+            corpus_pin_digest: inputs.corpus_pin_digest.clone(),
+            report_digest,
+            sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
+            substance_floor_percentile: inputs.substance_floor_percentile,
+        },
+    };
+    Ok(SubstanceEvaluation { report, values })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +1004,165 @@ mod tests {
     #[test]
     fn the_monotonicity_sweep_passes_at_the_spec_values() {
         assert!(monotonicity_sweep(&SubstanceParams::rlvr_v1()));
+    }
+
+    /// The projections of 100 envelopes with 0 to 99 paired calls.
+    fn hundred_projections() -> Vec<ToolCallProjection> {
+        (0..100usize)
+            .map(|calls| {
+                let label = format!("evaluate_{calls:03}_calls");
+                let mut events = vec![calibration_event(
+                    &format!("{label}:prompt"),
+                    TraceContributionEventType::UserMessage,
+                    Some("fix the failing test".to_string()),
+                )];
+                for index in 0..calls {
+                    events.extend(paired_events(&label, index, &format!("tool{}", index % 8)));
+                }
+                project_tool_calls(&calibration_envelope(&label, events))
+            })
+            .collect()
+    }
+
+    fn inputs(projections: Vec<ToolCallProjection>, floor_percentile: u32) -> EvaluateInputs {
+        EvaluateInputs {
+            projections,
+            corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+            params: params(),
+            sub_floor_mult_micros: 250_000,
+            substance_floor_percentile: floor_percentile,
+        }
+    }
+
+    /// Substance in micros, sorted, scored as the evaluation scores it.
+    fn sorted_substance(projections: &[ToolCallProjection]) -> Vec<u64> {
+        let mut values: Vec<u64> = projections
+            .iter()
+            .map(|projection| {
+                let terms = substance_terms(projection, ScoreWitnessClass::Unattested, &params());
+                to_micros(composite(&terms, &params()))
+            })
+            .collect();
+        values.sort_unstable();
+        values
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        let sorted = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        assert_eq!(percentile_micros(&sorted, 90), 90);
+        assert_eq!(percentile_micros(&sorted, 0), 10);
+        assert_eq!(percentile_micros(&sorted, 10), 10);
+        assert_eq!(percentile_micros(&sorted, 100), 100);
+    }
+
+    #[test]
+    fn evaluate_calibrates_both_values() {
+        let projections = hundred_projections();
+        let sorted = sorted_substance(&projections);
+        let evaluation = evaluate(&inputs(projections, 25)).expect("evaluates");
+        let values = &evaluation.values;
+        // Nearest rank over 100 values: p90 is index 89, p25 index 24.
+        assert_eq!(values.sub_ceil_micros, sorted[89]);
+        assert_eq!(values.substance_floor_micros, sorted[24]);
+        assert_eq!(values.calibration.sub_ceil_percentile, 90);
+        assert_eq!(values.calibration.substance_floor_percentile, 25);
+        assert_eq!(
+            values.calibration.corpus_pin_digest,
+            format!("sha256:{}", "a".repeat(64))
+        );
+
+        let report = &evaluation.report;
+        assert_eq!(
+            report.schema,
+            "trace_commons.substance_calibration_report.v1"
+        );
+        assert_eq!(report.trace_count, 100);
+        assert_eq!(
+            report.checks_run,
+            vec!["guardrail", "monotonicity", "distribution"]
+        );
+        assert_eq!(report.guardrail.source, "synthetic");
+        assert_eq!(
+            report.guardrail.recipe_id,
+            GuardrailRecipe::v1().recipe_id()
+        );
+        assert_eq!(report.guardrail.transforms.len(), 7);
+        assert!(report.monotonicity.sweep_passed);
+        assert!(report.monotonicity.floors_above_zero);
+        assert_eq!(report.distribution.tool_free_count, 1);
+        assert_eq!(report.distribution.substance.min_micros, sorted[0]);
+        assert_eq!(report.distribution.substance.max_micros, sorted[99]);
+        assert_eq!(report.distribution.substance.p90_micros, sorted[89]);
+        assert_eq!(report.calibrated.sub_ceil_micros, values.sub_ceil_micros);
+        assert_eq!(
+            report.calibrated.substance_floor_micros,
+            values.substance_floor_micros
+        );
+
+        crate::versioned_pipeline_substance::SubstanceScoreConfig::local_reference()
+            .with_calibrated(values)
+            .validate()
+            .expect("the calibrated configuration is valid");
+    }
+
+    #[test]
+    fn a_floor_at_p_fails_at_most_p_percent() {
+        let projections = hundred_projections();
+        let sorted = sorted_substance(&projections);
+        let evaluation = evaluate(&inputs(projections, 30)).expect("evaluates");
+        let floor = evaluation.values.substance_floor_micros;
+        let failed = sorted.iter().filter(|value| **value < floor).count();
+        assert!(
+            failed as f64 / sorted.len() as f64 <= 0.30,
+            "{failed} of {} below the floor",
+            sorted.len()
+        );
+    }
+
+    #[test]
+    fn evaluate_refuses_bad_inputs() {
+        assert_eq!(
+            evaluate(&inputs(Vec::new(), 10)).unwrap_err(),
+            "evaluate_corpus_empty"
+        );
+        assert_eq!(
+            evaluate(&inputs(hundred_projections(), 101)).unwrap_err(),
+            "evaluate_floor_percentile_invalid"
+        );
+        let mut bad = inputs(hundred_projections(), 10);
+        bad.params.m_work_micros = 0;
+        assert_eq!(evaluate(&bad).unwrap_err(), "evaluate_params_invalid");
+    }
+
+    #[test]
+    fn the_report_digest_names_the_report() {
+        let first = evaluate(&inputs(hundred_projections(), 10)).expect("evaluates");
+        let value = serde_json::to_value(&first.report).unwrap();
+        let bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&value).unwrap();
+        assert_eq!(
+            first.values.calibration.report_digest,
+            format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+        );
+        let second = evaluate(&inputs(hundred_projections(), 10)).expect("evaluates");
+        assert_eq!(
+            first.values.calibration.report_digest,
+            second.values.calibration.report_digest
+        );
+    }
+
+    /// Spec section 8.3, isolation: this module names no embedder, no index
+    /// reader and no Score policy. The names are built here, so that this
+    /// test does not hold them in the source it reads.
+    #[test]
+    fn evaluate_reads_no_embedder_or_index() {
+        let source = include_str!("versioned_pipeline_substance_calibration.rs");
+        for name in [
+            concat!("Identified", "Embedder"),
+            concat!("Identified", "IndexReader"),
+            concat!("Substance", "ScorePolicy"),
+        ] {
+            assert!(!source.contains(name), "the module names {name}");
+        }
     }
 }

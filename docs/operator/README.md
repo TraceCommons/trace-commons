@@ -35,6 +35,7 @@ the link.
 | Raising client daily upload limits automatically | [`./client-upload-allowance.md`](./client-upload-allowance.md) |
 | Diagnosing upload credits missing from an account or payout | [`./upload-credit-ownership.md`](./upload-credit-ownership.md) |
 | Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
+| Calibrating the substance Score (`pipeline.py evaluate`: the distribution report, `sub_ceil` and the owner's floor) | [`./substance-calibration.md`](./substance-calibration.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
@@ -275,6 +276,11 @@ Every runbook in this directory, with a one-line description.
 - [`./staging-tester-guide.md`](./staging-tester-guide.md) — for staging
   testers: installing the staging app, making a NEAR AI staging account, what
   works and what does not yet, and removing it.
+- [`./substance-calibration.md`](./substance-calibration.md) — running
+  `pipeline.py evaluate`: checks 1 to 3 of the substance Score on a pin, the
+  calibration report and the calibrated values, the owner's floor
+  percentile, the `cq4` readers, and what the compare harness removal must
+  keep.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —
   Cloudflare Pages deployment and pilot playbook for the public
   pseudonymous leaderboard, contributor profiles, and aggregate analytics.
