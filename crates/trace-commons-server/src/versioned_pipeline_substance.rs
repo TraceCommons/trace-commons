@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use trace_commons_gate_api::pipeline::ScoreWitnessClass;
+use trace_commons_gate_enclave::chunker::{APPROX_CHARS_PER_TOKEN, TraceChunk};
 use trace_commons_protocol::canonical_json::to_canonical_string;
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceContributionEventType, event_carries_result, replay_call_id,
@@ -182,6 +183,14 @@ pub fn sat(x: f64, ceil: f64) -> f64 {
 /// `m + (1 - m) * v`: lifts `[0, 1]` onto `[m, 1]`.
 pub fn graded(v: f64, m: f64) -> f64 {
     m + (1.0 - m) * v
+}
+
+/// The token weight of a chunk for the novelty aggregate (SQ-3). The
+/// substance Score calls no perplexity scorer, so the chunker's character
+/// budget gives the count: characters over [`APPROX_CHARS_PER_TOKEN`],
+/// rounded up, at least 1.
+pub fn estimated_chunk_tokens(chunk: &TraceChunk) -> u64 {
+    (chunk.text.chars().count().div_ceil(APPROX_CHARS_PER_TOKEN) as u64).max(1)
 }
 
 /// Terms in micros: clamp to `[0, 1]`, then round.
@@ -618,5 +627,19 @@ mod tests {
         let mut params = SubstanceParams::rlvr_v1();
         params.m_rep_micros = 0;
         assert_eq!(params.validate(), Err("substance_params_invalid"));
+    }
+
+    #[test]
+    fn estimated_chunk_tokens_uses_four_chars() {
+        let chunk = |text: &str| TraceChunk {
+            chunk_index: 0,
+            text: text.to_string(),
+            spans: Vec::new(),
+        };
+        assert_eq!(estimated_chunk_tokens(&chunk("abcdefghi")), 3);
+        assert_eq!(estimated_chunk_tokens(&chunk("")), 1);
+        assert_eq!(estimated_chunk_tokens(&chunk("abcdefgh")), 2);
+        // Characters, not bytes: nine two-byte characters are still 3.
+        assert_eq!(estimated_chunk_tokens(&chunk("ééééééééé")), 3);
     }
 }
