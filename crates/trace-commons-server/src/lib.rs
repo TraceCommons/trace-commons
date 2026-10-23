@@ -91,6 +91,7 @@ pub mod versioned_pipeline_qualification;
 pub mod versioned_pipeline_remote_restore;
 pub mod versioned_pipeline_score_registry;
 pub mod versioned_pipeline_substance;
+pub mod versioned_pipeline_substance_calibration;
 pub mod witness_service;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";
