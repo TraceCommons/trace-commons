@@ -2641,6 +2641,12 @@ char*       tc_decisions_owed_text(int64_t decisions_owed);
  */
 char*       tc_inference_connection_copy_json(void);
 
+/* The payout-link section's words (consent_copy::payout_link_copy), every
+ * one a draft for owner review. Templates carry {org_name}. NULL only on a
+ * caught panic.
+ */
+char*       tc_payout_link_copy_json(void);
+
 /* The Flow 1 grant screens' sentences for the configuration in config_dir
  * (consent_copy::automatic_contribution_copy). The core chooses the
  * disclosure: exactly one of patterns_only and model_scrubbed is present.
