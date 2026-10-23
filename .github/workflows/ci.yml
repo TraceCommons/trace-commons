@@ -95,6 +95,11 @@ jobs:
       # title and pre-release version.
       - name: Sparkle appcast for each channel
         run: scripts/ci/test-generate-appcast.sh
+      # Seconds, no build, no network. The server deploy files: the pilot
+      # templates and deploy.sh unchanged by the staging parameters, and the
+      # staging render (deploy/staging-gcp/render-env.sh) with dummy secrets.
+      - name: Pilot and staging server deploy files
+        run: scripts/ci/test-deploy-render.sh
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py

@@ -138,11 +138,13 @@ after it was signed; 7 is the default).
    trace-commons-staging-pins verify current.json --public-key <public key hex>
    ```
 
-5. Install. Copy `current.json` to the staging host's pin directory, so the
-   staging site serves it, and put the printed
-   `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=` line in the staging
-   ingest's drop-in and restart ingest (section 5.9: the ingest checks its
-   own receipts against one set).
+5. Install. Copy `current.json` to the staging host's pin directory,
+   `/var/lib/tracecommons-site/near-ai-pins/current.json` (mode 0644), so the
+   staging site serves it. Then rerun `deploy/staging-gcp/render-env.sh` with
+   `TC_NEAR_AI_EXPECTED_MEASUREMENTS` set to the value of the printed
+   `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS=` line and restart ingest
+   (section 5.9: the ingest checks its own receipts against one set). See
+   `deploy/staging-gcp/README.md`.
 
 ## Refusals
 
