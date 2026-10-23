@@ -282,8 +282,122 @@ async fn org_listing_keeps_only_owned_active_orgs_and_never_sends_names_to_inges
         }
     }
     assert!(seen[0].body.contains(ORG_A));
-    // Nor are names written to this device.
-    assert!(!f.files().contains(NAME_MARK));
+    // Only the chosen org's name is kept on this device, for status after a
+    // restart; the names of orgs not chosen are never written.
+    let files = f.files();
+    assert!(files.contains(&format!("Owned {NAME_MARK} A")));
+    for other in ["Admin", "Inactive", "Odd", "Member", ORG_B, ORG_C, ORG_D] {
+        assert!(!files.contains(other), "{other} written to disk");
+    }
+}
+
+async fn status_of(shared: &DaemonShared) -> Value {
+    ok(
+        super::super::ipc::handle_request_async(shared, &req("payout_rails_status", json!({})))
+            .await,
+    )
+}
+
+#[tokio::test]
+async fn the_linked_org_name_survives_a_restart_without_listing_again() {
+    let cloud = Cloud::start(vec![
+        org(ORG_A, &format!("First {NAME_MARK} A"), "owner", true),
+        org(ORG_B, "Synthetic org B", "owner", true),
+    ])
+    .await;
+    let f = Fixture::new(true).await;
+    link(&f, &cloud, ORG_A).await;
+
+    // Kept in its own file, 0600, beside the link record; never in the
+    // link record itself.
+    let path = f.shared.store.daemon_path(DAEMON_PAYOUT_ORG_NAMES_FILE);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+    let link_record = f
+        .shared
+        .store
+        .read_daemon_file(DAEMON_PAYOUT_LINK_FILE)
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&link_record).contains(NAME_MARK));
+
+    // A restarted daemon has listed nothing, and still shows the name.
+    let reads = cloud.me_reads().len();
+    let restarted = DaemonShared::load(f.shared.store.clone()).unwrap();
+    let after = status_of(&restarted).await;
+    assert_eq!(after["rails"][0]["recipient_ref_check"], "match");
+    assert_eq!(
+        after["rails"][0]["organization_name"],
+        format!("First {NAME_MARK} A")
+    );
+    assert_eq!(cloud.me_reads().len(), reads, "status asks NEAR AI nothing");
+
+    // Reading the list again refreshes the saved name (a rename), and still
+    // keeps only the linked org's.
+    cloud.set_orgs(vec![
+        org(ORG_A, &format!("Renamed {NAME_MARK} A"), "owner", true),
+        org(ORG_B, "Synthetic org B", "owner", true),
+    ]);
+    list(&f, &cloud).await;
+    let restarted = DaemonShared::load(f.shared.store.clone()).unwrap();
+    assert_eq!(
+        status_of(&restarted).await["rails"][0]["organization_name"],
+        format!("Renamed {NAME_MARK} A")
+    );
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("First"), "{saved}");
+    assert!(!saved.contains("Synthetic org B"), "{saved}");
+}
+
+#[tokio::test]
+async fn forgetting_near_ai_clears_the_saved_org_name() {
+    let cloud = Cloud::start(vec![org(
+        ORG_A,
+        &format!("Forget {NAME_MARK} A"),
+        "owner",
+        true,
+    )])
+    .await;
+    let f = Fixture::new(true).await;
+    link(&f, &cloud, ORG_A).await;
+    assert!(f.files().contains(NAME_MARK));
+
+    let forgot = super::super::ipc::handle_request_async(
+        &f.shared,
+        &req("near_ai_credential_forget", json!({})),
+    )
+    .await;
+    assert!(
+        forgot.error.is_none(),
+        "{:?}",
+        forgot.error.map(|e| e.message)
+    );
+
+    assert!(
+        !f.files().contains(NAME_MARK),
+        "the name outlived the forget"
+    );
+    assert!(
+        f.shared
+            .store
+            .read_daemon_file(DAEMON_PAYOUT_ORG_NAMES_FILE)
+            .unwrap()
+            .is_none()
+    );
+    // Nor does this process still show it from memory, or after a restart.
+    assert_eq!(
+        status(&f).await["rails"][0]["organization_name"],
+        Value::Null
+    );
+    let restarted = DaemonShared::load(f.shared.store.clone()).unwrap();
+    assert_eq!(
+        status_of(&restarted).await["rails"][0]["organization_name"],
+        Value::Null
+    );
 }
 
 #[tokio::test]
@@ -504,6 +618,8 @@ async fn unlink_starts_and_confirms_without_a_token_or_a_near_ai_call() {
         .unwrap();
     let local: Value = serde_json::from_slice(&local).unwrap();
     assert!(local["rails"].as_object().unwrap().is_empty(), "{local}");
+    // And so is the org's saved name.
+    assert!(!f.files().contains("Synthetic org A"));
 }
 
 #[tokio::test]
