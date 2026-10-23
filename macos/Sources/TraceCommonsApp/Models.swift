@@ -882,6 +882,9 @@ enum DaemonEvent: Equatable {
     /// cache -- see the contract's note that a cache hit "no event
     /// follows".
     case previewReady(PreviewRequestResult)
+    /// `near_ai_balance_changed`: NEAR AI credit arrived; read the balance
+    /// again.
+    case nearAiBalanceChanged
     case unknown(String)
 }
 

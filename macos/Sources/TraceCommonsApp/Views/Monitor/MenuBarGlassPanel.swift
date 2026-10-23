@@ -4,12 +4,13 @@ import TCDesign
 import TCShellCore
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
-/// popover" handoff, as the owner reshaped it on 2026-10-19: a top row with
-/// the traces worth a second look on the left and Watching, Settings and
-/// Quit as icon buttons on the right; the suggestion and the estimate; the
-/// NEAR AI tools, one button each, for a quick Private AI session; the
-/// shared/kept legend and day graph; and the way into the app. It is the
-/// app's only menu-bar item, in every build.
+/// popover" handoff, as the owner reshaped it on 2026-10-19 and
+/// 2026-10-22: a top row with the NEAR AI wordmark on the left and
+/// Watching, Settings and Quit as icon buttons on the right; Private AI,
+/// with the NEAR AI tools, one button each, for a quick Private AI session;
+/// the traces worth a second look; the suggestion and the estimate; the
+/// shared/kept legend and the app's bar graph; and the way into the app.
+/// It is the app's only menu-bar item, in every build.
 ///
 /// The handoff's rules hold here:
 /// - Nothing is sent from the popover. Its one write is pausing and
@@ -27,6 +28,8 @@ struct MenuBarGlassPanel: View {
     /// system window already carries its material, and a second layer of
     /// glass on it is glass on glass (R14); the preview window has none.
     var ownsSurface = false
+    /// The graph's bar under the pointer, whose day the legend counts.
+    @State private var hovered: String?
 
     /// A quarter narrower than the handoff's 380 (owner, 2026-10-21).
     static let width: CGFloat = 285
@@ -34,10 +37,10 @@ struct MenuBarGlassPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             topRow
+            privateAI
+            flaggedRow
             nudgeRow
             settlementRow
-            tools
-            legend
             graph
             glance
             menuItems
@@ -57,29 +60,17 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Top row
 
-    /// The traces worth a second look, first (owner, 2026-10-19: moved to
-    /// the top; the core's approved heading is kept), then Watching,
+    /// The NEAR AI wordmark in the top left corner (owner, 2026-10-22),
+    /// its "near" starting where the rows' words do, then Watching,
     /// Settings and Quit as icon buttons in the top right corner. Watching
-    /// is a dropdown menu of its pause choices, or Resume. Spaced tight for
-    /// the narrower panel: the heading and its count fit beside the buttons
-    /// up to two digits, and a longer count shrinks the line a little rather
-    /// than cutting the count off.
+    /// is a dropdown menu of its pause choices, or Resume.
     private var topRow: some View {
         HStack(spacing: GlassTokens.Space.s2) {
-            Button { open(.traces(entryId: nil)) } label: {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
-                }
-            }
-            .buttonStyle(GlassMenuRowStyle())
-            .padding(.vertical, -GlassTokens.Space.s2)
-            GlassRoundMenu(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchItems }
-                .accessibilityValue(watchValue)
-                .disabled(watchState == .coreDown || watchState == .loading)
+            GlassNearWordmark()
+                .frame(height: Self.wordmarkHeight)
+                .padding(.leading, GlassTokens.Space.s4)
+            Spacer(minLength: GlassTokens.Space.s4)
+            WatchingMenuButton()
             GlassRoundButton(MonitorWords.table?.settingsTitle ?? MenuWords.settings, icon: .glyph(.gear)) {
                 NSApp.activate(ignoringOtherApps: true)
                 navigation.requestSettings()
@@ -89,93 +80,87 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    private var paused: Bool { watchState == .paused }
+    /// The wordmark's height: about 85pt wide, past the brand kit's 72px
+    /// floor for the wordmark, and shorter than the icon buttons beside it.
+    static let wordmarkHeight: CGFloat = 16
 
-    /// Watching's state (the stack-wide ScreenState rule): a core that is
-    /// not running is core down, and never reads as On.
-    private var watchState: ScreenState {
-        switch model.startup {
-        case .running:
-            return ScreenState.resolve(failure: nil, loaded: true, paused: model.status.paused, known: true)
-        case .starting:
-            return .loading
-        default:
-            return .coreDown
-        }
-    }
+    // MARK: Private AI
 
-    private var watchValue: String {
-        switch watchState {
-        case .ready: MenuWords.on
-        case .paused: MonitorWords.paused
-        case .coreDown, .loading, .unknown: "—"
-        }
-    }
-
-    /// Watching's dropdown (owner, 2026-10-19: a traditional menu, not a
-    /// list sliding open in the panel): under its name, the pause choices
-    /// (`MenuBarWords`) while watching, or Resume while paused.
+    /// Private AI, just under the top row (owner, 2026-10-22): its name
+    /// with On or Off beside it, over the NEAR AI tools, one button each,
+    /// for a quick Private AI session (owner, 2026-10-19). Drawn only while
+    /// signed in to NEAR AI, and only with the core's words for its name.
+    /// The buttons are drawn only while a tool can be started
+    /// (`ManagedSessionsSection.toolArea`); a button opens the Private AI
+    /// tab at that tool's launch dialog.
     @ViewBuilder
-    private var watchItems: some View {
-        Section(MonitorWords.watching) {
-            if paused {
-                Button(MenuBarWords.resume) { model.resume() }
-            } else {
-                ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
-                               MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
-                    Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }
-                }
-            }
-        }
-    }
-
-    // MARK: Tools
-
-    /// The NEAR AI tools, one button each, above the graph (owner,
-    /// 2026-10-19: quick Private AI sessions). Drawn only while signed in
-    /// to NEAR AI with a terminal to start in. A button opens the Private
-    /// AI tab at that tool's launch dialog.
-    @ViewBuilder
-    private var tools: some View {
-        if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn, snapshot.capabilities.terminalLaunch,
-           !snapshot.signInStartTools.isEmpty
+    private var privateAI: some View {
+        if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn,
+           let name = model.privateInferenceCopy?.destination
         {
-            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
-                ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                    ManagedToolButton(tool: tool) {
-                        model.pendingManagedLaunch = tool
-                        open(.inference)
+            GlassEyebrowCard(name, accessory: {
+                PrivateAIStatusLabel()
+            }, content: {
+                if MenuPanelStatus.showsToolButtons(snapshot) {
+                    HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                        ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                            ManagedToolButton(tool: tool) {
+                                model.pendingManagedLaunch = tool
+                                open(.inference)
+                            }
+                        }
                     }
+                    .disabled(model.managedBusy)
                 }
-            }
-            .disabled(model.managedBusy)
+            })
         }
+    }
+
+    // MARK: Worth a second look
+
+    /// The traces worth a second look, under Private AI (owner,
+    /// 2026-10-22: out of the top row, which holds the wordmark now; the
+    /// core's approved heading is kept). It opens Traces.
+    private var flaggedRow: some View {
+        Button { open(.traces(entryId: nil)) } label: {
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+            }
+        }
+        .buttonStyle(GlassMenuRowStyle())
+        .padding(.vertical, -GlassTokens.Space.s2)
     }
 
     // MARK: Legend and graph
 
-    /// Shared and kept, each from its own read (`store.sharedCount`,
-    /// `store.keptCount`). A count that is not current is the core's
-    /// unknown word, never the last count and never a bare dash.
-    private var sharedValue: String { MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown) }
-    private var keptValue: String { MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown) }
-
-    private var legend: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MenuWords.shared, value: sharedValue, status: .shared)
-            GlassLegendCell(MenuWords.kept, value: keptValue, status: .kept)
-        }
-    }
-
+    /// The shared and kept legend over the app's bar graph (owner,
+    /// 2026-10-22: the popover's graph matches the app's), as the edge
+    /// rail's Traces peek draws them: the Traces graph's days, counted as
+    /// it counts them, in its compact form for the narrower panel. The
+    /// legend counts the graph's days, or the day under the pointer. Each
+    /// count comes from its own read (`store.sharedCount`,
+    /// `store.keptCount`); one that is not current is the core's unknown
+    /// word, never the last count and never a bare dash.
     private var graph: some View {
-        let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
-        return GlassDayGraph(
-            columns: store.columns, paused: paused || !store.columnsCurrent,
-            summary: "\(MenuWords.shared) \(sharedValue) · \(MenuWords.kept) \(keptValue)",
-            sharedChip: sharedValue,
-            keptChip: keptValue,
-            leading: start.formatted(.dateTime.month(.abbreviated).day()),
-            trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
+        let buckets = store.buckets
+        let shown = buckets.first { $0.start.formatted(.iso8601) == hovered }
+        let shared = store.sharedCount.map { shown?.shared ?? $0 }
+        let kept = store.keptCount.map { shown?.kept ?? $0 }
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(MenuWords.shared, value: MenuPanelData.countWord(shared, unknown: MonitorWords.unknown),
+                                status: .shared)
+                GlassLegendCell(MenuWords.kept, value: MenuPanelData.countWord(kept, unknown: MonitorWords.unknown),
+                                status: .kept)
+            }
+            GlassBarGraph(
+                MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),
+                scaleFloor: 5, compact: true, hovered: $hovered)
+                .frame(height: EdgeRailGraph.height)
+        }
     }
 
     // MARK: Glance
@@ -279,6 +264,72 @@ struct MenuBarGlassPanel: View {
     /// The Monitor (or first run) at a destination; the handler raises it.
     private func open(_ destination: MonitorDestination?) {
         OpenMonitor.request(destination)
+    }
+}
+
+/// Watching as a round dropdown (owner, 2026-10-19: a traditional menu,
+/// not a list sliding open in the panel): under its name, the pause
+/// choices (`MenuBarWords`) while watching, or Resume while paused. The
+/// menu-bar popover's top row has it, and the edge rail's Traces peek
+/// (owner, 2026-10-22).
+struct WatchingMenuButton: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        GlassRoundMenu(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchItems }
+            .accessibilityValue(watchValue)
+            .disabled(watchState == .coreDown || watchState == .loading)
+    }
+
+    private var paused: Bool { watchState == .paused }
+
+    /// Watching's state (the stack-wide ScreenState rule): a core that is
+    /// not running is core down, and never reads as On.
+    private var watchState: ScreenState {
+        switch model.startup {
+        case .running:
+            return ScreenState.resolve(failure: nil, loaded: true, paused: model.status.paused, known: true)
+        case .starting:
+            return .loading
+        default:
+            return .coreDown
+        }
+    }
+
+    private var watchValue: String {
+        switch watchState {
+        case .ready: MenuWords.on
+        case .paused: MonitorWords.paused
+        case .coreDown, .loading, .unknown: "—"
+        }
+    }
+
+    @ViewBuilder
+    private var watchItems: some View {
+        Section(MonitorWords.watching) {
+            if paused {
+                Button(MenuBarWords.resume) { model.resume() }
+            } else {
+                ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                               MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
+                    Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }
+                }
+            }
+        }
+    }
+}
+
+/// Private AI's On or Off, with its dot (owner, 2026-10-22): the
+/// menu-bar popover's Private AI section has it, and the edge rail's
+/// Private AI peek beside its title.
+struct PrivateAIStatusLabel: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let state = MenuPanelStatus.privateAI(model)
+        GlassStatusLabel(MenuPanelStatus.privateAIValue(state, model: model), status: MenuPanelStatus.privateAIDot(state))
+            .multilineTextAlignment(.trailing)
+            .lineLimit(2)
     }
 }
 
@@ -756,6 +807,49 @@ enum MenuPanelStatus {
         guard let on else { return .unknown }
         guard on else { return .off }
         return PrivateInferenceIndicator.status(tone) == .on ? .on : .notWorking
+    }
+
+    /// Private AI's state: the listener's reported tone, never the switch
+    /// alone, so a switch left on over a dead listener never reads On. A
+    /// switch the core did not report is unknown, never Off.
+    @MainActor
+    static func privateAI(_ model: AppModel) -> PrivateAI {
+        privateAI(
+            on: model.daemonSettings?.privateInference,
+            tone: PrivateInferenceSurface.tone(model.privateInferenceState, calls: model.privateInferenceCalls))
+    }
+
+    /// On and Off in the core's words; a listener that is not working while
+    /// the switch is on reads the core's state line for it; unknown is a
+    /// dash, never Off.
+    @MainActor
+    static func privateAIValue(_ state: PrivateAI, model: AppModel) -> String {
+        switch state {
+        case .on: MenuWords.on
+        case .off: MonitorWords.off
+        case .notWorking:
+            model.privateInferenceCopy.map {
+                PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: $0, calls: model.privateInferenceCalls)
+            } ?? "—"
+        case .unknown: "—"
+        }
+    }
+
+    /// The dot beside Private AI's state: on only while it is On, outside
+    /// while it is on but not working, off otherwise.
+    static func privateAIDot(_ state: PrivateAI) -> GlassStatus {
+        switch state {
+        case .on: .on
+        case .notWorking: .outside
+        case .off, .unknown: .off
+        }
+    }
+
+    /// Whether Private AI's section draws the tool buttons: only while a
+    /// tool can be started, the Private AI tab's own rule
+    /// (`ManagedSessionsSection.toolArea`), and there is one to start.
+    static func showsToolButtons(_ snapshot: ManagedSnapshot) -> Bool {
+        ManagedSessionsSection.toolArea(snapshot) == .buttons && !snapshot.signInStartTools.isEmpty
     }
 }
 

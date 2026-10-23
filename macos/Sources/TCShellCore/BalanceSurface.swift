@@ -32,6 +32,16 @@ public struct BalanceStatus: Equatable, Sendable {
     /// service's own `updated_at`. The only true thing a shell can say with
     /// it is how long ago the question was put.
     public let observedAt: Date?
+    /// What is left now minus what was left about a day ago, signed, or
+    /// `nil` with no reading from about a day ago. NEVER drawn as zero.
+    public let change24hNanos: Int64?
+    /// The core's finished line for that change, or `nil` when there is
+    /// nothing to say (no change, under a cent, or not known).
+    public let change24hText: String?
+    /// All NEAR AI credit the daemon has counted arriving in the spending
+    /// organization, or `nil` until it has read the whole ledger. Only ever
+    /// compared with an earlier value of itself, to see that credit arrived.
+    public let receivedTotalNanos: Int64?
 
     public init(
         state: String,
@@ -39,7 +49,10 @@ public struct BalanceStatus: Equatable, Sendable {
         spendLimitNanos: Int64? = nil,
         totalSpentNanos: Int64? = nil,
         scale: UInt8 = BalanceStatus.unreadableScale,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        change24hNanos: Int64? = nil,
+        change24hText: String? = nil,
+        receivedTotalNanos: Int64? = nil
     ) {
         self.state = state
         self.remainingNanos = remainingNanos
@@ -47,6 +60,9 @@ public struct BalanceStatus: Equatable, Sendable {
         self.totalSpentNanos = totalSpentNanos
         self.scale = scale
         self.observedAt = observedAt
+        self.change24hNanos = change24hNanos
+        self.change24hText = change24hText
+        self.receivedTotalNanos = receivedTotalNanos
     }
 
     /// The scale used when the wire carried none.
@@ -88,7 +104,10 @@ public struct BalanceStatus: Equatable, Sendable {
             spendLimitNanos: object["spend_limit_nanos"] as? Int64,
             totalSpentNanos: object["total_spent_nanos"] as? Int64,
             scale: (object["scale"] as? Int).flatMap { UInt8(exactly: $0) } ?? unreadableScale,
-            observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp))
+            observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp),
+            change24hNanos: object["change_24h_nanos"] as? Int64,
+            change24hText: (object["change_24h_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            receivedTotalNanos: object["received_total_nanos"] as? Int64)
     }
 
     /// RFC 3339, the shape `chrono`'s `DateTime<Utc>` serializes to.

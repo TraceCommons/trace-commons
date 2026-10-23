@@ -1028,6 +1028,7 @@ extension DaemonData {
         public let weeklyRecap: Bool?
         public let insightsTip: Bool?
         public let settlementEstimate: Bool?
+        public let nearAiCredit: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case digest
@@ -1036,6 +1037,7 @@ extension DaemonData {
             case weeklyRecap = "weekly_recap"
             case insightsTip = "insights_tip"
             case settlementEstimate = "settlement_estimate"
+            case nearAiCredit = "near_ai_credit"
         }
     }
 

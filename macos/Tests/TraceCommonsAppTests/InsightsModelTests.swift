@@ -250,12 +250,18 @@ final class InsightsOverviewTests: XCTestCase {
         let recorder = OverviewRecorder()
         let model = InsightsOverviewModel(service: { try await recorder.call($0) })
         model.open()
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where model.busy || model.sessionsInputs == nil { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.overview?.week_start, "2026-09-07")
         var requests = await recorder.requests
-        XCTAssertEqual(requests.map(\.operation.type), ["week_overview"])
+        // The week, then the Sessions figure's breakdown, always read with
+        // it (owner, 2026-10-22).
+        XCTAssertEqual(requests.map(\.operation.type), ["week_overview", "card_inputs"])
         XCTAssertNil(requests[0].operation.week_start)
         XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
+        XCTAssertEqual(requests[1].operation.card, "sessions")
+        XCTAssertEqual(requests[1].operation.week_start, "2026-09-07")
+        XCTAssertEqual(model.sessionsInputs?.card, "sessions")
+        XCTAssertNil(model.openCard, "the breakdown is not a figure's drill-down")
 
         model.showInputs("cache_share")
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }

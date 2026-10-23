@@ -199,11 +199,12 @@ final class MenuBarGlanceTests: XCTestCase {
         XCTAssertTrue(card.contains("tcinsights.copy()"), "the card reads the core's words")
     }
 
-    /// The glance under the graph; the tools above the legend, and no
-    /// recent activity (owner, 2026-10-19).
+    /// The glance under the graph, which draws its own legend, and no
+    /// recent activity (owner, 2026-10-19). The tools moved into Private
+    /// AI's section under the top row (owner, 2026-10-22).
     func test_thePanelDrawsTheGlanceBetweenTheGraphAndRecent() throws {
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains("            tools\n            legend\n            graph\n            glance\n            menuItems\n"))
+        XCTAssertTrue(panel.contains("            settlementRow\n            graph\n            glance\n            menuItems\n"))
         XCTAssertFalse(panel.contains("MenuWords.recentActivity"), "recent activity is back")
         XCTAssertTrue(panel.contains("MenuPanelData.glanceToDraw(store.glance, stale: store.stale)"))
         // The interval re-read runs beside the pinned opening read.

@@ -1806,6 +1806,69 @@ pub const FUNDING_REFRESH: &str = "Check account";
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check again.";
 
+// ---- Spending organization (DRAFT, awaiting owner review) ----
+//
+// Owner request, 2026-10-23: a contributor whose NEAR AI account has several
+// organizations chooses which one's balance Private AI spends from, in
+// Settings, and the Private AI screen says so when no choice has been made.
+// That request is the approval for the prompt existing (ui-copy-guide rule
+// 9). The WORDING below is a draft and is not approved.
+
+/// The Settings card's heading. DRAFT.
+pub const SPEND_ORG_TITLE: &str = "Spending organization";
+/// What the card is a choice about. DRAFT.
+pub const SPEND_ORG_WHAT: &str = "Private AI spends from this organization's NEAR AI balance.";
+/// The picker's label, also its accessible name. Picking an organization
+/// switches to it; there is no separate button. DRAFT.
+pub const SPEND_ORG_PICKER: &str = "Organization to spend from";
+/// Shown while a switch is in flight; it takes about ten seconds. DRAFT.
+pub const SPEND_ORG_SWITCHING: &str = "Switching. This takes a few seconds.";
+/// A switch that failed. Every failure changes nothing. DRAFT.
+pub const SPEND_ORG_FAILED: &str = "Couldn't switch. Nothing changed.";
+/// A switch refused because the sign-in ended. DRAFT.
+pub const SPEND_ORG_SESSION_EXPIRED: &str = "Sign in to NEAR AI again, then switch.";
+/// A switch NEAR AI refused for that organization (for example, a role that
+/// may not create access there). DRAFT.
+pub const SPEND_ORG_REFUSED: &str =
+    "NEAR AI didn't allow Private AI to use that organization. Nothing changed.";
+/// The previous organization's access is still being removed. DRAFT.
+pub const SPEND_ORG_REVOKE_PENDING: &str = "Still removing access from the previous organization.";
+/// The Private AI screen's prompt heading. DRAFT.
+pub const SPEND_ORG_PROMPT_TITLE: &str = "Choose an organization";
+/// The prompt's line, over `{organization}`, the current one's name. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE: &str = "Your NEAR AI account has several organizations. Private AI is spending from {organization}. Choose one in Settings.";
+/// The prompt's line when the current organization's name is not known. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE_UNNAMED: &str = "Your NEAR AI account has several organizations. Choose which one Private AI spends from in Settings.";
+/// The prompt's action: it opens Settings, so it says so (rule 2). DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION: &str = "Review settings";
+/// The action's accessible name. DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY: &str = "Review settings to choose an organization";
+
+/// The spending-organization words, carried in the daemon's
+/// `near_ai_spend_organizations` answer so no shell owns a sentence of it.
+/// `current_name` is the current organization's name, when listed.
+#[must_use]
+pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
+    let prompt_line = match current_name {
+        Some(name) => SPEND_ORG_PROMPT_LINE.replace("{organization}", name),
+        None => SPEND_ORG_PROMPT_LINE_UNNAMED.to_owned(),
+    };
+    serde_json::json!({
+        "title": SPEND_ORG_TITLE,
+        "what": SPEND_ORG_WHAT,
+        "picker": SPEND_ORG_PICKER,
+        "switching": SPEND_ORG_SWITCHING,
+        "failed": SPEND_ORG_FAILED,
+        "session_expired": SPEND_ORG_SESSION_EXPIRED,
+        "refused": SPEND_ORG_REFUSED,
+        "revoke_pending": SPEND_ORG_REVOKE_PENDING,
+        "prompt_title": SPEND_ORG_PROMPT_TITLE,
+        "prompt_line": prompt_line,
+        "prompt_action": SPEND_ORG_PROMPT_ACTION,
+        "prompt_action_accessibility": SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
+    })
+}
+
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
     report: &crate::daemon::nearai_credential::funding::FundingReport,
@@ -1953,6 +2016,26 @@ pub fn format_amount(nanos: i64, scale: u8) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let magnitude = cents.unsigned_abs();
     format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+/// The NEAR AI balance's change over the last 24 hours, under the Balance
+/// tile's figure. `{amount}` is signed: `+$3.20`, `-$1.00`. DRAFT, awaiting
+/// owner review.
+pub const BALANCE_CHANGE_24H: &str = "{amount} in the last 24 hours";
+
+/// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING when
+/// there is nothing to say: no change, a change under a cent, or a scale this
+/// build cannot honour. The magnitude is floored like every amount here, so
+/// the line never claims more movement, either way, than happened.
+#[must_use]
+pub fn balance_change_line(nanos: i64, scale: u8) -> String {
+    let magnitude = i64::try_from(nanos.unsigned_abs()).unwrap_or(i64::MAX);
+    let amount = format_amount(magnitude, scale);
+    if nanos == 0 || amount.is_empty() || amount == "$0.00" || !amount.starts_with('$') {
+        return String::new();
+    }
+    let sign = if nanos > 0 { "+" } else { "-" };
+    BALANCE_CHANGE_24H.replace("{amount}", &format!("{sign}{amount}"))
 }
 
 /// What is left, as a sentence, or the sentence for there being no figure.
@@ -3011,6 +3094,29 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_24_hour_change_is_signed_and_never_rounds_up() {
+        assert_eq!(
+            balance_change_line(3_209_000_000, 9),
+            "+$3.20 in the last 24 hours"
+        );
+        assert_eq!(
+            balance_change_line(-1_009_000_000, 9),
+            "-$1.00 in the last 24 hours"
+        );
+    }
+
+    #[test]
+    fn no_change_or_under_a_cent_is_not_said() {
+        // The tile says nothing for no change (the Credit tile's rule).
+        assert_eq!(balance_change_line(0, 9), "");
+        assert_eq!(balance_change_line(9_000_000, 9), "");
+        assert_eq!(balance_change_line(-9_000_000, 9), "");
+        // A scale this build cannot honour is no figure, not a wrong one.
+        assert_eq!(balance_change_line(5_000_000_000, 200), "");
+        assert!(!balance_change_line(i64::MIN, 9).is_empty());
+    }
     /// The panels' refresh icons all say "Refresh", so each has its own
     /// accessible name that says what it re-reads (docs/ui-copy-guide.md
     /// section 5), carried by the export rather than joined in a shell.
