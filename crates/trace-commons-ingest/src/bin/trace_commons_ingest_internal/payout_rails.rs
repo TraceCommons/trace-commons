@@ -17,12 +17,19 @@
 //! reason -- whatever epochs an earlier boot stored. Every rail defaults to
 //! `disabled`, which needs nothing and runs nothing.
 //!
-//! The operator routes are admin-only and copy the admin drill routes' auth
-//! shape (`authenticate_with_tenant_access_grant`, then `require_admin`):
+//! The rail-wide controls are the operator's alone. They accept only the
+//! deployment's payout control token (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`),
+//! never a tenant token -- a tenant admin's included -- and refuse every
+//! caller while it is unset:
 //!
 //! - `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` set and
 //!   clear that rail's kill switch. Each appends a control row naming the
 //!   operator by hash; there is no global halt.
+//!
+//! Link release moves one link of the caller's own tenant, so it keeps the
+//! admin drill routes' tenant auth (`authenticate_with_tenant_access_grant`,
+//! then `require_admin`):
+//!
 //! - `POST /v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release`
 //!   moves one of the operator tenant's active links on that rail to
 //!   `closing` (for example after a contributor reports lost access to the
@@ -117,10 +124,75 @@ pub(crate) fn spawn_payout_rail_workers(state: &Arc<AppState>) -> Vec<tokio::tas
         .spawn_workers(payouts, corpus, Arc::new(UnconfiguredRecipientOpener))
 }
 
-/// The operator's hash on control and audit rows. Hash-only: never the
-/// principal or the token.
+/// The operator's hash on audit rows a tenant admin's action writes (link
+/// release). Hash-only: never the principal or the token.
 fn operator_actor_hash(auth: &TenantAuth) -> String {
     sha256_prefixed(&format!("payout-operator-v1:{}", auth.principal_ref))
+}
+
+/// The setting holding the operator's payout control token: the one
+/// credential the rail-wide controls accept. It is deployment-wide, not a
+/// tenant token, so no tenant (and no tenant admin) can mint it.
+pub(crate) const TRACE_COMMONS_PAYOUT_CONTROL_TOKEN: &str = "TRACE_COMMONS_PAYOUT_CONTROL_TOKEN";
+
+/// The shortest control token boot accepts.
+const PAYOUT_CONTROL_TOKEN_MIN_LEN: usize = 32;
+
+/// The stored form of a control token: its sha256, never the token.
+pub(crate) fn payout_control_token_hash(token: &str) -> String {
+    sha256_prefixed(&format!("payout-control-token-v1:{token}"))
+}
+
+/// Reads [`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`] at boot. Unset is `None`
+/// (the controls refuse every caller); a token shorter than 32 characters
+/// refuses the start rather than guarding the kill switch weakly.
+pub(crate) fn payout_control_token_hash_from_env() -> anyhow::Result<Option<String>> {
+    let Some(token) = optional_trimmed_env(TRACE_COMMONS_PAYOUT_CONTROL_TOKEN)? else {
+        return Ok(None);
+    };
+    if token.len() < PAYOUT_CONTROL_TOKEN_MIN_LEN {
+        anyhow::bail!("payout control refused to start: payout_control_token_too_short");
+    }
+    Ok(Some(payout_control_token_hash(&token)))
+}
+
+/// Equal-length comparison that does not stop at the first differing byte.
+fn same_digest(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+/// The gate on every rail-wide payout control (halt, resume, hold list and
+/// clear): the operator's control token and nothing else. It never consults
+/// tenant tokens, so a tenant admin is refused like anyone else. Unset
+/// refuses every caller (`payout_control_unconfigured`). Returns the
+/// operator's actor hash for audit rows: a hash of the token's hash.
+fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+    let Some(expected) = state.payout_control_token_hash.as_deref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payout_control_unconfigured",
+        ));
+    };
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+    let presented = payout_control_token_hash(token);
+    if !same_digest(&presented, expected) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "payout_control_token_required",
+        ));
+    }
+    Ok(sha256_prefixed(&format!("payout-operator-v2:{expected}")))
 }
 
 #[derive(Debug, Serialize)]
@@ -151,8 +223,7 @@ async fn set_payout_rail_control(
     headers: HeaderMap,
     halted: bool,
 ) -> ApiResult<Json<PayoutRailControlResponse>> {
-    let auth = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_admin(&auth)?;
+    let actor = require_payout_operator(state.as_ref(), &headers)?;
     let entry = state
         .payout_rails
         .get(&rail_id)
@@ -167,12 +238,7 @@ async fn set_payout_rail_control(
         PAYOUT_RESUME_LABEL
     };
     store
-        .set_payout_control(
-            entry.rail_id(),
-            halted,
-            Some(label),
-            &operator_actor_hash(&auth),
-        )
+        .set_payout_control(entry.rail_id(), halted, Some(label), &actor)
         .await
         .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_control_unrecorded"))?;
     entry.record_halted(halted);
@@ -307,6 +373,14 @@ mod tests {
         ] {
             assert!(!is_link_id_hash(bad), "{bad}");
         }
+        assert!(same_digest("sha256:ab", "sha256:ab"));
+        assert!(!same_digest("sha256:ab", "sha256:ac"));
+        assert!(!same_digest("sha256:ab", "sha256:abc"));
+        assert_ne!(
+            payout_control_token_hash("a"),
+            payout_control_token_hash("b")
+        );
+        assert!(!payout_control_token_hash("secret-token").contains("secret-token"));
         assert!(is_reason_label("contributor_lost_org_access"));
         for bad in ["", "Lost", "lost access", "a-b", &"a".repeat(65)] {
             assert!(!is_reason_label(bad), "{bad}");

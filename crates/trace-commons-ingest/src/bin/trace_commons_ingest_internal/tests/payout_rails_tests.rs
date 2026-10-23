@@ -99,21 +99,47 @@ async fn readiness_reports_each_rail_separately() {
     assert_eq!(rails[1]["qualified"], false);
 }
 
+const OPERATOR_TOKEN: &str = "payout-operator-test-token-0123456789abcdef";
+
+fn with_operator_token(mut state: Arc<AppState>, token: &str) -> Arc<AppState> {
+    Arc::make_mut(&mut state).payout_control_token_hash =
+        Some(super::super::payout_rails::payout_control_token_hash(token));
+    state
+}
+
 #[tokio::test]
-async fn halt_and_resume_refuse_without_the_admin_bearer() {
+async fn halt_and_resume_refuse_without_the_operator_token() {
     let dir = tempfile::tempdir().unwrap();
-    let state = test_state(dir.path().to_path_buf());
+    // No operator token configured: every caller is refused, a tenant
+    // admin included, and nothing falls back to tenant auth.
+    let unconfigured = test_state(dir.path().to_path_buf());
+    for action in ["halt", "resume"] {
+        let uri = format!("/v1/admin/payout-rails/near_ai/{action}");
+        for bearer in [Some("admin-token-a"), Some(OPERATOR_TOKEN)] {
+            let (status, body) =
+                post(unconfigured.clone(), &uri, bearer, serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{action} {body}");
+            assert_eq!(body["error"], "payout_control_unconfigured", "{body}");
+        }
+    }
+
+    let state = with_operator_token(test_state(dir.path().to_path_buf()), OPERATOR_TOKEN);
     for action in ["halt", "resume"] {
         let uri = format!("/v1/admin/payout-rails/near_ai/{action}");
         let (status, _) = post(state.clone(), &uri, None, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{action} with no bearer");
-        let (status, _) = post(state.clone(), &uri, Some("token-a"), serde_json::json!({})).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{action} as a contributor");
+        // Tenant tokens never reach a rail-wide control, an admin's included.
+        for bearer in ["token-a", "admin-token-a", "payout-operator-test-token"] {
+            let (status, body) =
+                post(state.clone(), &uri, Some(bearer), serde_json::json!({})).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{action} as {bearer} {body}");
+            assert_eq!(body["error"], "payout_control_token_required", "{body}");
+        }
         // An unknown rail is refused by name, never defaulted.
         let (status, body) = post(
             state.clone(),
             &format!("/v1/admin/payout-rails/test_keyed/{action}"),
-            Some("admin-token-a"),
+            Some(OPERATOR_TOKEN),
             serde_json::json!({}),
         )
         .await;
@@ -123,7 +149,7 @@ async fn halt_and_resume_refuse_without_the_admin_bearer() {
         let (status, body) = post(
             state.clone(),
             &uri,
-            Some("admin-token-a"),
+            Some(OPERATOR_TOKEN),
             serde_json::json!({}),
         )
         .await;
@@ -149,7 +175,7 @@ fn payout_state(
     let inner = Arc::make_mut(&mut state);
     inner.tokens = Arc::new(tokens);
     inner.payout_store = Some(backend.clone() as Arc<dyn PayoutStore>);
-    state
+    with_operator_token(state, OPERATOR_TOKEN)
 }
 
 async fn control_rows(backend: &PgBackend) -> i64 {
@@ -168,7 +194,7 @@ async fn control_rows(backend: &PgBackend) -> i64 {
 }
 
 #[tokio::test]
-async fn halt_and_resume_require_the_admin_bearer_and_write_audit_rows() {
+async fn halt_and_resume_require_the_operator_token_and_write_audit_rows() {
     let Some(backend) = required_postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -179,14 +205,18 @@ async fn halt_and_resume_require_the_admin_bearer_and_write_audit_rows() {
     let rail = RailId::near_ai();
     let before = control_rows(&backend).await;
 
-    let (status, _) = post(
-        state.clone(),
-        "/v1/admin/payout-rails/near_ai/halt",
-        Some("token-a"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // A contributor and this tenant's own admin are both refused: the kill
+    // switch is rail-wide, so no tenant token reaches it.
+    for bearer in ["token-a", token.as_str()] {
+        let (status, _) = post(
+            state.clone(),
+            "/v1/admin/payout-rails/near_ai/halt",
+            Some(bearer),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
     assert_eq!(
         control_rows(&backend).await,
         before,
@@ -196,7 +226,7 @@ async fn halt_and_resume_require_the_admin_bearer_and_write_audit_rows() {
     let (status, body) = post(
         state.clone(),
         "/v1/admin/payout-rails/near_ai/halt",
-        Some(&token),
+        Some(OPERATOR_TOKEN),
         serde_json::json!({}),
     )
     .await;
@@ -228,12 +258,12 @@ async fn halt_and_resume_require_the_admin_bearer_and_write_audit_rows() {
         .unwrap()
         .get(0);
     assert!(actor.starts_with("sha256:") && actor.len() == 71, "{actor}");
-    assert!(!actor.contains(&token));
+    assert!(!actor.contains(OPERATOR_TOKEN));
 
     let (status, body) = post(
         state.clone(),
         "/v1/admin/payout-rails/near_ai/resume",
-        Some(&token),
+        Some(OPERATOR_TOKEN),
         serde_json::json!({}),
     )
     .await;

@@ -784,7 +784,7 @@ Each rail has its own mode setting; for `near_ai` it is
   written.
 - `live`: as specified below.
 
-The kill switch is runtime, not boot-time, and per rail: an admin route
+The kill switch is runtime, not boot-time, and per rail: an operator route
 `POST /v1/admin/payout-rails/{rail_id}/halt` sets that rail's row in
 `trace_payout_control` (with an audit row: rail id, actor hash, time,
 label), and `.../resume` clears it. The rail's pass reads it before each
@@ -792,7 +792,12 @@ send, under its single-flight lock, and stops at once when it is set.
 Lines already `pending` stay `pending`; recovery resumes them after
 `resume`. Readiness reports `payout_halted` for that rail. Halting one rail
 does not touch another; there is no global halt (an operator halts each
-rail).
+rail). The switch is rail-wide, so it is not a tenant control: halt, resume
+and hold clearing accept only the deployment's payout control token
+(`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`, stored as a hash, at least 32
+characters), never a tenant token, a tenant admin's included, and refuse
+every caller (`payout_control_unconfigured`) while it is unset. Audit and
+control rows name the operator by a hash of the token's hash.
 
 ### State and storage
 
