@@ -18,11 +18,12 @@ final class MenuBarGlassPanelTests: XCTestCase {
     }
 
     /// The popover is a quarter narrower than the handoff's 380 (owner,
-    /// 2026-10-21), and its top row is spaced to fit that.
+    /// 2026-10-21). The wordmark in its top row stays past the brand kit's
+    /// 72px floor for the wordmark.
     func test_thePanelIsAQuarterNarrower() throws {
         XCTAssertEqual(MenuBarGlassPanel.width, 380 * 0.75)
-        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains(".minimumScaleFactor(0.85)"), "a long count shrinks the heading, never cut off")
+        let ratio = GlassNearWordmark.viewBox.width / GlassNearWordmark.viewBox.height
+        XCTAssertGreaterThanOrEqual(MenuBarGlassPanel.wordmarkHeight * ratio, 72)
     }
 
     // MARK: Mode roll-up
@@ -101,23 +102,31 @@ final class MenuBarGlassPanelTests: XCTestCase {
         return patched
     }
 
-    // MARK: Day graph
+    // MARK: Graph
 
-    /// Contributions go up and kept sessions go down, on the day they
-    /// happened; the newest day is the last column; older days fall off.
-    func test_theGraphCountsPerDayEndingToday() {
+    /// The popover's bars are the Traces graph's (owner, 2026-10-22): its
+    /// days and counts, every other weekday left out counting back from
+    /// today's, so the labels fit the popover's narrower columns.
+    func test_theGraphBarsAreTheAppsWithEveryOtherLabel() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let now = Date(timeIntervalSince1970: 1_790_000_000)
         let day: TimeInterval = 86_400
-        let columns = MenuPanelData.days(
-            shared: [now, now - 60, now - day, now - 40 * day],
-            kept: [now - 2 * day], ending: now, count: 36, calendar: calendar)
-        XCTAssertEqual(columns.count, 36)
-        XCTAssertEqual(columns.last?.up, 2)
-        XCTAssertEqual(columns[34].up, 1)
-        XCTAssertEqual(columns[33].down, 1)
-        XCTAssertEqual(columns.reduce(0) { $0 + $1.up }, 3, "a day outside the window is not drawn")
+        let buckets = TracesGraphModel.buckets(
+            shared: [now, now - 60, now - day, now - 40 * day], kept: [now - 2 * day],
+            offset: 0, now: now, range: .days, calendar: calendar)
+        let bars = MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords)
+        XCTAssertEqual(bars.count, TracesGraphModel.days)
+        XCTAssertEqual(bars.map(\.id), buckets.map { TracesGraphFooter.bar($0, words: nil).id })
+        XCTAssertEqual(bars.last?.up, 2)
+        XCTAssertEqual(bars[bars.count - 2].up, 1)
+        XCTAssertEqual(bars[bars.count - 3].down, 1)
+        XCTAssertEqual(bars.reduce(0) { $0 + $1.up }, 3, "a day outside the window is not drawn")
+        XCTAssertEqual(bars.last?.label, buckets.last?.label, "today is labelled")
+        XCTAssertFalse(bars.last?.label.isEmpty ?? true)
+        XCTAssertEqual(bars[bars.count - 2].label, "")
+        XCTAssertEqual(bars[bars.count - 3].label, buckets[buckets.count - 3].label)
+        XCTAssertEqual(bars.filter { !$0.label.isEmpty }.count, (TracesGraphModel.days + 1) / 2)
     }
 
     // MARK: Menu-bar item

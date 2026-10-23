@@ -1,0 +1,553 @@
+//! NEAR AI credit arriving in the organization Private AI spends from, and the
+//! NEAR AI balance's change over the last 24 hours.
+//!
+//! **Arrivals are read, never inferred.** A contributor's balance goes up when
+//! credit arrives and down when Private AI spends it, so a rise in the balance
+//! cannot tell an arrival from a quiet hour. cloud-api keeps a ledger of
+//! credit transfers, and an owner session can read the transfers INTO its
+//! organization (`GET /v1/organizations/{org}/credit/transfers?direction=incoming`,
+//! `credits:read`). Every row there is credit that arrived; each is counted
+//! once, by its id. Spending never appears in it, so spending can never look
+//! like an arrival.
+//!
+//! **The 24-hour change is the balance's own.** It compares what is left now
+//! with what was left about a day ago, from samples this daemon took. It goes
+//! up with an arrival and down with spending, which is what it is meant to
+//! say. With no sample from about a day ago there is no change to report, and
+//! nothing is reported -- never a zero.
+//!
+//! **What is kept** (`near-ai-credit-arrivals.json`, beside the spending
+//! organization record): the organization's id, balance samples for 48 hours,
+//! the running total received, the total as of the last notification, and the
+//! ids and times of recent transfers so none is counted twice. No names, no
+//! memo, no sender. It is forgotten with the NEAR AI sign-in, and reset when
+//! Private AI moves to another organization.
+//!
+//! **Sessions.** Every read here goes through the balance module's lock
+//! ([`balance::with_management_session`] and [`balance::read`]), so a poll can
+//! never race a balance read for the refresh token, which rotates on every
+//! exchange.
+
+use super::api::{CloudApi, IncomingTransfer, TransferCursor};
+use super::balance::{self, BalanceReport};
+use super::loopback::SessionTokens;
+use crate::config::ConfigStore;
+use crate::daemon::ipc::DaemonShared;
+use anyhow::Result;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
+
+/// The record's file, in the daemon's directory.
+pub const ARRIVALS_FILE: &str = "near-ai-credit-arrivals.json";
+
+/// How long balance samples are kept. Twice the comparison window, so a
+/// sample from a day ago is still there when the daemon was off for a while.
+pub const SAMPLE_RETENTION: Duration = Duration::hours(48);
+
+/// The closest together two kept samples may be. A balance read every
+/// minute keeps one sample per spacing, not sixty.
+pub const SAMPLE_SPACING: Duration = Duration::minutes(10);
+
+/// What "the last 24 hours" compares against.
+pub const CHANGE_WINDOW: Duration = Duration::hours(24);
+
+/// How much older than [`CHANGE_WINDOW`] the comparison sample may be. A
+/// Mac that was asleep at this time yesterday compares with the last
+/// reading before then, as long as it is no older than this allows; past
+/// it, there is nothing from "about a day ago" and no change is reported.
+pub const CHANGE_TOLERANCE: Duration = Duration::hours(6);
+
+/// How far back each poll re-reads the transfer ledger, before the newest
+/// transfer it has already seen. A transfer committed late with an earlier
+/// time is still found; anything this old was seen by an earlier poll.
+pub const LOOKBACK: Duration = Duration::days(2);
+
+/// How often the daemon reads the ledger and the balance on its own. DRAFT,
+/// owner decision: each read past five minutes exchanges the refresh token
+/// once, so this is kept well apart.
+pub const POLL_INTERVAL: Duration = Duration::minutes(30);
+
+/// The most pages one poll reads. 100 transfers a page.
+pub const MAX_PAGES: usize = 20;
+
+/// A notification needs at least this much new credit since the last one
+/// ($1, in nano-dollars). DRAFT, owner decision 3 (2026-10-23).
+pub const NOTIFY_MIN_NANOS: i64 = 1_000_000_000;
+
+/// And at least this fraction of everything received as of the last one,
+/// in percent (25%). DRAFT, owner decision 3 (2026-10-23).
+pub const NOTIFY_GROWTH_PERCENT: i64 = 25;
+
+/// The most samples kept, whatever the clock does.
+const MAX_SAMPLES: usize = 400;
+/// The most transfer ids kept.
+const MAX_SEEN: usize = 2_000;
+/// A record larger than this is not one this build wrote.
+const MAX_FILE_BYTES: usize = 512 * 1024;
+
+/// One balance reading, kept for the 24-hour comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BalanceSample {
+    pub(crate) at: DateTime<Utc>,
+    pub(crate) remaining_nanos: i64,
+}
+
+/// One transfer already counted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeenTransfer {
+    pub(crate) id: String,
+    pub(crate) at: DateTime<Utc>,
+}
+
+/// Everything kept about one organization's credit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ArrivalsRecord {
+    /// The organization every figure below belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) samples: Vec<BalanceSample>,
+    /// Every transfer counted so far, added up, in nano-dollars.
+    #[serde(default)]
+    pub(crate) received_total_nanos: i64,
+    /// Whether one whole read of the ledger has finished. Until it has,
+    /// [`received_total_nanos`](Self::received_total_nanos) is not a total.
+    #[serde(default)]
+    pub(crate) scanned: bool,
+    /// The received total as of the last notification; `None` before the
+    /// first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) notified_received_total_nanos: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) seen: Vec<SeenTransfer>,
+    /// The newest transfer time counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) high_water: Option<DateTime<Utc>>,
+}
+
+/// Whether credit received is worth a notification: `Some(amount)` to
+/// announce, in nano-dollars, or `None`.
+///
+/// The first credit ever received always is. After that, the credit received
+/// since the last notification must reach both [`NOTIFY_MIN_NANOS`] and
+/// [`NOTIFY_GROWTH_PERCENT`] of everything received as of that notification.
+/// Integer arithmetic only.
+#[must_use]
+pub fn credit_candidacy(received_total: i64, notified_total: Option<i64>) -> Option<i64> {
+    if received_total <= 0 {
+        return None;
+    }
+    let Some(baseline) = notified_total else {
+        return Some(received_total);
+    };
+    let grown = i128::from(received_total) - i128::from(baseline);
+    let enough = grown >= i128::from(NOTIFY_MIN_NANOS)
+        && grown * 100 >= i128::from(baseline.max(0)) * i128::from(NOTIFY_GROWTH_PERCENT);
+    enough.then(|| i64::try_from(grown).unwrap_or(i64::MAX))
+}
+
+impl ArrivalsRecord {
+    /// Make this the record of `organization_id`. A different organization
+    /// starts a new record: its balance and its transfers are not this one's.
+    pub(crate) fn adopt(&mut self, organization_id: &str) {
+        if self.organization_id.as_deref() != Some(organization_id) {
+            *self = Self {
+                organization_id: Some(organization_id.to_owned()),
+                ..Self::default()
+            };
+        }
+    }
+
+    /// Keep a balance reading taken at `at`. A `None` (no limit set, so no
+    /// remaining figure) is not a reading and is not kept.
+    pub(crate) fn record_sample(&mut self, at: DateTime<Utc>, remaining_nanos: Option<i64>) {
+        let Some(remaining_nanos) = remaining_nanos else {
+            return;
+        };
+        // A newer reading inside the spacing is not kept, rather than
+        // replacing the last one: a replaced sample would slide forward with
+        // every read and never grow a day old.
+        if self
+            .samples
+            .last()
+            .is_some_and(|last| at - last.at < SAMPLE_SPACING)
+        {
+            return;
+        }
+        self.samples.push(BalanceSample {
+            at,
+            remaining_nanos,
+        });
+        self.samples.retain(|s| s.at >= at - SAMPLE_RETENTION);
+        if self.samples.len() > MAX_SAMPLES {
+            let excess = self.samples.len() - MAX_SAMPLES;
+            self.samples.drain(..excess);
+        }
+    }
+
+    /// What is left now minus what was left about a day before `now`, or
+    /// `None` when either is unknown.
+    #[must_use]
+    pub(crate) fn change_24h(&self, now: DateTime<Utc>, remaining_now: Option<i64>) -> Option<i64> {
+        let remaining_now = remaining_now?;
+        let latest = now - CHANGE_WINDOW;
+        let earliest = latest - CHANGE_TOLERANCE;
+        let then = self
+            .samples
+            .iter()
+            .filter(|s| s.at <= latest && s.at >= earliest)
+            .max_by_key(|s| s.at)?;
+        remaining_now.checked_sub(then.remaining_nanos)
+    }
+
+    /// The oldest transfer time the next poll needs to read back to, or
+    /// `None` to read the whole ledger.
+    #[must_use]
+    pub(crate) fn scan_cutoff(&self) -> Option<DateTime<Utc>> {
+        self.high_water.map(|at| at - LOOKBACK)
+    }
+
+    /// Count one finished read of the ledger. Each transfer is counted once,
+    /// by id; one older than [`Self::scan_cutoff`] was read by an earlier
+    /// poll and is skipped. Answers the credit newly counted.
+    pub(crate) fn apply_transfers(&mut self, rows: &[IncomingTransfer]) -> i64 {
+        let cutoff = self.scan_cutoff();
+        let mut added: i64 = 0;
+        for row in rows {
+            if row.amount <= 0
+                || cutoff.is_some_and(|cutoff| row.created_at < cutoff)
+                || self.seen.iter().any(|seen| seen.id == row.id)
+            {
+                continue;
+            }
+            added = added.saturating_add(row.amount);
+            self.received_total_nanos = self.received_total_nanos.saturating_add(row.amount);
+            self.seen.push(SeenTransfer {
+                id: row.id.clone(),
+                at: row.created_at,
+            });
+            self.high_water = Some(
+                self.high_water
+                    .map_or(row.created_at, |high| high.max(row.created_at)),
+            );
+        }
+        // Keep the ids the next poll can read back over, with a day to
+        // spare, and never more than the cap.
+        if let Some(keep_from) = self.scan_cutoff().map(|cutoff| cutoff - Duration::days(1)) {
+            self.seen.retain(|seen| seen.at >= keep_from);
+        }
+        if self.seen.len() > MAX_SEEN {
+            self.seen.sort_by_key(|seen| seen.at);
+            let excess = self.seen.len() - MAX_SEEN;
+            self.seen.drain(..excess);
+        }
+        self.scanned = true;
+        added
+    }
+
+    /// What a notification would announce now, if anything.
+    #[must_use]
+    pub(crate) fn candidacy(&self) -> Option<i64> {
+        if !self.scanned {
+            return None;
+        }
+        credit_candidacy(
+            self.received_total_nanos,
+            self.notified_received_total_nanos,
+        )
+    }
+}
+
+// ---- the record, in memory and on disk ----
+
+/// Each directory's record, loaded once and written through. The arbiter
+/// reads it every tick, so it is read from here and not from the file.
+///
+/// A leaf lock: nothing is taken while it is held.
+fn records() -> &'static Mutex<HashMap<PathBuf, ArrivalsRecord>> {
+    static RECORDS: OnceLock<Mutex<HashMap<PathBuf, ArrivalsRecord>>> = OnceLock::new();
+    RECORDS.get_or_init(Default::default)
+}
+
+/// The record on disk. Missing, oversized or unreadable reads as empty: it
+/// holds nothing that cannot be read again from the service, and the cost of
+/// starting over is at most one notification for credit already announced.
+fn load(store: &ConfigStore) -> ArrivalsRecord {
+    match store.read_daemon_file(ARRIVALS_FILE) {
+        Ok(Some(bytes)) if bytes.len() <= MAX_FILE_BYTES => {
+            serde_json::from_slice(&bytes).unwrap_or_default()
+        }
+        _ => ArrivalsRecord::default(),
+    }
+}
+
+/// A copy of this directory's record.
+pub(crate) fn snapshot(store: &ConfigStore) -> ArrivalsRecord {
+    records()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(store.dir().to_path_buf())
+        .or_insert_with(|| load(store))
+        .clone()
+}
+
+/// Change the record and write it through, or do nothing when no NEAR AI
+/// sign-in is kept: under the credential commit lock, so a forget cannot
+/// land between the check and the write and have a poll bring the record
+/// back.
+fn update<R>(shared: &DaemonShared, change: impl FnOnce(&mut ArrivalsRecord) -> R) -> Option<R> {
+    let store = &shared.store;
+    let locks = super::session::coordination(store.dir()).ok()?;
+    let _commit = locks.commit.lock().ok()?;
+    shared
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .near_ai_session
+        .as_ref()?;
+    let mut map = records().lock().unwrap_or_else(|e| e.into_inner());
+    let record = map
+        .entry(store.dir().to_path_buf())
+        .or_insert_with(|| load(store));
+    let out = change(record);
+    let written = serde_json::to_vec(record)
+        .ok()
+        .is_some_and(|bytes| store.write_daemon_file(ARRIVALS_FILE, &bytes).is_ok());
+    if !written {
+        tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_written");
+    }
+    Some(out)
+}
+
+/// Forget the record. The caller holds the credential commit lock: this is
+/// the forget path's. Best effort, like the spending organization's record.
+pub(crate) fn clear_locked(store: &ConfigStore) {
+    records()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(store.dir());
+    match std::fs::remove_file(store.daemon_path(ARRIVALS_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_cleared"),
+    }
+}
+
+/// Keep a balance just read for `organization_id` as a sample. Called by the
+/// balance read itself, so every read -- the app's and the poll's -- counts.
+pub(crate) fn note_balance(
+    shared: &DaemonShared,
+    organization_id: Option<&str>,
+    reading: &balance::BalanceReading,
+) {
+    let Some(organization_id) = organization_id else {
+        return;
+    };
+    update(shared, |record| {
+        record.adopt(organization_id);
+        record.record_sample(reading.observed_at, reading.remaining_nanos);
+    });
+}
+
+/// What a credit notification would announce now: `(amount, received
+/// total)`, or `None`. From memory after the first read.
+pub(crate) fn pending_notification(store: &ConfigStore) -> Option<(i64, i64)> {
+    let record = snapshot(store);
+    record
+        .candidacy()
+        .map(|amount| (amount, record.received_total_nanos))
+}
+
+/// A credit notification announcing everything up to `received_total` was
+/// posted: that total is the next one's baseline. A record that has since
+/// moved to another organization keeps its own.
+pub(crate) fn mark_notified(shared: &DaemonShared, received_total: i64) {
+    update(shared, |record| {
+        if record.scanned && record.received_total_nanos >= received_total {
+            record.notified_received_total_nanos = Some(received_total);
+        }
+    });
+}
+
+/// The organization Private AI spends from, when a NEAR AI sign-in is kept.
+fn spending_organization(shared: &DaemonShared) -> Option<String> {
+    let settings = shared.settings.lock().unwrap_or_else(|e| e.into_inner());
+    settings.near_ai_session.as_ref()?;
+    settings
+        .near_ai_inference
+        .as_ref()
+        .map(|key| key.organization_id.clone())
+}
+
+// ---- the balance reply ----
+
+/// `near_ai_balance`'s answer: the balance, and beside it the 24-hour change
+/// and the credit received so far.
+///
+/// `change_24h_nanos` and `change_24h_text` are null with no reading from
+/// about a day ago, and `change_24h_text` is also null for a change under a
+/// cent, which the tile does not say. `received_total_nanos` is null until
+/// one whole read of the transfer ledger has finished. All three are null in
+/// every state but `known`.
+pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> serde_json::Value {
+    let mut value = report.to_value();
+    let BalanceReport::Known(reading) = report else {
+        return value;
+    };
+    let Some(organization_id) = spending_organization(shared) else {
+        return value;
+    };
+    let record = snapshot(&shared.store);
+    if record.organization_id.as_deref() != Some(organization_id.as_str()) {
+        return value;
+    }
+    let change = record.change_24h(reading.observed_at, reading.remaining_nanos);
+    if let Some(object) = value.as_object_mut() {
+        if let Some(change) = change {
+            object.insert("change_24h_nanos".into(), change.into());
+            let text = crate::private_inference_copy::balance_change_line(change, BALANCE_SCALE);
+            if !text.is_empty() {
+                object.insert("change_24h_text".into(), text.into());
+            }
+        }
+        if record.scanned {
+            object.insert(
+                "received_total_nanos".into(),
+                record.received_total_nanos.into(),
+            );
+        }
+    }
+    value
+}
+
+/// The wire's scale for every amount here: nano-dollars.
+const BALANCE_SCALE: u8 = 9;
+
+// ---- the poll ----
+
+/// When each directory last polled. In memory: a restarted daemon polls at
+/// once, which is one read.
+fn last_polls() -> &'static Mutex<HashMap<PathBuf, DateTime<Utc>>> {
+    static LAST: OnceLock<Mutex<HashMap<PathBuf, DateTime<Utc>>>> = OnceLock::new();
+    LAST.get_or_init(Default::default)
+}
+
+/// Whether a poll is due at `now`, and if so, mark it started.
+fn take_poll_due(store: &ConfigStore, now: DateTime<Utc>) -> bool {
+    let mut map = last_polls().lock().unwrap_or_else(|e| e.into_inner());
+    let last = map.get(store.dir()).copied();
+    // A clock that went backwards reads as a poll just now.
+    if last.is_some_and(|last| now - last < POLL_INTERVAL && last <= now + POLL_INTERVAL) {
+        return false;
+    }
+    map.insert(store.dir().to_path_buf(), now);
+    true
+}
+
+/// One supervisor tick: read the balance and the transfer ledger when a
+/// poll is due and a NEAR AI sign-in with a spending organization is kept.
+/// Cheap otherwise. Logs labels only.
+pub async fn poll(shared: &DaemonShared, now: DateTime<Utc>) {
+    if spending_organization(shared).is_none() || !take_poll_due(&shared.store, now) {
+        return;
+    }
+    let Ok(api) = CloudApi::live() else {
+        return;
+    };
+    if poll_with(shared, &api).await.is_err() {
+        tracing::debug!(target: "near_ai_credit", "near_ai_credit_poll_unavailable");
+    }
+}
+
+/// [`poll`] against an explicit client, without the schedule. Answers the
+/// credit newly counted.
+pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i64> {
+    let Some(organization_id) = spending_organization(shared) else {
+        return Ok(0);
+    };
+    // A sample for the 24-hour change, through the balance's own read and
+    // its cache, so a poll right after the app read one costs no call.
+    let _ = balance::read_via(shared, api).await;
+    let cutoff = {
+        let record = snapshot(&shared.store);
+        (record.organization_id.as_deref() == Some(organization_id.as_str()))
+            .then(|| record.scan_cutoff())
+            .flatten()
+    };
+    let rows = balance::with_management_session(shared, api, |tokens| {
+        fetch_incoming(api, tokens, organization_id.clone(), cutoff)
+    })
+    .await?;
+    let added = update(shared, |record| {
+        record.adopt(&organization_id);
+        let first_read = !record.scanned;
+        let added = record.apply_transfers(&rows);
+        // Credit already in the ledger at the first read is history -- an
+        // upgrade, or a new organization -- not an arrival. It becomes the
+        // baseline without a notification, so "the first credit ever" is
+        // the first to land after an empty first read. DRAFT, owner review.
+        if first_read && added > 0 {
+            record.notified_received_total_nanos = Some(record.received_total_nanos);
+        }
+        added
+    })
+    .unwrap_or(0);
+    if added > 0 {
+        shared.publish(
+            crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED,
+            serde_json::json!({}),
+        );
+    }
+    Ok(added)
+}
+
+/// Read the ledger, newest first, back to `cutoff` (or all of it). May run
+/// twice under one poll (see [`balance::with_management_session`]): it only
+/// reads.
+async fn fetch_incoming(
+    api: &CloudApi,
+    tokens: SessionTokens,
+    organization_id: String,
+    cutoff: Option<DateTime<Utc>>,
+) -> Result<Vec<IncomingTransfer>> {
+    let mut rows = Vec::new();
+    let mut cursor: Option<TransferCursor> = None;
+    for _ in 0..MAX_PAGES {
+        let page = api
+            .incoming_transfers_page(&tokens, &organization_id, cursor.as_ref())
+            .await?;
+        let oldest = page.transfers.last().map(|t| t.created_at);
+        let done = page.transfers.is_empty()
+            || cutoff
+                .zip(oldest)
+                .is_some_and(|(cutoff, oldest)| oldest < cutoff);
+        rows.extend(page.transfers);
+        match page.next_cursor {
+            Some(next) if !done => cursor = Some(next),
+            _ => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Put `record` in place for `store`, in memory and on disk, as if earlier
+/// polls had left it.
+#[cfg(test)]
+pub(crate) fn set_for_test(store: &ConfigStore, record: ArrivalsRecord) {
+    if let Ok(bytes) = serde_json::to_vec(&record) {
+        let _ = store.write_daemon_file(ARRIVALS_FILE, &bytes);
+    }
+    records()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(store.dir().to_path_buf(), record);
+}
+
+#[cfg(test)]
+#[path = "arrivals_tests.rs"]
+mod tests;

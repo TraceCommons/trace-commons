@@ -31,11 +31,11 @@ use trace_commons_gate_api::{RailDescriptor, RailId, RailRate, RecipientKind};
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
-    Database, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutLineResolution,
-    PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLinkAction, PayoutLinkClose,
-    PayoutLinkInsert, PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState,
-    PayoutLinkTransition, PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore,
-    PendingPayoutLineInsert, SealedRecipient,
+    Database, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction, PayoutHold,
+    PayoutLineResolution, PayoutLineResolve, PayoutLineState, PayoutLineWrite, PayoutLinkAction,
+    PayoutLinkClose, PayoutLinkInsert, PayoutLinkRequestInsert, PayoutLinkRequestWrite,
+    PayoutLinkState, PayoutLinkTransition, PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore,
+    PendingPayoutLineInsert, SealedRecipient, payout_account_id_hash,
 };
 use uuid::Uuid;
 
@@ -1344,6 +1344,69 @@ async fn rate_epochs_and_control_are_not_writable_by_the_runtime_role() {
         .unwrap()
         .get(0);
     assert_eq!(history, 2, "halt and resume each leave a row");
+}
+
+/// The operator's view of a rail's holds: every open hold in one tenant on
+/// one rail, by account and label. Cleared holds, other rails and other
+/// tenants are not listed.
+#[tokio::test]
+async fn open_holds_are_listed_per_tenant_and_rail() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let (other, other_accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let open = |tenant: &str, account: Uuid, rail_id: &str, label: &str| {
+        let (tenant, rail_id, label) = (tenant.to_owned(), rail_id.to_owned(), label.to_owned());
+        async move {
+            assert!(
+                store
+                    .open_payout_hold(&tenant, account, &rail(&rail_id), &label, ACTOR)
+                    .await
+                    .unwrap()
+            );
+        }
+    };
+    open(&tenant, accounts[0], "near_ai", "payout_recovery_unmatched").await;
+    open(&tenant, accounts[0], "near_ai", "payout_link_unreadable").await;
+    open(&tenant, accounts[1], "near_ai", "payout_over_ceiling").await;
+    open(&tenant, accounts[1], "test_keyed", "payout_over_ceiling").await;
+    open(&other, other_accounts[0], "near_ai", "payout_over_ceiling").await;
+    assert!(
+        store
+            .clear_payout_hold(
+                &tenant,
+                accounts[1],
+                &rail("near_ai"),
+                "payout_over_ceiling",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+
+    let mut listed = store
+        .open_payout_holds(&tenant, &rail("near_ai"))
+        .await
+        .unwrap();
+    listed.sort_by(|a, b| a.label.cmp(&b.label));
+    assert_eq!(
+        listed,
+        vec![
+            PayoutHold {
+                account_id: accounts[0],
+                label: "payout_link_unreadable".into()
+            },
+            PayoutHold {
+                account_id: accounts[0],
+                label: "payout_recovery_unmatched".into()
+            },
+        ]
+    );
+    let hash = payout_account_id_hash(accounts[0]);
+    assert!(hash.starts_with("sha256:") && hash.len() == 71);
+    assert!(!hash.contains(&accounts[0].to_string()));
 }
 
 #[tokio::test]

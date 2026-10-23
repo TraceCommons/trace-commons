@@ -176,11 +176,18 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
             (409, Code::OrganizationTransferLimitExceeded) if call == Call::Probe => {
                 RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
             }
+            // On a send (or the zero read, which is one) either code is a
+            // limit on our own credential or org: its budget, its source,
+            // or its recipient list, which the link probe already checked.
+            // None of that is the recipient's standing, so it holds no
+            // account: stop the rail and change no row, the pending line
+            // included, and the next pass resends it once an operator has
+            // raised the limit.
             (409, Code::CredentialTransferLimitExceeded) => {
-                RailRefusal::HoldLine("near_ai_credential_transfer_limit_exceeded")
+                RailRefusal::StopPass("near_ai_credential_transfer_limit_exceeded")
             }
             (409, Code::OrganizationTransferLimitExceeded) => {
-                RailRefusal::HoldLine("near_ai_organization_transfer_limit_exceeded")
+                RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
             }
             (409, Code::CapacityOverflow) => RailRefusal::HoldLine("near_ai_capacity_overflow"),
             (_, _) if call != Call::Send => RailRefusal::StopPass("near_ai_reply_unexpected"),

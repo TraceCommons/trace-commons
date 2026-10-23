@@ -3310,7 +3310,16 @@ impl PayoutAccountStanding {
     }
 }
 
-pub use postgres_payout::{PayoutPassLock, link_id_hash as payout_link_id_hash};
+pub use postgres_payout::{
+    PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
+};
+
+/// One open hold on a rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutHold {
+    pub account_id: Uuid,
+    pub label: String,
+}
 
 /// The payout rail store. Implemented for PostgreSQL in `postgres_payout`.
 #[async_trait]
@@ -3537,6 +3546,14 @@ pub trait PayoutStore: Send + Sync {
         account: Uuid,
         rail: &RailId,
     ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Every open hold in `tenant` on `rail`, by account and label: the
+    /// operator's view before clearing one.
+    async fn open_payout_holds(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutHold>, DatabaseError>;
 
     /// Records a request with its audit row.
     async fn insert_payout_link_request(

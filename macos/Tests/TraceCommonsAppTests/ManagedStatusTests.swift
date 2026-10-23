@@ -92,15 +92,23 @@ final class ManagedStatusTests: XCTestCase {
     }
 
     /// (d) The list not read yet: the sessions card says it is connecting,
-    /// with Retry.
+    /// with Retry as the card's own re-read icon, the size the balance
+    /// card's is (owner, 2026-10-22), in the core's words even before the
+    /// daemon has sent its table.
     func test_anUnreadListSaysConnectingWithRetry() throws {
         let source = try Self.source()
         for needle in [
             "} else {\n                connectingCard\n            }",
             "subtitle: [model.managedText(\"connecting\")]",
-            "Label(model.managedText(\"retry\"), systemImage: \"arrow.clockwise\")",
+            "refresh: .init(model.managedText(\"retry\"), isDisabled: model.managedBusy) {",
         ] {
             XCTAssertTrue(source.contains(needle), "ManagedSessionsView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("Label(model.managedText(\"retry\")"), "Retry is a capsule again")
+        let model = AppModel()
+        XCTAssertNil(model.managedSnapshot)
+        for key in ["title", "connecting", "retry"] {
+            XCTAssertFalse(model.managedText(key).isEmpty, "\(key) has no words before the first read")
         }
     }
 

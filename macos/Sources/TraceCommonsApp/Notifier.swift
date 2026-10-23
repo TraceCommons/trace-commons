@@ -111,7 +111,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static func nudgeCategory(
         _ actions: [(id: String, label: String)], kind: NudgeSurface.Kind? = nil
     ) -> CategorySpec {
-        let scope = kind == .settlementEstimate ? "settlement_estimate." : ""
+        // Kinds whose buttons carry their own words get their own scope.
+        let scope = switch kind {
+        case .settlementEstimate: "settlement_estimate."
+        case .nearAiCredit: "near_ai_credit."
+        default: ""
+        }
         return CategorySpec(
             identifier: nudgeActionPrefix + scope + actions.map(\.id).joined(separator: "+"),
             buttons: actions.map {
@@ -142,6 +147,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         if let review = copy?[.notifySettlementActionReview], let notNow = copy?[.notifySettlementActionNotNow] {
             specs.append(nudgeCategory(
                 [(id: "review", label: review), (id: notNowActionId, label: notNow)], kind: .settlementEstimate))
+        }
+        if let view = copy?[.notifyNearAiCreditActionView], let notNow = copy?[.notifyNearAiCreditActionNotNow] {
+            specs.append(nudgeCategory(
+                [(id: "review", label: view), (id: notNowActionId, label: notNow)], kind: .nearAiCredit))
         }
         return specs
     }

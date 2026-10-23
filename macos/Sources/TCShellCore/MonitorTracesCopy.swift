@@ -163,6 +163,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let submitCount: String
     public let submitting: String
     public let submitTip: String
+    public let submitTraceTip: String
     public let eligibleCount: String
     public let reviewing: String
     public let reviewTip: String
@@ -199,6 +200,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case submitCount = "submit_count"
         case submitting
         case submitTip = "submit_tip"
+        case submitTraceTip = "submit_trace_tip"
         case eligibleCount = "eligible_count"
         case reviewing
         case reviewTip = "review_tip"

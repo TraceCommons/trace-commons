@@ -611,12 +611,18 @@ final class InsightsOverviewModel {
     /// The daemon's week (feed T), in the same shape. While it is set it is
     /// the only week shown; the saved week is never mixed in.
     private(set) var counter: InsightsWeekOverview?
+    /// The open figure's drill-down: tokens or cache share.
     private(set) var inputs: InsightsCardInputs?
-    /// Feed T's counted sessions, held for the Sessions card's drill-down.
-    private var counterSessions: InsightsCounterSessions?
-    /// Feed T's Sessions drill-down while it is open: the daemon's rows, not
-    /// the core's, since they carry no reference the core could look up.
-    private(set) var counterInputs: InsightsCounterSessions?
+    /// The Sessions figure's breakdown under feed S, read with every week
+    /// and always shown under the Sessions card (owner, 2026-10-22: never
+    /// behind a chevron). Nil while unread, after a failed read, and under
+    /// feed T.
+    private(set) var sessionsInputs: InsightsCardInputs?
+    private var sessionsTask: Task<Void, Never>?
+    /// Feed T's counted sessions, the Sessions figure's breakdown while the
+    /// daemon's week shows: the daemon's rows, not the core's, since they
+    /// carry no reference the core could look up.
+    private(set) var counterSessions: InsightsCounterSessions?
     /// The week asked for; `nil` is the current week.
     private(set) var requestedWeek: String?
 
@@ -632,50 +638,59 @@ final class InsightsOverviewModel {
     /// to the saved week. Any open drill-down closes either way.
     func showCounter(_ week: InsightsWeekOverview?, sessions: InsightsCounterSessions? = nil) {
         counter = week; counterSessions = week == nil ? nil : sessions
-        inputs = nil; counterInputs = nil
+        inputs = nil
     }
 
-    /// Whether `card` opens a drill-down in the week on screen. Under feed T
-    /// only the Sessions card does, from the daemon's own rows.
-    func drills(_ card: String) -> Bool {
-        counter == nil || (card == "sessions" && counterSessions != nil)
-    }
+    /// Whether the tokens or cache share figure opens a drill-down in the
+    /// week on screen. Feed T rows carry no session reference the core
+    /// could look up, so under feed T neither does.
+    func drills(_ card: String) -> Bool { counter == nil && card != "sessions" }
 
-    /// The card whose drill-down is open, either feed's.
-    var openCard: String? { inputs?.card ?? (counterInputs == nil ? nil : "sessions") }
+    /// The figure whose drill-down is open.
+    var openCard: String? { inputs?.card }
 
     func open() { active = true; load() }
     func close() {
         active = false; token = UUID(); task?.cancel(); task = nil; busy = false
-        inputs = nil; counterInputs = nil
+        sessionsTask?.cancel(); sessionsTask = nil
+        inputs = nil; sessionsInputs = nil
     }
     func reload() { load() }
     func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
 
-    /// Read the drill-down for `card` (`tokens`, `cache_share` or `sessions`)
-    /// in the week on screen.
+    /// Read the drill-down for `card` (`tokens` or `cache_share`) in the
+    /// saved week on screen.
     func showInputs(_ card: String) {
-        // Feed T rows carry no session reference the core could look up, so
-        // under feed T only the Sessions card drills, from the daemon's rows.
-        guard active else { return }
-        if counter != nil {
-            if card == "sessions", let counterSessions { counterInputs = counterSessions }
-            return
-        }
-        guard let week = overview?.week_start else { return }
+        guard active, counter == nil, card != "sessions", let week = overview?.week_start else { return }
         run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
             guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
             model.inputs = inputs
         }
     }
-    func hideInputs() { inputs = nil; counterInputs = nil }
+    func hideInputs() { inputs = nil }
 
     private func load() {
         guard active else { return }
-        inputs = nil; counterInputs = nil
+        inputs = nil; sessionsInputs = nil
+        sessionsTask?.cancel(); sessionsTask = nil
         run(.init("week_overview", weekStart: requestedWeek, tz: Self.offset)) { model, response in
             guard let overview = response.overview else { throw InsightsError.invalidResponse }
             model.overview = overview
+            model.readSessions(week: overview.week_start)
+        }
+    }
+
+    /// Read the Sessions figure's breakdown for `week`, on its own task so
+    /// a figure's drill-down never cancels it. A failed read draws none.
+    private func readSessions(week: String) {
+        sessionsTask?.cancel()
+        let service = service
+        sessionsTask = Task { [weak self] in
+            let response = try? await service(
+                .init(operation: .init("card_inputs", weekStart: week, tz: Self.offset, card: "sessions")))
+            guard let self, self.active, !Task.isCancelled, self.overview?.week_start == week else { return }
+            let inputs = response?.type == "card_inputs" ? response?.inputs : nil
+            self.sessionsInputs = inputs?.card == "sessions" ? inputs : nil
         }
     }
 
