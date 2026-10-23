@@ -260,14 +260,19 @@ pem_public=$'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEADUMMYDUMMYDUMMYDUMMYDUM
 issuer_keypair="$pem_private"$'\n'"$pem_public"$'\nkid: 00000000-0000-4000-8000-000000000001'
 attestation=$'# Attestation signing key for trace-commons-ingest.\n\nTRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID=00000000-0000-4000-8000-000000000002\n\nTRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM=\''"$pem_private"$'\n\'\nTRACE_COMMONS_INGEST_ATTESTATION_PUBLIC_KEY_PEM=\''"$pem_public"$'\n\''
 
+# Hex keys in the form `openssl rand -hex 32` prints, each distinct and
+# recognisable so the printed-secret check below can look for it.
+hex_gate="$(printf 'da%.0s' $(seq 32))"
+hex_artifact="$(printf 'db%.0s' $(seq 32))"
+hex_name_kek="$(printf 'dc%.0s' $(seq 32))"
 secret_env=(
   TC_SECRET_tc_staging_nearai_inference_key=dummy-staging-near-ai-key
-  TC_SECRET_tc_staging_db_app_password=dummy-staging-db-password
-  TC_SECRET_tc_staging_db_login_resolver_password=dummy-staging-resolver-password
-  TC_SECRET_tc_staging_gate_master_key=dummy-staging-gate-master-key-0123456789abcdef
-  TC_SECRET_tc_staging_artifact_key=dummy-staging-artifact-key-0123456789abcdef0123
+  TC_SECRET_tc_staging_db_app_password=dummystagingdbpassword
+  TC_SECRET_tc_staging_db_login_resolver_password=dummystagingresolverpassword
+  "TC_SECRET_tc_staging_gate_master_key=$hex_gate"
+  "TC_SECRET_tc_staging_artifact_key=$hex_artifact"
   TC_SECRET_tc_staging_near_account_index_pepper=ZHVtbXktc3RhZ2luZy1wZXBwZXItMDEyMzQ1Njc4OWFiY2RlZg==
-  TC_SECRET_tc_staging_near_account_name_kek_key=dummy-staging-name-kek-0123456789abcdef0123456789
+  "TC_SECRET_tc_staging_near_account_name_kek_key=$hex_name_kek"
   "TC_SECRET_tc_staging_issuer_signing_keypair=$issuer_keypair"
   "TC_SECRET_tc_staging_issuer_workload_public_key=$pem_public"
   "TC_SECRET_tc_staging_ingest_attestation_keypair=$attestation"
@@ -324,7 +329,7 @@ if [ -f "$ingest" ]; then
   expect "$ingest" TRACE_COMMONS_NEAR_PROVISIONING_ISSUER_URL "https://issuer.$H"
   expect "$ingest" TRACE_COMMONS_NEAR_PROVISIONING_AUDIENCE trace-commons-ingest
   expect "$ingest" TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER ZHVtbXktc3RhZ2luZy1wZXBwZXItMDEyMzQ1Njc4OWFiY2RlZg==
-  expect "$ingest" TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY dummy-staging-name-kek-0123456789abcdef0123456789
+  expect "$ingest" TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY "$hex_name_kek"
   expect "$ingest" TRACE_COMMONS_ADMISSION_ENABLED false
   expect "$ingest" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE disabled
   expect "$ingest" TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED false
@@ -335,13 +340,13 @@ if [ -f "$ingest" ]; then
   expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_NAME '"Near.ai Staging"'
   expect "$ingest" TRACE_COMMONS_SIGNED_TOKEN_ISSUER "https://issuer.$H"
   expect "$ingest" TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS "issuer.$H"
-  expect "$ingest" DATABASE_URL postgres://app:dummy-staging-db-password@127.0.0.1:5432/tracecommons
-  expect "$ingest" TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL postgres://tc_login_resolver_login:dummy-staging-resolver-password@127.0.0.1:5432/tracecommons
+  expect "$ingest" DATABASE_URL postgres://app:dummystagingdbpassword@127.0.0.1:5432/tracecommons
+  expect "$ingest" TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL postgres://tc_login_resolver_login:dummystagingresolverpassword@127.0.0.1:5432/tracecommons
   expect "$ingest" TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME projects/tracecommons-pilot-2026/locations/us-central1/keyRings/tc-staging/cryptoKeys/kek-v1
   expect "$ingest" TRACE_COMMONS_REMOTE_OBJECT_STORE_BUCKET tc-staging-artifacts-20261021
   expect "$ingest" TRACE_COMMONS_REMOTE_OBJECT_STORE_CREDENTIAL_REF tc-staging-runtime@tracecommons-pilot-2026.iam.gserviceaccount.com
-  expect "$ingest" TRACE_COMMONS_GATE_SERVICE_MASTER_KEY dummy-staging-gate-master-key-0123456789abcdef
-  expect "$ingest" TRACE_COMMONS_ARTIFACT_KEY_HEX dummy-staging-artifact-key-0123456789abcdef0123
+  expect "$ingest" TRACE_COMMONS_GATE_SERVICE_MASTER_KEY "$hex_gate"
+  expect "$ingest" TRACE_COMMONS_ARTIFACT_KEY_HEX "$hex_artifact"
   expect "$ingest" TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID 00000000-0000-4000-8000-000000000002
 
   # Settings a staging ingest must not carry at all.
@@ -392,7 +397,7 @@ if [ -f "$issuer" ]; then
   expect "$issuer" TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_ISSUER https://issuer.staging.tracecommons.ai
   expect "$issuer" TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SIGNING_KID 00000000-0000-4000-8000-000000000001
   expect "$issuer" TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_AUDIENCE trace-commons-ingest
-  expect "$issuer" DATABASE_URL postgres://app:dummy-staging-db-password@127.0.0.1:5432/tracecommons
+  expect "$issuer" DATABASE_URL postgres://app:dummystagingdbpassword@127.0.0.1:5432/tracecommons
   expect "$issuer" TRACE_COMMONS_ONBOARDING_INGEST_URL https://ingest.staging.tracecommons.ai
   if grep -q -E '^TRACE_COMMONS_ALLOWLIST_SOURCE=' "$issuer"; then
     fail "the staging issuer env names an invite allowlist"
@@ -423,7 +428,8 @@ for file in "$ingest" "$issuer" "$out/issuer-signing-v1.pem"; do
     fail "$(basename "$file") is mode $mode, want 640"
   fi
 done
-if grep -q -F -e dummy-staging -e 'PRIVATE KEY' "$scratch/render.out" "$scratch/render.err"; then
+if grep -q -F -e dummy-staging -e dummystaging -e "$hex_gate" -e "$hex_artifact" \
+  -e "$hex_name_kek" -e ZHVtbXkt -e 'PRIVATE KEY' "$scratch/render.out" "$scratch/render.err"; then
   fail "render-env.sh printed a secret value"
 else
   pass "render-env.sh prints no secret value"
@@ -518,6 +524,31 @@ elif ! refused payout; then
 else
   pass "render-env.sh refuses payout dry_run without its settings"
 fi
+
+# Secrets that go into a KEY=value line or a URL have their shape checked
+# by name: a password that would break the database URL, a key that is not
+# hex, and any single-line secret carrying a newline, which would add a line
+# of its own to the env file (here, a witness bypass).
+for bad in \
+  "db_app_password:TC_SECRET_tc_staging_db_app_password=pass@word/x" \
+  "db_login_resolver_password:TC_SECRET_tc_staging_db_login_resolver_password=pass:word" \
+  "gate_master_key:TC_SECRET_tc_staging_gate_master_key=$(printf 'zz%.0s' $(seq 32))" \
+  "artifact_key:TC_SECRET_tc_staging_artifact_key=${hex_artifact:0:62}" \
+  "near_account_name_kek_key:TC_SECRET_tc_staging_near_account_name_kek_key=$hex_name_kek"$'\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' \
+  "nearai_inference_key:TC_SECRET_tc_staging_nearai_inference_key=dummy-staging-near-ai-key"$'\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' \
+  "near_account_index_pepper:TC_SECRET_tc_staging_near_account_index_pepper=ZHVtbXktc3RhZ2luZy1wZXBwZXItMDEyMzQ1Njc4OWFiY2RlZg=="$'\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true'; do
+  name="${bad%%:*}"
+  if run_render "bad-$name" "${bad#*:}"; then
+    fail "render-env.sh accepted a malformed tc-staging-${name//_/-}"
+  elif ! grep -q "^render-env: refusing: secret tc-staging-${name//_/-} " "$scratch/bad-$name.err"; then
+    fail "render-env.sh did not refuse a malformed tc-staging-${name//_/-} by name"
+    cat "$scratch/bad-$name.err" >&2
+  elif [ -e "$out/ingest.env" ] || [ -e "$out/issuer.env" ]; then
+    fail "render-env.sh left an env file behind after refusing tc-staging-${name//_/-}"
+  else
+    pass "render-env.sh refuses a malformed tc-staging-${name//_/-} by name and writes nothing"
+  fi
+done
 
 # 4. caddy adapt, where caddy is installed.
 if command -v caddy >/dev/null 2>&1; then

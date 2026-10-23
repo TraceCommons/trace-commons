@@ -48,13 +48,13 @@ nothing else.
 | Secret | Exists | Runtime | Becomes | How to make it |
 |---|---|---|---|---|
 | `tc-staging-nearai-inference-key` | yes | yes | `TRACE_COMMONS_NEAR_AI_API_KEY`, `TRACE_NEAR_AI_PRIVACY_API_KEY` | a NEAR AI staging API key |
-| `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role |
-| `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6; letters and digits only |
+| `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role. 16 or more letters and digits; any other character refuses (see below) |
+| `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6. 16 or more letters and digits |
 | `tc-staging-nearai-reseller-key` | yes | yes, read only when payout is on | `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` | the reseller org's credential on NEAR AI staging |
-| `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (at least 32 characters) |
-| `tc-staging-artifact-key` | **no** | yes | `TRACE_COMMONS_ARTIFACT_KEY_HEX` | `openssl rand -hex 32`. Losing it loses every stored artifact |
+| `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (exactly 64 hex characters) |
+| `tc-staging-artifact-key` | **no** | yes | `TRACE_COMMONS_ARTIFACT_KEY_HEX` | `openssl rand -hex 32` (64 hex characters). Losing it loses every stored artifact |
 | `tc-staging-near-account-index-pepper` | **no** | yes | `TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER` | `openssl rand -base64 32` (base64 of at least 32 bytes) |
-| `tc-staging-near-account-name-kek-key` | **no** | yes | `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` | `openssl rand -hex 32`. Its presence is required when sign-up is on; under `TRACE_COMMONS_KEK_PROVIDER=gcp_cloud_kms` the KMS key `tc-staging/kek-v1` is what seals account names, and this value is not used as key material |
+| `tc-staging-near-account-name-kek-key` | **no** | yes | `TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY` | `openssl rand -hex 32` (64 hex characters). Its presence is required when sign-up is on; under `TRACE_COMMONS_KEK_PROVIDER=gcp_cloud_kms` the KMS key `tc-staging/kek-v1` is what seals account names, and this value is not used as key material |
 | `tc-staging-issuer-signing-keypair` | **no** | yes | `/etc/tracecommons/issuer-signing-v1.pem`, `issuer-signing.pub`, `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SIGNING_KID` | the whole output of `trace-commons-upload-claim-issuer --generate-keypair` (private PEM, public PEM, `kid:` line) |
 | `tc-staging-issuer-workload-public-key` | **no** | yes | `/etc/tracecommons/workload-signing.pub` | the public PEM from a second `--generate-keypair`. The issuer will not start without one. Staging issues no workload tokens, so the private half and its kid can be discarded |
 | `tc-staging-ingest-attestation-keypair` | **no** | yes | `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID`, `_SIGNING_KEY_PEM`, `_PUBLIC_KEY_PEM` | the whole output of `trace-commons-ingest --generate-attestation-keypair` |
@@ -83,6 +83,23 @@ $B/trace-commons-upload-claim-issuer --generate-keypair | new_secret tc-staging-
 $B/trace-commons-upload-claim-issuer --generate-keypair \
   | awk '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/' | new_secret tc-staging-issuer-workload-public-key
 $B/trace-commons-ingest --generate-attestation-keypair | new_secret tc-staging-ingest-attestation-keypair
+```
+
+`render-env.sh` checks the shape of every secret that goes into a
+`KEY=value` line or a URL, and refuses by the secret's name: no secret but
+the two keypairs may hold a newline (it would add a line of its own to
+`ingest.env`), the hex keys must be 64 hex characters, the pepper base64, the
+NEAR AI keys one token, and the two database passwords letters and digits
+only, because they go into `postgres://` URLs unencoded. If the existing
+`tc-staging-db-app-password` refuses, give the role a new one and add it as
+a new version, the value reaching `psql` on stdin:
+
+```bash
+pw="$(openssl rand -hex 24)"
+printf '%s' "$pw" | gcloud secrets versions add tc-staging-db-app-password \
+  --project "$P" --data-file=-
+printf 'ALTER ROLE app PASSWORD %s;\n' "'$pw'" | sudo -u postgres psql -v ON_ERROR_STOP=1
+unset pw
 ```
 
 Rotation: add a secret version, rerun `render-env.sh`, restart the service.

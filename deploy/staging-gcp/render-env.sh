@@ -115,9 +115,29 @@ secret() {
   printf '%s' "$value"
 }
 
-# At least 32 characters: SecretsCrypto refuses a shorter master key.
-long_enough() {
-  [ "${#2}" -ge 32 ] || refuse "secret $1 is shorter than 32 characters"
+# The shape of a secret that goes into one KEY=value line or a URL, checked
+# before it is used: $1 the secret's name, $2 its value, $3 an extended
+# regular expression the whole value must match, $4 what that means. A
+# newline is refused first, by itself: it would add a line of its own to the
+# env file, which no later check could tell from a line of the template.
+shaped() {
+  case "$2" in
+    *$'\n'* | *$'\r'*) refuse "secret $1 holds more than one line" ;;
+  esac
+  [[ "$2" =~ $3 ]] || refuse "secret $1 is not $4"
+}
+
+# A 32-byte key as `openssl rand -hex 32` prints it. SecretsCrypto itself
+# needs only 32 characters; hex is what this deployment generates, and
+# anything else here is a mistake.
+hex_key() {
+  shaped "$1" "$2" '^[0-9A-Fa-f]{64}$' "64 hex characters (openssl rand -hex 32)"
+}
+
+# A database password goes into a postgres:// URL unencoded, so it may hold
+# only characters that need no encoding there.
+db_password() {
+  shaped "$1" "$2" '^[A-Za-z0-9]{16,}$' "16 or more letters and digits"
 }
 
 # The one PEM block of type $2 in $1, or nothing.
@@ -130,19 +150,25 @@ pem_block() {
 }
 
 TC_DB_PASSWORD="$(secret tc-staging-db-app-password)"
+db_password tc-staging-db-app-password "$TC_DB_PASSWORD"
 TC_LOGIN_RESOLVER_PASSWORD="$(secret tc-staging-db-login-resolver-password)"
+db_password tc-staging-db-login-resolver-password "$TC_LOGIN_RESOLVER_PASSWORD"
 TC_NEAR_AI_API_KEY="$(secret tc-staging-nearai-inference-key)"
+shaped tc-staging-nearai-inference-key "$TC_NEAR_AI_API_KEY" \
+  '^[A-Za-z0-9._~+/=:-]+$' "one token of letters, digits and ._~+/=:-"
 TC_GATE_MASTER_KEY_HEX="$(secret tc-staging-gate-master-key)"
-long_enough tc-staging-gate-master-key "$TC_GATE_MASTER_KEY_HEX"
+hex_key tc-staging-gate-master-key "$TC_GATE_MASTER_KEY_HEX"
 TC_ARTIFACT_KEY_HEX="$(secret tc-staging-artifact-key)"
-long_enough tc-staging-artifact-key "$TC_ARTIFACT_KEY_HEX"
+hex_key tc-staging-artifact-key "$TC_ARTIFACT_KEY_HEX"
 TC_NEAR_ACCOUNT_INDEX_PEPPER="$(secret tc-staging-near-account-index-pepper)"
+shaped tc-staging-near-account-index-pepper "$TC_NEAR_ACCOUNT_INDEX_PEPPER" \
+  '^[A-Za-z0-9+/]+={0,2}$' "base64 (openssl rand -base64 32)"
 pepper_bytes="$(printf '%s' "$TC_NEAR_ACCOUNT_INDEX_PEPPER" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" \
   || pepper_bytes=0
 [ "${pepper_bytes:-0}" -ge 32 ] \
   || refuse "secret tc-staging-near-account-index-pepper is not base64 of at least 32 bytes"
 TC_NEAR_ACCOUNT_NAME_KEK_KEY="$(secret tc-staging-near-account-name-kek-key)"
-long_enough tc-staging-near-account-name-kek-key "$TC_NEAR_ACCOUNT_NAME_KEK_KEY"
+hex_key tc-staging-near-account-name-kek-key "$TC_NEAR_ACCOUNT_NAME_KEK_KEY"
 
 issuer_keypair="$(secret tc-staging-issuer-signing-keypair)"
 issuer_private="$(pem_block "$issuer_keypair" "PRIVATE KEY")" \
@@ -188,7 +214,10 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
       [[ "${!var:-}" =~ ^[A-Za-z0-9_-]+$ ]] || refuse "$var is not set (payout $TC_NEAR_AI_PAYOUT_MODE)"
     done
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=$TC_NEAR_AI_PAYOUT_MODE"$'\n'
-    extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL=$(secret tc-staging-nearai-reseller-key)"$'\n'
+    reseller_key="$(secret tc-staging-nearai-reseller-key)"
+    shaped tc-staging-nearai-reseller-key "$reseller_key" \
+      '^[A-Za-z0-9._~+/=:-]+$' "one token of letters, digits and ._~+/=:-"
+    extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL=$reseller_key"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID=$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG=$TC_NEAR_AI_PAYOUT_SENDER_ORG"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE=$TC_NEAR_AI_PAYOUT_SOURCE"$'\n'
