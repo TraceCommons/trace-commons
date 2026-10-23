@@ -781,6 +781,15 @@ mod tests {
             Arc::new(ReferenceEmbedder::new()),
             pins.embedder_descriptor.clone(),
         );
+        // The control: the unchanged configuration through the same
+        // builder and adapters is the production package, so the refusal
+        // below comes from the changed value alone.
+        let unchanged = substance_package(&config, &scorer, &embedder).unwrap();
+        assert_eq!(unchanged, package);
+        assert_eq!(
+            production_package_pins(&unchanged).unwrap().score_selection,
+            ProductionScoreSelection::Substance(substance_values())
+        );
         let mut fixed = config.clone();
         fixed.sub_floor_mult_micros += 1;
         let other = substance_package(&fixed, &scorer, &embedder).unwrap();

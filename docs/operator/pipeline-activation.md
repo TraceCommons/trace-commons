@@ -1897,10 +1897,28 @@ tenant moves with its own `activate`. Do these steps in this order.
    re-qualifies only a tenant whose active bundle is the armed bundle, and
    skips the others with `pipeline_default_routing_requalify_bundle_differs`.
 
-To roll back one tenant, `activate` the compatibility bundle for it. The
-compatibility bundle stays runnable while the gate variables stay in the env
-file. As for every `activate`, it needs signed results for the compatibility
-package on the running revision.
+Roll back one tenant at a time. The compatibility bundle stays runnable while
+the gate variables stay in the env file.
+
+- For a tenant that step 6 moved from the compatibility bundle to the
+  substance bundle, send `POST /v1/admin/pipeline/rollback` with the
+  compatibility `bundle_id`. Use `rollback`, not `activate`: `rollback` reads
+  no readiness, but `activate` is refused for every bundle while a run of the
+  tenant is in `retry` ("The order of checks" above, and `rollback` under
+  "Activate, roll back, contain, deactivate").
+- For a tenant that the loop activated first on the substance bundle, send
+  `POST /v1/admin/pipeline/activate` with the compatibility `bundle_id`. That
+  tenant has no earlier bundle, so `rollback` answers `409`
+  `earlier_qualified_bundle_required`.
+
+Both routes need signed results for the compatibility package on the running
+revision, so a rollback needs a full compatibility promotion on the new
+revision. Its `pipeline_production_adapters` result comes from one boot of the
+new revision whose env file has none of the six substance variables: that
+boot's default package is the compatibility package. A boot with
+`TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` unset and a calibration variable
+still set refuses to start (`pipeline_substance_calibration_unexpected`). If
+the rollback must be ready, do this compatibility promotion before step 6.
 
 ## Fail-closed dependency qualification
 
