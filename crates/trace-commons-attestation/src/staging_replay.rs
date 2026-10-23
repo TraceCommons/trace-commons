@@ -94,11 +94,6 @@ pub const INSTANCE_ID_EVENT: &str = "instance-id";
 /// The keys every compose action carries, and no others.
 const ACTION_KEYS: [&str; 4] = ["action", "container", "image", "timestamp"];
 
-/// The keys a compose-manager record must carry. Others it may carry
-/// (`nonce`, `nonce_source`, `event_log`, `report_data`, `vm_config`) are not
-/// read: the quote is the authority for what they claim.
-const RECORD_KEYS: [&str; 3] = ["quote", "actions", "actions_hash"];
-
 /// Why an entry's RTMR3 log or compose-manager record was refused. Every
 /// refusal earns no key for that entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,7 +258,9 @@ impl fmt::Debug for Marker {
 
 /// What a replayed RTMR3 log's values must be. Every value is the event's
 /// payload bytes, compared exactly; `key_provider` too, as the event carries
-/// it (its inner structure is not parsed).
+/// it (its inner structure is not parsed). An empty `app_id`, `mr_kms`,
+/// `os_image_hash` or `key_provider` matches no event, not even one with an
+/// empty payload; a marker's payload may be empty and is compared as it is.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Rtmr3Allowlist {
     pub app_id: Vec<u8>,
@@ -645,7 +642,9 @@ pub fn check_rtmr3_allowlist(
             ReplayRefusal::KeyProviderNotAllowed,
         ),
     ] {
-        if event_payload(events, name) != expected.as_slice() {
+        // An empty listed value is one not filled in: it matches nothing,
+        // not an event whose payload happens to be empty.
+        if expected.is_empty() || event_payload(events, name) != expected.as_slice() {
             return Err(refusal);
         }
     }
@@ -725,9 +724,10 @@ impl ComposeManagerRecord {
             .ok_or(ReplayRefusal::ComposeManagerMissing)?
             .as_object()
             .ok_or(ReplayRefusal::ComposeManagerMalformed)?;
-        if RECORD_KEYS.iter().any(|key| !record.contains_key(*key)) {
-            return Err(ReplayRefusal::ComposeManagerMalformed);
-        }
+        // `quote`, `actions` and `actions_hash` are required, each read
+        // below. Other keys the record may carry (`nonce`, `nonce_source`,
+        // `event_log`, `report_data`, `vm_config`) are not read: the quote
+        // is the authority for what they claim.
         let quote = record
             .get("quote")
             .and_then(Value::as_str)
@@ -1312,6 +1312,22 @@ mod tests {
     }
 
     #[test]
+    fn an_event_above_rtmr3_is_refused() {
+        // TDX has RTMR0-3 only; an `imr` above 3 is no register, and the
+        // log carrying it is malformed rather than skipped.
+        let events = ten_events();
+        let mut log = log_of(&events);
+        log.as_array_mut().unwrap().push(json!({
+            "imr": 4, "event_type": RTMR3_EVENT_TYPE, "digest": "",
+            "event": "app-id", "event_payload": APP_ID,
+        }));
+        assert_eq!(
+            replay_rtmr3(Some(&log), &quote_replaying(&events)),
+            Err(ReplayRefusal::LogMalformed)
+        );
+    }
+
+    #[test]
     fn an_unknown_event_is_refused() {
         // A log the quote really measured, with an eleventh event of a name
         // the allowlist does not know: it replays, and is still refused.
@@ -1349,6 +1365,16 @@ mod tests {
         reordered.swap(5, 6);
         assert_eq!(
             check(&reordered, &quote_replaying(&reordered)),
+            Err(ReplayRefusal::EventSequence)
+        );
+        // The replay alone refuses the reordered log, before any allowlist:
+        // `observe` runs only the replay.
+        assert_eq!(
+            replay_rtmr3(Some(&log_of(&reordered)), &quote_replaying(&reordered)),
+            Err(ReplayRefusal::EventSequence)
+        );
+        assert_eq!(
+            replay_rtmr3(Some(&log_of(&repeated)), &quote_replaying(&repeated)),
             Err(ReplayRefusal::EventSequence)
         );
         let empty: Vec<(String, String)> = Vec::new();
@@ -1432,6 +1458,45 @@ mod tests {
                 Err(ReplayRefusal::KeyProviderNotAllowed)
             );
         }
+    }
+
+    #[test]
+    fn an_empty_allowlisted_value_matches_nothing() {
+        // An allowlist that leaves a value empty by mistake does not accept
+        // a log whose event carries an empty payload: empty is "not filled
+        // in", never a value to compare with.
+        for (name, refusal) in [
+            ("app-id", ReplayRefusal::AppIdNotAllowed),
+            ("mr-kms", ReplayRefusal::MrKmsNotAllowed),
+            ("os-image-hash", ReplayRefusal::OsImageHashNotAllowed),
+            ("key-provider", ReplayRefusal::KeyProviderNotAllowed),
+        ] {
+            let events = with_payload(name, "");
+            let replayed = replay_rtmr3(Some(&log_of(&events)), &quote_replaying(&events)).unwrap();
+            let mut list = allowlist().rtmr3;
+            match name {
+                "app-id" => list.app_id.clear(),
+                "mr-kms" => list.mr_kms.clear(),
+                "os-image-hash" => list.os_image_hash.clear(),
+                _ => list.key_provider.clear(),
+            }
+            assert_eq!(
+                check_rtmr3_allowlist(&replayed, &list),
+                Err(refusal),
+                "{name}"
+            );
+        }
+        // A progress marker's payload may be empty, and an empty listed
+        // payload matches it.
+        let events = with_payload("system-ready", "");
+        let replayed = replay_rtmr3(Some(&log_of(&events)), &quote_replaying(&events)).unwrap();
+        let mut list = allowlist().rtmr3;
+        for marker in &mut list.markers {
+            if marker.name == "system-ready" {
+                marker.payload.clear();
+            }
+        }
+        assert_eq!(check_rtmr3_allowlist(&replayed, &list), Ok(()));
     }
 
     #[test]
