@@ -222,9 +222,9 @@ remaining trajectory is complete, and a complete trajectory replays better. A
 paired call carries arguments and a result, so adding one never lowers either
 share.
 
-This differs from the server's general `ReplaySufficiency::score()`, which
-returns full credit for a trace with zero tool calls. Substance defines replay
-directly to avoid rewarding a tool-free trace with full replay.
+This differs from the protocol crate's `ReplaySufficiency::score()`, which
+returns full credit for a tool-free trace that has an initial prompt. Substance
+defines replay directly to avoid rewarding a tool-free trace with full replay.
 
 Substance does not read the self-reported `replayable` flag. The flag is a weak
 self-report, true on every pilot envelope. No term vetoes the score, so the flag
@@ -376,11 +376,11 @@ section 11).
 
 Calibration runs offline. It writes the calibrated values into the bundle
 configuration and produces a calibration report. The report records the corpus
-pin, the calibrated values, and the result of every check below. Two commands
-do this. `pipeline.py dataset generate` builds the guardrail fixture of check 1
-from the pinned corpus. `pipeline.py evaluate` scores a dataset with the
-substance bundle and writes the report. Neither runs a model, an embedder, or
-the index. Four checks apply.
+pin, the calibrated values, and the result of every check below. Two new
+`pipeline.py` commands do this (section 8.2). `pipeline.py dataset generate`
+builds the guardrail fixture of check 1 from the pinned corpus.
+`pipeline.py evaluate` scores a dataset with the substance bundle and writes the
+report. Neither runs a model, an embedder, or the index. Four checks apply.
 
 1. Fabrication regression guardrail. A synthetic benchmark pairs real base
    traces with fabricated variants, one variant per base for each vector. For
@@ -401,7 +401,9 @@ the index. Four checks apply.
    change. Compare each variant with the baseline on three measures: the
    Spearman rank correlation of substance, the gate flip rate (the share of
    traces whose `substance_passed` changes), and the credit shift (the median
-   absolute change in `q`). A variant is insensitive when the Spearman
+   absolute change in the substance half of `q`, `h(substance)`, with novelty
+   held at 1, because calibration runs no embedder). A variant is insensitive
+   when the Spearman
    correlation is at least 0.95 and the gate flip rate is at most 2 percent. An
    insensitive parameter stays at its stated value. A sensitive parameter is
    listed in the report with its rationale, because its assumption drives the
@@ -472,10 +474,21 @@ them.
 (section 5.3). It lets an audit see which traces carried an attested final
 call, and it makes a rescore reproducible.
 
-`credit_quality_micros` and `credit_quality_version` are filled as today. The
-perplexity fields stay empty. The new fields are optional and are skipped when
-empty, so a compatibility outcome serializes byte-identically and stored hashes
-do not move.
+`credit_quality_micros` and `credit_quality_version` are filled as today.
+
+The Settle step writes a row into the legacy gate-decision table,
+`trace_gate_decisions`, for every Score policy, and it fails the run closed
+when the evidence lacks six fields. Substance fills them: `quality_passed` is
+`substance_passed`; `novelty_score_micros`, `novelty_passed`, and
+`nearest_neighbor_hash` come from novelty, as today; `perplexity_micros` and
+`tail_fraction_micros` are a fixed sentinel of 0, because the family runs no
+scorer. The row carries the run id, its source, and the credit quality version,
+so a reader can tell a substance row from a perplexity row and never reads the
+sentinel as a perplexity.
+
+The new evidence fields are optional and are skipped when empty, so a
+compatibility outcome serializes byte-identically and stored hashes do not
+move.
 
 ### 8.2 The bundle
 
@@ -497,19 +510,31 @@ do not move.
   beside the current `credit_quality` function. Its parameters come from the
   bundle configuration, not from code constants.
 - Substance needs no model, GPU, embedder, or remote call. Novelty is computed
-  as it is today, with the embedder and the index. Its chunk token counts come
-  from the chunker's own tokenizer, so novelty depends on no scorer.
+  with the embedder and the index, as today, with one change. The novelty
+  aggregate weights each chunk by a token count, and today the perplexity
+  scorer supplies that count when it scores the chunk. The substance family
+  calls no scorer, so the chunker supplies the count from its character
+  budget instead (4 characters per token, the estimate it already uses). So the
+  novelty weights of this family differ slightly from the compatibility
+  family's, and the novelty version changes with them.
 - `substance_version` is one label over the formula and the projection. A
   change to any of them bumps the label and the bundle id.
 - New code lives in a new module,
   `crates/trace-commons-server/src/versioned_pipeline_substance.rs`, with the
-  AGPL header.
+  AGPL header. The two calibration commands are new (section 7). The dataset
+  generator is a subcommand of the `trace-commons-pipeline-corpus-export`
+  binary, which already holds the pinned corpus loader. The `evaluate` driver
+  is a library module run through an ignored test, the same shape as `run`
+  and `compare`. Both are driven from `scripts/operator/pipeline.py`.
+- The existing `q` consumers (contributor points, the contributor cap, the
+  account-trust rule, and the credit-estimate fit) read the legacy row, so
+  they see a substance `q` with no change to their readers. A consumer that
+  allowlists a credit quality version needs `cq4` added.
 - A pipeline-scored trace is signed as
-  `trace_commons.pipeline_score_attestation.v1`, not the legacy
-  `trace_commons.score_attestation.v2`, which is built from legacy
-  gate-decision rows the substance family never writes. Whether the signed
-  `decision` already carries `substance_micros`, or needs a schema bump, is a
-  plan-time check.
+  `trace_commons.pipeline_score_attestation.v1`, which names the run, the
+  outcome, and the bundle, not the legacy `trace_commons.score_attestation.v2`.
+  Whether the signed outcome already carries `substance_micros`, or needs a
+  schema bump, is a plan-time check.
 
 ### 8.3 Tests
 
@@ -523,6 +548,8 @@ do not move.
   shows that the evidence change is byte-neutral for that family.
 - Isolation: the substance-only `evaluate` run builds with no embedder and no
   index, which shows that substance reads neither.
+- Settle: the legacy row builds from substance evidence, so a substance run
+  settles and pays.
 - Qualification: the substance package passes `pipeline.py qualify`.
 
 ## 9. Learnings and changes from the earlier substance design
@@ -580,6 +607,11 @@ Changes:
 - The evidence records the provenance class and the tool-call count. The score
   is signed as `trace_commons.pipeline_score_attestation.v1`.
 - Substance reads one input beyond the envelope: the stored witness class.
+- The novelty aggregate weights chunks by the chunker's character estimate,
+  not by the scorer's token count, because the family calls no scorer.
+- The family writes the legacy gate-decision row, as the compatibility family
+  does, so the existing `q` consumers need no change. The earlier design
+  planned a separate Stage 2 for them; it is dropped.
 
 What stays the same:
 
@@ -600,12 +632,8 @@ What stays the same:
 - Scoring the attested share only, or weighting each term by coverage. The
   witness records a final-call class, not a share, so this design uses one light
   binary weight inside substance.
-- Any change to novelty, the embedder, the index, or the award amount.
-- Stage 2: the move of the `q` consumers (contributor points, the contributor
-  cap, the account-trust rule, and the credit-estimate fit) from the legacy gate
-  rows to the pipeline Score evidence. The substance family writes no legacy
-  row, so until that separate change lands, those consumers do not see the `q`
-  of a substance-scored trace.
+- Any change to novelty, the embedder, the index, or the award amount, beyond
+  the chunk weights of section 8.2.
 - A conditional scorer dependency. The bundle runtime requires every package to
   name a scorer descriptor, so the substance package names one that it never
   calls. A separate change makes the dependency depend on the family.
