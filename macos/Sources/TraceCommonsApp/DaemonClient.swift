@@ -1146,6 +1146,8 @@ enum DaemonEventParser {
                   let due = try? DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: payloadData)
             else { return .unknown(name) }
             return .reengageDue(due)
+        case "near_ai_balance_changed":
+            return .nearAiBalanceChanged
         case "resync_required":
             return .resyncRequired
         case "lagged":

@@ -2018,6 +2018,26 @@ pub fn format_amount(nanos: i64, scale: u8) -> String {
     format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
 }
 
+/// The NEAR AI balance's change over the last 24 hours, under the Balance
+/// tile's figure. `{amount}` is signed: `+$3.20`, `-$1.00`. DRAFT, awaiting
+/// owner review.
+pub const BALANCE_CHANGE_24H: &str = "{amount} in the last 24 hours";
+
+/// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING when
+/// there is nothing to say: no change, a change under a cent, or a scale this
+/// build cannot honour. The magnitude is floored like every amount here, so
+/// the line never claims more movement, either way, than happened.
+#[must_use]
+pub fn balance_change_line(nanos: i64, scale: u8) -> String {
+    let magnitude = i64::try_from(nanos.unsigned_abs()).unwrap_or(i64::MAX);
+    let amount = format_amount(magnitude, scale);
+    if nanos == 0 || amount.is_empty() || amount == "$0.00" || !amount.starts_with('$') {
+        return String::new();
+    }
+    let sign = if nanos > 0 { "+" } else { "-" };
+    BALANCE_CHANGE_24H.replace("{amount}", &format!("{sign}{amount}"))
+}
+
 /// What is left, as a sentence, or the sentence for there being no figure.
 ///
 /// `None` is the wire's `null`, and it reaches [`BALANCE_NO_REMAINING`]
@@ -3074,6 +3094,29 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_24_hour_change_is_signed_and_never_rounds_up() {
+        assert_eq!(
+            balance_change_line(3_209_000_000, 9),
+            "+$3.20 in the last 24 hours"
+        );
+        assert_eq!(
+            balance_change_line(-1_009_000_000, 9),
+            "-$1.00 in the last 24 hours"
+        );
+    }
+
+    #[test]
+    fn no_change_or_under_a_cent_is_not_said() {
+        // The tile says nothing for no change (the Credit tile's rule).
+        assert_eq!(balance_change_line(0, 9), "");
+        assert_eq!(balance_change_line(9_000_000, 9), "");
+        assert_eq!(balance_change_line(-9_000_000, 9), "");
+        // A scale this build cannot honour is no figure, not a wrong one.
+        assert_eq!(balance_change_line(5_000_000_000, 200), "");
+        assert!(!balance_change_line(i64::MIN, 9).is_empty());
+    }
     /// The panels' refresh icons all say "Refresh", so each has its own
     /// accessible name that says what it re-reads (docs/ui-copy-guide.md
     /// section 5), carried by the export rather than joined in a shell.

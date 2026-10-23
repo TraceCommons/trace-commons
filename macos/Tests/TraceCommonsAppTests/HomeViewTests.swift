@@ -97,9 +97,13 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
+        // The figure counts while credit arrives (`BalanceArrivalFlourish`),
+        // and the 24-hour change sits under it in its ink (owner, 2026-10-23).
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail, "
-                + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, action: openPrivateAI)"))
+            "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
+                + "detail: balance.detail, detailInk: balance.detailInk, "
+                + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, "
+                + "action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))

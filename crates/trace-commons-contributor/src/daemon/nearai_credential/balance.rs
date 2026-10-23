@@ -184,6 +184,10 @@ impl BalanceReport {
             "total_requests": serde_json::Value::Null,
             "total_tokens": serde_json::Value::Null,
             "observed_at": serde_json::Value::Null,
+            // Filled in by `arrivals::balance_value` for a known balance.
+            "change_24h_nanos": serde_json::Value::Null,
+            "change_24h_text": serde_json::Value::Null,
+            "received_total_nanos": serde_json::Value::Null,
         });
         if let Self::Known(reading) = self
             && let Some(object) = value.as_object_mut()
@@ -346,6 +350,12 @@ pub async fn read(shared: &DaemonShared, fresh: bool) -> BalanceReport {
 /// caller and it passes the pinned live client.
 async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
     balance_report(read_account(shared, api, Want::Balance, BALANCE_TTL).await)
+}
+
+/// [`read_with`] for another module of this one: the credit-arrival poll
+/// takes its samples through the same lock and cache.
+pub(super) async fn read_via(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
+    read_with(shared, api).await
 }
 
 /// [`read_with`] for a fresh read: see [`read`].
@@ -519,7 +529,14 @@ async fn read_account(
                 entry.access_token = Some((access_token, Instant::now()));
                 match &reading {
                     AccountReading::Balance(value) => {
-                        entry.balance = Some((*value, Instant::now()))
+                        entry.balance = Some((*value, Instant::now()));
+                        // Every balance read is a sample for the 24-hour
+                        // change, the app's as well as the poll's.
+                        super::arrivals::note_balance(
+                            shared,
+                            connection.organization.as_deref(),
+                            value,
+                        );
                     }
                     AccountReading::Models(value) => {
                         entry.model_spend = Some((value.clone(), Instant::now()))
@@ -1157,6 +1174,9 @@ mod tests {
                 "total_requests",
                 "total_tokens",
                 "observed_at",
+                "change_24h_nanos",
+                "change_24h_text",
+                "received_total_nanos",
             ] {
                 assert!(body.get(key).is_some(), "{key} absent in {body}");
                 assert!(body[key].is_null(), "{key} is {body}");

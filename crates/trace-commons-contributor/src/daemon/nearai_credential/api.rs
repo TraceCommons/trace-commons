@@ -245,6 +245,35 @@ pub struct OrganizationBalance {
     pub total_tokens: i64,
 }
 
+/// One page of `GET /v1/organizations/{org}/credit/transfers?direction=incoming`,
+/// newest first.
+///
+/// Only the fields an arrival needs are read. The recipient's view also
+/// carries the sender's organization id, a memo and metadata; none of them is
+/// read, so none of them can be kept or logged.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IncomingTransferPage {
+    pub transfers: Vec<IncomingTransfer>,
+    #[serde(default)]
+    pub next_cursor: Option<TransferCursor>,
+}
+
+/// One credit transfer into the organization.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct IncomingTransfer {
+    pub id: String,
+    /// What arrived, in nano-dollars. Never negative on this route.
+    pub amount: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The service's cursor for the next (older) page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TransferCursor {
+    pub before_time: DateTime<Utc>,
+    pub before_id: String,
+}
+
 /// Organization-wide provider usage costs, never registry price estimates.
 #[derive(Clone, Deserialize)]
 pub struct OrganizationModelUsage {
@@ -790,6 +819,55 @@ impl CloudApi {
         )
         .await
     }
+    /// One page of credit transfers INTO `organization_id`, newest first,
+    /// older than `before` when given.
+    ///
+    /// Session-authenticated. cloud-api lets an owner session read this
+    /// (`credits:read`); a member who is not an owner is refused, which
+    /// arrives here as `near_ai_credential_refused`.
+    pub async fn incoming_transfers_page(
+        &self,
+        session: &SessionTokens,
+        organization_id: &str,
+        before: Option<&TransferCursor>,
+    ) -> Result<IncomingTransferPage> {
+        if organization_id.is_empty() {
+            bail!("near_ai_credential_no_organization")
+        }
+        if !is_path_segment(organization_id) {
+            bail!("near_ai_credential_unexpected")
+        }
+        let mut path = format!(
+            "/v1/organizations/{organization_id}/credit/transfers?direction=incoming&limit=100"
+        );
+        if let Some(cursor) = before {
+            // Both values come from the service's own previous page, but they
+            // are about to become query values: refuse anything that is not
+            // a plain id, and spell the time with `Z` so no `+` needs escaping.
+            if !is_path_segment(&cursor.before_id) {
+                bail!("near_ai_credential_unexpected")
+            }
+            let time = cursor
+                .before_time
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+            path.push_str(&format!(
+                "&before_time={time}&before_id={}",
+                cursor.before_id
+            ));
+        }
+        let page: IncomingTransferPage = self
+            .call(reqwest::Method::GET, &path, session, None)
+            .await?;
+        if page
+            .transfers
+            .iter()
+            .any(|t| t.amount < 0 || !is_path_segment(&t.id))
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(page)
+    }
+
     /// Rolling 24-hour usage from the selected organization, in native nanoUSD.
     pub async fn organization_model_usage(
         &self,

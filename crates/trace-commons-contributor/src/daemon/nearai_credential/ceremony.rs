@@ -646,6 +646,8 @@ pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
     // The spending-organization record goes with the session it needs.
     super::spend_org::clear_locked(store);
+    // And so does what was kept about its credit.
+    super::arrivals::clear_locked(store);
     if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.

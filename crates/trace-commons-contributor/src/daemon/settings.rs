@@ -131,6 +131,10 @@ pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
 /// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
 /// like the estimate switch it sits under.
 pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
+/// `notify.near_ai_credit` (N6): on, for a new install and an existing one
+/// alike -- the owner asked for this notification (2026-10-23). DRAFT,
+/// owner review.
+pub const DEFAULT_NOTIFY_NEAR_AI_CREDIT: bool = true;
 /// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
 /// the recommendation is off as a notification.
 pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
@@ -810,6 +814,9 @@ pub struct NotifyKinds {
     /// N5, the settlement estimate.
     #[serde(default = "default_notify_settlement_estimate")]
     pub settlement_estimate: bool,
+    /// N6, NEAR AI credit received.
+    #[serde(default = "default_notify_near_ai_credit")]
+    pub near_ai_credit: bool,
     /// Kind keys this build does not know, kept verbatim.
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
@@ -825,6 +832,7 @@ impl Default for NotifyKinds {
             weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
             insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
             settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
+            near_ai_credit: DEFAULT_NOTIFY_NEAR_AI_CREDIT,
             other: BTreeMap::new(),
         }
     }
@@ -857,6 +865,7 @@ impl NotifyKinds {
             "weekly_recap" => Some(&mut self.weekly_recap),
             "insights_tip" => Some(&mut self.insights_tip),
             "settlement_estimate" => Some(&mut self.settlement_estimate),
+            "near_ai_credit" => Some(&mut self.near_ai_credit),
             _ => None,
         }
     }
@@ -869,6 +878,7 @@ impl NotifyKinds {
             "weekly_recap" => Some(&self.weekly_recap),
             "insights_tip" => Some(&self.insights_tip),
             "settlement_estimate" => Some(&self.settlement_estimate),
+            "near_ai_credit" => Some(&self.near_ai_credit),
             _ => None,
         }
     }
@@ -895,6 +905,10 @@ where
 
 fn default_notify_settlement_estimate() -> bool {
     DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
+}
+
+fn default_notify_near_ai_credit() -> bool {
+    DEFAULT_NOTIFY_NEAR_AI_CREDIT
 }
 
 fn default_notify_digest() -> bool {
@@ -1562,6 +1576,7 @@ impl DaemonSettings {
             verdicts_landed: self.notify.verdicts_landed,
             weekly_recap: self.notify.weekly_recap,
             settlement_estimate: self.notify.settlement_estimate,
+            near_ai_credit: self.notify.near_ai_credit,
             renderer,
         }
     }
