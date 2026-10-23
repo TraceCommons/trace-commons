@@ -124,7 +124,8 @@ impl PayoutNotifier {
 pub struct PayoutRailStatus {
     /// The kill switch as last read; `None` before the first read.
     pub halted: Option<bool>,
-    /// The rate epoch version label in force at boot; never the rate.
+    /// The version label of the rail's rate in force now, from its rate
+    /// source at boot; never the rate, never a stored epoch alone.
     pub rate_epoch: Option<String>,
     /// The startup capacity probe answered with sending enabled.
     pub startup_probe_ok: bool,
@@ -171,6 +172,17 @@ impl PayoutRailEntry {
     /// Records the kill switch as an admin route just set it.
     pub fn record_halted(&self, halted: bool) {
         self.update(|status| status.halted = Some(halted));
+    }
+
+    /// The pass settings this rail runs with, `None` while disabled. The
+    /// pass runs only while a rate is in force now
+    /// ([`PayoutRails::set_rate_epoch`] with the current source's version).
+    pub fn pass_settings(&self) -> Option<PayoutPassSettings> {
+        let rate_in_force = self.status().rate_epoch.is_some();
+        self.settings.map(|settings| PayoutPassSettings {
+            rate_in_force,
+            ..settings
+        })
     }
 
     fn record_report(&self, report: &PayoutPassReport) {
@@ -257,6 +269,9 @@ impl PayoutRails {
                 mode: settings.mode,
                 account_ceiling: settings.account_ceiling,
                 local_send_limit: PAYOUT_LOCAL_SEND_LIMIT,
+                // Set from the boot's rate source by `set_rate_epoch`;
+                // nothing runs on a rate until one is recorded.
+                rate_in_force: false,
             }),
         };
         Ok(Self {
@@ -296,7 +311,9 @@ impl PayoutRails {
         }
     }
 
-    /// Records the rate epoch label in force for `rail_id`, for readiness.
+    /// Records the version of `rail_id`'s rate in force now, from its rate
+    /// source at boot (never the latest stored epoch): readiness reports it,
+    /// qualification needs it, and the rail's pass runs only with it.
     pub fn set_rate_epoch(&self, rail_id: &str, version: Option<String>) {
         if let Ok(entry) = self.get(rail_id) {
             entry.update(|status| status.rate_epoch = version);
@@ -352,6 +369,8 @@ impl PayoutRails {
                 last_pass: status.last_outcome,
                 reason: if halted {
                     Some("payout_halted")
+                } else if entry.mode != PayoutMode::Disabled && status.rate_epoch.is_none() {
+                    Some(crate::payout_pass::PAYOUT_RATE_UNAVAILABLE)
                 } else if status.close_blocked {
                     Some("payout_link_close_blocked")
                 } else {
@@ -373,7 +392,7 @@ impl PayoutRails {
             .iter()
             .filter_map(|entry| {
                 let rail = entry.rail.clone()?;
-                let settings = entry.settings?;
+                let settings = entry.pass_settings()?;
                 let pass = PayoutPass::new(
                     rail,
                     payouts.clone(),
@@ -548,6 +567,29 @@ mod tests {
         assert_eq!(entry.qualified(), !near_ai_staging());
         entry.record_halted(true);
         assert!(!entry.qualified());
+    }
+
+    #[test]
+    fn an_enabled_rail_without_a_current_rate_is_unqualified_and_runs_no_rate() {
+        for mode in [PayoutMode::DryRun, PayoutMode::Live] {
+            let rails = PayoutRails::from_config(&enabled(mode)).unwrap();
+            let entry = rails.get("near_ai").unwrap();
+            entry.update(|status| status.startup_probe_ok = true);
+            rails.set_rate_epoch("near_ai", None);
+            assert!(!entry.qualified());
+            assert!(!entry.pass_settings().unwrap().rate_in_force);
+            let readiness = &rails.readiness()[1];
+            assert_eq!(readiness.rate_epoch, None);
+            assert_eq!(readiness.reason, Some("payout_rate_unavailable"));
+
+            rails.set_rate_epoch("near_ai", Some("table-v1".into()));
+            assert!(entry.pass_settings().unwrap().rate_in_force);
+            assert_eq!(rails.readiness()[1].reason, None);
+        }
+        // A disabled rail has no pass and no rate reason.
+        let rails = PayoutRails::disabled();
+        assert!(rails.get("near_ai").unwrap().pass_settings().is_none());
+        assert_eq!(rails.readiness()[1].reason, None);
     }
 
     struct CountingRunner {

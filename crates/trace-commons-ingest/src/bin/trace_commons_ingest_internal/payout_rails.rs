@@ -9,8 +9,13 @@
 //! `live` with a setting missing or malformed refuses the start), records
 //! the rail's rate epoch, builds the rails, and probes each `live` rail's
 //! capacity once; a failed probe marks the rail unqualified in readiness and
-//! does not refuse the start. Every rail defaults to `disabled`, which needs
-//! nothing and runs nothing.
+//! does not refuse the start. An enabled rail whose rate source has no rate
+//! (no settlement table, or one without a positive rate) does not refuse the
+//! start either: refusing would take every route down for one rail. It runs
+//! no rate instead -- its pass stops as `payout_rate_unavailable` before
+//! accrual or any call, and readiness reports it unqualified with that
+//! reason -- whatever epochs an earlier boot stored. Every rail defaults to
+//! `disabled`, which needs nothing and runs nothing.
 //!
 //! The operator routes are admin-only and copy the admin drill routes' auth
 //! shape (`authenticate_with_tenant_access_grant`, then `require_admin`):
@@ -34,7 +39,9 @@ use trace_commons_server::db::{
 };
 use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
 use trace_commons_server::payout_pass::UnconfiguredRecipientOpener;
-use trace_commons_server::payout_rate::{NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot};
+use trace_commons_server::payout_rate::{
+    NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot, near_ai_rate_version_in_force,
+};
 use trace_commons_server::payout_worker::PayoutRails;
 
 const PAYOUT_HALT_LABEL: &str = "operator_halt";
@@ -66,24 +73,22 @@ pub(crate) async fn payout_rails_from_env(
     }
     let rails = PayoutRails::from_config(&near_ai)
         .map_err(|error| anyhow::anyhow!("near_ai payout refused to start: {}", error.label()))?;
-    if let Some(store) = payout_store {
-        for entry in rails.entries() {
-            if entry.mode() == trace_commons_server::payout_rate::PayoutMode::Disabled {
-                continue;
-            }
-            // The version label of the latest epoch, for readiness; never
-            // the rate.
-            let latest = store
-                .payout_rate_epochs(entry.rail_id())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("near_ai payout refused to start: payout_rate_epoch_unread")
-                })?
-                .into_iter()
-                .max_by_key(|epoch| epoch.observed_at)
-                .map(|epoch| epoch.rate.version().to_owned());
-            rails.set_rate_epoch(entry.rail_id().as_str(), latest);
+    // The version of the rate in force now, from the rate source this boot
+    // recorded, for readiness and for the pass. Never the latest stored
+    // epoch: a rail whose source is gone must not keep paying on a rate an
+    // earlier boot left behind (it stops as `payout_rate_unavailable`).
+    if near_ai.mode() != trace_commons_server::payout_rate::PayoutMode::Disabled {
+        let version = near_ai_rate_version_in_force(settlement_table).map_err(|error| {
+            anyhow::anyhow!("near_ai payout refused to start: {}", error.label())
+        })?;
+        if version.is_none() {
+            tracing::warn!(
+                rail = NEAR_AI_PAYOUT_RAIL_LABEL,
+                label = trace_commons_server::payout_pass::PAYOUT_RATE_UNAVAILABLE,
+                "payout rail has no rate in force; it accrues and sends nothing"
+            );
         }
+        rails.set_rate_epoch(NEAR_AI_PAYOUT_RAIL_LABEL, version);
     }
     rails.startup_probe().await;
     for entry in rails.entries() {

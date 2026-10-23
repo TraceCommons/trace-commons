@@ -68,6 +68,7 @@ pub const PAYOUT_RECOVERY_UNMATCHED: &str = "payout_recovery_unmatched";
 pub const PAYOUT_LINK_CLOSE_BLOCKED: &str = "payout_link_close_blocked";
 const PAYOUT_STORE_FAILED: &str = "payout_store_failed";
 const PAYOUT_RAIL_SENDING_DISABLED: &str = "payout_rail_sending_disabled";
+pub const PAYOUT_RATE_UNAVAILABLE: &str = "payout_rate_unavailable";
 
 /// The line reference a rail is handed: a `sha256:` hash of the line id,
 /// never the id itself. Deterministic, so a recovery resends the same line.
@@ -114,6 +115,11 @@ pub struct PayoutPassSettings {
     pub account_ceiling: AtomicUnits,
     /// At most this many sends per pass ([`PAYOUT_LOCAL_SEND_LIMIT`]).
     pub local_send_limit: u32,
+    /// The rail's rate source has a rate now. False when the source is gone
+    /// (no settlement table, or one without a positive rate): the pass then
+    /// stops as `payout_rate_unavailable` before accrual or any call, so a
+    /// stored epoch alone never keeps a rail paying.
+    pub rate_in_force: bool,
 }
 
 /// How a pass ended.
@@ -284,6 +290,13 @@ impl PayoutPass {
         let mut report = PayoutPassReport::new(self.rail_id().clone(), self.settings.mode);
         if self.settings.mode == PayoutMode::Disabled {
             report.outcome = PayoutPassOutcome::Disabled;
+            return report;
+        }
+        if !self.settings.rate_in_force {
+            report.outcome = PayoutPassOutcome::Stopped {
+                label: PAYOUT_RATE_UNAVAILABLE,
+            };
+            self.log(&report);
             return report;
         }
         let lock = match self
@@ -1227,6 +1240,7 @@ mod tests {
             PAYOUT_LINK_CLOSE_BLOCKED,
             PAYOUT_STORE_FAILED,
             PAYOUT_RAIL_SENDING_DISABLED,
+            PAYOUT_RATE_UNAVAILABLE,
             PayoutPassOutcome::Halted.label(),
             PayoutPassOutcome::LockBusy.label(),
         ] {

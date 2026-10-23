@@ -331,6 +331,7 @@ fn settings(mode: PayoutMode) -> PayoutPassSettings {
         mode,
         account_ceiling: AtomicUnits::from_raw(CEILING),
         local_send_limit: 50,
+        rate_in_force: true,
     }
 }
 
@@ -537,6 +538,69 @@ async fn a_linked_account_is_paid_owed_and_an_unlinked_one_accrues_only() {
     );
     assert_eq!(mock.transfers().len(), 1);
     assert_eq!(lines(&fixture, &tenant, "near_ai").await.len(), 1);
+}
+
+/// A rail whose rate source is gone pays nothing from stored epochs: the
+/// fixture's epoch `v1` is still recorded, the account is owed and linked,
+/// and the pass accrues nothing, calls nothing and writes nothing, in
+/// `live` and in `dry_run` alike.
+#[tokio::test]
+async fn a_stored_epoch_without_a_current_rate_pays_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    settle(&fixture, &tenant, accounts[0], 3_000).await;
+    link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        rail.as_ref(),
+        &opener,
+        &org(1),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let before = snapshot(&fixture, &tenant, "near_ai").await;
+    for mode in [PayoutMode::Live, PayoutMode::DryRun] {
+        let report = pass(
+            &fixture,
+            rail.clone(),
+            &opener,
+            PayoutPassSettings {
+                rate_in_force: false,
+                ..settings(mode)
+            },
+        )
+        .run_once()
+        .await;
+        assert_eq!(
+            report.outcome,
+            PayoutPassOutcome::Stopped {
+                label: "payout_rate_unavailable"
+            },
+            "{report:?}"
+        );
+        assert_eq!(
+            (report.accrued, report.sent, report.dry_run_accounts),
+            (0, 0, 0)
+        );
+    }
+    assert!(mock.requests().is_empty(), "no call to the rail at all");
+    assert_eq!(
+        fixture
+            .runtime
+            .payout_owed(&tenant, accounts[0], &rail_id("near_ai"))
+            .await
+            .unwrap()
+            .accrual_count,
+        0,
+        "nothing accrued from the stored epoch"
+    );
+    assert_eq!(snapshot(&fixture, &tenant, "near_ai").await, before);
 }
 
 #[tokio::test]
