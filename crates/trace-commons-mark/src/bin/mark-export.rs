@@ -23,6 +23,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut out_dir: Option<PathBuf> = None;
     let mut repo_root: Option<PathBuf> = None;
+    let mut staging_dir: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -33,9 +34,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--staging-dir" => match args.next() {
+                Some(value) => staging_dir = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("--staging-dir needs a directory");
+                    return ExitCode::FAILURE;
+                }
+            },
             _ if out_dir.is_none() => out_dir = Some(PathBuf::from(arg)),
             _ => {
-                eprintln!("usage: mark-export [output-dir] [--repo-root <dir>]");
+                eprintln!(
+                    "usage: mark-export [output-dir] [--repo-root <dir>] [--staging-dir <dir>]"
+                );
                 return ExitCode::FAILURE;
             }
         }
@@ -60,6 +70,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("wrote {}", path.display());
+    }
+
+    // The staging channel's icon documents, in their own directory under the
+    // file names the `.icon` build reads, so the channel file's
+    // TC_ICON_SOURCE is the only switch. Production's files are not touched.
+    if let Some(dir) = staging_dir {
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            eprintln!("creating {}: {err}", dir.display());
+            return ExitCode::FAILURE;
+        }
+        for export in trace_commons_mark::staging_exports() {
+            let path = dir.join(export.relative_path);
+            let mut contents = export.contents;
+            contents.push('\n');
+            if let Err(err) = std::fs::write(&path, contents) {
+                eprintln!("writing {}: {err}", path.display());
+                return ExitCode::FAILURE;
+            }
+            println!("wrote {}", path.display());
+        }
     }
 
     if let Some(root) = repo_root {
