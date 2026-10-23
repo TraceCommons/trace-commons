@@ -2752,8 +2752,16 @@ pub const NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE: &str =
 /// A commons that is reachable and working, and simply does not offer this
 /// way in. Distinct from both of the above, because the thing to do is
 /// different: neither retrying nor signing in will help.
+#[cfg(not(feature = "near-ai-staging"))]
 pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str =
     "That commons does not offer joining with a NEAR AI login. You can still join with a wallet.";
+/// Staging has no wallet to fall back on: NEAR AI's Google login is the
+/// only way in (staging spec S12, S18), so the line says so. Still its own
+/// sentence, as every refusal's is.
+///
+/// Approved 2026-10-23 (owner: "say only google is supported").
+#[cfg(feature = "near-ai-staging")]
+pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str = "Only Google sign-in is supported.";
 
 /// `invalid`. A malformed request, which a contributor cannot cause from the
 /// app and cannot act on.
@@ -4607,6 +4615,43 @@ mod tests {
                 "{unknown:?} did not fall back to the generic sentence"
             );
         }
+    }
+
+    /// Production's refusal for a commons without the NEAR AI login still
+    /// points at the wallet, as it shipped.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn production_points_an_unsupported_commons_at_the_wallet() {
+        assert_eq!(
+            near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNSUPPORTED),
+            "That commons does not offer joining with a NEAR AI login. You can still join with a wallet."
+        );
+    }
+
+    /// Staging is reached through a NEAR AI login only: no refusal the
+    /// first run can show after the NEAR AI enrollment offers a wallet.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn staging_offers_no_wallet_when_a_near_ai_join_is_refused() {
+        for label in [
+            NEAR_AI_ENROLL_ALREADY_ENROLLED,
+            NEAR_AI_ENROLL_NO_SESSION,
+            NEAR_AI_ENROLL_ENDPOINT_REFUSED,
+            NEAR_AI_ENROLL_TOKEN_UNAVAILABLE,
+            NEAR_AI_ENROLL_START_FAILED,
+            NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+            NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+            NEAR_AI_ENROLL_INVALID,
+            NEAR_AI_ENROLL_VERIFICATION_FAILED,
+            "near_ai_enroll_unavailable",
+        ] {
+            let line = near_ai_enroll_line(label).to_lowercase();
+            assert!(!line.contains("wallet"), "{label}: {line}");
+        }
+        assert_eq!(
+            private_inference_copy().near_ai_enroll_commons_unsupported,
+            "Only Google sign-in is supported."
+        );
     }
 
     /// The offer says a wallet is not needed, because that is the whole point

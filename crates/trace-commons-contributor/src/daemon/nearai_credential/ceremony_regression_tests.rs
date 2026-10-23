@@ -303,7 +303,7 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
 async fn an_unstorable_ceremony_refuses_before_opening_a_browser() {
     let fixture = Fixture::new();
     fixture.backend.fail_next_with_unentitled();
-    let error = begin(&fixture.store, "github").await.unwrap_err();
+    let error = begin(&fixture.store, "google").await.unwrap_err();
     assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");
     assert_eq!(
         fixture.browser_urls_served(),

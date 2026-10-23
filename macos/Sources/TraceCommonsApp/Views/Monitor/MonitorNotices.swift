@@ -686,12 +686,14 @@ struct MonitorNotices: View {
 /// The NEAR AI sign-in, begun as Settings > Private AI begins it: the
 /// daemon starts the ceremony and the browser finishes it. A browser that
 /// never opened leaves a ceremony nobody can finish, so it is stopped
-/// rather than left to time out.
+/// rather than left to time out. It names no provider, so the daemon starts
+/// this build's default (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): the
+/// NEAR wallet in production, NEAR AI's Google login in staging.
 @MainActor
 enum NearAiSignIn {
     static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
         Task {
-            guard let url = await model.startNearAiCredential(provider: "near") else { return }
+            guard let url = await model.startNearAiCredential() else { return }
             let accepted = await withCheckedContinuation { continuation in
                 openURL(url) { continuation.resume(returning: $0) }
             }

@@ -54,9 +54,10 @@ impl std::fmt::Debug for InviteLookupRequest {
 ///
 /// This is an estimate, not a promise. It is set by the operator on the
 /// invite, the credit ledger does not enforce it, settlement is disabled and
-/// grading is in shadow mode. Clients MUST present it as "estimated credit per
-/// accepted trace, not yet settled", and never as a payment promise or a
-/// guaranteed rate.
+/// grading is in shadow mode. Clients MUST present it as estimated credit
+/// per accepted trace (or a total estimated from it), and never as a payment
+/// promise or a guaranteed rate. (The owner dropped "not yet settled" from
+/// the wording on 2026-10-23.)
 ///
 /// Response types deliberately do not use `deny_unknown_fields`, so an issuer
 /// can add a field without breaking clients already shipped. Only the request
@@ -83,8 +84,8 @@ impl CreditRange {
 /// The answer. On `valid: true` the display name and range are present when
 /// the operator set them; on `valid: false` only `reason_label` is.
 ///
-/// Clients MUST present `credit_range` as "estimated credit per accepted
-/// trace, not yet settled", never as a payment promise. See [`CreditRange`].
+/// Clients MUST present `credit_range` as an estimate, never as a payment
+/// promise. See [`CreditRange`].
 ///
 /// Unknown fields are ignored on purpose: a field added to the response later
 /// must not break clients already shipped.

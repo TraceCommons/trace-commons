@@ -3,6 +3,7 @@ pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
 pub mod device_invite_subject;
+pub mod first_run_estimate;
 pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;

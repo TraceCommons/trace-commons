@@ -95,6 +95,17 @@ jobs:
       # title and pre-release version.
       - name: Sparkle appcast for each channel
         run: scripts/ci/test-generate-appcast.sh
+      # Seconds, no build, no network. The server deploy files: the pilot
+      # templates and deploy.sh unchanged by the staging parameters, and the
+      # staging render (deploy/staging-gcp/render-env.sh) with dummy secrets.
+      - name: Pilot and staging server deploy files
+        run: scripts/ci/test-deploy-render.sh
+      # Seconds, no build, no network. The staging database backup and its
+      # restore check against stub pg_dump, pg_restore, psql and gcloud: run
+      # as postgres, dump and counts in one snapshot, mode 0600, sidecar
+      # uploaded last, and a row-count mismatch fails.
+      - name: Staging database backup and restore check
+        run: scripts/ci/test-staging-db-backup.sh
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py

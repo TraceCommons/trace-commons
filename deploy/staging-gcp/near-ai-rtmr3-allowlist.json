@@ -1,0 +1,38 @@
+{
+  "rtmr3": {
+    "app_id": "2c0a0c96cb6dbd659bf1446e2f3fce58172ff91b",
+    "mr_kms": "6a64e679539b4cd3588fd7f9434974d95b176d607df6e43ddc432aeb3ca6009e",
+    "os_image_hash": "91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829",
+    "key_provider": "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343339346161656432633734356536613435376362383335663766343734323366353766663365616437316239326162666636626463313464393035623331396632653133393631623432633530373430646165343439386439633531646437613265323237363630633965356335303430383363646130366236633131363832227d",
+    "markers": [
+      {
+        "name": "system-preparing",
+        "payload": ""
+      },
+      {
+        "name": "boot-mr-done",
+        "payload": ""
+      },
+      {
+        "name": "storage-fs",
+        "payload": "7a6673"
+      },
+      {
+        "name": "system-ready",
+        "payload": ""
+      }
+    ]
+  },
+  "compose_actions": {
+    "compose_manager_images": [
+      "nearaidev/compose-manager@sha256:6e035c8fb99c1d31f41760d25af178683a658cca4afd73cd0d366fbb5bf884be"
+    ],
+    "compose_files": [
+      {
+        "file": "prod/small-models.yaml",
+        "file_sha256": "addbc5fc3d3c43a455f44178c1525dd21f6c84dedf26ed9b4c725ac384ee980d",
+        "commit": "6000fd05967289ca9d3fcd4b1413875a05e958a1"
+      }
+    ]
+  }
+}

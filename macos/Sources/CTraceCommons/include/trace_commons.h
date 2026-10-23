@@ -318,12 +318,15 @@ char*       tc_settings_ranges_json(void);
  * {"channel":"production","state_dir_name":"trace-commons",
  *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
  *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
- *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
+ *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
+ *  "near_ai_sign_in_providers":["near","github","google"]}
  *
  * channel is "production" or "staging". The macOS app compares channel with
  * its Info.plist TCChannel and starts nothing on a mismatch.
  * near_ai_dashboard_origin is where the funding row's credits link points;
- * it takes no part in that check. No key, secret or
+ * it takes no part in that check. near_ai_sign_in_providers is the NEAR AI
+ * sign-in providers this build offers, in order; a staging build names
+ * "google" only. No key, secret or
  * keychain name is in it. Reads nothing and writes nothing. Returns an owned
  * string; free it with tc_string_free. NULL only on a caught panic.
  */
@@ -2084,6 +2087,16 @@ char*       tc_onboarding_copy(void);
  * only on a caught panic.
  */
 char*       tc_first_run_copy_json(void);
+
+/* The first run's Traces estimate, one line, worded and formatted by the
+ * core (first_run_copy::traces_estimate_line). `request` is a JSON object:
+ * {"traces": <found>, "usd_micros_per_accepted_trace": {min,max},
+ * "credit_range": <an invite lookup's>}, each optional. A dollar total when
+ * the commons published a range, else points. Returns an OWNED string; free
+ * with tc_string_free. NULL draws no line: nothing found or counted yet, a
+ * total past range, or a NULL or unreadable request.
+ */
+char*       tc_first_run_estimate_line(const char* request);
 
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.

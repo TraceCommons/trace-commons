@@ -82,6 +82,24 @@
 //! fetched and refused pins nothing at once, never an older set. The status
 //! reports the outcome as a label (`PinProvider::status_label`).
 //!
+//! **A staging build also replays RTMR3** (owner decision S16; spec 5.5,
+//! steps 6 and 7). Its sets pin `mrtd`, `rtmr0-2` and `mrconfigid`, not a
+//! static `rtmr3`, and the signed document carries an allowlist beside them.
+//! For every model entry whose key it depends on, after the quote has
+//! verified and matched a set, it replays that entry's own `event_log`
+//! against the verified quote's RTMR3 and checks the events against the
+//! allowlist (`staging_replay::replay_rtmr3`, `check_rtmr3_allowlist`), then
+//! checks that entry's `compose_manager_attestation`: its quote verified the
+//! same way, the same TD and boot as the model quote, our nonce, the
+//! recomputed actions hash, and every action parsed by kind and allowed
+//! (`staging_replay::check_compose_manager`; owner decision S17: the compose
+//! manager's image by digest, a `compose_up`'s file by path, SHA-256 and
+//! commit, a `compose_down`'s by path and commit). All from the one report this
+//! answer fetched with its own nonce. A key is earned only if the set, the
+//! replay, the RTMR3 allowlist and the compose-manager checks all pass. The
+//! last outcome is reported as a label too
+//! (`PinProvider::attestation_label`).
+//!
 //! No pins, whichever way, means no key can be earned: nothing verifies.
 //!
 //! Nothing here logs a key, a nonce, a model, a report or a URL.
@@ -97,7 +115,14 @@ use trace_commons_attestation::measurements::{
 use trace_commons_attestation::quote::{
     Collateral, REQUIRED_TCB_STATUS, VerifiedQuote, verify_quote,
 };
-use trace_commons_attestation::receipt::{AttestedKeyError, model_entry_quotes, quote_bound_keys};
+#[cfg(not(feature = "near-ai-staging"))]
+use trace_commons_attestation::receipt::model_entry_quotes;
+use trace_commons_attestation::receipt::{AttestedKeyError, quote_bound_keys};
+#[cfg(feature = "near-ai-staging")]
+use trace_commons_attestation::staging_replay::{
+    Allowlist, ComposeManagerRecord, EntryEvidence, check_compose_manager, check_rtmr3_allowlist,
+    model_entry_evidence, replay_rtmr3,
+};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 #[cfg(not(feature = "near-ai-staging"))]
 use trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins;
@@ -407,6 +432,28 @@ pub const PINS_SEQUENCE_UNREADABLE: &str = "pins_sequence_unreadable";
 #[cfg(feature = "near-ai-staging")]
 pub const PINS_SEQUENCE_UNWRITABLE: &str = "pins_sequence_unwritable";
 
+/// The attestation label before any answer has been earned.
+#[cfg(feature = "near-ai-staging")]
+pub const ATTESTATION_NOT_CHECKED: &str = "not_checked";
+/// The attestation label when the last answer earned keys.
+#[cfg(feature = "near-ai-staging")]
+pub const ATTESTED: &str = "attested";
+/// Sets are in force but no allowlist came with them.
+#[cfg(feature = "near-ai-staging")]
+const PINS_NO_ALLOWLIST: &str = "pins_no_allowlist";
+// The labels below name why an answer earned no key. Only a staging build
+// reports them (`PinProvider::attestation_label`).
+
+/// The report holds no model entry this answer can use.
+const REPORT_NOT_ATTESTED: &str = "report_not_attested";
+/// A model quote did not verify against Intel collateral.
+const QUOTE_UNVERIFIED: &str = "quote_unverified";
+/// A model quote verified on a platform behind on Intel's fixes.
+const QUOTE_TCB_NOT_UP_TO_DATE: &str = "quote_tcb_not_up_to_date";
+/// A model quote's registers match no pinned set.
+const QUOTE_NOT_PINNED: &str = "quote_not_pinned";
+/// The verified quotes do not bind the claimed keys under our nonce.
+const QUOTE_KEYS_UNBOUND: &str = "quote_keys_unbound";
 /// The pins in force right now, and a digest to tell when they changed.
 #[derive(Debug, Clone, Default)]
 pub struct CurrentPins {
@@ -415,6 +462,11 @@ pub struct CurrentPins {
     /// Changes whenever `sets` does. A change detector for the cache, not an
     /// integrity check: nothing signs it.
     pub digest: String,
+    /// What a staging build checks each entry's RTMR3 log and
+    /// compose-manager record against, signed with the sets. `None` earns no
+    /// key: a set without its allowlist pins nothing.
+    #[cfg(feature = "near-ai-staging")]
+    pub allowlist: Option<Arc<Allowlist>>,
 }
 
 struct CachedPins {
@@ -451,13 +503,22 @@ enum Mode {
     Unpinned,
     /// A fixed list: the operator override in a default build, or a test's.
     #[cfg(any(test, not(feature = "near-ai-staging")))]
-    Fixed(Vec<ExpectedMeasurements>),
+    Fixed(FixedPins),
     /// Ingest's unsigned document (default build only).
     #[cfg(not(feature = "near-ai-staging"))]
     Published(Box<dyn PinSource>),
     /// The signed staging set (staging build only).
     #[cfg(feature = "near-ai-staging")]
     Signed(SignedPins),
+}
+
+/// A fixed provider's pins.
+#[cfg(any(test, not(feature = "near-ai-staging")))]
+struct FixedPins {
+    sets: Vec<ExpectedMeasurements>,
+    /// A staging test's allowlist; `None` earns no key in a staging build.
+    #[cfg(feature = "near-ai-staging")]
+    allowlist: Option<Arc<Allowlist>>,
 }
 
 /// The signed source with what it is checked against, all compiled in.
@@ -502,6 +563,7 @@ impl SignedPins {
             pins: CurrentPins {
                 digest: format!("signed:{}:{payload_sha256}", verified.sequence),
                 sets: verified.sets,
+                allowlist: Some(Arc::new(verified.allowlist)),
             },
             valid_until: Some(verified.expires_at),
         })
@@ -568,6 +630,10 @@ pub struct PinProvider {
     cache: tokio::sync::Mutex<(Option<CachedPins>, Option<u64>)>,
     /// The last label reached, for `status`, which cannot await.
     status: Mutex<&'static str>,
+    /// The last attestation outcome under these pins, as a label: the
+    /// replay and compose-manager refusals among them (staging only).
+    #[cfg(feature = "near-ai-staging")]
+    attestation: Mutex<&'static str>,
 }
 
 impl std::fmt::Debug for PinProvider {
@@ -583,7 +649,7 @@ impl PinProvider {
         let status = match &mode {
             Mode::Unpinned => PINS_NONE,
             #[cfg(any(test, not(feature = "near-ai-staging")))]
-            Mode::Fixed(sets) if sets.is_empty() => PINS_NONE,
+            Mode::Fixed(fixed) if fixed.sets.is_empty() => PINS_NONE,
             #[cfg(any(test, not(feature = "near-ai-staging")))]
             Mode::Fixed(_) => PINNED,
             #[allow(unreachable_patterns)]
@@ -593,6 +659,8 @@ impl PinProvider {
             mode,
             cache: tokio::sync::Mutex::new((None, None)),
             status: Mutex::new(status),
+            #[cfg(feature = "near-ai-staging")]
+            attestation: Mutex::new(ATTESTATION_NOT_CHECKED),
         }
     }
 
@@ -605,7 +673,7 @@ impl PinProvider {
         source: Option<Box<dyn PinSource>>,
     ) -> Self {
         Self::with_mode(match (override_pins, source) {
-            (Some(pins), _) => Mode::Fixed(pins),
+            (Some(pins), _) => Mode::Fixed(FixedPins { sets: pins }),
             (None, Some(source)) => Mode::Published(source),
             (None, None) => Mode::Unpinned,
         })
@@ -687,10 +755,24 @@ impl PinProvider {
         Self::signed_with(source, public_key, dir.join(SEQUENCE_FILE))
     }
 
-    /// A provider that always answers `sets`.
+    /// A provider that always answers `sets`, with no allowlist: in a
+    /// staging build it earns no key.
     #[cfg(test)]
     pub(crate) fn fixed(sets: Vec<ExpectedMeasurements>) -> Self {
-        Self::with_mode(Mode::Fixed(sets))
+        Self::with_mode(Mode::Fixed(FixedPins {
+            sets,
+            #[cfg(feature = "near-ai-staging")]
+            allowlist: None,
+        }))
+    }
+
+    /// A staging test's provider: `sets` and the allowlist signed with them.
+    #[cfg(all(test, feature = "near-ai-staging"))]
+    pub(crate) fn fixed_allowing(sets: Vec<ExpectedMeasurements>, allowlist: Allowlist) -> Self {
+        Self::with_mode(Mode::Fixed(FixedPins {
+            sets,
+            allowlist: Some(Arc::new(allowlist)),
+        }))
     }
 
     /// A provider that pins nothing.
@@ -734,14 +816,37 @@ impl PinProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = label;
     }
 
+    /// The last attestation outcome, as a label: [`ATTESTED`],
+    /// [`ATTESTATION_NOT_CHECKED`], or the check that refused the last
+    /// answer, such as `rtmr3_replay_mismatch` or
+    /// `compose_action_not_allowed`. Never an event value, register, key or
+    /// nonce. Staging builds only.
+    #[cfg(feature = "near-ai-staging")]
+    pub fn attestation_label(&self) -> &'static str {
+        *self
+            .attestation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    fn set_attestation(&self, label: &'static str) {
+        *self
+            .attestation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = label;
+    }
+
     /// The pins in force at `now_unix`.
     pub async fn current(&self, now_unix: u64) -> CurrentPins {
         match &self.mode {
             Mode::Unpinned => CurrentPins::default(),
             #[cfg(any(test, not(feature = "near-ai-staging")))]
-            Mode::Fixed(pins) => CurrentPins {
-                sets: pins.clone(),
-                digest: format!("override:{}", digest_sets(pins)),
+            Mode::Fixed(fixed) => CurrentPins {
+                sets: fixed.sets.clone(),
+                digest: format!("override:{}", digest_sets(&fixed.sets)),
+                #[cfg(feature = "near-ai-staging")]
+                allowlist: fixed.allowlist.clone(),
             },
             #[allow(unreachable_patterns)]
             _ => self.refreshed(now_unix).await,
@@ -1057,9 +1162,27 @@ impl NearAiQuoteAttestor {
         Arc::clone(locks.entry(model.to_string()).or_default())
     }
 
+    /// A refusal under `label`: no key. In a staging build the label is
+    /// what the status reports; a default build reports none.
+    fn refused(&self, label: &'static str) -> Attestation {
+        #[cfg(feature = "near-ai-staging")]
+        {
+            self.inner.pins.set_attestation(label);
+            tracing::debug!(control = CONTROL, label, "NEAR AI model key not earned");
+        }
+        let _ = label;
+        Attestation::NotAttested
+    }
+
     /// Earn the key set for `model` from scratch, under `pins`.
     async fn earn(&self, model: &str, now: u64, pins: &CurrentPins) -> Attestation {
         let inner = &self.inner;
+        // A staging set without its allowlist pins nothing (S16): the sets
+        // no longer pin RTMR3, and the allowlist is what stands in for it.
+        #[cfg(feature = "near-ai-staging")]
+        let Some(allowlist) = pins.allowlist.clone() else {
+            return self.refused(PINS_NO_ALLOWLIST);
+        };
         let Some(nonce) = (inner.nonce)() else {
             return Attestation::Unavailable;
         };
@@ -1071,36 +1194,109 @@ impl NearAiQuoteAttestor {
         let claimed =
             match trace_commons_attestation::receipt::model_ed25519_keys(&report, &nonce, model) {
                 Ok(keys) => keys,
-                Err(AttestedKeyError::ModelNotAttested) => return Attestation::NotAttested,
-                Err(_) => return Attestation::NotAttested,
+                Err(AttestedKeyError::ModelNotAttested) => {
+                    return self.refused(REPORT_NOT_ATTESTED);
+                }
+                Err(_) => return self.refused(REPORT_NOT_ATTESTED),
             };
-        let Ok(quotes) = model_entry_quotes(&report, model) else {
-            return Attestation::NotAttested;
+        // Each entry's quote, and in a staging build its own log and
+        // compose-manager record beside it, all from this one report.
+        #[cfg(feature = "near-ai-staging")]
+        let Ok(entries) = model_entry_evidence(&report, model) else {
+            return self.refused(REPORT_NOT_ATTESTED);
         };
-        let mut verified = Vec::with_capacity(quotes.len());
-        for quote in &quotes {
+        #[cfg(not(feature = "near-ai-staging"))]
+        let Ok(entries) = model_entry_quotes(&report, model) else {
+            return self.refused(REPORT_NOT_ATTESTED);
+        };
+        let mut verified = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            #[cfg(feature = "near-ai-staging")]
+            let quote = &entry.quote;
+            #[cfg(not(feature = "near-ai-staging"))]
+            let quote = entry;
             let Ok(collateral) = inner.source.collateral(quote).await else {
                 return Attestation::Unavailable;
             };
             let Some(checked) = (inner.verify)(quote, &collateral, now) else {
-                return Attestation::NotAttested;
+                return self.refused(QUOTE_UNVERIFIED);
             };
             // A genuine quote from a platform behind on Intel's fixes earns
             // nothing, exactly as the server's drill refuses it.
             if checked.tcb_status != REQUIRED_TCB_STATUS {
-                return Attestation::NotAttested;
+                return self.refused(QUOTE_TCB_NOT_UP_TO_DATE);
             }
             if !image_is_pinned(&pins.sets, &checked) {
-                return Attestation::NotAttested;
+                return self.refused(QUOTE_NOT_PINNED);
+            }
+            #[cfg(feature = "near-ai-staging")]
+            match self
+                .staging_checks(entry, &checked, &nonce, now, &allowlist)
+                .await
+            {
+                Ok(()) => {}
+                Err(StagingRefusal::Unavailable) => return Attestation::Unavailable,
+                Err(StagingRefusal::Refused(label)) => return self.refused(label),
             }
             verified.push(checked);
         }
         let report_data: Vec<&[u8]> = verified.iter().map(|q| q.report_data.as_slice()).collect();
         match quote_bound_keys(&claimed, &report_data, &nonce) {
-            Ok(keys) => Attestation::Keys(keys),
-            Err(_) => Attestation::NotAttested,
+            Ok(keys) => {
+                #[cfg(feature = "near-ai-staging")]
+                inner.pins.set_attestation(ATTESTED);
+                Attestation::Keys(keys)
+            }
+            Err(_) => self.refused(QUOTE_KEYS_UNBOUND),
         }
     }
+
+    /// Spec 5.5, steps 6 and 7, for one model entry whose quote verified
+    /// and matched a set: replay its own log against that quote and check
+    /// the events against the allowlist, then check its own compose-manager
+    /// record, whose quote goes through the same verifier with collateral
+    /// fetched for it.
+    #[cfg(feature = "near-ai-staging")]
+    async fn staging_checks(
+        &self,
+        entry: &EntryEvidence,
+        checked: &VerifiedQuote,
+        nonce: &str,
+        now: u64,
+        allowlist: &Allowlist,
+    ) -> Result<(), StagingRefusal> {
+        let refused = |refusal: trace_commons_attestation::staging_replay::ReplayRefusal| {
+            StagingRefusal::Refused(refusal.label())
+        };
+        let events = replay_rtmr3(entry.event_log.as_ref(), checked).map_err(refused)?;
+        check_rtmr3_allowlist(&events, &allowlist.rtmr3).map_err(refused)?;
+        let record = ComposeManagerRecord::from_entry(&entry.entry).map_err(refused)?;
+        let collateral = self
+            .inner
+            .source
+            .collateral(&record.quote)
+            .await
+            .map_err(|SourceUnavailable| StagingRefusal::Unavailable)?;
+        check_compose_manager(
+            &record,
+            |quote| (self.inner.verify)(quote, &collateral, now),
+            checked,
+            nonce,
+            Some(&allowlist.compose_actions),
+        )
+        .map_err(refused)?;
+        Ok(())
+    }
+}
+
+/// Why the staging checks earned nothing.
+#[cfg(feature = "near-ai-staging")]
+enum StagingRefusal {
+    /// Collateral for the compose-manager quote could not be fetched: not a
+    /// verdict, as for the model quote's.
+    Unavailable,
+    /// Refused under this label.
+    Refused(&'static str),
 }
 
 #[async_trait::async_trait]
@@ -1156,11 +1352,298 @@ mod tests {
         serde_json::from_str(report).expect("fixture parses")
     }
 
+    // -- the staged fixture ------------------------------------------------
+    //
+    // A staging build earns a key only when the model entry's RTMR3 log
+    // replays to its verified quote and its compose-manager record checks
+    // (S16). No log replays to the capture's real RTMR3, so every entry here
+    // carries a synthetic log and record, and the verifier stages the
+    // registers they describe on the real, verified quote: `verify_staged`
+    // sets RTMR3 to the log's replay and MRCONFIGID to config-id v1 over the
+    // synthetic compose hash, and `with_compose` answers the compose-manager
+    // quote from the model quote it follows, as one TD's would. A default
+    // build reads neither the log nor the record, and its tests run over the
+    // same staged registers, so both builds test one fixture.
+
+    pub(super) const APP_ID: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    pub(super) const COMPOSE_HASH: &str =
+        "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+    pub(super) const INSTANCE_ID: &str = "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d";
+    pub(super) const MR_KMS: &str = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b";
+    pub(super) const OS_IMAGE_HASH: &str =
+        "0505050505050505050505050505050505050505050505050505050505050505";
+    pub(super) const KEY_PROVIDER: &str =
+        "7b226e616d65223a226b6d73222c226964223a2273796e746865746963227d";
+    /// Synthetic compose-action values, in the live record's formats.
+    pub(super) const MANAGER_IMAGE: &str = "registry.example/compose-manager@sha256:abababababababababababababababababababababababababababababababab";
+    pub(super) const COMPOSE_FILE: &str = "example/models.yaml";
+    pub(super) const FILE_SHA256: &str =
+        "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+    pub(super) const COMMIT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+    const RTMR3_EVENT_TYPE: u32 = 0x0800_0001;
+    const RTMR3_EVENTS: [&str; 10] = [
+        "system-preparing",
+        "app-id",
+        "compose-hash",
+        "instance-id",
+        "boot-mr-done",
+        "mr-kms",
+        "os-image-hash",
+        "key-provider",
+        "storage-fs",
+        "system-ready",
+    ];
+
+    fn marker_payload(name: &str) -> String {
+        hex::encode(format!("synthetic {name}"))
+    }
+
+    /// The ten RTMR3 events, in order, with synthetic payloads.
+    pub(super) fn ten_events() -> Vec<(String, String)> {
+        RTMR3_EVENTS
+            .iter()
+            .map(|name| {
+                let payload = match *name {
+                    "app-id" => APP_ID.to_string(),
+                    "compose-hash" => COMPOSE_HASH.to_string(),
+                    "instance-id" => INSTANCE_ID.to_string(),
+                    "mr-kms" => MR_KMS.to_string(),
+                    "os-image-hash" => OS_IMAGE_HASH.to_string(),
+                    "key-provider" => KEY_PROVIDER.to_string(),
+                    marker => marker_payload(marker),
+                };
+                (name.to_string(), payload)
+            })
+            .collect()
+    }
+
+    pub(super) fn event_log(events: &[(String, String)]) -> serde_json::Value {
+        let mut log = vec![serde_json::json!({
+            "imr": 0, "event_type": 1, "digest": "ee".repeat(48), "event": "", "event_payload": ""
+        })];
+        for (name, payload) in events {
+            log.push(serde_json::json!({
+                "imr": 3, "event_type": RTMR3_EVENT_TYPE, "digest": "",
+                "event": name, "event_payload": payload,
+            }));
+        }
+        serde_json::Value::Array(log)
+    }
+
+    /// RTMR3 as the replay rule computes it: SHA-384 chained from zero over
+    /// SHA-384(type LE32 || ":" || name || ":" || payload). Written out here
+    /// so the default build's tests need no staging code.
+    pub(super) fn replayed(events: &[(String, String)]) -> String {
+        use sha2::{Digest, Sha384};
+        let mut register = [0u8; 48];
+        for (name, payload) in events {
+            let mut digest = Sha384::new();
+            digest.update(RTMR3_EVENT_TYPE.to_le_bytes());
+            digest.update(b":");
+            digest.update(name.as_bytes());
+            digest.update(b":");
+            digest.update(hex::decode(payload).unwrap());
+            let digest = digest.finalize();
+            let mut extend = Sha384::new();
+            extend.update(register);
+            extend.update(digest);
+            register = extend.finalize().into();
+        }
+        hex::encode(register)
+    }
+
+    /// One action of each kind, structurally exact to the live record
+    /// (string timestamps, a digest-pinned compose-manager image, a compose
+    /// file named by path, commit and SHA-256); every value synthetic.
+    pub(super) fn actions() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"action": "compose_manager_started", "container": "compose-manager", "image": MANAGER_IMAGE, "timestamp": "2026-01-01T00:00:00Z"}),
+            serde_json::json!({"action": "compose_up", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "services": ["model-a", "proxy"], "timestamp": "2026-01-01T00:00:01Z"}),
+            serde_json::json!({"action": "compose_down", "tag": "v0.0.1", "commit": COMMIT, "file": COMPOSE_FILE, "services": ["proxy"], "timestamp": "2026-01-01T00:00:02Z"}),
+        ]
+    }
+
+    /// SHA-256 of `actions` as sorted-key compact JSON. The fixture's
+    /// actions are ASCII strings and lists, where `serde_json`'s compact
+    /// form of a sorted copy is Python's.
+    pub(super) fn actions_hash(actions: &[serde_json::Value]) -> String {
+        use sha2::{Digest, Sha256};
+        fn sorted(value: &serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let ordered: std::collections::BTreeMap<_, _> =
+                        map.iter().map(|(k, v)| (k.clone(), sorted(v))).collect();
+                    let mut out = serde_json::Map::new();
+                    for (k, v) in ordered {
+                        out.insert(k, v);
+                    }
+                    serde_json::Value::Object(out)
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.iter().map(sorted).collect())
+                }
+                other => other.clone(),
+            }
+        }
+        let text =
+            serde_json::to_string(&sorted(&serde_json::Value::Array(actions.to_vec()))).unwrap();
+        hex::encode(Sha256::digest(text.as_bytes()))
+    }
+
+    pub(super) fn fixture_quote() -> Vec<u8> {
+        hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap()
+    }
+
+    /// The compose-manager quote: the capture's with one byte appended, so
+    /// `with_compose` can tell it from the model quote by its bytes.
+    pub(super) fn compose_quote() -> Vec<u8> {
+        let mut quote = fixture_quote();
+        quote.push(0);
+        quote
+    }
+
+    /// The registers the synthetic log and compose hash describe, on a
+    /// verified quote.
+    pub(super) fn stage(quote: &mut VerifiedQuote) {
+        quote.rtmr[3] = replayed(&ten_events());
+        quote.mr_config_id = format!("01{COMPOSE_HASH}{}", "00".repeat(15));
+    }
+
+    /// `verify_quote`, staged when the quote is the capture's.
+    pub(super) fn verify_staged(
+        quote: &[u8],
+        collateral: &Collateral,
+        now: u64,
+    ) -> Option<VerifiedQuote> {
+        let mut verified = verify_quote(quote, collateral, now).ok()?;
+        if quote == fixture_quote().as_slice() {
+            stage(&mut verified);
+        }
+        Some(verified)
+    }
+
+    /// `inner` for every quote but the compose-manager one, which is the
+    /// capture verified for real, with the registers of the model quote
+    /// `inner` verified last, our nonce at `[32..64]` and the fixture's
+    /// actions hash at `[0..32]`.
+    pub(super) fn with_compose(
+        inner: impl Fn(&[u8], &Collateral, u64) -> Option<VerifiedQuote> + Send + Sync + 'static,
+    ) -> QuoteVerifier {
+        with_compose_over(actions(), |_| {}, inner)
+    }
+
+    /// [`with_compose`] for a record over `record_actions`, with `alter`
+    /// applied to the compose-manager quote it answers.
+    pub(super) fn with_compose_over(
+        record_actions: Vec<serde_json::Value>,
+        alter: impl Fn(&mut VerifiedQuote) + Send + Sync + 'static,
+        inner: impl Fn(&[u8], &Collateral, u64) -> Option<VerifiedQuote> + Send + Sync + 'static,
+    ) -> QuoteVerifier {
+        let last: Mutex<Option<VerifiedQuote>> = Mutex::new(None);
+        Box::new(move |quote, collateral, now| {
+            if quote == compose_quote().as_slice() {
+                let real = fixture_quote();
+                let mut verified = verify_quote(&real, collateral, now).ok()?;
+                let model = last.lock().unwrap().clone()?;
+                verified.mrtd = model.mrtd;
+                verified.mr_config_id = model.mr_config_id;
+                verified.rtmr = model.rtmr;
+                verified.report_data[0..32]
+                    .copy_from_slice(&hex::decode(actions_hash(&record_actions)).unwrap());
+                verified.report_data[32..64].copy_from_slice(&real[600..632]);
+                alter(&mut verified);
+                return Some(verified);
+            }
+            let verified = inner(quote, collateral, now)?;
+            *last.lock().unwrap() = Some(verified.clone());
+            Some(verified)
+        })
+    }
+
+    /// The allowlist the staged fixture passes, as a signed payload carries
+    /// it.
+    #[cfg(feature = "near-ai-staging")]
+    pub(super) fn fixture_allowlist_json() -> serde_json::Value {
+        let markers: Vec<serde_json::Value> = [
+            "system-preparing",
+            "boot-mr-done",
+            "storage-fs",
+            "system-ready",
+        ]
+        .iter()
+        .map(|name| serde_json::json!({"name": name, "payload": marker_payload(name)}))
+        .collect();
+        serde_json::json!({
+            "rtmr3": {
+                "app_id": APP_ID,
+                "mr_kms": MR_KMS,
+                "os_image_hash": OS_IMAGE_HASH,
+                "key_provider": KEY_PROVIDER,
+                "markers": markers,
+            },
+            "compose_actions": {
+                "compose_manager_images": [MANAGER_IMAGE],
+                "compose_files": [
+                    {"file": COMPOSE_FILE, "file_sha256": FILE_SHA256, "commit": COMMIT},
+                ],
+            },
+        })
+    }
+
+    /// A fixed provider over `sets`: in a staging build, with the fixture's
+    /// allowlist, which a staging key needs as much as the sets.
+    pub(super) fn fixed_pins(sets: Vec<ExpectedMeasurements>) -> PinProvider {
+        #[cfg(feature = "near-ai-staging")]
+        {
+            PinProvider::fixed_allowing(
+                sets,
+                trace_commons_attestation::staging_replay::Allowlist::from_json(
+                    &fixture_allowlist_json(),
+                )
+                .unwrap(),
+            )
+        }
+        #[cfg(not(feature = "near-ai-staging"))]
+        {
+            PinProvider::fixed(sets)
+        }
+    }
+
+    /// A model entry over `quote_hex`, carrying the synthetic log and a
+    /// compose-manager record bound to the fixture's actions.
+    pub(super) fn entry_json(
+        quote_hex: &str,
+        key: &str,
+        nonce: &str,
+        model: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "model_name": model,
+            "signing_algo": "ed25519",
+            "signing_address": key,
+            "request_nonce": nonce,
+            "intel_quote": quote_hex,
+            "event_log": event_log(&ten_events()),
+            "compose_manager_attestation": {
+                "actions": actions(),
+                "actions_hash": actions_hash(&actions()),
+                // A JSON-encoded string, as the live record carries it.
+                "event_log": event_log(&ten_events()).to_string(),
+                "nonce": nonce,
+                "nonce_source": "client",
+                "quote": hex::encode(compose_quote()),
+                "report_data": "00",
+                "vm_config": "{}",
+            },
+        })
+    }
+
     /// A real, Intel-verifiable quote (the ECDSA capture's) framed as an
     /// ed25519 model attestation. The key and nonce are read out of that
     /// quote's own `report_data`, so the report is consistent by
     /// construction rather than by a hand-written expectation -- the same
-    /// construction the server's signer-resolver tests use.
+    /// construction the server's signer-resolver tests use. The entry
+    /// carries the staged log and compose-manager record.
     fn synthetic_report() -> (String, String, String) {
         let quote_hex = json(ECDSA_REPORT)["intel_quote"]
             .as_str()
@@ -1170,13 +1653,7 @@ mod tests {
         let report_data = &quote[568..632];
         let key = hex::encode(&report_data[0..32]);
         let nonce = hex::encode(&report_data[32..64]);
-        let entry = serde_json::json!({
-            "model_name": MODEL,
-            "signing_algo": "ed25519",
-            "signing_address": key,
-            "request_nonce": nonce,
-            "intel_quote": quote_hex,
-        });
+        let entry = entry_json(&quote_hex, &key, &nonce, MODEL);
         let gateway = serde_json::json!({
             "signing_algo": "ed25519",
             "signing_address": "cd".repeat(32),
@@ -1190,19 +1667,24 @@ mod tests {
         (document.to_string(), nonce, key)
     }
 
-    /// Pins taken from the quote's own verified registers, by running the
-    /// real verification path rather than pasting hex.
+    /// Pins taken from the quote's own verified (and staged) registers, by
+    /// running the real verification path rather than pasting hex. They name
+    /// the S16 registers and RTMR3 too, so one set serves both builds.
     fn real_pins() -> Vec<ExpectedMeasurements> {
-        let quote = hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap();
-        let verified = verify_quote(
-            &quote,
+        let verified = verify_staged(
+            &fixture_quote(),
             &parse_collateral(COLLATERAL).unwrap(),
             FIXTURE_CAPTURED_AT,
         )
         .expect("the capture verifies against its collateral");
         let raw = format!(
-            "mrtd={},rtmr0={},rtmr1={},rtmr2={},rtmr3={}",
-            verified.mrtd, verified.rtmr[0], verified.rtmr[1], verified.rtmr[2], verified.rtmr[3]
+            "mrtd={},mrconfigid={},rtmr0={},rtmr1={},rtmr2={},rtmr3={}",
+            verified.mrtd,
+            verified.mr_config_id,
+            verified.rtmr[0],
+            verified.rtmr[1],
+            verified.rtmr[2],
+            verified.rtmr[3]
         );
         vec![one_set(&raw)]
     }
@@ -1254,10 +1736,10 @@ mod tests {
         };
         let attestor = NearAiQuoteAttestor::with_parts(
             Box::new(source),
-            Arc::new(PinProvider::fixed(pins)),
+            Arc::new(fixed_pins(pins)),
             Box::new(move || clock.load(Ordering::SeqCst)),
             Box::new(move || Some(nonce.clone())),
-            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+            with_compose(verify_staged),
         );
         (attestor, reports)
     }
@@ -1287,20 +1769,10 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let gateway = serde_json::json!({
-            "signing_algo": "ed25519",
-            "signing_address": key,
-            "request_nonce": nonce,
-            "intel_quote": quote_hex,
-            "report_data": format!("{key}{nonce}"),
-        });
-        let other_model = serde_json::json!({
-            "model_name": "Qwen/Qwen3.8-27B",
-            "signing_algo": "ed25519",
-            "signing_address": key,
-            "request_nonce": nonce,
-            "intel_quote": quote_hex,
-        });
+        let mut gateway = entry_json(&quote_hex, &key, &nonce, MODEL);
+        gateway.as_object_mut().unwrap().remove("model_name");
+        gateway["report_data"] = serde_json::json!(format!("{key}{nonce}"));
+        let other_model = entry_json(&quote_hex, &key, &nonce, "Qwen/Qwen3.8-27B");
         let with_other_model = serde_json::json!({
             "gateway_attestation": gateway,
             "model_attestations": [other_model],
@@ -1315,7 +1787,7 @@ mod tests {
             trace_commons_attestation::receipt::gateway_ed25519_key(&with_other_model, &nonce),
             Ok(key.clone())
         );
-        let verified = verify_quote(
+        let verified = verify_staged(
             &hex::decode(&quote_hex).unwrap(),
             &parse_collateral(COLLATERAL).unwrap(),
             FIXTURE_CAPTURED_AT,
@@ -1353,15 +1825,7 @@ mod tests {
         // Inside the quote's signature data, past report_data: the JSON
         // binding still reads the same key and nonce, and only DCAP can tell.
         tampered[700] ^= 0x01;
-        let entry = |quote: &str| {
-            serde_json::json!({
-                "model_name": MODEL,
-                "signing_algo": "ed25519",
-                "signing_address": key,
-                "request_nonce": nonce,
-                "intel_quote": quote,
-            })
-        };
+        let entry = |quote: &str| entry_json(quote, &key, &nonce, MODEL);
         let report = |second: &str| {
             serde_json::json!({ "model_attestations": [entry(&quote_hex), entry(second)] })
                 .to_string()
@@ -1375,11 +1839,11 @@ mod tests {
                     reports: Arc::new(AtomicUsize::new(0)),
                     collateral_ok: true,
                 }),
-                Arc::new(PinProvider::fixed(real_pins())),
+                Arc::new(fixed_pins(real_pins())),
                 Box::new(|| FIXTURE_CAPTURED_AT),
                 Box::new(move || Some(nonce.clone())),
-                Box::new(move |quote, collateral, now| {
-                    let mut verified = verify_quote(quote, collateral, now).ok()?;
+                with_compose(move |quote: &[u8], collateral: &Collateral, now: u64| {
+                    let mut verified = verify_staged(quote, collateral, now)?;
                     if second_off_pin && calls.fetch_add(1, Ordering::SeqCst) == 1 {
                         verified.mrtd = "00".repeat(48);
                     }
@@ -1609,11 +2073,11 @@ mod tests {
                     reports,
                     collateral_ok: true,
                 }),
-                Arc::new(PinProvider::fixed(real_pins())),
+                Arc::new(fixed_pins(real_pins())),
                 Box::new(|| FIXTURE_CAPTURED_AT),
                 Box::new(move || Some(nonce.clone())),
-                Box::new(move |quote, collateral, now| {
-                    let mut verified = verify_quote(quote, collateral, now).ok()?;
+                with_compose(move |quote: &[u8], collateral: &Collateral, now: u64| {
+                    let mut verified = verify_staged(quote, collateral, now)?;
                     verified.tcb_status = status.to_string();
                     Some(verified)
                 }),
@@ -1652,10 +2116,10 @@ mod tests {
         };
         let attestor = NearAiQuoteAttestor::with_parts(
             Box::new(source),
-            Arc::new(PinProvider::fixed(real_pins())),
+            Arc::new(fixed_pins(real_pins())),
             Box::new(|| FIXTURE_CAPTURED_AT),
             Box::new(move || Some(nonce.clone())),
-            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+            with_compose(verify_staged),
         );
         assert_eq!(
             attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
@@ -1753,10 +2217,10 @@ mod tests {
                 release: Arc::clone(&release),
                 reports: Arc::clone(&reports),
             }),
-            Arc::new(PinProvider::fixed(pins)),
+            Arc::new(fixed_pins(pins)),
             Box::new(|| FIXTURE_CAPTURED_AT),
             Box::new(move || Some(nonce.clone())),
-            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+            with_compose(verify_staged),
         );
         (attestor, entered, release, reports, key)
     }
@@ -1813,6 +2277,9 @@ mod tests {
         }
     }
 
+    /// A one-register set, for the published pins' tests (a staging build
+    /// has its own, in `signed`).
+    #[cfg(not(feature = "near-ai-staging"))]
     fn pin_string(byte: &str) -> String {
         format!("mrconfigid={}", byte.repeat(48))
     }
@@ -1865,7 +2332,7 @@ mod tests {
                         move || clock.load(Ordering::SeqCst)
                     }),
                     Box::new(move || Some(nonce.clone())),
-                    Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+                    with_compose(verify_staged),
                 );
                 let expect = |attested: bool| {
                     if attested {
@@ -2009,7 +2476,7 @@ mod tests {
                 Arc::clone(&provider),
                 Box::new(|| FIXTURE_CAPTURED_AT),
                 Box::new(move || Some(nonce.clone())),
-                Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+                with_compose(verify_staged),
             );
             assert!(!matches!(
                 attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
@@ -2043,7 +2510,7 @@ mod tests {
                     move || clock.load(Ordering::SeqCst)
                 }),
                 Box::new(move || Some(nonce.clone())),
-                Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+                with_compose(verify_staged),
             );
             assert_eq!(
                 attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
@@ -2103,7 +2570,7 @@ mod tests {
     #[test]
     fn an_empty_pin_list_pins_no_image() {
         let quote = hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap();
-        let verified = verify_quote(
+        let verified = verify_staged(
             &quote,
             &parse_collateral(COLLATERAL).unwrap(),
             FIXTURE_CAPTURED_AT,
@@ -2207,6 +2674,13 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
         }
 
+        /// A v2 set: every S16 register, all `byte`. Shadows the outer
+        /// helper, whose one-register set a v2 document refuses.
+        fn pin_string(byte: &str) -> String {
+            let v = byte.repeat(48);
+            format!("mrtd={v},mrconfigid={v},rtmr0={v},rtmr1={v},rtmr2={v}")
+        }
+
         /// A key pair made for the test, and documents it signs.
         struct Signer(Ed25519KeyPair);
 
@@ -2221,7 +2695,8 @@ mod tests {
                 self.0.public_key().as_ref().to_vec()
             }
 
-            /// A v1 payload for this build, with `changes` laid over it.
+            /// A v2 payload for this build, carrying the fixture's
+            /// allowlist, with `changes` laid over it.
             fn payload(
                 sequence: u64,
                 issued_at: u64,
@@ -2237,6 +2712,7 @@ mod tests {
                     "issued_at": utc(issued_at),
                     "expires_at": utc(expires_at),
                     "sets": sets,
+                    "allowlist": fixture_allowlist_json(),
                 });
                 for (k, v) in changes.as_object().unwrap() {
                     payload[k] = v.clone();
@@ -2257,6 +2733,19 @@ mod tests {
 
             fn sign(&self, payload: &[u8]) -> Vec<u8> {
                 self.wrap(payload, &staging_pins::key_id(&self.public()))
+            }
+
+            /// `payload` signed under the v1 prefix, as a v1 tool did.
+            fn sign_v1(&self, payload: &[u8]) -> Vec<u8> {
+                let mut input = staging_pins::SIGNING_PREFIX_V1.to_vec();
+                input.extend_from_slice(payload);
+                let signature = self.0.sign(&input);
+                serde_json::to_vec(&serde_json::json!({
+                    "payload": b64(payload),
+                    "signature": b64(signature.as_ref()),
+                    "key_id": staging_pins::key_id(&self.public()),
+                }))
+                .unwrap()
             }
 
             /// A well-formed current document: `sequence`, issued at `at`,
@@ -2332,7 +2821,7 @@ mod tests {
                 provider,
                 Box::new(move || at),
                 Box::new(move || Some(nonce.clone())),
-                Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+                with_compose(verify_staged),
             );
             (attestor, key)
         }
@@ -2743,6 +3232,28 @@ mod tests {
                     label(PinRefusal::SetUnparseable),
                 ),
                 (
+                    "a v1 document",
+                    signer.sign_v1(&payload(serde_json::json!({
+                        "format": staging_pins::FORMAT_V1,
+                    }))),
+                    None,
+                    label(PinRefusal::V1Document),
+                ),
+                (
+                    "a set without the S16 registers",
+                    signer.sign(&payload(serde_json::json!({
+                        "sets": [format!("mrtd={}", "aa".repeat(48))],
+                    }))),
+                    None,
+                    label(PinRefusal::SetMissingRegister),
+                ),
+                (
+                    "a malformed allowlist",
+                    signer.sign(&payload(serde_json::json!({"allowlist": {}}))),
+                    None,
+                    label(PinRefusal::Malformed),
+                ),
+                (
                     "a rollback",
                     signer.sign(&payload(serde_json::json!({}))),
                     Some("10 0000000000000000000000000000000000000000000000000000000000000000\n"),
@@ -2898,6 +3409,567 @@ mod tests {
                     .unwrap()
                     .host_str()
             );
+        }
+    }
+
+    /// The RTMR3 replay and the compose-manager check, as a staging build
+    /// makes them before it earns a key (S16, spec 5.5 steps 6 and 7).
+    #[cfg(feature = "near-ai-staging")]
+    mod replay {
+        use super::*;
+        use trace_commons_attestation::staging_replay::Allowlist;
+
+        /// The S16 set of the staged quote: `mrtd`, `rtmr0-2` and
+        /// `mrconfigid`, never a static RTMR3, which is what the replay
+        /// stands in for.
+        fn s16_pins() -> Vec<ExpectedMeasurements> {
+            let verified = verify_staged(
+                &fixture_quote(),
+                &parse_collateral(COLLATERAL).unwrap(),
+                FIXTURE_CAPTURED_AT,
+            )
+            .unwrap();
+            vec![one_set(&format!(
+                "mrtd={},mrconfigid={},rtmr0={},rtmr1={},rtmr2={}",
+                verified.mrtd,
+                verified.mr_config_id,
+                verified.rtmr[0],
+                verified.rtmr[1],
+                verified.rtmr[2]
+            ))]
+        }
+
+        fn quote_hex() -> String {
+            hex::encode(fixture_quote())
+        }
+
+        fn key_and_nonce() -> (String, String) {
+            let quote = fixture_quote();
+            (hex::encode(&quote[568..600]), hex::encode(&quote[600..632]))
+        }
+
+        /// A report whose one model entry carries `events` as its log and a
+        /// record over `record_actions`.
+        fn report_over(
+            events: &[(String, String)],
+            record_actions: &[serde_json::Value],
+        ) -> String {
+            let (key, nonce) = key_and_nonce();
+            let mut entry = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            entry["event_log"] = event_log(events);
+            entry["compose_manager_attestation"]["actions"] = serde_json::json!(record_actions);
+            entry["compose_manager_attestation"]["actions_hash"] =
+                serde_json::json!(actions_hash(record_actions));
+            serde_json::json!({ "model_attestations": [entry] }).to_string()
+        }
+
+        /// A verifier whose model quote measured `events` and whose
+        /// compose-manager quote binds `record_actions`, altered by
+        /// `alter_compose`.
+        fn verifier(
+            events: Vec<(String, String)>,
+            record_actions: Vec<serde_json::Value>,
+            alter_compose: impl Fn(&mut VerifiedQuote) + Send + Sync + 'static,
+        ) -> QuoteVerifier {
+            with_compose_over(
+                record_actions,
+                alter_compose,
+                move |quote, collateral, now| {
+                    let mut verified = verify_staged(quote, collateral, now)?;
+                    if quote == fixture_quote().as_slice() {
+                        verified.rtmr[3] = replayed(&events);
+                    }
+                    Some(verified)
+                },
+            )
+        }
+
+        struct Run {
+            attestor: NearAiQuoteAttestor,
+            pins: Arc<PinProvider>,
+            reports: Arc<AtomicUsize>,
+        }
+
+        fn run(report: String, pins: PinProvider, verify: QuoteVerifier) -> Run {
+            let (_, nonce) = key_and_nonce();
+            let reports = Arc::new(AtomicUsize::new(0));
+            let pins = Arc::new(pins);
+            let attestor = NearAiQuoteAttestor::with_parts(
+                Box::new(Fixture {
+                    report,
+                    reports: Arc::clone(&reports),
+                    collateral_ok: true,
+                }),
+                Arc::clone(&pins),
+                Box::new(|| FIXTURE_CAPTURED_AT),
+                Box::new(move || Some(nonce.clone())),
+                verify,
+            );
+            Run {
+                attestor,
+                pins,
+                reports,
+            }
+        }
+
+        /// Earn under the fixture's pins and allowlist: the answer and the
+        /// status label it left.
+        async fn earn(report: String, verify: QuoteVerifier) -> (Attestation, &'static str) {
+            let run = run(report, fixed_pins(s16_pins()), verify);
+            let answer = run.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await;
+            (answer, run.pins.attestation_label())
+        }
+
+        fn good() -> (String, QuoteVerifier) {
+            (
+                report_over(&ten_events(), &actions()),
+                verifier(ten_events(), actions(), |_| {}),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_earns_a_key_only_when_set_replay_and_allowlist_pass() {
+            let (key, _) = key_and_nonce();
+            // All of them pass: the key.
+            let (report, verify) = good();
+            assert_eq!(
+                earn(report, verify).await,
+                (Attestation::Keys(vec![key]), ATTESTED)
+            );
+
+            // The set does not match: no key, whatever the replay says.
+            let (report, verify) = good();
+            let off_pins = run(report, fixed_pins(other_pins()), verify);
+            assert_eq!(
+                off_pins.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested
+            );
+            assert_eq!(off_pins.pins.attestation_label(), "quote_not_pinned");
+
+            // The set matches but there is no allowlist to check against:
+            // no key.
+            let (report, verify) = good();
+            let bare = run(report, PinProvider::fixed(s16_pins()), verify);
+            assert_eq!(
+                bare.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested
+            );
+            assert_eq!(bare.pins.attestation_label(), "pins_no_allowlist");
+
+            // The set matches and the replay holds, against the
+            // refuse-everything placeholder allowlist: no key.
+            let placeholder = Allowlist::from_json(&serde_json::json!({
+                "rtmr3": {"app_id": "", "mr_kms": "", "os_image_hash": "", "key_provider": "", "markers": []},
+                "compose_actions": {"compose_manager_images": [], "compose_files": []},
+            }))
+            .unwrap();
+            let (report, verify) = good();
+            let refusing = run(
+                report,
+                PinProvider::fixed_allowing(s16_pins(), placeholder),
+                verify,
+            );
+            assert_eq!(
+                refusing.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested
+            );
+            assert_eq!(
+                refusing.pins.attestation_label(),
+                "rtmr3_app_id_not_allowed"
+            );
+
+            // The log is missing: no key.
+            let (key, nonce) = key_and_nonce();
+            let mut entry = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            entry.as_object_mut().unwrap().remove("event_log");
+            let report = serde_json::json!({ "model_attestations": [entry] }).to_string();
+            assert_eq!(
+                earn(report, verifier(ten_events(), actions(), |_| {})).await,
+                (Attestation::NotAttested, "rtmr3_log_missing")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_an_unknown_event() {
+            // The quote really measured this log, an eleventh event and all.
+            let mut events = ten_events();
+            events.insert(8, ("add-container".to_string(), "00".to_string()));
+            assert_eq!(
+                earn(
+                    report_over(&events, &actions()),
+                    verifier(events, actions(), |_| {})
+                )
+                .await,
+                (Attestation::NotAttested, "rtmr3_event_unknown")
+            );
+            // Another key provider, which the quote also really measured.
+            let events: Vec<(String, String)> = ten_events()
+                .into_iter()
+                .map(|(n, p)| {
+                    if n == "key-provider" {
+                        (n, hex::encode(r#"{"name":"kms","id":"another"}"#))
+                    } else {
+                        (n, p)
+                    }
+                })
+                .collect();
+            assert_eq!(
+                earn(
+                    report_over(&events, &actions()),
+                    verifier(events, actions(), |_| {})
+                )
+                .await,
+                (Attestation::NotAttested, "rtmr3_key_provider_not_allowed")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_a_replay_mismatch() {
+            // The report's log is altered after the quote measured the
+            // original: it no longer replays to the quote's RTMR3.
+            let mut altered = ten_events();
+            altered[8].1 = "00".to_string();
+            assert_eq!(
+                earn(
+                    report_over(&altered, &actions()),
+                    verifier(ten_events(), actions(), |_| {})
+                )
+                .await,
+                (Attestation::NotAttested, "rtmr3_replay_mismatch")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_accepts_an_allowlisted_compose_action() {
+            let (key, _) = key_and_nonce();
+            // The listed actions, at other times: the timestamp is not
+            // compared.
+            let mut later = actions();
+            later[1]["timestamp"] = serde_json::json!("2027-01-01T00:00:00Z");
+            // Which services a listed file starts or stops is free, and the
+            // tag is not matched.
+            later[1]["services"] = serde_json::json!(["model-b"]);
+            later[2]["services"] = serde_json::json!([]);
+            later[1]["tag"] = serde_json::json!("v9.9.9");
+            assert_eq!(
+                earn(
+                    report_over(&ten_events(), &later),
+                    verifier(ten_events(), later.clone(), |_| {})
+                )
+                .await,
+                (Attestation::Keys(vec![key]), ATTESTED)
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_a_disallowed_compose_image() {
+            // A compose file swapped after boot for one that logs prompts:
+            // the record honestly binds it, and its hash is not listed.
+            let mut swapped = actions();
+            swapped.push(serde_json::json!({
+                "action": "compose_up", "tag": "v0.0.1", "commit": COMMIT,
+                "file": COMPOSE_FILE, "file_sha256": "f2".repeat(32),
+                "services": ["model-a"], "timestamp": "2026-01-01T00:00:03Z",
+            }));
+            assert_eq!(
+                earn(
+                    report_over(&ten_events(), &swapped),
+                    verifier(ten_events(), swapped.clone(), |_| {})
+                )
+                .await,
+                (Attestation::NotAttested, "compose_action_not_allowed")
+            );
+            // And a record whose list was edited after its quote was made.
+            assert_eq!(
+                earn(
+                    report_over(&ten_events(), &swapped),
+                    verifier(ten_events(), actions(), |_| {})
+                )
+                .await,
+                (Attestation::NotAttested, "compose_actions_hash_mismatch")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_each_unlisted_or_unknown_compose_action() {
+            let mut cases: Vec<(Vec<serde_json::Value>, &str)> = Vec::new();
+            // Another compose-manager image, or the listed one in another
+            // container.
+            let mut image = actions();
+            image[0]["image"] = serde_json::json!(format!(
+                "registry.example/compose-manager@sha256:{}",
+                "cd".repeat(32)
+            ));
+            cases.push((image, "compose_action_not_allowed"));
+            let mut container = actions();
+            container[0]["container"] = serde_json::json!("sidecar");
+            cases.push((container, "compose_action_not_allowed"));
+            // A compose_up of the listed file at another commit.
+            let mut commit = actions();
+            commit[1]["commit"] = serde_json::json!("c2".repeat(20));
+            cases.push((commit, "compose_action_not_allowed"));
+            // A compose_down of a file not listed.
+            let mut down = actions();
+            down[2]["file"] = serde_json::json!("example/other.yaml");
+            cases.push((down, "compose_action_not_allowed"));
+            // A kind the format does not define.
+            let mut unknown = actions();
+            unknown[1]["action"] = serde_json::json!("compose_restart");
+            cases.push((unknown, "compose_action_unknown"));
+            // A key the kind does not carry, and a numeric timestamp.
+            let mut extra = actions();
+            extra[2]["file_sha256"] = serde_json::json!(FILE_SHA256);
+            cases.push((extra, "compose_manager_malformed"));
+            let mut numeric = actions();
+            numeric[0]["timestamp"] = serde_json::json!(1);
+            cases.push((numeric, "compose_manager_malformed"));
+            for (record_actions, label) in cases {
+                assert_eq!(
+                    earn(
+                        report_over(&ten_events(), &record_actions),
+                        verifier(ten_events(), record_actions.clone(), |_| {})
+                    )
+                    .await,
+                    (Attestation::NotAttested, label),
+                    "{label}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_refuses_a_compose_manager_quote_from_another_td() {
+            for alter in [
+                (|q: &mut VerifiedQuote| q.mrtd = "12".repeat(48)) as fn(&mut VerifiedQuote),
+                |q| q.rtmr[3] = "13".repeat(48),
+                |q| q.mr_config_id = "14".repeat(48),
+            ] {
+                assert_eq!(
+                    earn(
+                        report_over(&ten_events(), &actions()),
+                        verifier(ten_events(), actions(), alter)
+                    )
+                    .await,
+                    (Attestation::NotAttested, "compose_manager_other_td")
+                );
+            }
+            // A record quote that does not verify at all.
+            let (key, nonce) = key_and_nonce();
+            let mut entry = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            entry["compose_manager_attestation"]["quote"] = serde_json::json!("00");
+            let report = serde_json::json!({ "model_attestations": [entry] }).to_string();
+            assert_eq!(
+                earn(report, verifier(ten_events(), actions(), |_| {})).await,
+                (Attestation::NotAttested, "compose_manager_quote_unverified")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_takes_the_log_and_compose_record_from_the_quotes_report() {
+            // One report per answer: the quote, its log and its record all
+            // come from the fetch made with this answer's nonce.
+            let (report, verify) = good();
+            let one = run(report, fixed_pins(s16_pins()), verify);
+            assert!(matches!(
+                one.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::Keys(_)
+            ));
+            assert_eq!(one.reports.load(Ordering::SeqCst), 1);
+
+            // A record quoted for another fetch's nonce is never combined
+            // with this one's quote.
+            assert_eq!(
+                earn(
+                    report_over(&ten_events(), &actions()),
+                    verifier(ten_events(), actions(), |q| q.report_data[32..64]
+                        .fill(0x5a))
+                )
+                .await,
+                (Attestation::NotAttested, "compose_manager_nonce_mismatch")
+            );
+
+            // The log and record are the ones beside the quote: a good log
+            // on another model's entry does not stand in for a bad one on
+            // ours.
+            let (key, nonce) = key_and_nonce();
+            let other = entry_json(&quote_hex(), &key, &nonce, "Qwen/Qwen3.8-27B");
+            let mut ours = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            let mut bad = ten_events();
+            bad[8].1 = "00".to_string();
+            ours["event_log"] = event_log(&bad);
+            let report = serde_json::json!({ "model_attestations": [other, ours] }).to_string();
+            assert_eq!(
+                earn(report, verifier(ten_events(), actions(), |_| {})).await,
+                (Attestation::NotAttested, "rtmr3_replay_mismatch")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_checks_every_entry_for_the_model() {
+            // Two entries for our model, the first of which passes. Each
+            // entry's own log and record are checked, so a bad second entry
+            // refuses the key rather than riding on the first.
+            let (key, nonce) = key_and_nonce();
+            let good_entry = || entry_json(&quote_hex(), &key, &nonce, MODEL);
+            let two = |second: serde_json::Value| {
+                serde_json::json!({ "model_attestations": [good_entry(), second] }).to_string()
+            };
+
+            // The control: two good entries earn the key.
+            let (answer, label) =
+                earn(two(good_entry()), verifier(ten_events(), actions(), |_| {})).await;
+            assert!(matches!(answer, Attestation::Keys(_)), "{answer:?}");
+            assert_eq!(label, ATTESTED);
+
+            // The second entry's log does not replay to its quote.
+            let mut bad_log = good_entry();
+            let mut altered = ten_events();
+            altered[8].1 = "00".to_string();
+            bad_log["event_log"] = event_log(&altered);
+            // The second entry has no compose-manager record.
+            let mut no_record = good_entry();
+            no_record
+                .as_object_mut()
+                .unwrap()
+                .remove("compose_manager_attestation");
+            // The second entry's record quote does not verify.
+            let mut bad_record = good_entry();
+            bad_record["compose_manager_attestation"]["quote"] = serde_json::json!("00");
+            for (second, expected) in [
+                (bad_log, "rtmr3_replay_mismatch"),
+                (no_record, "compose_manager_missing"),
+                (bad_record, "compose_manager_quote_unverified"),
+            ] {
+                assert_eq!(
+                    earn(two(second), verifier(ten_events(), actions(), |_| {})).await,
+                    (Attestation::NotAttested, expected),
+                    "{expected}"
+                );
+            }
+        }
+
+        /// The fixture, with collateral for the compose-manager quote alone
+        /// unavailable while `down` is set.
+        struct ComposeCollateralDown {
+            inner: Fixture,
+            down: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl AttestationSource for ComposeCollateralDown {
+            async fn report(&self, model: &str, nonce: &str) -> Result<String, SourceUnavailable> {
+                self.inner.report(model, nonce).await
+            }
+            async fn collateral(&self, quote: &[u8]) -> Result<Collateral, SourceUnavailable> {
+                if self.down.load(Ordering::SeqCst) && quote == compose_quote().as_slice() {
+                    return Err(SourceUnavailable);
+                }
+                self.inner.collateral(quote).await
+            }
+        }
+
+        #[tokio::test]
+        async fn compose_manager_collateral_unavailable_is_no_answer() {
+            // The model quote's collateral is there and the record's is not:
+            // the record cannot be checked, so there is no key and no
+            // verdict either, and the next call asks again.
+            let (report, verify) = good();
+            let (key, nonce) = key_and_nonce();
+            let reports = Arc::new(AtomicUsize::new(0));
+            let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let pins = Arc::new(fixed_pins(s16_pins()));
+            let attestor = NearAiQuoteAttestor::with_parts(
+                Box::new(ComposeCollateralDown {
+                    inner: Fixture {
+                        report,
+                        reports: Arc::clone(&reports),
+                        collateral_ok: true,
+                    },
+                    down: Arc::clone(&down),
+                }),
+                Arc::clone(&pins),
+                Box::new(|| FIXTURE_CAPTURED_AT),
+                Box::new(move || Some(nonce.clone())),
+                verify,
+            );
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::Unavailable
+            );
+            assert_eq!(pins.attestation_label(), ATTESTATION_NOT_CHECKED);
+            assert_eq!(reports.load(Ordering::SeqCst), 1);
+
+            // Nothing was remembered: with the collateral back, the next
+            // call fetches again and earns the key.
+            down.store(false, Ordering::SeqCst);
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::Keys(vec![key])
+            );
+            assert_eq!(reports.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn a_staging_build_never_takes_a_gateway_quote_for_the_model() {
+            // A gateway attestation carrying a good quote, log and record,
+            // and no model entry: no key.
+            let (key, nonce) = key_and_nonce();
+            let mut gateway = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            gateway.as_object_mut().unwrap().remove("model_name");
+            gateway["report_data"] = serde_json::json!(format!("{key}{nonce}"));
+            let gateway_only = serde_json::json!({ "gateway_attestation": gateway }).to_string();
+            assert_eq!(
+                earn(gateway_only, verifier(ten_events(), actions(), |_| {}))
+                    .await
+                    .0,
+                Attestation::NotAttested
+            );
+            // A model entry without a log, beside a gateway attestation
+            // with one: the gateway's log is not read for the model.
+            let mut entry = entry_json(&quote_hex(), &key, &nonce, MODEL);
+            entry.as_object_mut().unwrap().remove("event_log");
+            let report = serde_json::json!({
+                "gateway_attestation": gateway,
+                "model_attestations": [entry],
+            })
+            .to_string();
+            assert_eq!(
+                earn(report, verifier(ten_events(), actions(), |_| {})).await,
+                (Attestation::NotAttested, "rtmr3_log_missing")
+            );
+        }
+
+        #[tokio::test]
+        async fn status_names_the_replay_and_allowlist_refusals() {
+            // Before any answer, nothing has been checked.
+            let (report, verify) = good();
+            let fresh = run(report, fixed_pins(s16_pins()), verify);
+            assert_eq!(fresh.pins.attestation_label(), ATTESTATION_NOT_CHECKED);
+
+            let mut mr_kms = ten_events();
+            mr_kms[5].1 = "99".repeat(48);
+            let mut marker = ten_events();
+            marker[9].1 = "00".to_string();
+            let cases: Vec<(Vec<(String, String)>, Vec<serde_json::Value>, &str)> = vec![
+                (mr_kms, actions(), "rtmr3_mr_kms_not_allowed"),
+                (marker, actions(), "rtmr3_marker_not_allowed"),
+            ];
+            for (events, record_actions, label) in cases {
+                let report = report_over(&events, &record_actions);
+                let (answer, status) = earn(report, verifier(events, record_actions, |_| {})).await;
+                assert_eq!(answer, Attestation::NotAttested, "{label}");
+                assert_eq!(status, label);
+            }
+
+            // A refusal is replaced by the next outcome, never kept: the
+            // label is the last answer's.
+            let (report, verify) = good();
+            let run = run(report, fixed_pins(s16_pins()), verify);
+            let _ = run.attestor.model_keys(NEAR_AI_BACKEND, MODEL).await;
+            assert_eq!(run.pins.attestation_label(), ATTESTED);
+            // Every label is a label: no event value, register or nonce.
+            for label in [ATTESTED, ATTESTATION_NOT_CHECKED, "quote_not_pinned"] {
+                assert!(label.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
+            }
         }
     }
 }

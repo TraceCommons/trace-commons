@@ -445,6 +445,7 @@ pub const METHODS: &[&str] = &[
     "private_ai",
     "set_private_ai",
     "invite_lookup",
+    "first_run_estimate",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -510,7 +511,7 @@ pub const METHODS: &[&str] = &[
 /// `model_spend`, `set_private_ai`, `publish_public_run`,
 /// `unpublish_public_run`, `set_public_profile`, `clear_public_profile`,
 /// `history_detail`, `refresh_history`, `withdraw`, `withdraw_bulk`,
-/// `commons_credit_summary`, the mission catalogues, the
+/// `commons_credit_summary`, `first_run_estimate`, the mission catalogues, the
 /// `inference_connection_*` methods, `skill_candidate`, `skill_evaluate`,
 /// `witness_preview_request`, and the routing probes. Also refused, because
 /// they approve or grant a send, or write outside the state store (the
@@ -2869,9 +2870,16 @@ impl DaemonShared {
         // `pins_unavailable`, or the refusal that pinned nothing, such as
         // `pins_expired`. A label and nothing else: no key, host or
         // measurement. A default build never names the field.
+        //
+        // Beside it, `near_ai_attestation`: the last answer's outcome under
+        // those pins -- `attested`, `not_checked`, or the check that earned
+        // no key, such as `rtmr3_replay_mismatch` or
+        // `compose_action_not_allowed` (owner decision S16). Also a label
+        // and nothing else.
         #[cfg(feature = "near-ai-staging")]
         {
             status["near_ai_pins"] = self.near_ai_pins.status_label().into();
+            status["near_ai_attestation"] = self.near_ai_pins.attestation_label().into();
         }
         status
     }
@@ -3562,6 +3570,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
+    ("first_run_estimate", "first-run-estimate-requires-async"),
     ("account_bind", "identity-requires-async"),
     ("account_binding", "identity-requires-async"),
     ("account_session_status", "identity-requires-async"),
@@ -6474,6 +6483,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
+        "first_run_estimate" => super::network_data::handle_first_run_estimate(shared, req).await,
         "account_bind" => super::native_identity::handle(shared, req).await,
         "account_binding" => super::native_identity::handle(shared, req).await,
         "account_session_status" => super::native_identity::handle(shared, req).await,
@@ -14781,7 +14791,7 @@ mod tests {
     #[tokio::test]
     async fn an_unnamed_cancel_acts_without_disclosing_the_attempt_it_acted_on() {
         let s = shared();
-        let started = crate::daemon::nearai_credential::ceremony::begin(&s.store, "github")
+        let started = crate::daemon::nearai_credential::ceremony::begin(&s.store, "google")
             .await
             .expect("a ceremony to cancel");
         let id = started["attempt_id"].as_str().unwrap().to_string();
@@ -16230,6 +16240,7 @@ mod tests {
         );
         s.near_ai_pins = Arc::clone(&provider);
         assert_eq!(s.status_value()["near_ai_pins"], "pins_not_fetched");
+        assert_eq!(s.status_value()["near_ai_attestation"], "not_checked");
         assert!(provider.current(1_800_000_000).await.sets.is_empty());
         assert_eq!(s.status_value()["near_ai_pins"], "pins_malformed");
     }
@@ -16240,6 +16251,7 @@ mod tests {
     #[test]
     fn a_default_build_status_has_no_pin_label() {
         assert!(shared().status_value().get("near_ai_pins").is_none());
+        assert!(shared().status_value().get("near_ai_attestation").is_none());
     }
 
     /// The attestor needs a key and an enrollment, and nothing else: with no
@@ -17629,7 +17641,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 61);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 62);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18117,7 +18129,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 68, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

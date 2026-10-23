@@ -119,7 +119,39 @@ All dated 2026-10-21. The owner's words are quoted.
   compose-manager record's `actions` list, bound to that record's own
   quote through `actions_hash`, so the compose-action half of the owner's
   option is checked from that list and its quote, not from the replay
-  (5.2). The rule is still the replay, not the record.
+  (5.2). The rule is still the replay, not the record. Refinement chosen
+  by the owner (2026-10-22): "Require all ten, in order" (the ten RTMR3
+  events, 5.2).
+- **(S17) Pin compose file hashes.** The #1575 check assumed every compose
+  action had the keys `action`, `container`, `image` and `timestamp`; run
+  against live NEAR AI staging, `observe` refused the record as
+  `compose_manager_malformed`, because only `compose_manager_started` has
+  that shape (Verified on 2026-10-22: the RTMR3 replay, corrected below).
+  The owner chose "Pin compose file hashes (Recommended)" (2026-10-22), whose
+  text was: "compose_manager_started: its image digest must be listed.
+  compose_up: its file_sha256 (with file path and commit) must be listed;
+  which services it starts is free, since the pinned file defines them all.
+  compose_down: allowed for a listed file (stopping containers adds no
+  code). Any other action kind refuses. A reviewer approves a new file by
+  fetching it at that commit, checking the hash and reading the images it
+  names." So the allowlist's `compose_actions` lists compose-manager images
+  by digest and compose files by (path, SHA-256, commit) (5.2). A
+  `compose_down` matches a listed file by path and commit, since it carries
+  no hash. The `tag` an action carries is not matched: a tag is a movable
+  name, the commit is the immutable one, and the file hash is taken at that
+  commit. This changed the v2 payload's `compose_actions` from a list to an
+  object before any v2 document had been signed, so the format string stays
+  `trace-commons-near-ai-pins/v2`.
+- **(S18) Staging signs in through NEAR AI's login, not a NEAR wallet.** "In
+  the staging builds the sign in needs to be via Google and not your near
+  wallet" (2026-10-23, after installing a staging DMG). Asked whether to
+  offer GitHub as well, the owner chose "Google only for now" (2026-10-23).
+  A staging build's one NEAR AI sign-in provider is Google
+  (`channel::NEAR_AI_SIGN_IN_PROVIDERS`); the daemon refuses the NEAR
+  wallet ceremony and GitHub, and the native wallet signup answers
+  Unsupported. A commons without the login says "Only Google sign-in is
+  supported." Testers make their staging NEAR AI account with Google.
+  Production keeps the NEAR wallet as its default (3.12).
 
 Everything else here is a proposal. Section 10 lists what is still open.
 
@@ -332,10 +364,23 @@ is recorded here.
 - **Post-boot compose actions do not extend RTMR3.** The
   `compose_manager_attestation` record has the fields `actions`,
   `actions_hash`, `nonce`, `nonce_source` (`"client"`), `quote`,
-  `event_log`, `report_data` and `vm_config`. `actions` held eight
-  entries, each with the keys `action`, `container`, `image` and
-  `timestamp`; the action kinds seen were `compose_manager_started`,
-  `compose_up` and `compose_down`. None of them appears in the RTMR3 log.
+  `event_log`, `report_data` and `vm_config`. Its `event_log` is a
+  JSON-encoded string (the model entry's is a JSON list), and `vm_config`
+  is a string. `actions` held eight entries of three kinds, with different
+  keys per kind (corrected on 2026-10-22, from the ed25519 and ecdsa
+  captures, which agree; this bullet first said every action had
+  `action`, `container`, `image` and `timestamp`). Every action has
+  `action` and `timestamp`, the timestamp a string:
+  - `compose_manager_started`: `container` (the compose manager's,
+    `compose-manager`) and `image`, a digest reference
+    (`<name>@sha256:<64 hex>`);
+  - `compose_up`: `tag` (a release tag), `commit` (40 hex), `file` (a path
+    in NEAR AI's repository), `file_sha256` (64 hex) and `services` (a list
+    of service names);
+  - `compose_down`: `tag`, `commit`, `file` and `services`, with no
+    `file_sha256`.
+
+  None of them appears in the RTMR3 log.
 - **The compose-manager quote is the model's TD, and binds the actions.**
   Its `mrtd`, `mrconfigid` and `rtmr0-3` are identical to the model entry
   quote's. Its `report_data[32..64]` is our nonce. Its
@@ -593,7 +638,9 @@ runs in both builds and holds them to the same answer.
 
 The one staging difference is that the NEAR wallet ceremony is refused
 (`staging_wallet_provisioning_closed`) whatever the configuration says, so
-NEAR AI is the only way to make a staging account.
+NEAR AI is the only way to make a staging account. The staging app does not
+offer it either (S18): its NEAR AI sign-in is NEAR AI's Google login only,
+never GitHub or the NEAR wallet.
 
 What opens NEAR AI sign-in is the pilot's readiness check
 (`near_ai_login_readiness_named`) less one control:
@@ -918,9 +965,20 @@ model quote:
    other serialisations do not match), and require it at the quote's
    `report_data[0..32]`. The record's own `actions_hash` field is not
    trusted; it must equal the recomputed value or the record is refused.
-5. Check every entry of `actions` against the allowlist by action kind,
-   container and image reference (the `timestamp` is not checked). An
-   action not in the allowlist refuses the entry.
+5. Parse every entry of `actions` by kind, with exactly that kind's keys
+   (Verified on 2026-10-22: the RTMR3 replay): an unknown kind
+   (`compose_action_unknown`), a missing or extra key or a value of the
+   wrong type (`compose_manager_malformed`) refuses the entry. Then check
+   each against the allowlist (S17): a `compose_manager_started` must name
+   the `compose-manager` container and a listed image, exactly, by digest;
+   a `compose_up` must name a listed compose file by `file`, `file_sha256`
+   and `commit` together; a `compose_down` must name a listed file's
+   `file` and `commit`. Which `services` an action starts or stops is free,
+   since the pinned file defines them all; the `tag` and the `timestamp`
+   are not compared. An action not allowed refuses the entry
+   (`compose_action_not_allowed`). The hash in step 4 is over the raw
+   actions exactly as received, every field included, never over the
+   parsed form.
 
 The compose-manager quote's `report_data[0..32]` is the actions hash, not
 a signing address, so the receipt signer binding
@@ -936,13 +994,26 @@ one report fetched with one nonce, and never combine records from two
 fetches.
 
 **Where the allowlist comes from and how it is reviewed.** `observe`
-prints, for each model entry, the decoded RTMR3 events (name, and the
-payload for every event except `instance-id`, whose value it never prints)
-and the compose-manager `actions` (kind, container, image). The operator
+writes a candidate allowlist to its `--review` file (not stdout, which
+carries the sets file `sign` reads): one value per RTMR3 event, the same
+across every model entry (it refuses the run as `review_entries_disagree`
+when entries differ), with no `instance-id` value, the distinct
+compose-manager images and the distinct (file, SHA-256, commit) of every
+`compose_up` seen, in the shape `sign --allowlist` reads. A `compose_down`
+whose file and commit no `compose_up` in the run brought up cannot be
+listed (it carries no hash), so the run is refused as
+`review_compose_down_unlisted`; a value the format cannot hold (an image
+not named by digest, a hash or commit not lower-case hex of its length)
+refuses it as `review_compose_actions_unlistable`. The operator
 reviews them and commits the allowlist as a file under
 `deploy/staging-gcp/`, so every change to it is a reviewed pull request. A
-new image or compose action that NEAR AI staging starts using therefore
-fails closed until someone has looked at it and merged it. `sign` reads
+new compose file is approved by fetching it from NEAR AI's repository at
+that commit, checking its SHA-256 and reading the images it names (S17). A
+new image or compose file that NEAR AI staging starts using therefore
+fails closed until someone has looked at it and merged it. `sign` refuses
+an allowlist filled in only in part (`allowlist_incomplete`): the RTMR3
+values, the four markers, at least one compose-manager image and at least
+one compose file, or nothing at all (the committed placeholder). `sign` reads
 that file and carries the allowlist **inside the signed payload**, next to
 `sets`, so the same key, sequence and expiry cover both and there is no
 second signature to check. Adding it bumps the payload format to
@@ -963,9 +1034,12 @@ one field:
       "key_provider": "<the staging KMS identity, as the event carries it>",
       "markers": [{"name": "<event name>", "payload": "<hex>"}]
     },
-    "compose_actions": [
-      {"action": "<action kind>", "container": "<container>", "image": "<image reference>"}
-    ]
+    "compose_actions": {
+      "compose_manager_images": ["<name>@sha256:<64 hex>"],
+      "compose_files": [
+        {"file": "<repository path>", "file_sha256": "<64 hex>", "commit": "<40 hex>"}
+      ]
+    }
   }
 }
 ```
@@ -999,9 +1073,9 @@ operators run it, nothing ships it) with `required-features = ["near-ai-staging"
   mismatch; verifies the entry's compose-manager quote, requires its
   registers to equal the model quote's and our nonce at
   `report_data[32..64]`, and recomputes `actions_hash` against its
-  `report_data[0..32]`, refusing the run if any of these fails; and prints
-  the decoded RTMR3 events and the compose actions for the allowlist
-  review (5.2).
+  `report_data[0..32]`, refusing the run if any of these fails; and writes
+  the candidate allowlist to its `--review` file for the allowlist review
+  (5.2).
 - `sign --sets <file> --sequence <n> --ttl-days <d>`: read the private key
   from stdin only (never argv, never a file it writes), build the payload,
   sign, and write `current.json`. It refuses a sequence not above the one in
@@ -1073,7 +1147,7 @@ sets from the signed document instead of ingest's unsigned one:
    report (5.2): its quote verifies against Intel collateral, its registers
    equal the model quote's, our nonce is at `report_data[32..64]`, the
    recomputed `actions_hash` is at `report_data[0..32]`, and every action
-   is in `allowlist.compose_actions`. A key is earned only if the set, the
+   parses by kind and is allowed by `allowlist.compose_actions` (S17). A key is earned only if the set, the
    replay, the RTMR3 allowlist and the compose-manager checks all pass.
    Until steps 6 and 7 land, a staging build pins with the tool's current
    default (production's `mrtd` and `rtmr0-3`), never with the S16
@@ -1102,7 +1176,8 @@ nothing".
 | An RTMR3 event not in the allowlist, missing, repeated or out of order, or with a value other than the listed one | earn no key for that entry |
 | Compose-manager record missing, its quote does not verify, its registers differ from the model quote's, or our nonce is not at `report_data[32..64]` | earn no key for that entry |
 | Recomputed `actions_hash` not at the compose-manager quote's `report_data[0..32]` | earn no key for that entry |
-| A compose action (kind, container, image) not in the allowlist | earn no key for that entry |
+| A compose action of an unknown kind, or not of its kind's exact shape | earn no key for that entry |
+| A compose action not allowed: a compose-manager image not listed by digest, a `compose_up` file (path, SHA-256, commit) not listed, a `compose_down` file (path, commit) not listed | earn no key for that entry |
 
 The daemon's status reports which of these applies, as a label (for
 example `pins_expired`), so a tester can say "proof marks stopped, status
@@ -1222,9 +1297,9 @@ macOS build.
 What a tester does, in order. The runbook carries the full text; any
 user-facing copy it adds follows `docs/ui-copy-guide.md`.
 
-1. Make a NEAR AI staging account at `cloud-stg.near.ai`. It is separate
-   from a production NEAR AI account, even with the same GitHub or Google
-   login.
+1. Make a NEAR AI staging account at `cloud-stg.near.ai`, with Google
+   (the staging app signs in with Google only, S18). It is separate from a
+   production NEAR AI account, even with the same Google login.
 2. Get the staging DMG link from the owner. No invite is needed: any
    staging NEAR AI account can sign up (S12).
 3. Download `Near.ai Staging.dmg` from the staging pre-release and drag it to
@@ -1403,3 +1478,36 @@ profile is in `macos/` (#1545). Still open:
   (3.7).
 - **NEAR AI staging's public `/v1/attestation/pins` is not NEAR AI's pins.**
   It holds backup-provider pins.
+- **Open sign-up does not open for today's client (found in review of
+  Task 11).** 3.12 compiles the admission ledger out of the staging build,
+  but the old readiness check (`near_ai_login_readiness_named` under the
+  legacy contract) still requires `TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`,
+  and the old capabilities response publishes no issuer without a witness.
+  The contributor daemon, which the macOS app drives, signs up only through
+  `/v1/account/near/provision/capabilities` and
+  `/v1/account/near-ai/provision/start` and `/finish`, and requires the
+  `witness` field. No client calls the `/v2` routes, which are the only
+  ones a staging build makes ready. So a staging server with no witness
+  boots and every app sign-up fails with
+  `near_ai_enroll_commons_unsupported`. Closing it is a code change, not a
+  setting: either the staging client moves to `capabilities/v2` and
+  `start`/`finish/v2`, or the staging build drops the witness from the old
+  contract on both sides, with a staging test on the old routes. A
+  placeholder witness is not a fix: the client would call that host.
+- **Task 11 differs from the plan in five places, on purpose.**
+  - The ingest overlay is `deploy/staging-gcp/ingest.env.template`, not
+    `staging.env.template`: the release check refuses the substring
+    `staging.env` in deploy files.
+  - The `staging.tracecommons.ai` site is a separate file
+    (`Caddyfile.site.template`) appended to the pilot Caddyfile's render,
+    not a block in the pilot template behind a variable. The pilot template
+    is unchanged.
+  - Under `TC_DB_MODE=local`, `deploy.sh` installs the pilot units with the
+    Cloud SQL proxy dependency swapped for the local PostgreSQL unit (a
+    `sed` rewrite), not a drop-in: a drop-in can add a dependency but cannot
+    remove the pilot ingest unit's `Requires=cloud-sql-proxy.service`.
+  - Payout starts `disabled`, not `dry_run` (3.8). `dry_run` records a rate
+    epoch at boot and needs the payout store, and the rail's own settings
+    have no caller yet.
+  - `trace-commons-staging-pins` is built with
+    `near-attestation-collateral`, so its `observe` step can check quotes.

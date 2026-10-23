@@ -1406,10 +1406,12 @@ async fn drift_sample_data_matches_the_real_daemon() {
             serde_json::from_str(&committed_text).unwrap_or_else(|e| panic!("{key}: {e}"));
         let mut actual = actual.clone();
         // The samples are a default build's. A staging build's status adds
-        // its signed-pin label, which a default build never sends.
+        // its signed-pin and attestation labels, which a default build
+        // never sends.
         #[cfg(feature = "near-ai-staging")]
         if let Value::Object(map) = &mut actual {
             map.remove("near_ai_pins");
+            map.remove("near_ai_attestation");
         }
         for k in touched.unwrap_or(&[]) {
             for side in [&mut committed, &mut actual] {

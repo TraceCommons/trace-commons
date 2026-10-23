@@ -67,6 +67,23 @@ use sha2::{Digest, Sha256};
 /// path's `near-`, and not a prefix of it in either direction.
 const TENANT_PREFIX: &str = "nearai-";
 
+/// The provisioning ceremony's routes, chosen by the build rather than by any
+/// setting (#1574 review, finding H1).
+///
+/// A production build keeps the routes every deployed client calls, whose
+/// readiness requires the commons's published witness. A `near-ai-staging`
+/// build calls the v2 routes, which a staging ingest opens without the
+/// admission ledger or the witness (staging spec S12); the old ones refuse
+/// there, so a staging client on them could never sign up.
+#[cfg(not(feature = "near-ai-staging"))]
+pub const PROVISION_START_PATH: &str = "/v1/account/near-ai/provision/start";
+#[cfg(not(feature = "near-ai-staging"))]
+pub const PROVISION_FINISH_PATH: &str = "/v1/account/near-ai/provision/finish";
+#[cfg(feature = "near-ai-staging")]
+pub const PROVISION_START_PATH: &str = super::account_onboarding::NEAR_AI_START_V2_PATH;
+#[cfg(feature = "near-ai-staging")]
+pub const PROVISION_FINISH_PATH: &str = super::account_onboarding::NEAR_AI_FINISH_V2_PATH;
+
 #[derive(Deserialize)]
 struct Started {
     ceremony_id: String,
@@ -243,6 +260,20 @@ async fn enroll(
         bail!("near_ai_enroll_already_enrolled")
     }
     let prepared = prepare(shared, ingest_url).await?;
+    enroll_prepared(shared, api, ingest_url, prepared, expected).await
+}
+
+/// [`enroll`] from a prepared ceremony on: the device key, the ceremony and
+/// the published enrollment. Separate so a test can prepare against a
+/// loopback commons (see [`prepare_on`]) and still run every later step as
+/// `enroll` runs it.
+async fn enroll_prepared(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    ingest_url: &str,
+    prepared: Prepared,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<serde_json::Value> {
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
 
@@ -277,7 +308,9 @@ pub(super) struct Prepared {
     session: super::settings::NearAiSession,
     issuer_url: String,
     audience: String,
-    witness: crate::config::WitnessSettings,
+    /// `None` only in a `near-ai-staging` build: see
+    /// [`super::account_onboarding::LoginCapability::witness`].
+    witness: Option<crate::config::WitnessSettings>,
     receipt_endpoint: Option<String>,
 }
 
@@ -286,7 +319,7 @@ pub(super) struct Prepared {
 pub(super) struct Provisioned {
     issuer_url: String,
     audience: String,
-    witness: crate::config::WitnessSettings,
+    witness: Option<crate::config::WitnessSettings>,
     receipt_endpoint: Option<String>,
     finished: Finished,
 }
@@ -300,7 +333,17 @@ pub(super) async fn prepare(shared: &DaemonShared, ingest_url: &str) -> Result<P
         .map_err(|_| anyhow!("near_ai_enroll_endpoint_refused"))?;
     let commons =
         client(ingest_url, &allowed).map_err(|_| anyhow!("near_ai_enroll_endpoint_refused"))?;
+    prepare_on(shared, commons, ingest_url).await
+}
 
+/// [`prepare`] after the address check, over the origin-only client
+/// `prepare` built for `ingest_url`. Separate so a test can hand it a client
+/// for a loopback commons, which `prepare`'s own address check refuses.
+async fn prepare_on(
+    shared: &DaemonShared,
+    commons: trace_commons_operator_client::Client,
+    ingest_url: &str,
+) -> Result<Prepared> {
     let session = shared
         .settings
         .lock()
@@ -313,8 +356,9 @@ pub(super) async fn prepare(shared: &DaemonShared, ingest_url: &str) -> Result<P
     // that spends nothing: a contributor who never logged in should be told
     // that, not that the commons is unreachable.
     //
-    // The commons's own facts, from the same route and the same validator the
-    // wallet ceremony uses. `issuer_url` and `audience` are what `submit`
+    // The commons's own facts. A production build reads them from the same
+    // route and the same validator the wallet ceremony uses; a staging build
+    // from the v2 route, which publishes no witness. `issuer_url` and `audience` are what `submit`
     // mints upload claims with, so an enrollment without them is enrolled and
     // unable to upload -- a config that fails at the contributor's first
     // submission rather than here, where they could still act on it.
@@ -324,11 +368,9 @@ pub(super) async fn prepare(shared: &DaemonShared, ingest_url: &str) -> Result<P
     // otherwise ask for. Before the session is read and well before the token
     // is spent: a commons that is unreachable or not offering enrollment must
     // not cost the contributor their refresh token either.
-    let (issuer_url, audience, witness, receipt_endpoint) =
-        super::account_onboarding::validated_capability(
-            ingest_url,
-            super::account_onboarding::Path::NearAiLogin,
-        )
+    //
+    // See `account_onboarding::login_capability_from` for the two routes.
+    let capability = super::account_onboarding::login_capability_from(&commons, ingest_url)
         .await
         .map_err(|refusal| match refusal {
             super::account_onboarding::SignupRefusal::AddressRefused => {
@@ -344,10 +386,10 @@ pub(super) async fn prepare(shared: &DaemonShared, ingest_url: &str) -> Result<P
     Ok(Prepared {
         commons,
         session,
-        issuer_url,
-        audience,
-        witness,
-        receipt_endpoint,
+        issuer_url: capability.issuer_url,
+        audience: capability.audience,
+        witness: capability.witness,
+        receipt_endpoint: capability.receipt_endpoint,
     })
 }
 
@@ -374,7 +416,7 @@ pub(super) async fn provision(
     let started: Started = commons
         .call_json(
             reqwest::Method::POST,
-            "/v1/account/near-ai/provision/start",
+            PROVISION_START_PATH,
             &[],
             Some(&start_payload(&code_challenge, &identity.public_key_b64)),
         )
@@ -399,7 +441,7 @@ pub(super) async fn provision(
     let finished: Finished = commons
         .call_json(
             reqwest::Method::POST,
-            "/v1/account/near-ai/provision/finish",
+            PROVISION_FINISH_PATH,
             &[],
             // The JWT rides in the body, never a header: we are not
             // authenticating to the commons with it, we are handing it over to
@@ -483,7 +525,7 @@ struct Commons<'a> {
     ingest_url: &'a str,
     issuer_url: &'a str,
     audience: &'a str,
-    witness: crate::config::WitnessSettings,
+    witness: Option<crate::config::WitnessSettings>,
     receipt_endpoint: Option<String>,
 }
 
@@ -546,11 +588,15 @@ fn persist_for(
         display_handle: None,
         public_bio: None,
         public_since: None,
-        witness_origin: Some(crate::config::WitnessOriginRecord::for_witness(
-            &commons.witness,
-            crate::config::WitnessOrigin::PublishedAtJoin,
-        )),
-        witness: Some(commons.witness),
+        // A production enrollment always has its witness. A staging one has
+        // none (staging spec S12), and records no witness origin either.
+        witness_origin: commons.witness.as_ref().map(|witness| {
+            crate::config::WitnessOriginRecord::for_witness(
+                witness,
+                crate::config::WitnessOrigin::PublishedAtJoin,
+            )
+        }),
+        witness: commons.witness,
         inference_receipt_endpoint: commons.receipt_endpoint,
         consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
@@ -786,13 +832,15 @@ mod tests {
             ingest_url: "https://commons.example",
             issuer_url: "https://issuer.example",
             audience: "trace-commons-upload",
-            witness: serde_json::from_value(serde_json::json!({
-                "url": "https://witness.example",
-                "signing_address": format!("0x{}", "ab".repeat(20)),
-                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
-                "admission_evidence": true,
-            }))
-            .unwrap(),
+            witness: Some(
+                serde_json::from_value(serde_json::json!({
+                    "url": "https://witness.example",
+                    "signing_address": format!("0x{}", "ab".repeat(20)),
+                    "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                    "admission_evidence": true,
+                }))
+                .unwrap(),
+            ),
             receipt_endpoint: Some("https://receipts.example/v1".into()),
         }
     }
@@ -1342,7 +1390,7 @@ mod native_bind_tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap(),receipt_endpoint:None};
+            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:Some(serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap()),receipt_endpoint:None};
             let result = bind_prepared(
                 &shared,
                 &CloudApi::for_test(&origin).unwrap(),
@@ -1416,5 +1464,396 @@ mod native_bind_tests {
                 "rt_rotated"
             );
         }
+    }
+}
+
+/// Which provisioning routes each build's enrollment calls, run end to end
+/// against a loopback commons (#1574 review, finding H1).
+///
+/// Every step after the address check is the real one: the capability fetch
+/// and its validation, the start body, the device proof, the refresh-token
+/// exchange, the finish and the published enrollment. The commons is a stub
+/// that records each request and answers in the server's own shapes; the
+/// server-side half of the same contract runs against the real handlers in
+/// the ingest's suite.
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    const LEGACY_CAPABILITIES: &str = "/v1/account/near/provision/capabilities";
+    const LEGACY_START: &str = "/v1/account/near-ai/provision/start";
+    const LEGACY_FINISH: &str = "/v1/account/near-ai/provision/finish";
+    const EXCHANGE: &str = "/v1/users/me/access-tokens";
+
+    /// How the stub commons answers.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Commons {
+        /// A production commons: the old capabilities route is ready and
+        /// publishes its witness; v2 is ready as well.
+        Production,
+        /// A staging commons (S12): no witness, so the old route answers its
+        /// bare not-ready document, and v2 is ready.
+        Staging,
+        /// A staging commons whose v2 document says the login path is closed.
+        StagingLoginClosed,
+        /// A staging commons whose v2 finish refuses (the uniform deny).
+        StagingFinishRefused,
+    }
+
+    struct Stub {
+        origin: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Stub {
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    fn witness() -> Value {
+        json!({
+            "url": "https://witness.example",
+            "signing_address": format!("0x{}", "ab".repeat(20)),
+            "expected_measurements": [format!("mrtd={}", "cd".repeat(48))],
+        })
+    }
+
+    async fn stub(commons: Commons, device: DeviceIdentity) -> Stub {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let challenge = Arc::new(Mutex::new(String::new()));
+        let nonce = [7u8; 32];
+        let expires = Utc::now().timestamp() + 300;
+        let record = {
+            let requests = Arc::clone(&requests);
+            move |method: &axum::http::Method, uri: &axum::http::Uri| {
+                requests
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {}", uri.path()));
+            }
+        };
+        let app = axum::Router::new()
+            .route(
+                LEGACY_CAPABILITIES,
+                axum::routing::get(move || async move {
+                    axum::Json(if commons == Commons::Production {
+                        json!({
+                            "ready": false, "near_ai_login_ready": true, "network": null,
+                            "witness": witness(), "issuer_url": "https://issuer.example",
+                            "audience": "upload", "inference_receipt_endpoint": null,
+                            "funding_available": false,
+                        })
+                    } else {
+                        // What `capabilities` answers on a commons with no
+                        // witness.
+                        json!({"ready": false, "near_ai_login_ready": false, "funding_available": false})
+                    })
+                }),
+            )
+            .route(
+                account_onboarding_v2::CAPABILITIES,
+                axum::routing::get(move || async move {
+                    axum::Json(json!({
+                        "contract_version": "near-provision-capabilities-v2",
+                        "ready": false,
+                        "near_ai_login_ready": commons != Commons::StagingLoginClosed,
+                        "network": null,
+                        "wallet_start_path": "/v1/account/near/provision/start/v2",
+                        "wallet_finish_path": "/v1/account/near/provision/finish/v2",
+                        "near_ai_start_path": "/v1/account/near-ai/provision/start/v2",
+                        "near_ai_finish_path": "/v1/account/near-ai/provision/finish/v2",
+                        "inference_connection_selection_required": true,
+                        "offers_available": false,
+                        "funding_available": false,
+                        "issuer_url": "https://issuer.staging-fixture.example",
+                        "audience": "staging-upload",
+                        "inference_receipt_endpoint": "https://receipts.staging-fixture.example",
+                    }))
+                }),
+            );
+        let start = {
+            let challenge = Arc::clone(&challenge);
+            move |axum::Json(body): axum::Json<Value>| {
+                let challenge = Arc::clone(&challenge);
+                async move {
+                    // The server parses this with `deny_unknown_fields`.
+                    assert_eq!(
+                        body,
+                        start_payload(
+                            body["code_challenge"].as_str().unwrap(),
+                            body["device_public_key"].as_str().unwrap()
+                        )
+                    );
+                    *challenge.lock().unwrap() = body["code_challenge"].as_str().unwrap().into();
+                    axum::Json(json!({
+                        "ceremony_id": "ceremony-fixture",
+                        "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                        "expires_at": expires,
+                        "device_signing_bytes": "",
+                    }))
+                }
+            }
+        };
+        let finish = {
+            let challenge = Arc::clone(&challenge);
+            let device = Arc::new(device);
+            move |axum::Json(body): axum::Json<Value>| {
+                let challenge = challenge.lock().unwrap().clone();
+                let device = Arc::clone(&device);
+                async move {
+                    if commons == Commons::StagingFinishRefused {
+                        return (
+                            axum::http::StatusCode::FORBIDDEN,
+                            axum::Json(json!({"error": "forbidden"})),
+                        );
+                    }
+                    let public: [u8; 32] = base64::engine::general_purpose::STANDARD
+                        .decode(&device.public_key_b64)
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    let preimage =
+                        trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+                            &nonce,
+                            "ceremony-fixture",
+                            &public,
+                            &challenge,
+                            expires,
+                        );
+                    let signature = base64::engine::general_purpose::STANDARD
+                        .decode(body["device_signature"].as_str().unwrap())
+                        .unwrap();
+                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+                        .verify(&preimage, &signature)
+                        .expect("the device signed this ceremony");
+                    assert_eq!(body["access_token"], "near-access");
+                    assert!(body.get("account_id").is_none());
+                    let tenant = format!("nearai-{}", "3c".repeat(32));
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "access_token": format!("tcn1_{}.secret", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tenant)),
+                            "token_type": "Bearer",
+                            "expires_in_secs": 43200,
+                            "account_id": uuid::Uuid::new_v4().to_string(),
+                            "tenant_id": tenant,
+                            "device_key_id": device.device_key_id,
+                            "anchor_hash": format!("sha256:{}", "ab".repeat(32)),
+                        })),
+                    )
+                }
+            }
+        };
+        let app = app
+            .route(LEGACY_START, axum::routing::post(start.clone()))
+            .route(account_onboarding_v2::START, axum::routing::post(start))
+            .route(LEGACY_FINISH, axum::routing::post(finish.clone()))
+            .route(account_onboarding_v2::FINISH, axum::routing::post(finish))
+            .route(
+                EXCHANGE,
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "access_token": "near-access",
+                        "refresh_token": "rt_rotated",
+                        "refresh_token_expiration": Utc::now() + chrono::Duration::days(1),
+                    }))
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    record(request.method(), request.uri());
+                    next.run(request)
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Stub {
+            origin,
+            requests,
+            server,
+        }
+    }
+
+    mod account_onboarding_v2 {
+        pub const CAPABILITIES: &str =
+            crate::daemon::account_onboarding::NEAR_AI_CAPABILITIES_V2_PATH;
+        pub const START: &str = crate::daemon::account_onboarding::NEAR_AI_START_V2_PATH;
+        pub const FINISH: &str = crate::daemon::account_onboarding::NEAR_AI_FINISH_V2_PATH;
+    }
+
+    fn shared_with_session() -> (tempfile::TempDir, DaemonShared) {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        let mut settings = shared.settings.lock().unwrap();
+        settings.near_ai_session = Some(crate::daemon::settings::NearAiSession {
+            refresh_token: "rt_original".into(),
+            refresh_token_expires_at: None,
+            stored_at: Utc::now(),
+            user_agent: "Mozilla/5.0 Test".into(),
+        });
+        settings.save_for_test(&shared.store).unwrap();
+        drop(settings);
+        (dir, shared)
+    }
+
+    /// `enroll` against the stub, from the step after the address check (the
+    /// stub is loopback HTTP, which that check refuses).
+    async fn enroll_against(
+        commons: Commons,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        let (dir, shared) = shared_with_session();
+        let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
+        let stub = stub(commons, identity).await;
+        let expected = super::super::commons_credentials::snapshot(
+            &shared.store,
+            super::super::commons_credentials::Kind::Account,
+        )
+        .unwrap();
+        let client =
+            super::super::native_identity::client(&stub.origin, "unauthenticated").unwrap();
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+        let result = match prepare_on(&shared, client, &stub.origin).await {
+            Ok(prepared) => enroll_prepared(&shared, &api, &stub.origin, prepared, expected).await,
+            Err(error) => Err(error),
+        };
+        (stub, shared, result, dir)
+    }
+
+    fn stored_refresh(shared: &DaemonShared) -> String {
+        crate::daemon::settings::DaemonSettings::load_with_cloud_credentials(&shared.store)
+            .unwrap()
+            .near_ai_session
+            .unwrap()
+            .refresh_token
+    }
+
+    /// A production build signs up exactly as every deployed client does: the
+    /// old capabilities route, its witness, and the old start and finish.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_production_enrollment_keeps_today_s_route_sequence() {
+        assert_eq!(PROVISION_START_PATH, LEGACY_START);
+        assert_eq!(PROVISION_FINISH_PATH, LEGACY_FINISH);
+        let (stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        let reply = result.expect("a production enrollment");
+        assert_eq!(reply["enrolled"], true);
+        assert_eq!(
+            stub.requests(),
+            vec![
+                format!("GET {LEGACY_CAPABILITIES}"),
+                format!("POST {LEGACY_START}"),
+                format!("POST {EXCHANGE}"),
+                format!("POST {LEGACY_FINISH}"),
+            ]
+        );
+        let config = shared.store.load_config().unwrap().unwrap();
+        assert_eq!(config.issuer_url, "https://issuer.example");
+        assert_eq!(config.audience, "upload");
+        assert_eq!(
+            config.witness.as_ref().map(|w| w.url.as_str()),
+            Some("https://witness.example")
+        );
+        assert_eq!(
+            config.witness_origin_view(),
+            Some(crate::config::WitnessOriginView::Recorded(
+                crate::config::WitnessOrigin::PublishedAtJoin
+            ))
+        );
+    }
+
+    /// A production build does not sign up on a commons with no witness,
+    /// whatever its v2 route says: it never asks v2.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_production_build_never_asks_the_v2_routes() {
+        let (stub, shared, result, _dir) = enroll_against(Commons::Staging).await;
+        assert_eq!(
+            label(&result.unwrap_err()),
+            "near_ai_enroll_commons_unsupported"
+        );
+        assert_eq!(stub.requests(), vec![format!("GET {LEGACY_CAPABILITIES}")]);
+        assert_eq!(stored_refresh(&shared), "rt_original");
+        assert!(shared.store.load_config().unwrap().is_none());
+    }
+
+    /// A staging build signs up through the v2 routes against a commons with
+    /// no witness, and records the issuer and audience v2 published.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_enrollment_uses_the_v2_routes_and_needs_no_witness() {
+        assert_eq!(PROVISION_START_PATH, account_onboarding_v2::START);
+        assert_eq!(PROVISION_FINISH_PATH, account_onboarding_v2::FINISH);
+        let (stub, shared, result, _dir) = enroll_against(Commons::Staging).await;
+        let reply = result.expect("a staging enrollment");
+        assert_eq!(reply["enrolled"], true);
+        assert!(!reply.to_string().contains("secret"));
+        assert_eq!(
+            stub.requests(),
+            vec![
+                format!("GET {}", account_onboarding_v2::CAPABILITIES),
+                format!("POST {}", account_onboarding_v2::START),
+                format!("POST {EXCHANGE}"),
+                format!("POST {}", account_onboarding_v2::FINISH),
+            ]
+        );
+        let config = shared.store.load_config().unwrap().unwrap();
+        assert_eq!(config.issuer_url, "https://issuer.staging-fixture.example");
+        assert_eq!(config.audience, "staging-upload");
+        assert!(config.witness.is_none());
+        assert!(config.witness_origin.is_none());
+        assert_eq!(
+            config.inference_receipt_endpoint.as_deref(),
+            Some("https://receipts.staging-fixture.example")
+        );
+        assert_eq!(stored_refresh(&shared), "rt_rotated");
+    }
+
+    /// A v2 refusal reaches the shell under this module's own label, spends
+    /// nothing it did not have to, and publishes no enrollment.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_v2_refusal_is_surfaced_with_its_label() {
+        // The login path closed: refused before the refresh token is spent.
+        let (stub, shared, result, _dir) = enroll_against(Commons::StagingLoginClosed).await;
+        assert_eq!(
+            label(&result.unwrap_err()),
+            "near_ai_enroll_commons_unsupported"
+        );
+        assert_eq!(
+            stub.requests(),
+            vec![format!("GET {}", account_onboarding_v2::CAPABILITIES)]
+        );
+        assert_eq!(stored_refresh(&shared), "rt_original");
+        assert!(shared.store.load_config().unwrap().is_none());
+
+        // The finish refused.
+        let (stub, shared, result, _dir) = enroll_against(Commons::StagingFinishRefused).await;
+        assert_eq!(
+            label(&result.unwrap_err()),
+            "near_ai_enroll_verification_failed"
+        );
+        assert_eq!(
+            stub.requests().last().map(String::as_str),
+            Some(format!("POST {}", account_onboarding_v2::FINISH).as_str())
+        );
+        assert!(
+            !stub
+                .requests()
+                .iter()
+                .any(|r| r.ends_with(LEGACY_START) || r.ends_with(LEGACY_FINISH)),
+            "a staging build asked the old routes"
+        );
+        assert!(shared.store.load_config().unwrap().is_none());
     }
 }

@@ -791,13 +791,16 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
 /// {"channel":"production","state_dir_name":"trace-commons",
 ///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
 ///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
-///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>"}
+///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
+///  "near_ai_sign_in_providers":["near","github","google"]}
 /// ```
 ///
 /// `channel` is `production` or `staging`. The macOS app compares `channel`
 /// with its Info.plist `TCChannel` and starts nothing on a mismatch.
 /// `near_ai_dashboard_origin` is where the funding row's credits link points;
-/// it takes no part in that check. No key, secret
+/// it takes no part in that check. `near_ai_sign_in_providers` is the
+/// NEAR AI sign-in providers this build offers, in order
+/// (`channel::NEAR_AI_SIGN_IN_PROVIDERS`); a staging build names `google` only. No key, secret
 /// or keychain name is in it. Reads nothing and writes nothing; the same
 /// object for every caller on this build. Returns an owned string; free it
 /// with [`tc_string_free`]. NULL only on a caught panic.
@@ -812,6 +815,7 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
             "passkey_rp_id": channel::PASSKEY_RP_ID,
             "url_scheme": channel::URL_SCHEME,
             "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
+            "near_ai_sign_in_providers": channel::NEAR_AI_SIGN_IN_PROVIDERS,
         });
         Ok(to_owned_cstring(&serde_json::to_string(&json)?))
     })
@@ -5559,6 +5563,36 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
         let copy = trace_commons_contributor::first_run_copy::first_run_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
+}
+
+/// The first run's Traces estimate, one line
+/// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
+/// `traces` (the traces found), the daemon's `first_run_estimate` range
+/// `usd_micros_per_accepted_trace`, and an invite lookup's `credit_range`,
+/// each optional. The core does the arithmetic and the formatting, so the
+/// shell shows the string as it is.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL draws no
+/// line: nothing found or counted yet, a total past range, a NULL or
+/// unreadable request, or a caught panic.
+///
+/// # Safety
+/// `request`, if non-null, must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_first_run_estimate_line(request: *const c_char) -> *mut c_char {
+    let outcome = guard(|| {
+        if request.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(raw) = (unsafe { borrow_str(request) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        match trace_commons_contributor::first_run_copy::traces_estimate_line_json(raw) {
+            Some(line) => Ok(to_owned_cstring(&line)),
+            None => Ok(std::ptr::null_mut()),
+        }
+    });
+    outcome.unwrap_or(std::ptr::null_mut())
 }
 
 // ---------------------------------------------------------------------------

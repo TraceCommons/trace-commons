@@ -6374,6 +6374,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
         credit_settlement_table: None,
+        first_run_estimate: Default::default(),
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -30493,6 +30494,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
         credit_settlement_table: None,
+        first_run_estimate: Default::default(),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -101934,4 +101936,138 @@ fn api_error_log_label_keeps_only_label_shaped_messages() {
     );
     assert_eq!(api_error_log_label(&"a".repeat(65)), "unlabelled");
     assert_eq!(api_error_log_label("UPPER"), "unlabelled");
+}
+
+mod first_run_estimate_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+    use trace_commons_protocol::first_run_estimate::{FirstRunEstimate, UsdMicrosRange};
+
+    // Synthetic values only: these are not a rate anyone runs with.
+    const MIN: &str = "120000";
+    const MAX: &str = "340000";
+
+    async fn get_first_run_estimate(state: Arc<AppState>) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    // The literal, so the route inventory's `^/v1/public/`
+                    // rule is the one that classifies it.
+                    .uri("/v1/public/first-run-estimate")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    }
+
+    /// The route is registered as a literal; it must be the protocol's.
+    #[test]
+    fn the_route_literal_is_the_protocol_path() {
+        assert_eq!(
+            trace_commons_protocol::first_run_estimate::FIRST_RUN_ESTIMATE_PATH,
+            "/v1/public/first-run-estimate"
+        );
+    }
+
+    /// Neither setting is no range: the document is empty, and clients
+    /// word the first run in points as before.
+    #[test]
+    fn neither_setting_is_an_empty_document() {
+        assert_eq!(
+            credit_estimate::first_run_estimate_from_values(None, None).unwrap(),
+            FirstRunEstimate::default()
+        );
+    }
+
+    #[test]
+    fn both_settings_are_the_range() {
+        assert_eq!(
+            credit_estimate::first_run_estimate_from_values(Some(MIN), Some(MAX)).unwrap(),
+            FirstRunEstimate {
+                usd_micros_per_accepted_trace: Some(UsdMicrosRange {
+                    min: 120_000,
+                    max: 340_000
+                }),
+            }
+        );
+        // One figure is a range whose ends meet.
+        assert!(credit_estimate::first_run_estimate_from_values(Some(MIN), Some(MIN)).is_ok());
+    }
+
+    /// Fail closed: one without the other, anything not plain digits, zero,
+    /// sub-cent, past the bound, or min above max refuses boot with one
+    /// label that names no value.
+    #[test]
+    fn a_bad_setting_refuses_boot() {
+        let cases: [(Option<&str>, Option<&str>); 13] = [
+            (Some(MIN), None),
+            (None, Some(MAX)),
+            (Some(""), Some(MAX)),
+            (Some(MIN), Some("")),
+            (Some(" 120000"), Some(MAX)),
+            (Some("+120000"), Some(MAX)),
+            (Some("-120000"), Some(MAX)),
+            (Some("1.2"), Some(MAX)),
+            (Some("0"), Some(MAX)),
+            (Some("120001"), Some(MAX)),
+            (Some(MAX), Some(MIN)),
+            (Some(MIN), Some("100010000")),
+            (Some(MIN), Some("99999999999999999999999")),
+        ];
+        for (min, max) in cases {
+            let err =
+                credit_estimate::first_run_estimate_from_values(min, max).expect_err("refused");
+            assert_eq!(
+                err.to_string(),
+                "first_run_usd_estimate_invalid",
+                "{min:?} {max:?}"
+            );
+        }
+    }
+
+    /// Unauthenticated and outside tenant context: no credential is sent,
+    /// and with no setting the body is `{}`.
+    #[tokio::test]
+    async fn the_route_serves_an_empty_document_without_a_setting() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = get_first_run_estimate(test_state(temp.path().to_path_buf())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn the_route_serves_the_configured_range_unauthenticated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).first_run_estimate = Arc::new(
+            credit_estimate::first_run_estimate_from_values(Some(MIN), Some(MAX)).unwrap(),
+        );
+        let response = get_first_run_estimate(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=300")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}})
+        );
+    }
 }
