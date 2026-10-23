@@ -81,6 +81,7 @@ nothing else.
 | `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role. 16 or more letters and digits; any other character refuses (see below) |
 | `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6. 16 or more letters and digits |
 | `tc-staging-nearai-reseller-key` | yes | yes, read only when payout is on | `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` | the reseller org's credential on NEAR AI staging |
+| `tc-staging-payout-control-token` | **no** | yes, read only when payout is `live` | `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | `openssl rand -hex 32` (32 or more characters of letters, digits and `._~+/=-`, one line). The operator's token for payout halt, resume and holds; a `live` rail refuses to render, and the ingest to boot, without it |
 | `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (exactly 64 hex characters) |
 | `tc-staging-artifact-key` | **no** | yes | `TRACE_COMMONS_ARTIFACT_KEY_HEX` | `openssl rand -hex 32` (64 hex characters). Losing it loses every stored artifact |
 | `tc-staging-near-account-index-pepper` | **no** | yes | `TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER` | `openssl rand -base64 32` (base64 of at least 32 bytes) |
@@ -409,6 +410,20 @@ back, restarts it and fails. The issuer, installed first, is not rolled back
   account-index pepper and account-name KEK set (the link routes seal each
   recipient under them); the staging template already sets all three. Values
   come only from the render's environment and Secret Manager.
+- Before `TC_NEAR_AI_PAYOUT_MODE=live`, create the payout control token once
+  (the operator does this; nothing here creates it):
+
+  ```bash
+  openssl rand -hex 32 | tr -d '\n' | new_secret tc-staging-payout-control-token
+  ```
+
+  with `new_secret` from [Secrets](#secrets). It is the only credential
+  `POST /v1/admin/payout-rails/near_ai/halt` and `.../resume` accept, so
+  keep a way to read it when you need to halt. A `live` render refuses
+  without it (32 or more characters on one line), and the ingest refuses to
+  boot a `live` rail without it (`payout_control_token_unconfigured`).
+  `dry_run` sends nothing and neither reads nor needs it. Rotate it like any
+  other secret: add a version, rerun step 4, restart.
 - Alerting on a failed backup or restore check: today a failure shows only
   as a failed unit (`systemctl --failed`) and in the journal.
 - Open sign-up from the app (step 7).
