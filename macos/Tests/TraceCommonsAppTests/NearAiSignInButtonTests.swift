@@ -124,6 +124,144 @@ final class NearAiSignInButtonTests: XCTestCase {
         try await waitFor("balance read again") { daemon.count("near_ai_balance") > 0 }
     }
 
+    @MainActor
+    func test_retryCancelsTheNamedAttemptAndOpensAFreshBrowserSession() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+
+        await model.signInToNearAI()
+
+        XCTAssertEqual(opened().count, 2)
+        XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
+        XCTAssertEqual(Set(opened()).count, 2, "retry must get a new URL")
+        XCTAssertTrue(model.nearAiSigningIn)
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertEqual(model.accountSession, .signedIn)
+        XCTAssertFalse(model.nearAiSignInFailed)
+    }
+
+    @MainActor
+    func test_failedCancellationKeepsTheOriginalWaitAndDoesNotOpenAnotherBrowser() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        daemon.cancelFails = true
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+        await model.signInToNearAI()
+        XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
+        XCTAssertEqual(opened().count, 1)
+        XCTAssertTrue(model.nearAiSigningIn)
+        XCTAssertNotNil(model.lastActionError)
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertEqual(model.accountSession, .signedIn)
+    }
+
+    @MainActor
+    func test_repeatedRetryWhileCancellationIsPendingStartsOnlyOneReplacement() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        daemon.cancelDelay = 0.2
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+        let retry = Task { await model.signInToNearAI() }
+        try await waitFor("cancel requested") { daemon.count("near_ai_credential_cancel") == 1 }
+        await model.signInToNearAI()
+        await retry.value
+        XCTAssertEqual(opened().count, 2)
+        XCTAssertEqual(daemon.count("near_ai_credential_cancel"), 1)
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertEqual(model.accountSessionGeneration, 1)
+    }
+
+    @MainActor
+    func test_accountRetryDiscardsAnOldPollThatCompletesAfterTheReplacementOpened() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        daemon.holdNextSuccessfulStatus()
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToAccount() }
+        try await waitFor("old status held") { daemon.statusHeld }
+        await model.signInToAccount()
+        XCTAssertEqual(opened().count, 2)
+        daemon.releaseStatus.signal()
+        try await Task.sleep(for: .milliseconds(1_200))
+        XCTAssertTrue(model.accountSigningIn, "the old success cannot finish the replacement")
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertEqual(model.accountSession, .signedIn)
+    }
+
+    @MainActor
+    func test_passkeyAccountsCanRestartTheNearAiBrowserWait() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.signInPath = "passkey"
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+        await model.signInToNearAI()
+        XCTAssertEqual(opened().count, 2)
+        XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertFalse(model.nearAiSignInFailed)
+        XCTAssertEqual(model.accountSessionGeneration, 1)
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 0)
+    }
+
+    @MainActor
+    func test_replacementStartFailureEndsTheWaitAndAllowsAnotherSignIn() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        let (model, opened) = model(daemon)
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+        daemon.startFails = true
+        await model.signInToNearAI()
+        // Ensure the old implementation can fail without waiting ten minutes.
+        if daemon.cancelledIDs.isEmpty { daemon.finishBrowserSignIn() }
+        await signIn.value
+        XCTAssertEqual(opened().count, 1)
+        XCTAssertTrue(model.nearAiSignInFailed)
+        XCTAssertFalse(model.nearAiSigningIn)
+        daemon.startFails = false
+        let next = Task { await model.signInToNearAI() }
+        try await waitFor("another browser opened") { opened().count == 2 }
+        daemon.finishBrowserSignIn()
+        await next.value
+        XCTAssertFalse(model.nearAiSignInFailed)
+    }
+
+    @MainActor
+    func test_aRestartCannotReplaceANewerFlowAfterItsOriginalWaitWasCancelled() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.loginRefused = true
+        daemon.cancelDelay = 0.3
+        let (model, opened) = model(daemon)
+        let first = Task { await model.signInToNearAI() }
+        try await waitFor("first browser opened") { opened().count == 1 }
+        let retry = Task { await model.signInToNearAI() }
+        try await waitFor("cancel requested") { daemon.count("near_ai_credential_cancel") == 1 }
+        first.cancel()
+        await first.value
+        let next = Task { await model.signInToNearAI() }
+        try await waitFor("new flow browser opened") { opened().count == 2 }
+        await retry.value
+        XCTAssertEqual(opened().count, 2, "the old restart cannot open a third browser")
+        XCTAssertTrue(model.nearAiSigningIn)
+        daemon.finishBrowserSignIn()
+        await next.value
+        XCTAssertFalse(model.nearAiSignInFailed)
+    }
+
     // MARK: - The cards
 
     private func source(_ path: String) throws -> String {

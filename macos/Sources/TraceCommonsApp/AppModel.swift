@@ -671,9 +671,19 @@ final class AppModel: ObservableObject {
     /// leaves the state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
 
-    /// The attempt the first run's near.ai login is waiting on, kept apart
-    /// from Settings' `credentialAttempt` so its Cancel names its own.
-    private var firstRunLoginAttemptID: String?
+    /// The attempt awaited by first run or account recovery, kept apart
+    /// from Settings' `credentialAttempt` so cancellation names its own.
+    @Published private var firstRunLoginAttemptID: String?
+    @Published private(set) var nearAiBrowserSignInWaiting = false
+    @Published private(set) var nearAiBrowserRestarting = false
+    private var nearAiBrowserGeneration = 0
+
+    /// A second Sign in again replaces the browser attempt, without
+    /// starting a second account flow or trusting the old poll's result.
+    var canRestartNearAiBrowserSignIn: Bool {
+        nearAiBrowserSignInWaiting && firstRunLoginAttemptID != nil
+            && !nearAiBrowserRestarting && (accountSigningIn || nearAiSigningIn)
+    }
 
     @Published private(set) var credentialBusy = false
 
@@ -3415,6 +3425,10 @@ final class AppModel: ObservableObject {
     /// this signs in to NEAR AI in the browser first and asks once more.
     /// The session is then read again, and only that read is trusted.
     func signInAgain() async {
+        if nearAiBrowserSignInWaiting {
+            await restartNearAIBrowserSignIn()
+            return
+        }
         guard !accountSigningIn else { return }
         accountSigningIn = true
         accountSignInFailure = nil
@@ -3445,6 +3459,10 @@ final class AppModel: ObservableObject {
     /// sections that read the account (billing, payout) follow
     /// `accountSessionGeneration`.
     func signInToNearAI() async {
+        if nearAiBrowserSignInWaiting {
+            await restartNearAIBrowserSignIn()
+            return
+        }
         guard !nearAiSigningIn, !accountSigningIn else { return }
         nearAiSigningIn = true
         nearAiSignInFailed = false
@@ -4036,7 +4054,7 @@ extension AppModel: FirstRunDaemon {
     /// `fresh`: sign in even when a NEAR AI login is stored, because NEAR AI
     /// refused it (Sign in again's `near_ai_sign_in_required`).
     func nearAILogin(fresh: Bool) async -> Bool {
-        guard let client else { return false }
+        guard let client, !nearAiBrowserSignInWaiting else { return false }
         if !fresh {
             let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
             if NearAILoginPoll.verdict(first) == .signedIn { return true }
@@ -4044,23 +4062,42 @@ extension AppModel: FirstRunDaemon {
         // A Cancel before the browser opens: no attempt is begun, and none
         // that began meanwhile opens the browser.
         if Task.isCancelled { return false }
+        nearAiBrowserGeneration &+= 1
+        nearAiBrowserSignInWaiting = true
+        defer {
+            nearAiBrowserSignInWaiting = false
+            firstRunLoginAttemptID = nil
+        }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
         guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
-        if Task.isCancelled {
+        if Task.isCancelled || self.client !== client {
             _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
             return false
         }
         firstRunLoginAttemptID = attempt.attemptID
-        defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
         openBrowser(url)
-        let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
-        while Date() < deadline, !Task.isCancelled {
+        var deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
+        var deadlineAttemptID = attempt.attemptID
+        while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))
             // Cancelled (the first run's Cancel): stop at once, without
             // another poll that could report a sign-in.
             if Task.isCancelled { return false }
             guard self.client === client else { return false }
-            let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
+            // Cancellation and replacement are one operation. In particular,
+            // an old poll must not finish the flow while cancel is in flight.
+            if nearAiBrowserRestarting { continue }
+            guard let attemptID = firstRunLoginAttemptID else { return false }
+            if deadlineAttemptID != attemptID {
+                deadlineAttemptID = attemptID
+                deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
+            }
+            guard Date() < deadline else { return false }
+            let generation = nearAiBrowserGeneration
+            let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attemptID) }.value
+            guard !Task.isCancelled, self.client === client else { return false }
+            guard !nearAiBrowserRestarting, generation == nearAiBrowserGeneration,
+                  firstRunLoginAttemptID == attemptID else { continue }
             switch fresh ? NearAILoginPoll.freshVerdict(status) : NearAILoginPoll.verdict(status) {
             case .signedIn:
                 refreshNearAiCredential()
@@ -4073,6 +4110,42 @@ extension AppModel: FirstRunDaemon {
             }
         }
         return false
+    }
+
+    /// Cancel the named attempt before requesting a new one. The original
+    /// waiter follows the replacement, so only it completes the account flow.
+    private func restartNearAIBrowserSignIn() async {
+        guard canRestartNearAiBrowserSignIn, let client,
+              let attemptID = firstRunLoginAttemptID else { return }
+        nearAiBrowserRestarting = true
+        nearAiBrowserGeneration &+= 1
+        let generation = nearAiBrowserGeneration
+        defer { nearAiBrowserRestarting = false }
+        let cancelled = await DaemonWork.run {
+            Result { try client.nearAiCredentialCancel(attemptID: attemptID) }
+        }
+        guard self.client === client, nearAiBrowserSignInWaiting,
+              generation == nearAiBrowserGeneration else { return }
+        guard case .success = cancelled else {
+            // A failed cancel keeps the original wait and permits retry.
+            lastActionError = privateInferenceCopy?.credentialFailed
+            return
+        }
+        firstRunLoginAttemptID = nil
+        let started = await DaemonWork.run { try? client.nearAiCredentialStart() }
+        guard self.client === client, nearAiBrowserSignInWaiting, !Task.isCancelled,
+              generation == nearAiBrowserGeneration else {
+            if let attempt = started {
+                _ = await DaemonWork.run { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }
+            }
+            return
+        }
+        guard let attempt = started, let url = URL(string: attempt.browserURL) else {
+            lastActionError = privateInferenceCopy?.credentialFailed
+            return
+        }
+        firstRunLoginAttemptID = attempt.attemptID
+        openBrowser(url)
     }
 
     /// Cancel on Folders or Tools: end the browser sign-in `nearAILogin`

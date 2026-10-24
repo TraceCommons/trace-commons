@@ -138,7 +138,7 @@ struct FundingRow: View {
             trailing: {
                 // Signed out, the button is the balance card's Sign in (owner,
                 // 2026-10-24), not Check account: checking cannot help.
-                let signIn = NearAiSignInOffer.billingOffers(state: status?.state)
+                let signIn = model.nearAiSigningIn || NearAiSignInOffer.billingOffers(state: status?.state)
                 Button {
                     if signIn {
                         Task { await model.signInToNearAI() }
@@ -154,7 +154,8 @@ struct FundingRow: View {
                 }
                 .buttonStyle(GlassButtonStyle(signIn ? .primary : .glass))
                 .fixedSize()
-                .disabled(model.credentialBusy || model.nearAiSigningIn || (!signIn && request != nil))
+                .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)
+                          || (!signIn && request != nil))
             })
         .onAppear {
             visible = true
