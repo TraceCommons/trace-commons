@@ -24,8 +24,14 @@ final class PayoutLinkModel: ObservableObject {
     @Published private(set) var statusRefusal: PayoutLinkRefusal?
 
     private var client: DaemonClient?
+    // A refresh supersedes earlier refreshes, while an explicit Change's
+    // org read stays valid when a refresh deliberately leaves it alone.
+    private var refreshGeneration: UInt64 = 0
+    private var organizationsGeneration: UInt64 = 0
 
     func attach(_ client: DaemonClient?) {
+        refreshGeneration &+= 1
+        organizationsGeneration &+= 1
         self.client = client
     }
 
@@ -33,6 +39,8 @@ final class PayoutLinkModel: ObservableObject {
     /// the section hides rather than show an old link state, except for a
     /// missing account session, which it says.
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         guard surface != nil, let client else {
             rail = nil
             statusRefusal = nil
@@ -41,6 +49,7 @@ final class PayoutLinkModel: ObservableObject {
         let result = await DaemonWork.run {
             Result { try client.payoutLink.status() }
         }
+        guard generation == refreshGeneration else { return }
         switch result {
         case .success(let rails):
             rail = PayoutLinkSurface.nearAiRail(in: rails)
@@ -53,26 +62,37 @@ final class PayoutLinkModel: ObservableObject {
             // The daemon has no name for the link (neither listed nor
             // saved), or the person may choose: list the orgs.
             if surface.needsOrgName(for: rail) || surface.canChoose(for: rail) {
-                await loadOrganizations()
-                await reloadStatusForNames()
+                await loadOrganizations(refresh: generation)
+                guard generation == refreshGeneration else { return }
+                await reloadStatusForNames(refresh: generation)
             }
         }
     }
 
-    private func reloadStatusForNames() async {
+    private func reloadStatusForNames(refresh generation: UInt64) async {
         guard let client else { return }
         let result = await DaemonWork.run {
             Result { try client.payoutLink.status() }
         }
+        guard generation == refreshGeneration else { return }
         if case .success(let rails) = result { rail = PayoutLinkSurface.nearAiRail(in: rails) }
     }
 
     func loadOrganizations() async {
+        await loadOrganizations(refresh: nil)
+    }
+
+    private func loadOrganizations(refresh expectedRefresh: UInt64?) async {
         guard let client, !busy else { return }
+        organizationsGeneration &+= 1
+        let generation = organizationsGeneration
         picker.beginLoading()
         let result = await DaemonWork.run {
             Result { try client.payoutLink.organizations() }
         }
+        guard generation == organizationsGeneration,
+              expectedRefresh.map({ $0 == refreshGeneration }) ?? true
+        else { return }
         switch result {
         case .success(let listing):
             refusal = nil

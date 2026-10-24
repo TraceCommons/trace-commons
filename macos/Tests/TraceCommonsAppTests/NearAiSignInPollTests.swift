@@ -6,11 +6,17 @@ import XCTest
 
 /// A daemon whose sign-in the test finishes, cancels or times out by hand.
 private final class SignInDaemon: DaemonCalling {
-    enum Phase { case absent, waiting, signedIn }
+    enum Phase { case absent, waiting, signedIn, failedWithRetainedKey, cancelledWithRetainedSession }
 
     private let lock = NSLock()
     private var phase: Phase = .absent
     private var recorded: [String] = []
+    private var holdNextStatus = false
+    private var heldStatus = false
+    let releaseStatus = DispatchSemaphore(value: 0)
+
+    var statusHeld: Bool { lock.withLock { heldStatus } }
+    func holdNextStatusReply() { lock.withLock { holdNextStatus = true } }
 
     var methods: [String] {
         lock.lock()
@@ -26,26 +32,50 @@ private final class SignInDaemon: DaemonCalling {
         phase = next
     }
 
+    private static func statusReply(_ phase: Phase) -> String {
+        switch phase {
+        case .absent:
+            return #"{"id":1,"result":{"state":"absent","session_state":"absent"}}"#
+        case .waiting:
+            return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
+        case .signedIn:
+            return #"{"id":1,"result":{"state":"present","session_state":"present","attempt_id":"synthetic-attempt","attempt_status":"complete"}}"#
+        case .failedWithRetainedKey:
+            return #"{"id":1,"result":{"state":"present","session_state":"absent","attempt_id":"synthetic-attempt","attempt_status":"failed"}}"#
+        case .cancelledWithRetainedSession:
+            return #"{"id":1,"result":{"state":"present","session_state":"present","attempt_id":"synthetic-attempt","attempt_status":"cancelled"}}"#
+        }
+    }
+
     func call(_ method: String, params paramsJSON: String) -> String {
+        if method == "near_ai_credential_status" {
+            let (reply, held) = lock.withLock {
+                recorded.append(method)
+                let held = holdNextStatus
+                holdNextStatus = false
+                heldStatus = held
+                return (Self.statusReply(phase), held)
+            }
+            // Freeze the reply without holding the daemon lock: a newer
+            // read can finish the ceremony before this old answer arrives.
+            if held {
+                releaseStatus.wait()
+                lock.withLock { heldStatus = false }
+            }
+            return reply
+        }
         lock.lock()
         defer { lock.unlock() }
         recorded.append(method)
         switch method {
-        case "near_ai_credential_status":
-            switch phase {
-            case .absent:
-                return #"{"id":1,"result":{"state":"absent","session_state":"absent"}}"#
-            case .waiting:
-                return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
-            case .signedIn:
-                return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
-            }
         case "near_ai_credential_start":
             phase = .waiting
             return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
         case "near_ai_credential_cancel":
             phase = .absent
             return #"{"id":1,"result":{}}"#
+        case "account_session_status":
+            return #"{"id":1,"result":{"state":"known","signed_in":false,"sign_in":"passkey"}}"#
         case "near_ai_balance":
             return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
         default:
@@ -100,6 +130,7 @@ final class NearAiSignInPollTests: XCTestCase {
 
         XCTAssertNil(model.credentialAttempt, "A finished sign-in must stop the poll")
         XCTAssertNil(model.credentialPoll)
+        XCTAssertEqual(model.accountSessionGeneration, 1, "billing and payout must re-read after the shared browser sign-in")
         // Everything the key sits behind is re-read once the sign-in lands.
         for method in ["get_settings", "harness_list", "managed_snapshot"] {
             for _ in 0..<300 where daemon.count(method) == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
@@ -109,6 +140,43 @@ final class NearAiSignInPollTests: XCTestCase {
         let settled = daemon.count("near_ai_credential_status")
         try await Task.sleep(nanoseconds: 60_000_000)
         XCTAssertEqual(daemon.count("near_ai_credential_status"), settled)
+    }
+
+    /// The daemon keeps its browser ceremony across an app restart. A
+    /// status read resumes that wait even though this app holds no attempt.
+    @MainActor
+    func testRecoveredDaemonAttemptNotifiesAccountDependentsWhenItCompletes() async throws {
+        let daemon = SignInDaemon()
+        daemon.set(.waiting)
+        let model = makeModel(daemon)
+        let (waiting, waitingSubscription) = published(model, "recovered waiting") { $0.sessionState == "obtaining" }
+        model.refreshNearAiCredential()
+        await fulfillment(of: [waiting], timeout: 3)
+        waitingSubscription.cancel()
+        let poll = try XCTUnwrap(model.credentialPoll)
+        XCTAssertNil(model.credentialAttempt, "the app did not start this ceremony")
+        XCTAssertEqual(model.accountSessionGeneration, 0)
+
+        daemon.set(.signedIn)
+        await poll.value
+
+        XCTAssertNil(model.credentialPoll)
+        XCTAssertEqual(model.credentialStatus.sessionState, CredentialSurface.statePresent)
+        XCTAssertEqual(model.accountSessionGeneration, 1, "billing and payout must follow a recovered sign-in too")
+    }
+
+    /// A normal read of an already kept login is not a new sign-in.
+    @MainActor
+    func testAnAlreadyPresentLoginDoesNotPublishAnotherSignIn() async throws {
+        let daemon = SignInDaemon()
+        daemon.set(.signedIn)
+        let model = makeModel(daemon)
+        let (landed, subscription) = published(model, "already present") { $0.sessionState == CredentialSurface.statePresent }
+        model.refreshNearAiCredential()
+        await fulfillment(of: [landed], timeout: 3)
+        subscription.cancel()
+        XCTAssertNil(model.credentialPoll)
+        XCTAssertEqual(model.accountSessionGeneration, 0)
     }
 
     @MainActor
@@ -123,6 +191,7 @@ final class NearAiSignInPollTests: XCTestCase {
 
         XCTAssertNil(model.credentialAttempt)
         XCTAssertEqual(daemon.count("near_ai_credential_cancel"), 1)
+        XCTAssertEqual(model.accountSessionGeneration, 0, "cancelling must not publish a successful sign-in")
         let settled = daemon.count("near_ai_credential_status")
         try await Task.sleep(nanoseconds: 60_000_000)
         XCTAssertEqual(daemon.count("near_ai_credential_status"), settled, "Nothing may poll a cancelled sign-in")
@@ -142,6 +211,101 @@ final class NearAiSignInPollTests: XCTestCase {
         XCTAssertNil(model.credentialPoll)
         XCTAssertEqual(model.credentialStatus.sessionState, "absent")
         XCTAssertEqual(daemon.count("get_settings"), 0, "No key arrived, so nothing behind it is re-read")
+        XCTAssertEqual(model.accountSessionGeneration, 0, "a failed browser attempt must not refresh signed-in sections")
+    }
+
+    @MainActor
+    func testAFailedFreshAttemptWithARetainedKeyDoesNotPublishSignIn() async throws {
+        let daemon = SignInDaemon()
+        let model = makeModel(daemon)
+        _ = await model.startNearAiCredential()
+        let poll = try XCTUnwrap(model.credentialPoll)
+        daemon.set(.failedWithRetainedKey)
+        await poll.value
+        XCTAssertEqual(model.credentialStatus.state, CredentialSurface.statePresent)
+        XCTAssertEqual(model.credentialStatus.sessionState, "absent")
+        XCTAssertEqual(model.accountSessionGeneration, 0, "an inference key is not a signed-in account session")
+    }
+
+    @MainActor
+    func testACancelledFreshAttemptWithARetainedSessionDoesNotPublishSignIn() async throws {
+        let daemon = SignInDaemon()
+        let model = makeModel(daemon)
+        _ = await model.startNearAiCredential()
+        let poll = try XCTUnwrap(model.credentialPoll)
+        daemon.set(.cancelledWithRetainedSession)
+        await poll.value
+        XCTAssertEqual(model.credentialStatus.sessionState, CredentialSurface.statePresent)
+        XCTAssertEqual(model.accountSessionGeneration, 0, "the named attempt was cancelled despite an older retained session")
+    }
+
+    @MainActor
+    func testALateWaitingReplyCannotRearmACompletedSignIn() async throws {
+        let daemon = SignInDaemon()
+        let model = makeModel(daemon)
+        model.credentialPollInterval = .seconds(60)
+        defer { daemon.releaseStatus.signal(); model.shutdown() }
+        let (waiting, waitingSubscription) = published(model, "initial browser wait") { $0.sessionState == "obtaining" }
+        _ = await model.startNearAiCredential()
+        await fulfillment(of: [waiting], timeout: 3)
+        waitingSubscription.cancel()
+
+        daemon.holdNextStatusReply()
+        model.refreshNearAiCredential()
+        for _ in 0..<300 where !daemon.statusHeld { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(daemon.statusHeld)
+
+        let completed = expectation(description: "shared sign-in completed")
+        let completionSubscription = model.$accountSessionGeneration.filter { $0 == 1 }.prefix(1)
+            .sink { _ in completed.fulfill() }
+        daemon.set(.signedIn)
+        model.refreshNearAiCredential()
+        await fulfillment(of: [completed], timeout: 3)
+        completionSubscription.cancel()
+
+        let stale = expectation(description: "old waiting reply must stay discarded")
+        stale.isInverted = true
+        let staleSubscription = model.$credentialStatus.dropFirst().filter { $0.sessionState == "obtaining" }
+            .sink { _ in stale.fulfill() }
+        daemon.releaseStatus.signal()
+        await fulfillment(of: [stale], timeout: 0.3)
+        staleSubscription.cancel()
+        XCTAssertEqual(model.credentialStatus.sessionState, CredentialSurface.statePresent)
+        XCTAssertNil(model.credentialAttempt)
+
+        // A subsequent normal read cannot turn that late waiting reply
+        // into another successful sign-in notification.
+        let reads = daemon.count("near_ai_credential_status")
+        model.refreshNearAiCredential()
+        for _ in 0..<300 where daemon.count("near_ai_credential_status") == reads {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(model.accountSessionGeneration, 1)
+    }
+
+    /// Settings can read the same ceremony while the shared Sign in flow
+    /// owns it. Only that flow may announce successful completion.
+    @MainActor
+    func testObservingTheNewerBrowserFlowDoesNotPublishASecondCompletion() async throws {
+        let daemon = SignInDaemon()
+        let model = makeModel(daemon)
+        var browserOpened = false
+        model.openBrowser = { _ in browserOpened = true }
+        let signIn = Task { await model.signInToNearAI() }
+        let deadline = Date().addingTimeInterval(3)
+        while !browserOpened, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(browserOpened)
+        let (waiting, subscription) = published(model, "observing browser wait") { $0.sessionState == "obtaining" }
+        model.refreshNearAiCredential()
+        await fulfillment(of: [waiting], timeout: 3)
+        subscription.cancel()
+        let poll = try XCTUnwrap(model.credentialPoll)
+        daemon.set(.signedIn)
+        await poll.value
+        await signIn.value
+        XCTAssertFalse(model.nearAiSignInFailed)
+        XCTAssertEqual(model.accountSessionGeneration, 1, "the observer must not duplicate the shared flow's notification")
     }
 
     @MainActor
