@@ -345,6 +345,9 @@ struct InsightsPatternSessionsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 LazyVStack(spacing: 0) {
                     ForEach(found.sessions) { session in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("insightsPatternSessions", session.id)
+                        #endif
                         InsightsDrillRow(
                             title: session.session_ref,
                             figure: InsightsOverviewWords.figure(session.tokens, copy: copy),

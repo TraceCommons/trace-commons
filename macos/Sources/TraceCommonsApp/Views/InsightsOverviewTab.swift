@@ -449,6 +449,9 @@ struct InsightsOverviewTab: View {
                     let rows = InsightsOverviewWords.modelRows(overview, copy: copy)
                     let most = rows.map(\.tokens).max() ?? 0
                     ForEach(rows) { row in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("supplementalModels", String(row.id))
+                        #endif
                         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                             HStack {
                                 Text(row.label).lineLimit(1).truncationMode(.middle)
@@ -528,6 +531,9 @@ struct InsightsCounterSessionsView: View {
                 // text hosts off the responder tree until their rows are visible.
                 LazyVStack(spacing: 0) {
                     ForEach(sessions.rows) { row in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
+                        #endif
                         InsightsDrillRow(
                             title: InsightsOverviewWords.harness(row.session.source, copy: copy),
                             figure: InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
@@ -601,6 +607,9 @@ struct InsightsCardInputsView: View {
                 // rendering as watched sessions, while retaining text selection.
                 LazyVStack(spacing: 0) {
                     ForEach(inputs.sessions) { session in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("insightsSavedSessions", session.session_ref)
+                        #endif
                         InsightsDrillRow(
                             title: InsightsOverviewWords.harness(session.source, copy: copy),
                             figure: inputs.card == "cache_share"

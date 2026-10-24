@@ -227,6 +227,9 @@ struct InferenceTabView: View {
         GlassEyebrowCard(MonitorWords.calls) {
             LazyVStack(spacing: 0) {
                 ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
+                    #if DEBUG
+                    let _ = OtherCollectionRowBodies.record("supplementalCalls", String(call.id))
+                    #endif
                     GlassTableRow(first: index == 0) { callRow(call) }
                 }
             }
