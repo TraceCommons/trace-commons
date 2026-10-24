@@ -246,10 +246,11 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
-        for needle in ["subtitle: [status?.view.message ?? copy.fundingUnavailable],", "info: copy.fundingWhat,",
+        for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
+                       "NearAiSignInOffer.billingOffers(state: status?.state)", "model.signInToNearAI()", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
-                       "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
-                       ".disabled(model.credentialBusy || request != nil)",
+                       ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
+                       ".disabled(model.credentialBusy || model.nearAiSigningIn || (!signIn && request != nil))",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
                        ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {
             XCTAssertTrue(funding.contains(needle), "FundingRow.swift lacks \(needle)")
