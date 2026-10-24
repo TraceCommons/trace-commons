@@ -45,6 +45,8 @@ struct Commons {
     refreshes: Mutex<u32>,
     /// The bearer each payout status read presented.
     status_bearers: Mutex<Vec<String>>,
+    /// Every other account route asked, with the bearer it was asked with.
+    feature_calls: Mutex<Vec<(String, String)>>,
     /// The device key the ceremony must be signed by.
     device_public_key: String,
 }
@@ -72,6 +74,7 @@ async fn spawn(device_public_key: String) -> Stub {
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
         status_bearers: Mutex::new(Vec::new()),
+        feature_calls: Mutex::new(Vec::new()),
         device_public_key,
     });
     let expires = Utc::now().timestamp() + 300;
@@ -182,15 +185,70 @@ async fn spawn(device_public_key: String) -> Stub {
                     )
                 }
             }),
-        );
+        )
+        .fallback({
+            let state = Arc::clone(&state);
+            move |uri: axum::http::Uri, headers: HeaderMap| async move {
+                let path = uri.path().to_string();
+                let presented = bearer(&headers);
+                state
+                    .feature_calls
+                    .lock()
+                    .unwrap()
+                    .push((path.clone(), presented.clone()));
+                if presented != renewed_token() {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+                }
+                feature_answer(&path)
+            }
+        });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     Stub { origin, state }
 }
 
+/// What each feature's account route answers a renewed session with.
+fn feature_answer(path: &str) -> (StatusCode, Json<Value>) {
+    let body = match path {
+        p if p.starts_with("/v1/account/traces/") && p.ends_with("/withdraw") => {
+            json!({"distribution_reach": "not_distributed"})
+        }
+        "/v1/account/credit-summary" => json!({
+            "points": {"earned_this_period": 7, "lifetime_earned": 30},
+            "currency": {"code": "USD", "earned_this_period": "0.70"},
+            "posture": {
+                "settlement": "disabled",
+                "graded": false,
+                "explanation": "Credit is recorded but not settled.",
+            },
+            "period": {"start": "2026-08-01T00:00:00Z", "end": "2026-08-31T00:00:00Z"},
+            "pending_review": 1,
+        }),
+        "/v1/account/activity-missions/status" => json!({
+            "schema_version":1,"kind":"trace_activity","policy_sha256":"a".repeat(64),
+            "observed_at":"2026-10-02T00:00:00Z","source":"account_contributed_submissions",
+            "qualification":"accepted","coverage_starts_on":"2026-10-01","month_starts_on":"2026-10-01",
+            "monthly_contributions":2,"daily":null,"completed_days":null,"current_streak":null,
+            "level":null,"levels_configured":false,"badges":null,"rewards_enabled":false,
+            "credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"
+        }),
+        "/v1/account/inference-connection/offers" => json!({
+            "contract_version": "inference-connection-v1",
+            "inference_connection_selection_required": true,
+            "description": "server copy",
+            "offers": [],
+        }),
+        "/v1/account/contribution-status" => {
+            json!({"authority": "bounded", "ready": true, "policy_version": "v1"})
+        }
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
+    };
+    (StatusCode::OK, Json(body))
+}
+
 struct Fixture {
-    shared: DaemonShared,
+    shared: Arc<DaemonShared>,
     _dir: tempfile::TempDir,
     stub: Stub,
     api: CloudApi,
@@ -213,7 +271,7 @@ impl Fixture {
 
     async fn with_tenant(session: Session, tenant_id: &str) -> Self {
         let (dir, store) = crate::config::tests_support::temp_store();
-        let shared = DaemonShared::load(store).unwrap();
+        let shared = Arc::new(DaemonShared::load(store).unwrap());
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = spawn(identity.public_key_b64.clone()).await;
         let mut cfg = crate::commands::unenrolled_preview_config();
@@ -249,6 +307,9 @@ impl Fixture {
             settings.save_for_test(&shared.store).unwrap();
         }
         let api = CloudApi::for_test(&stub.origin).unwrap();
+        // The route a feature call renews through: this stub, for this
+        // state directory only.
+        route_for_test(&shared.store, &stub.origin);
         Self {
             shared,
             _dir: dir,
@@ -282,6 +343,36 @@ impl Fixture {
             params: json!({}),
         };
         super::super::payout_link::status(&self.shared, &req, Some(&self.via())).await
+    }
+}
+
+impl Fixture {
+    async fn call(&self, method: &str, params: Value) -> Response {
+        let req = Request {
+            id: 9,
+            method: method.into(),
+            params,
+        };
+        crate::daemon::ipc::handle_request_async(&self.shared, &req).await
+    }
+
+    /// The bearers the feature routes under `prefix` were asked with.
+    fn feature_bearers(&self, prefix: &str) -> Vec<String> {
+        self.stub
+            .state
+            .feature_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.starts_with(prefix))
+            .map(|(_, bearer)| bearer.clone())
+            .collect()
+    }
+
+    fn enable_missions(&self) {
+        let mut settings = self.shared.settings.lock().unwrap();
+        settings.missions_enabled = true;
+        settings.save_for_test(&self.shared.store).unwrap();
     }
 }
 
@@ -443,4 +534,222 @@ async fn a_new_near_ai_sign_in_lifts_the_wait_after_a_refused_renewal() {
 
     assert_eq!(refusal(&response), None);
     assert_eq!(fx.ceremonies(), (2, 2));
+}
+
+// Every feature that presents the account session renews it the same way
+// (#1603's follow-ups): withdrawal, Trace Credit, activity missions, the
+// inference connection, the public run and account contributions.
+
+/// Each feature method, its params, and the route prefix it presents the
+/// session to.
+fn feature_methods() -> Vec<(&'static str, Value, &'static str)> {
+    let submission = uuid::Uuid::new_v4().to_string();
+    vec![
+        (
+            "withdraw",
+            json!({"submission_id": submission}),
+            "/v1/account/traces/",
+        ),
+        (
+            "commons_credit_summary",
+            json!({}),
+            "/v1/account/credit-summary",
+        ),
+        (
+            "activity_missions_status",
+            json!({}),
+            "/v1/account/activity-missions/status",
+        ),
+        (
+            "inference_connection_offers",
+            json!({}),
+            "/v1/account/inference-connection/offers",
+        ),
+        (
+            "history_detail",
+            json!({"submission_id": submission}),
+            "/v1/account/traces/",
+        ),
+        (
+            "account_contribution_status",
+            json!({}),
+            "/v1/account/contribution-status",
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn every_feature_renews_an_expired_session_and_presents_the_new_one() {
+    for (method, params, route) in feature_methods() {
+        let fx = Fixture::new(Session::Expired).await;
+        fx.enable_missions();
+        let config_before = fx.config();
+
+        let response = fx.call(method, params).await;
+
+        assert_ne!(
+            refusal(&response),
+            Some("account-session-required"),
+            "{method} was refused for want of a session"
+        );
+        assert_eq!(fx.ceremonies(), (1, 1), "{method} renewed once");
+        let bearers = fx.feature_bearers(route);
+        assert!(!bearers.is_empty(), "{method} never reached {route}");
+        assert!(
+            bearers.iter().all(|b| *b == renewed_token()),
+            "{method} presented the expired session"
+        );
+        assert_eq!(fx.config(), config_before, "{method} rewrote the config");
+        match method {
+            "withdraw" => {
+                assert_eq!(response.result.as_ref().unwrap()["withdrawn"], true);
+            }
+            "commons_credit_summary" => {
+                assert_eq!(response.result.as_ref().unwrap()["points_state"], "known");
+            }
+            // The stub has no such trace; the point is that it was asked.
+            "history_detail" => {
+                assert_eq!(refusal(&response), Some("session-detail-not-found"));
+            }
+            _ => assert_eq!(refusal(&response), None, "{method} refused"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_feature_leaves_a_signed_out_account_signed_out() {
+    for (method, params, _) in feature_methods() {
+        let fx = Fixture::new(Session::Absent).await;
+        fx.enable_missions();
+
+        let _ = fx.call(method, params).await;
+
+        assert_eq!(fx.ceremonies(), (0, 0), "{method} signed the account in");
+        assert_eq!(*fx.stub.state.refreshes.lock().unwrap(), 0, "{method}");
+        assert!(
+            fx.stub.state.feature_calls.lock().unwrap().is_empty(),
+            "{method} presented a session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_session_status_reports_signed_in_once_it_is_renewed() {
+    let fx = Fixture::new(Session::Expired).await;
+
+    let first = fx.call("account_session_status", json!({})).await;
+    let second = fx.call("account_session_status", json!({})).await;
+
+    for response in [&first, &second] {
+        let status = response.result.as_ref().expect("status answered");
+        assert_eq!(status["state"], "known");
+        assert_eq!(status["signed_in"], true);
+        let expires: chrono::DateTime<Utc> =
+            serde_json::from_value(status["expires_at"].clone()).unwrap();
+        assert!(expires > Utc::now() + chrono::Duration::hours(11));
+    }
+    assert_eq!(
+        fx.ceremonies(),
+        (1, 1),
+        "a status read renews only an expired session"
+    );
+}
+
+#[tokio::test]
+async fn the_session_status_of_a_signed_out_or_passkey_account_renews_nothing() {
+    for fx in [
+        Fixture::new(Session::Absent).await,
+        Fixture::with_tenant(Session::Expired, "tenant-passkey").await,
+    ] {
+        let status = fx.call("account_session_status", json!({})).await;
+
+        assert_eq!(status.result.as_ref().unwrap()["signed_in"], false);
+        assert_eq!(fx.ceremonies(), (0, 0));
+    }
+}
+
+#[tokio::test]
+async fn a_refused_renewal_is_not_retried_by_another_feature() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.enable_missions();
+    *fx.stub.state.refuse.lock().unwrap() = true;
+
+    let status = fx.call("account_session_status", json!({})).await;
+    let missions = fx.call("activity_missions_status", json!({})).await;
+    let payout = fx.payout_status().await;
+
+    assert_eq!(status.result.as_ref().unwrap()["signed_in"], false);
+    assert_eq!(refusal(&missions), Some("account-session-required"));
+    assert_eq!(refusal(&payout), Some("account-session-required"));
+    assert_eq!(fx.ceremonies(), (1, 1), "the backoff is shared");
+}
+
+#[tokio::test]
+async fn features_that_arrive_together_renew_once() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.enable_missions();
+
+    let (status, credit, missions, offers, payout) = tokio::join!(
+        fx.call("account_session_status", json!({})),
+        fx.call("commons_credit_summary", json!({})),
+        fx.call("activity_missions_status", json!({})),
+        fx.call("inference_connection_offers", json!({})),
+        fx.payout_status(),
+    );
+
+    assert_eq!(status.result.as_ref().unwrap()["signed_in"], true);
+    assert_eq!(credit.result.as_ref().unwrap()["points_state"], "known");
+    assert_eq!(refusal(&missions), None);
+    assert_eq!(refusal(&offers), None);
+    assert_eq!(refusal(&payout), None);
+    assert_eq!(fx.ceremonies(), (1, 1));
+}
+
+/// Automatic upload's admission read (R3) runs on the supervisor's pass and
+/// never waits on a ceremony: the pass asks for a renewal off the pass, and
+/// the next pass reads the renewed session.
+#[tokio::test]
+async fn the_pass_renews_off_the_pass_and_only_once_per_wait() {
+    let fx = Fixture::new(Session::Expired).await;
+
+    let renewal = renew_off_pass(&fx.shared).expect("a renewal is started");
+    // A second pass while it runs, or soon after, starts nothing.
+    assert!(renew_off_pass(&fx.shared).is_none());
+    renewal.await.unwrap();
+
+    assert_eq!(fx.ceremonies(), (1, 1));
+    assert_eq!(
+        crate::account_auth::try_load_session_with_snapshot(&fx.shared.store)
+            .unwrap()
+            .unwrap()
+            .session
+            .access_token,
+        renewed_token()
+    );
+}
+
+#[tokio::test]
+async fn the_admission_read_asks_for_a_renewal_when_it_finds_no_session() {
+    let fx = Fixture::new(Session::Expired).await;
+    let key = super::super::policy::project_key_for(Some(&super::super::test_paths::abs(
+        "tmp/armed-project",
+    )));
+    fx.shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(
+            &key,
+            super::super::policy::ProjectMode::AutoUpload,
+            Utc::now(),
+        )
+        .unwrap();
+
+    super::super::account_admission::refresh(&fx.shared, Utc::now(), false).await;
+
+    assert!(fx.shared.account_admission.take_session_missing());
+    assert!(
+        !fx.shared.account_admission.take_session_missing(),
+        "taken once"
+    );
 }

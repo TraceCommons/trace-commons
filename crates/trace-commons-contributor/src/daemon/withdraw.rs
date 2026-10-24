@@ -113,7 +113,7 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
     };
-    let mut session = match account_session(shared) {
+    let mut session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {
@@ -173,7 +173,7 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "status-invalid"),
         None => return Response::err(req.id, ERR_BAD_PARAMS, "status-required"),
     };
-    let mut session = match account_session(shared) {
+    let mut session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {

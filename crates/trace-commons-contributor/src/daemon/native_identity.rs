@@ -633,8 +633,14 @@ fn passkey_state(store: &ConfigStore, state: &str, near_ai_connected: Option<boo
     json!({"state":state,"passkey_count":count,"remembered_name":name,"signed_in_name":signed_in_name,"near_ai_connected":near_ai_connected})
 }
 
-fn status(store: &ConfigStore) -> Value {
-    match account_auth::try_load_session_with_snapshot(store) {
+/// Whether a usable account session is held. An expired session on a
+/// NEAR AI-provisioned account is renewed first, so the app's signed-in
+/// state follows a renewal ([`super::account_session_renewal`]). A usable
+/// session is read only, never presented to the commons, so a poll rotates
+/// nothing; an expired one renews once, and a refused renewal is not tried
+/// again for the same record and login for its backoff.
+async fn status(shared: &DaemonShared) -> Value {
+    match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(loaded)) => {
             json!({"state":"known","signed_in":true,"expires_at":loaded.session.expires_at})
         }
@@ -718,7 +724,7 @@ async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
                 .remove(id);
             Ok(json!({"cancelled":true}))
         }
-        "account_session_status" => Ok(status(&shared.store)),
+        "account_session_status" => Ok(status(shared).await),
         "account_sign_out" => sign_out(shared).await,
         "account_sign_in" => {
             let cfg = shared
