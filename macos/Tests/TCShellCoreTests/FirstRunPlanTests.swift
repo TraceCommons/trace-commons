@@ -456,9 +456,31 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
             .setAskEachTime,
             .setConsentScopes(["research"]),
-            .setProjectMode(projectID: "p1", .autoUpload),
             .includePastSessions(projectID: "p1", ["s1"]),
             .setPrivateAI(true),
+            .markComplete,
+        ])
+    }
+
+    /// Ask each time is the global Ask override, which every folder's own
+    /// Automatic resolves under. Arming a folder beneath it would write an
+    /// arming and its audit row that are not in force, and that would start
+    /// sending if the override were later cleared, so Start sends none.
+    /// Its Ask and Never rules, and its picked past sessions, still go.
+    func test_askEachTimeNeverArmsAFolderBeneathTheOverride() {
+        var state = signedIn()
+        state.scopes = ["research"]
+        state.sharing = .askMe
+        state.rules = ["p1": .autoUpload, "p2": .ask, "p3": .ignore]
+        state.pastSelections = ["p1": ["s1"]]
+        let calls = FirstRunPlan.calls(for: state, at: .start)
+        XCTAssertFalse(calls.contains(.setProjectMode(projectID: "p1", .autoUpload)))
+        XCTAssertEqual(calls, [
+            .setAskEachTime,
+            .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p2", .ask),
+            .setProjectMode(projectID: "p3", .ignore),
+            .includePastSessions(projectID: "p1", ["s1"]),
             .markComplete,
         ])
     }
@@ -471,8 +493,8 @@ final class FirstRunPlanTests: XCTestCase {
         var state = signedIn()
         state.scopes = ["research"]
         state.rules = ["p1": .autoUpload, "p2": .ask]
+        state.sharing = .automatic
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
-            .setAskEachTime,
             .setConsentScopes(["research"]),
             .setProjectMode(projectID: "p1", .autoUpload),
             .setProjectMode(projectID: "p2", .ask),
