@@ -361,6 +361,283 @@ fn a_default_ingest_boot_refuses_each_staging_near_ai_setting() {
     }
 }
 
+const SCORER_PRODUCTION_HOST_FLAG: &str = "TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST";
+const SCORER_PRODUCTION_HOST_CONTROL_LABEL: &str = "missing_control:near_ai_scorer_production_host";
+const PRODUCTION_COMPLETIONS_BASE: &str = "https://qwen3-8-27b.completions.near.ai/v1";
+
+fn coherence_outcome(pairs: &[(&str, &str)]) -> Result<NearAiScorerHostChannel, String> {
+    near_ai_host_coherence_from_lookup(&near_ai_host_lookup(pairs))
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// The staging NEAR AI env with the scorer on a production completions
+/// host, the opt-in flag and the scorer's own key.
+#[cfg(feature = "near-ai-staging")]
+fn staging_env_with_production_scorer() -> Vec<(&'static str, &'static str)> {
+    let mut pairs = staging_near_ai_env()
+        .into_iter()
+        .map(|(key, value)| {
+            if key == "TRACE_COMMONS_NEAR_AI_BASE_URL" {
+                (key, PRODUCTION_COMPLETIONS_BASE)
+            } else {
+                (key, value)
+            }
+        })
+        .collect::<Vec<_>>();
+    pairs.push((SCORER_PRODUCTION_HOST_FLAG, "true"));
+    pairs.push((
+        "TRACE_COMMONS_NEAR_AI_SCORER_API_KEY",
+        "sk-scorer-marker-5d1e",
+    ));
+    pairs
+}
+
+/// Owner exception, 2026-10-24 (staging design 3.9): with the opt-in flag a
+/// staging ingest scores against a production direct-completions host.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_with_the_flag_boots_on_a_production_completions_scorer() {
+    assert_eq!(
+        coherence_outcome(&staging_env_with_production_scorer()),
+        Ok(NearAiScorerHostChannel::ProductionCompletionsException)
+    );
+    // Without the flag nothing changes.
+    assert_eq!(
+        coherence_outcome(&staging_near_ai_env()),
+        Ok(NearAiScorerHostChannel::ThisChannel)
+    );
+}
+
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_without_the_flag_still_refuses_a_production_completions_scorer() {
+    let pairs = staging_env_with_production_scorer()
+        .into_iter()
+        .filter(|(key, _)| *key != SCORER_PRODUCTION_HOST_FLAG)
+        .collect::<Vec<_>>();
+    let refusal = coherence_outcome(&pairs).expect_err("refused without the flag");
+    assert!(
+        refusal.contains("missing_control:near_ai_staging_host_coherence")
+            && refusal.contains("TRACE_COMMONS_NEAR_AI_BASE_URL"),
+        "{refusal}"
+    );
+    let off = pairs
+        .iter()
+        .copied()
+        .chain([(SCORER_PRODUCTION_HOST_FLAG, "false")])
+        .collect::<Vec<_>>();
+    let refusal = coherence_outcome(&off).expect_err("refused with the flag off");
+    assert!(
+        refusal.contains("near_ai_staging_host_coherence"),
+        "{refusal}"
+    );
+}
+
+/// The flag admits the completions host shape and nothing else: the
+/// production gateway, a lookalike and an unparseable value are refused.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_with_the_flag_refuses_any_other_scorer_host() {
+    for other in [
+        "https://cloud-api.near.ai/v1",
+        "https://qwen3-8-27b.completions.near.ai.evil.example/v1",
+        "https://qwen3-8-27b.completions.near.ai:8443/v1",
+        "http://qwen3-8-27b.completions.near.ai/v1",
+        "not a url",
+    ] {
+        let pairs = staging_env_with_production_scorer()
+            .into_iter()
+            .map(|(key, value)| {
+                if key == "TRACE_COMMONS_NEAR_AI_BASE_URL" {
+                    (key, other)
+                } else {
+                    (key, value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let refusal = coherence_outcome(&pairs).expect_err(other);
+        assert!(
+            refusal.contains(SCORER_PRODUCTION_HOST_CONTROL_LABEL)
+                && refusal.contains("TRACE_COMMONS_NEAR_AI_BASE_URL"),
+            "{refusal}"
+        );
+        assert!(
+            !refusal.contains("near.ai") && !refusal.contains("evil"),
+            "{refusal}"
+        );
+    }
+    // The staging host itself is not a production completions host either:
+    // the flag says the scorer is on production, so it must be.
+    let mut staging_scorer = staging_env_with_production_scorer();
+    for pair in staging_scorer.iter_mut() {
+        if pair.0 == "TRACE_COMMONS_NEAR_AI_BASE_URL" {
+            pair.1 = "https://cloud-stg-api.near.ai/v1";
+        }
+    }
+    assert!(coherence_outcome(&staging_scorer).is_err());
+}
+
+/// With the flag on, every NEAR AI setting but the scorer's base stays
+/// checked exactly as before.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_with_the_flag_still_checks_every_other_near_ai_setting() {
+    let base = staging_env_with_production_scorer();
+    for setting in NEAR_AI_HOST_SETTINGS
+        .iter()
+        .filter(|setting| **setting != "TRACE_COMMONS_NEAR_AI_BASE_URL")
+    {
+        for production in ["https://cloud-api.near.ai/v1", PRODUCTION_COMPLETIONS_BASE] {
+            let pairs = base
+                .iter()
+                .map(|(key, value)| {
+                    if key == setting {
+                        (*key, production)
+                    } else {
+                        (*key, *value)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let refusal = coherence_outcome(&pairs).expect_err(setting);
+            assert!(
+                refusal.contains("near_ai_staging_host_coherence") && refusal.contains(setting),
+                "{refusal}"
+            );
+        }
+    }
+    // The attestation base's production default is still refused.
+    let pairs = base
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != "TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL")
+        .collect::<Vec<_>>();
+    let refusal = coherence_outcome(&pairs).expect_err("unset attestation base");
+    assert!(
+        refusal.contains("TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL"),
+        "{refusal}"
+    );
+}
+
+/// The exception needs the scorer's own key: without it the scorer would
+/// send the staging key to a production host.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_with_the_flag_requires_the_scorer_key_and_a_valid_flag() {
+    let without_key = staging_env_with_production_scorer()
+        .into_iter()
+        .filter(|(key, _)| *key != "TRACE_COMMONS_NEAR_AI_SCORER_API_KEY")
+        .collect::<Vec<_>>();
+    let refusal = coherence_outcome(&without_key).expect_err("no scorer key");
+    assert!(
+        refusal.contains(SCORER_PRODUCTION_HOST_CONTROL_LABEL)
+            && refusal.contains("TRACE_COMMONS_NEAR_AI_SCORER_API_KEY"),
+        "{refusal}"
+    );
+    let without_scorer = staging_env_with_production_scorer()
+        .into_iter()
+        .filter(|(key, _)| *key != "TRACE_COMMONS_NEAR_AI_BASE_URL")
+        .collect::<Vec<_>>();
+    let refusal = coherence_outcome(&without_scorer).expect_err("no scorer base");
+    assert!(
+        refusal.contains(SCORER_PRODUCTION_HOST_CONTROL_LABEL),
+        "{refusal}"
+    );
+    for bad in ["yes", "1", "TRUE ish"] {
+        let pairs = staging_env_with_production_scorer()
+            .into_iter()
+            .map(|(key, value)| {
+                if key == SCORER_PRODUCTION_HOST_FLAG {
+                    (key, bad)
+                } else {
+                    (key, value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let refusal = coherence_outcome(&pairs).expect_err(bad);
+        assert!(
+            refusal.contains(SCORER_PRODUCTION_HOST_CONTROL_LABEL)
+                && refusal.contains(SCORER_PRODUCTION_HOST_FLAG),
+            "{refusal}"
+        );
+    }
+    for refusal in [&without_key, &without_scorer]
+        .into_iter()
+        .filter_map(|pairs| coherence_outcome(pairs).err())
+    {
+        assert!(!refusal.contains("sk-scorer-marker"), "{refusal}");
+    }
+}
+
+/// A default build never honours the flag: set to anything, the boot is
+/// refused before any host is looked at.
+#[cfg(not(feature = "near-ai-staging"))]
+#[test]
+fn a_default_ingest_refuses_the_scorer_production_host_flag() {
+    for value in ["true", "false", "yes"] {
+        let pairs = [
+            (SCORER_PRODUCTION_HOST_FLAG, value),
+            (
+                "TRACE_COMMONS_NEAR_AI_BASE_URL",
+                PRODUCTION_COMPLETIONS_BASE,
+            ),
+            (
+                "TRACE_COMMONS_NEAR_AI_SCORER_API_KEY",
+                "sk-scorer-marker-5d1e",
+            ),
+        ];
+        let refusal = coherence_outcome(&pairs).expect_err(value);
+        assert!(
+            refusal.contains(SCORER_PRODUCTION_HOST_CONTROL_LABEL)
+                && refusal.contains(SCORER_PRODUCTION_HOST_FLAG)
+                && refusal.contains("near-ai-staging"),
+            "{refusal}"
+        );
+        assert!(
+            !refusal.contains("near.ai/") && !refusal.contains("sk-scorer"),
+            "{refusal}"
+        );
+    }
+    // Unset, or blank, it is not set.
+    assert_eq!(
+        coherence_outcome(&[
+            (SCORER_PRODUCTION_HOST_FLAG, "  "),
+            (
+                "TRACE_COMMONS_NEAR_AI_BASE_URL",
+                PRODUCTION_COMPLETIONS_BASE
+            ),
+        ]),
+        Ok(NearAiScorerHostChannel::ThisChannel)
+    );
+}
+
+/// The attestation client's two keys: the scorer's own key for the scorer's
+/// host, and the shared key for the attestation gateway's registry. Without
+/// a scorer key there is one key, as before.
+#[test]
+fn the_attestation_client_sends_the_scorer_key_only_to_the_scorer_host() {
+    let keys = |pairs: &[(&str, &str)]| {
+        near_attestation_keys_from_lookup(&near_ai_host_lookup(pairs))
+            .map(|keys| (keys.endpoint, keys.registry))
+    };
+    assert_eq!(
+        keys(&[
+            ("TRACE_COMMONS_NEAR_AI_API_KEY", "sk-staging"),
+            ("TRACE_COMMONS_NEAR_AI_SCORER_API_KEY", "sk-production"),
+        ]),
+        Some(("sk-production".to_string(), Some("sk-staging".to_string())))
+    );
+    assert_eq!(
+        keys(&[("TRACE_COMMONS_NEAR_AI_API_KEY", " sk-shared ")]),
+        Some(("sk-shared".to_string(), None))
+    );
+    // The shared key is still what makes the client: the scorer key alone
+    // must not become the registry's key.
+    assert_eq!(
+        keys(&[("TRACE_COMMONS_NEAR_AI_SCORER_API_KEY", "sk-production")]),
+        None
+    );
+}
+
 /// The refusal names the control and the setting, never the value: a
 /// configured URL can carry a credential or an internal host name.
 #[test]

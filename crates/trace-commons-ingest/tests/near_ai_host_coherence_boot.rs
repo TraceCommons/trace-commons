@@ -73,3 +73,70 @@ fn the_ingest_binary_without_a_foreign_host_gets_past_the_check() {
     assert!(!output.status.success(), "an unconfigured boot must fail");
     assert!(!stderr.contains(CONTROL), "stderr: {stderr}");
 }
+
+const SCORER_PRODUCTION_HOST: &str = "TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST";
+const SCORER_PRODUCTION_HOST_CONTROL: &str = "near_ai_scorer_production_host";
+const SCORER_KEY: &str = "TRACE_COMMONS_NEAR_AI_SCORER_API_KEY";
+const KEY_MARKER: &str = "sk-boot-scorer-marker-c4";
+
+/// Owner exception, 2026-10-24 (staging design 3.9): a staging build with
+/// the opt-in flag gets past the check with its scorer on a production
+/// direct-completions host, and says so in one label line that names
+/// neither the host nor the key.
+#[cfg(feature = "near-ai-staging")]
+#[test]
+fn a_staging_ingest_with_the_flag_boots_past_the_check_on_a_production_completions_scorer() {
+    let mut env = coherent_env();
+    env.push((
+        SCORER_BASE,
+        "https://boot-marker-q7.completions.near.ai/v1".into(),
+    ));
+    env.push((SCORER_PRODUCTION_HOST, "true".into()));
+    env.push((SCORER_KEY, KEY_MARKER.into()));
+    // The deployed env's level (deploy/pilot-gcp/ingest.env.template).
+    env.push(("RUST_LOG", "info".into()));
+    let output = run_ingest(&env);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(!output.status.success(), "an unconfigured boot must fail");
+    assert!(!stderr.contains(CONTROL), "stderr: {stderr}");
+    assert!(
+        stdout.contains(SCORER_PRODUCTION_HOST_CONTROL)
+            || stderr.contains(SCORER_PRODUCTION_HOST_CONTROL),
+        "the exception is logged: {stdout} {stderr}"
+    );
+    for leaked in ["boot-marker-q7", "completions.near.ai", KEY_MARKER] {
+        assert!(
+            !stdout.contains(leaked) && !stderr.contains(leaked),
+            "{leaked}: {stdout} {stderr}"
+        );
+    }
+}
+
+/// A default build refuses the flag at boot, whatever the scorer host.
+#[cfg(not(feature = "near-ai-staging"))]
+#[test]
+fn a_default_ingest_refuses_the_scorer_production_host_flag_at_boot() {
+    let env = vec![
+        (
+            SCORER_BASE,
+            "https://boot-marker-q7.completions.near.ai/v1".to_string(),
+        ),
+        (SCORER_PRODUCTION_HOST, "true".to_string()),
+        (SCORER_KEY, KEY_MARKER.to_string()),
+    ];
+    let output = run_ingest(&env);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(!output.status.success(), "boot must fail: {stderr}");
+    assert!(
+        stderr.contains(&format!("missing_control:{SCORER_PRODUCTION_HOST_CONTROL}"))
+            && stderr.contains(SCORER_PRODUCTION_HOST),
+        "stderr: {stderr}"
+    );
+    for leaked in ["boot-marker-q7", KEY_MARKER] {
+        assert!(!stdout.contains(leaked) && !stderr.contains(leaked));
+    }
+}

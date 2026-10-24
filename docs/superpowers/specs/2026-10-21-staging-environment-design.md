@@ -614,6 +614,28 @@ setting (never the value), if one does not. A default build checks the
 reverse: it refuses a NEAR AI setting whose host is the staging host. That
 is how "shares nothing" becomes a check rather than a list to remember.
 
+**Owner exception, 2026-10-24: the scorer may be on production.** NEAR AI
+staging cannot score: its gateway refuses `echo` on `/v1/completions`, and
+it has no per-model direct-completions host like production's
+`https://qwen3-8-27b.completions.near.ai/v1`. The owner's instruction, verbatim:
+"just us the production endpoint and api key for staging then". So a
+`near-ai-staging` ingest with `TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST=true`
+leaves `TRACE_COMMONS_NEAR_AI_BASE_URL` out of the check when, and only when,
+its host is a production direct-completions host: https, one DNS label then
+`.completions.near.ai`, no userinfo, no port, no query
+(`near_ai_api::is_production_completions_host`). Any other scorer host with
+the flag refuses with `missing_control:near_ai_scorer_production_host`, and
+so does the flag without `TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`, the
+scorer's own key. That key is sent only to the scorer's host; the
+attestation registry, the privacy filter, login and payout keep the staging
+key. Every other NEAR AI setting is checked exactly as above. A default
+build refuses the flag at any value. The boot logs one label line, naming
+the control and never the host or key, when the exception is active.
+`deploy/staging-gcp/render-env.sh` renders it from `TC_SCORER_PRODUCTION_HOST`
+and `TC_SCORER_MODEL` with the secret `tc-staging-scorer-production-nearai-key`.
+The cost lands on the production NEAR AI account that owns that key, and
+staging traces reach the production TEE model.
+
 ### 3.10 The payout rail in staging
 
 Exactly the payout design's section 2 operator steps and section 8 test

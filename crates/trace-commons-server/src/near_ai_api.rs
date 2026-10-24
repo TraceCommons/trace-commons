@@ -71,6 +71,59 @@ pub fn near_ai_host_coherence(settings: &[(&'static str, &str)]) -> Result<(), &
         })
 }
 
+/// The DNS suffix of NEAR AI's production direct-completions hosts, one per
+/// model, such as `qwen3-8-27b.completions.near.ai`.
+const PRODUCTION_COMPLETIONS_HOST_SUFFIX: &str = ".completions.near.ai";
+
+/// Whether `url` names a NEAR AI production direct-completions host:
+/// `https://<label>.completions.near.ai`, where `<label>` is one DNS label,
+/// with no userinfo, no port (not even `:443`), no query and no fragment.
+///
+/// The one host shape a `near-ai-staging` ingest may score against outside
+/// its channel, and only when the operator opts in (staging design 3.9,
+/// owner exception 2026-10-24). The authority is checked as written, before
+/// any URL normalisation, so a parser that drops a default port or reads a
+/// backslash as a separator cannot widen what passes.
+pub fn is_production_completions_host(url: &str) -> bool {
+    let Some(rest) = url
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    // No query or fragment anywhere: a base URL carries neither.
+    if rest[authority_end..].contains(['?', '#']) {
+        return false;
+    }
+    let host = authority
+        .strip_suffix('.')
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
+    let Some(label) = host.strip_suffix(PRODUCTION_COMPLETIONS_HOST_SUFFIX) else {
+        return false;
+    };
+    let label_ok = (1..=63).contains(&label.len())
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !label.starts_with('-')
+        && !label.ends_with('-');
+    // The parser must agree on the host, and find no userinfo or port.
+    label_ok
+        && reqwest::Url::parse(url).is_ok_and(|parsed| {
+            parsed.scheme() == "https"
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.port().is_none()
+                && parsed.query().is_none()
+                && parsed.fragment().is_none()
+                && normalized_host(url).as_deref() == Some(host.as_str())
+        })
+}
+
 /// The URL's host, lower case, without a trailing dot.
 fn normalized_host(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
@@ -184,6 +237,56 @@ mod tests {
     fn a_default_build_talks_to_production() {
         assert!(!near_ai_staging());
         assert_eq!(NEAR_AI_API_BASE_URL, "https://cloud-api.near.ai/v1");
+    }
+
+    /// The production direct-completions host shape the staging scorer
+    /// exception admits (staging design 3.9, owner exception 2026-10-24):
+    /// https, one DNS label, then `.completions.near.ai`, and nothing that
+    /// could make the host something else.
+    #[test]
+    fn only_a_production_completions_host_is_one() {
+        for accepted in [
+            "https://qwen3-8-27b.completions.near.ai/v1",
+            "https://qwen3-8-27b.completions.near.ai/v1/",
+            "https://QWEN3-8-27B.Completions.Near.AI/v1",
+            "https://qwen3-8-27b.completions.near.ai./v1",
+            "https://a.completions.near.ai",
+        ] {
+            assert!(is_production_completions_host(accepted), "{accepted}");
+        }
+        for refused in [
+            "https://cloud-api.near.ai/v1",
+            "https://cloud-stg-api.near.ai/v1",
+            "https://completions.near.ai/v1",
+            "https://.completions.near.ai/v1",
+            "https://a.b.completions.near.ai/v1",
+            "https://-a.completions.near.ai/v1",
+            "https://a-.completions.near.ai/v1",
+            "https://a_b.completions.near.ai/v1",
+            "http://qwen3-8-27b.completions.near.ai/v1",
+            "https://user@qwen3-8-27b.completions.near.ai/v1",
+            "https://user:pass@qwen3-8-27b.completions.near.ai/v1",
+            "https://qwen3-8-27b.completions.near.ai:443/v1",
+            "https://qwen3-8-27b.completions.near.ai:8443/v1",
+            "https://qwen3-8-27b.completions.near.ai.evil.example/v1",
+            "https://qwen3-8-27b.completions.near.ai@evil.example/v1",
+            "https://evil.example/qwen3-8-27b.completions.near.ai/v1",
+            "https://evil.example/v1?h=qwen3-8-27b.completions.near.ai",
+            "https://qwen3-8-27b.completions.near.ai/v1?x=1",
+            "https://qwen3-8-27b.completions.near.ai/v1#x",
+            "https://qwen3-8-27b.completionsnear.ai/v1",
+            "https://qwen3-8-27bcompletions.near.ai/v1",
+            " https://qwen3-8-27b.completions.near.ai/v1",
+            "https://qwen3-8-27b.completions.near.ai\\@evil.example/v1",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_production_completions_host(refused), "{refused}");
+        }
+        let long = format!("https://{}.completions.near.ai/v1", "a".repeat(64));
+        assert!(!is_production_completions_host(&long));
+        let longest = format!("https://{}.completions.near.ai/v1", "a".repeat(63));
+        assert!(is_production_completions_host(&longest));
     }
 
     #[cfg(feature = "near-ai-staging")]

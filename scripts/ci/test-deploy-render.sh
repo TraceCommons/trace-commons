@@ -1025,6 +1025,104 @@ else
   cat "$scratch/scoring-all.err" >&2
 fi
 
+# The scorer on a NEAR AI production direct-completions host (staging
+# design 3.9, owner exception 2026-10-24): off by default, and on it renders
+# the scorer's base, model, the flag and the scorer's own key, and nothing
+# else changes.
+scorer_keys='^(TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST|TRACE_COMMONS_NEAR_AI_SCORER_API_KEY)='
+scorer_host_ok=https://qwen3-8-27b.completions.near.ai/v1
+scorer_model_ok=Qwen/Qwen3.8-27B
+scorer_key_ok=sk-dummy-production-scorer-key-7e2a
+if ! grep -Eq "$scorer_keys" "$ingest_default"; then
+  pass "a default render writes no scorer production-host settings"
+else
+  fail "a default render wrote scorer production-host settings"
+fi
+expect "$ingest_default" TRACE_COMMONS_NEAR_AI_BASE_URL https://cloud-stg-api.near.ai/v1
+if run_render scorer-production TC_SCORER_PRODUCTION_HOST="$scorer_host_ok" \
+  TC_SCORER_MODEL="$scorer_model_ok" \
+  "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_BASE_URL "$scorer_host_ok"
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_MODEL "$scorer_model_ok"
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST true
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_SCORER_API_KEY "$scorer_key_ok"
+  # Every other NEAR AI setting is staging's, and the production key is in
+  # exactly one line.
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_API_KEY dummy-staging-near-ai-key
+  expect "$out/ingest.env" TRACE_NEAR_AI_PRIVACY_API_KEY dummy-staging-near-ai-key
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL https://cloud-stg-api.near.ai/v1
+  expect "$out/ingest.env" TRACE_NEAR_AI_PRIVACY_BASE_URL https://cloud-stg-api.near.ai/v1
+  if [ "$(grep -c -F "$scorer_key_ok" "$out/ingest.env")" = 1 ]; then
+    pass "the production scorer key is in one line of ingest.env"
+  else
+    fail "the production scorer key is not in exactly one line of ingest.env"
+  fi
+  if grep -q -F "$scorer_key_ok" "$out/issuer.env"; then
+    fail "the production scorer key reached issuer.env"
+  else
+    pass "the production scorer key is not in issuer.env"
+  fi
+  no_duplicate_keys "$out/ingest.env" "the scorer production-host render"
+  if grep -q -F "$scorer_key_ok" "$scratch/scorer-production.out" "$scratch/scorer-production.err"; then
+    fail "render-env.sh printed the production scorer key"
+  else
+    pass "render-env.sh did not print the production scorer key"
+  fi
+else
+  fail "render-env.sh failed with the scorer on a production completions host"
+  cat "$scratch/scorer-production.err" >&2
+fi
+scoring_refused scorer-no-secret TC_SCORER_PRODUCTION_HOST="$scorer_host_ok" \
+  TC_SCORER_MODEL="$scorer_model_ok"
+if grep -q 'tc-staging-scorer-production-nearai-key' "$scratch/scorer-no-secret.err"; then
+  pass "the scorer refusal names the scorer production key secret"
+else
+  fail "the scorer refusal does not name the scorer production key secret"
+fi
+scoring_refused scorer-bad-secret TC_SCORER_PRODUCTION_HOST="$scorer_host_ok" \
+  TC_SCORER_MODEL="$scorer_model_ok" \
+  $'TC_SECRET_tc_staging_scorer_production_nearai_key=sk-one\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true'
+scoring_refused scorer-no-model TC_SCORER_PRODUCTION_HOST="$scorer_host_ok" \
+  "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok"
+scoring_refused scorer-no-host TC_SCORER_MODEL="$scorer_model_ok" \
+  "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok"
+scoring_refused scorer-bad-model TC_SCORER_PRODUCTION_HOST="$scorer_host_ok" \
+  "TC_SCORER_MODEL=Qwen 3 \$x" \
+  "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok"
+scorer_bad_hosts=(
+  https://cloud-api.near.ai/v1
+  https://cloud-stg-api.near.ai/v1
+  http://qwen3-8-27b.completions.near.ai/v1
+  https://qwen3-8-27b.completions.near.ai/v1/
+  https://qwen3-8-27b.completions.near.ai
+  https://qwen3-8-27b.completions.near.ai:443/v1
+  https://user@qwen3-8-27b.completions.near.ai/v1
+  https://a.b.completions.near.ai/v1
+  https://-a.completions.near.ai/v1
+  https://qwen3-8-27b.completions.near.ai.evil.example/v1
+  "https://qwen3-8-27b.completions.near.ai/v1?x=1"
+  https://evil.example/qwen3-8-27b.completions.near.ai/v1
+)
+for bad in "${scorer_bad_hosts[@]}"; do
+  scoring_refused "scorer-bad-host-${bad//[^0-9A-Za-z]/_}" "TC_SCORER_PRODUCTION_HOST=$bad" \
+    TC_SCORER_MODEL="$scorer_model_ok" \
+    "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok"
+done
+if grep -q 'TC_SCORER_PRODUCTION_HOST' "$scratch/scorer-bad-host-https___cloud_api_near_ai_v1.err"; then
+  pass "the scorer host refusal names TC_SCORER_PRODUCTION_HOST"
+else
+  fail "the scorer host refusal does not name TC_SCORER_PRODUCTION_HOST"
+fi
+# Without the host the secret is not read, set or not.
+if run_render scorer-off-secret-set \
+  "TC_SECRET_tc_staging_scorer_production_nearai_key=$scorer_key_ok" \
+  && ! grep -Eq "$scorer_keys" "$out/ingest.env" \
+  && ! grep -q -F "$scorer_key_ok" "$out/ingest.env"; then
+  pass "a render without TC_SCORER_PRODUCTION_HOST ignores the scorer production key"
+else
+  fail "a render without TC_SCORER_PRODUCTION_HOST wrote scorer production-host settings"
+fi
+
 # 4. caddy adapt, where caddy is installed.
 if command -v caddy >/dev/null 2>&1; then
   for file in "$scratch/pilot-Caddyfile" "$caddyfile"; do
