@@ -40,6 +40,8 @@ public struct SpendOrganizations: Equatable, Sendable {
         public let promptLine: String
         public let promptAction: String
         public let promptActionAccessibility: String
+        public let promptDismiss: String
+        public let promptDismissAccessibility: String
     }
 
     public let state: String
@@ -145,12 +147,15 @@ public struct SpendOrganizations: Equatable, Sendable {
             let sessionExpired = text("session_expired"), let refused = text("refused"),
             let revokePending = text("revoke_pending"), let promptTitle = text("prompt_title"),
             let promptLine = text("prompt_line"), let promptAction = text("prompt_action"),
-            let promptActionAccessibility = text("prompt_action_accessibility")
+            let promptActionAccessibility = text("prompt_action_accessibility"),
+            let promptDismiss = text("prompt_dismiss"),
+            let promptDismissAccessibility = text("prompt_dismiss_accessibility")
         else { return nil }
         return Words(
             title: title, what: what, picker: picker, switching: switching, failed: failed,
             sessionExpired: sessionExpired, refused: refused, revokePending: revokePending,
             promptTitle: promptTitle, promptLine: promptLine, promptAction: promptAction,
-            promptActionAccessibility: promptActionAccessibility)
+            promptActionAccessibility: promptActionAccessibility, promptDismiss: promptDismiss,
+            promptDismissAccessibility: promptDismissAccessibility)
     }
 }

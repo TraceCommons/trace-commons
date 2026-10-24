@@ -814,6 +814,25 @@ final class AppModel: ObservableObject {
         refreshSpendOrganizations(fresh: true)
     }
 
+    /// The prompt's "Not now": record the organization already in use as the
+    /// choice, so the prompt ends without a switch. The select method with
+    /// the current organization mints nothing and only records it. A failure
+    /// keeps the prompt and says nothing -- no Settings failure line, which is
+    /// for switches -- and the next re-read shows the truth.
+    func dismissSpendOrganizationPrompt() async {
+        guard let client, !spendOrganizationSwitching, !credentialBusy,
+            let current = spendOrganizations.currentOrganizationID
+        else { return }
+        let outcome = await Task.detached(priority: .userInitiated) {
+            Result { try client.nearAiSelectSpendOrganization(current) }
+        }.value
+        guard self.client === client else { return }
+        if case .success = outcome {
+            publishIfChanged(\.spendOrganizations, spendOrganizations.withPromptEnded())
+        }
+        refreshSpendOrganizations(fresh: true)
+    }
+
     /// Whether billing has opened in the browser during this run.
     ///
     /// Set only when the browser accepted the page. A payment made there

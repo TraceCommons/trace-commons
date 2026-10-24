@@ -13,6 +13,7 @@ final class SpendOrganizationSurfaceTests: XCTestCase {
         "session_expired": "EXPIRED", "refused": "REFUSED", "revoke_pending": "PENDING",
         "prompt_title": "PROMPT-TITLE", "prompt_line": "PROMPT-LINE",
         "prompt_action": "PROMPT-ACTION", "prompt_action_accessibility": "PROMPT-ACTION-AX",
+        "prompt_dismiss": "PROMPT-DISMISS", "prompt_dismiss_accessibility": "PROMPT-DISMISS-AX",
     ]
 
     static func payload(

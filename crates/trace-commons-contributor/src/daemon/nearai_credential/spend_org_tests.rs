@@ -631,6 +631,8 @@ fn the_view_carries_every_word_the_mac_app_reads() {
             "picker",
             "prompt_action",
             "prompt_action_accessibility",
+            "prompt_dismiss",
+            "prompt_dismiss_accessibility",
             "prompt_line",
             "prompt_title",
             "refused",
@@ -652,8 +654,20 @@ fn the_view_carries_every_word_the_mac_app_reads() {
             .unwrap()
             .contains("Example org")
     );
+    assert!(
+        view["prompt_dismiss_accessibility"]
+            .as_str()
+            .unwrap()
+            .contains("Example org")
+    );
     let unnamed = crate::private_inference_copy::spend_org_view(None);
     assert!(!unnamed["prompt_line"].as_str().unwrap().contains('{'));
+    assert!(
+        !unnamed["prompt_dismiss_accessibility"]
+            .as_str()
+            .unwrap()
+            .contains('{')
+    );
 }
 
 /// Forgetting the sign-in forgets this record too. The sweep needs the

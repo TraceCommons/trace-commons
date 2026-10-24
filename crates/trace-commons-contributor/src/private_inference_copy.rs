@@ -1843,6 +1843,15 @@ pub const SPEND_ORG_PROMPT_LINE_UNNAMED: &str = "Your NEAR AI account has severa
 pub const SPEND_ORG_PROMPT_ACTION: &str = "Review settings";
 /// The action's accessible name. DRAFT.
 pub const SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY: &str = "Review settings to choose an organization";
+/// The prompt's second action: it keeps the current organization and hides
+/// the prompt (owner request, 2026-10-24). DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS: &str = "Not now";
+/// The dismiss action's accessible name, over `{organization}`. DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY: &str = "Keep spending from {organization}";
+/// The dismiss action's accessible name when the organization's name is not
+/// known. DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED: &str =
+    "Keep spending from the current organization";
 
 /// The spending-organization words, carried in the daemon's
 /// `near_ai_spend_organizations` answer so no shell owns a sentence of it.
@@ -1852,6 +1861,10 @@ pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
     let prompt_line = match current_name {
         Some(name) => SPEND_ORG_PROMPT_LINE.replace("{organization}", name),
         None => SPEND_ORG_PROMPT_LINE_UNNAMED.to_owned(),
+    };
+    let dismiss_accessibility = match current_name {
+        Some(name) => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY.replace("{organization}", name),
+        None => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED.to_owned(),
     };
     serde_json::json!({
         "title": SPEND_ORG_TITLE,
@@ -1866,6 +1879,8 @@ pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
         "prompt_line": prompt_line,
         "prompt_action": SPEND_ORG_PROMPT_ACTION,
         "prompt_action_accessibility": SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
+        "prompt_dismiss": SPEND_ORG_PROMPT_DISMISS,
+        "prompt_dismiss_accessibility": dismiss_accessibility,
     })
 }
 
