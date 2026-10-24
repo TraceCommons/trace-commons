@@ -455,6 +455,96 @@ fn confirmed(req: &Request) -> bool {
         == Some(true)
 }
 
+/// Run a short local operation only while the payout-link generation still
+/// matches the one read before an asynchronous operation. The caller takes
+/// the credential commit lock first when writing credential-owned state.
+pub(crate) fn with_near_ai_recipient_ref<R>(
+    shared: &DaemonShared,
+    expected: Option<&str>,
+    operation: impl FnOnce() -> R,
+) -> Option<R> {
+    let _guard = memory(shared);
+    let state = load_state(shared).ok()?;
+    let current = state
+        .rails
+        .get(NEAR_AI_PAYOUT_RAIL_ID)
+        .map(|linked| near_ai_recipient_ref(linked.idempotency_key, linked.organization_id));
+    (current.as_deref() == expected).then(operation)
+}
+
+pub(crate) fn near_ai_recipient_ref_snapshot(shared: &DaemonShared) -> Result<Option<String>, ()> {
+    let _guard = memory(shared);
+    Ok(load_state(shared)?
+        .rails
+        .get(NEAR_AI_PAYOUT_RAIL_ID)
+        .map(|linked| near_ai_recipient_ref(linked.idempotency_key, linked.organization_id)))
+}
+
+/// The payout recipient this device linked, only while a fresh account read
+/// confirms that exact recipient. A spending key is never a payout identity.
+/// Links made on another device remain unknown here instead of being guessed.
+pub(crate) async fn verified_near_ai_recipient(
+    shared: &DaemonShared,
+    api: &CloudApi,
+) -> Result<Option<String>, ()> {
+    let candidate = {
+        let _guard = memory(shared);
+        load_state(shared)?
+            .rails
+            .get(NEAR_AI_PAYOUT_RAIL_ID)
+            .cloned()
+    };
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    let req = Request {
+        id: 0,
+        method: "payout_rails_status".into(),
+        params: serde_json::json!({}),
+    };
+    let via = RenewVia::live(api);
+    let (mut session, cfg) = session_and_config(shared, &req, Some(&via))
+        .await
+        .map_err(|_| ())?;
+    let call = client::status(&endpoint(&cfg, &session)).await;
+    let persisted = keep_rotated_token(shared, &mut session, call.rotated_token);
+    let status = call.result.map_err(|_| ())?;
+    if !persisted {
+        return Err(());
+    }
+    let Some(rail) = status
+        .rails
+        .iter()
+        .find(|rail| rail.rail_id == NEAR_AI_PAYOUT_RAIL_ID)
+    else {
+        return Ok(None);
+    };
+    if !rail.linked || rail.recipient_unavailable {
+        return Ok(None);
+    }
+    if rail.recipient_ref.as_deref()
+        != Some(
+            near_ai_recipient_ref(candidate.idempotency_key, candidate.organization_id).as_str(),
+        )
+    {
+        return Err(());
+    }
+    // A link/unlink committed while the status read ran invalidates this
+    // answer, even when the server read happened to match the earlier one.
+    let _guard = memory(shared);
+    let unchanged = load_state(shared)?
+        .rails
+        .get(NEAR_AI_PAYOUT_RAIL_ID)
+        .is_some_and(|current| {
+            current.idempotency_key == candidate.idempotency_key
+                && current.organization_id == candidate.organization_id
+        });
+    if !unchanged {
+        return Err(());
+    }
+    Ok(Some(candidate.organization_id.to_string()))
+}
+
 /// `payout_rails_status`, against the live NEAR AI service.
 pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
     let api = CloudApi::live().ok();

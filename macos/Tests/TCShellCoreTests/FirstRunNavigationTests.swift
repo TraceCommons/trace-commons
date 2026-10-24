@@ -224,7 +224,8 @@ final class FirstRunNavigationTests: XCTestCase {
 
         // Start sends what the state holds, the required use included.
         XCTAssertEqual(
-            FirstRunPlan.calls(for: included, at: .start).first, .setConsentScopes(["evaluation", "research"]))
+            Array(FirstRunPlan.calls(for: included, at: .start).prefix(2)),
+            [.setAskEachTime, .setConsentScopes(["evaluation", "research"]) ])
     }
 
     func test_joinWaitsForSomethingStartCanFinish() {

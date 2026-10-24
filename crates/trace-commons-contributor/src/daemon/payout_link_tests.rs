@@ -765,3 +765,47 @@ async fn every_method_requires_an_account_session() {
     }
     assert!(f.seen().is_empty());
 }
+
+#[tokio::test]
+async fn credit_monitoring_resolves_only_a_fresh_verified_payout_recipient() {
+    let cloud = Cloud::start(vec![org(ORG_A, "Synthetic payout org", "owner", true)]).await;
+    let f = Fixture::new(true).await;
+    assert!(
+        f.shared
+            .settings
+            .lock()
+            .unwrap()
+            .near_ai_inference
+            .is_none()
+    );
+    assert_eq!(
+        verified_near_ai_recipient(&f.shared, &cloud.api)
+            .await
+            .unwrap(),
+        None
+    );
+    link(&f, &cloud, ORG_A).await;
+    assert_eq!(
+        verified_near_ai_recipient(&f.shared, &cloud.api)
+            .await
+            .unwrap(),
+        Some(ORG_A.to_owned())
+    );
+    f.ingest.stub.lock().unwrap().recipient_ref = Some(near_ai_recipient_ref(
+        Uuid::new_v4(),
+        Uuid::parse_str(ORG_A).unwrap(),
+    ));
+    assert!(
+        verified_near_ai_recipient(&f.shared, &cloud.api)
+            .await
+            .is_err(),
+        "a stale local recipient cannot identify the server's payout destination"
+    );
+    f.ingest.stub.lock().unwrap().linked = false;
+    assert_eq!(
+        verified_near_ai_recipient(&f.shared, &cloud.api)
+            .await
+            .unwrap(),
+        None
+    );
+}

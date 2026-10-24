@@ -9,6 +9,7 @@ import XCTest
 private final class GrantRecordingDaemon: DaemonCalling {
     private let lock = NSLock()
     private var recorded: [(method: String, params: String)] = []
+    var methodResponses: [String: String] = [:]
     private var responseValue = #"{"id":1,"result":{}}"#
 
     var calls: [(method: String, params: String)] {
@@ -26,7 +27,7 @@ private final class GrantRecordingDaemon: DaemonCalling {
         lock.lock()
         defer { lock.unlock() }
         recorded.append((method: method, params: paramsJSON))
-        return responseValue
+        return methodResponses[method] ?? responseValue
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
@@ -49,7 +50,7 @@ private final class GrantRecordingDaemon: DaemonCalling {
 /// The Flow 1 grant and the invite lookup, as the macOS client sends them.
 final class DaemonClientFirstRunGrantTests: XCTestCase {
     private let grantedFrame =
-        #"{"id":1,"result":{"granted":true,"granted_at":"2026-10-04T12:00:00.123456Z","on_disk_recorded":false}}"#
+        #"{"id":1,"result":{"granted":true,"granted_at":"2026-10-04T12:00:00.123456Z","on_disk_recorded":false,"include_existing":true}}"#
 
     func test_grantAutomaticSendsConfirmedAndTheWitness() throws {
         let daemon = GrantRecordingDaemon()
@@ -58,9 +59,10 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
 
         let grant = try client.grantAutomatic(witnessSigningAddress: nil)
 
-        XCTAssertEqual(daemon.calls.map(\.method), ["grant_automatic"])
+        XCTAssertEqual(daemon.calls.map(\.method), ["grant_automatic_including_existing"])
         let params = try XCTUnwrap(daemon.lastParams)
-        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address"])
+        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address", "include_existing"])
+        XCTAssertEqual(params["include_existing"] as? Bool, true)
         // A JSON true, not 1: the daemon only takes a boolean confirmation.
         XCTAssertTrue(daemon.calls[0].params.contains(#""confirmed":true"#))
         // No witness is a JSON null, never an omitted key: an omitted key is
@@ -70,6 +72,7 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
         XCTAssertTrue(grant.granted)
         XCTAssertNotNil(grant.grantedAt)
         XCTAssertEqual(grant.onDiskRecorded, false)
+        XCTAssertEqual(grant.includeExisting, true)
     }
 
     func test_grantAutomaticPassesTheWitnessShown() throws {
@@ -81,6 +84,7 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
 
         let params = try XCTUnwrap(daemon.lastParams)
         XCTAssertEqual(params["witness_signing_address"] as? String, "witness-address")
+        XCTAssertEqual(params["include_existing"] as? Bool, true)
     }
 
     func test_aRefusedGrantThrowsTheDaemonsLabel() {
@@ -104,6 +108,35 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
         XCTAssertFalse(grant.granted)
         XCTAssertNil(grant.grantedAt)
         XCTAssertNil(grant.onDiskRecorded)
+    }
+
+    func test_anOlderDaemonCannotConfirmTheBroaderAutomaticScope() throws {
+        for extra in ["", #","include_existing":false"#] {
+            let daemon = GrantRecordingDaemon()
+            daemon.response = #"{"id":1,"result":{"granted":true"# + extra + "}}"
+            let client = DaemonClient(daemon: daemon)
+            XCTAssertThrowsError(try client.grantAutomatic(witnessSigningAddress: nil))
+        }
+    }
+
+    func test_askStopsUploadsBeforeWithdrawingTheStandingGrant() throws {
+        let daemon = GrantRecordingDaemon()
+        daemon.methodResponses = [
+            "set_contribution_override": #"{"id":1,"result":{"changed":true,"contribution_override":{"mode":"notify_only"},"returned":2}}"#,
+            "withdraw_automatic_grant": #"{"id":1,"result":{"withdrawn":true}}"#,
+        ]
+        let client = DaemonClient(daemon: daemon)
+        _ = try client.setAskEachTime()
+        XCTAssertEqual(daemon.calls.map(\.method), ["set_contribution_override", "withdraw_automatic_grant"])
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(daemon.calls[0].params.utf8)) as? [String: String])
+        XCTAssertEqual(params, ["mode": "notify_only"])
+    }
+
+    func test_unconfirmedAskDoesNotWithdrawTheStandingGrant() throws {
+        let daemon = GrantRecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"changed":true,"contribution_override":{"mode":"auto_upload"},"returned":0}}"#
+        XCTAssertThrowsError(try DaemonClient(daemon: daemon).setAskEachTime())
+        XCTAssertEqual(daemon.calls.map(\.method), ["set_contribution_override"])
     }
 
     func test_inviteLookupSendsTheInviteAsItsCode() throws {

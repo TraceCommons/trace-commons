@@ -47,6 +47,7 @@ protocol FirstRunDaemon: AnyObject {
     func cancelNearAILogin() async -> Bool
     /// Enroll this Mac through that login, with no invite.
     func enrollNearAI() async -> FirstRunNearAIEnrolment
+    func setAskEachTime() async -> Bool
     func saveConsentScopes(_ scopes: [String]) async -> Bool
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool
     func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool
@@ -97,6 +98,7 @@ enum FirstRunFailure: Equatable {
     /// label, for the core's line (`TCNearAiEnroll`).
     case nearAIEnrollFailed(label: String)
     case scopesFailed
+    case sharingFailed
     /// A folder rule or a past-session include was not saved.
     case rulesFailed
     case privateAIFailed
@@ -315,6 +317,8 @@ final class FirstRunRunner: ObservableObject {
             // The person's ceremony, not awaited: the commit moves on and
             // the sheets record their outcome when they end.
             requestPasskey()
+        case .setAskEachTime:
+            guard await daemon.setAskEachTime() else { return fail(.sharingFailed) }
         case .setConsentScopes(let scopes):
             guard await daemon.saveConsentScopes(scopes) else { return fail(.scopesFailed) }
         case .setProjectMode(let projectID, let mode):
@@ -328,6 +332,7 @@ final class FirstRunRunner: ObservableObject {
             // The one call that does not stop the run: a refused grant
             // finishes on Ask, and says so.
             if case .refused(let label) = await daemon.grantAutomatic(witness: witness) {
+                guard await daemon.setAskEachTime() else { return fail(.sharingFailed) }
                 state.sharing = .askMe
                 failure = .grantRefused(label: label)
                 refusedGrant = failure

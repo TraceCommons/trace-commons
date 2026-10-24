@@ -529,22 +529,30 @@ struct JoinScreen: View {
                     .multilineTextAlignment(.center)
             }
         } content: {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                nearAICard
-                if JoinScreenLayout.showsInviteCard(runner.state) {
-                    inviteCard
+            ScrollView {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    nearAICard
+                    if runner.state.holdsEnrolment {
+                        PayoutLinkView()
+                    }
+                    if JoinScreenLayout.showsInviteCard(runner.state) {
+                        inviteCard
+                    }
+                    if JoinScreenLayout.showsPasskeyCard(runner.state) {
+                        passkeyCard
+                    }
+                    if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
+                        GlassAlert(notice)
+                    }
+                    if let notice = runner.passkeyOutcome?.joinNotice(copy) {
+                        GlassNotice(tone: .ask) { Text(notice) }
+                    }
                 }
-                if JoinScreenLayout.showsPasskeyCard(runner.state) {
-                    passkeyCard
-                }
-                if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
-                    GlassAlert(notice)
-                }
-                if let notice = runner.passkeyOutcome?.joinNotice(copy) {
-                    GlassNotice(tone: .ask) { Text(notice) }
-                }
+                .frame(maxWidth: 460)
+                .frame(maxWidth: .infinity)
             }
-            .frame(width: 460)
+            .frame(maxWidth: 520)
+            .scrollBounceBehavior(.basedOnSize)
         }
         .onChange(of: runner.state.signedIn) { _, signedIn in
             if signedIn { signedInAt = Date() }

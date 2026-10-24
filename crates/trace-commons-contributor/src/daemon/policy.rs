@@ -2,7 +2,7 @@
 //!
 //! Autonomy is per-project and opt-in. An unknown project is `NotifyOnly`, so
 //! a freshly installed daemon uploads nothing until the contributor has
-//! deliberately said otherwise about a specific project.
+//! deliberately opted in for a project or for all watched folders.
 //!
 //! The policy key is the session's true working directory. It is deliberately
 //! *not* derived from the project basename: Claude Code encodes a cwd into a
@@ -489,10 +489,11 @@ pub struct ArmedFromNow {
     pub recorded_sources: BTreeMap<String, u64>,
 }
 
-/// The Flow 1 grant: "contribute automatically from projects discovered from
-/// now on".
+/// The Flow 1 grant. Fresh onboarding can explicitly include existing
+/// eligible history from every watched folder; older grants retain their
+/// from-now scope.
 ///
-/// **It arms nothing already on disk** (the spec's logout rule), recorded
+/// By default it arms nothing already on disk, recorded
 /// **per source**. A source's first successful discovery under the grant
 /// records its sessions and their projects and arms nothing from that pass;
 /// until a source is recorded none of its sessions arms anything. So a
@@ -506,7 +507,8 @@ pub struct ArmedFromNow {
 /// That is also what makes a re-grant after logout safe. Logout wipes this
 /// file, a Never folder's decision with it; the re-grant records the disk
 /// again, so every folder that already had sessions asks rather than being
-/// counted as new.
+/// counted as new. Only a fresh explicit `include_existing` grant expands
+/// that scope; loading an older grant never does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomaticGrant {
     pub granted_at: DateTime<Utc>,
@@ -514,6 +516,11 @@ pub struct AutomaticGrant {
     /// itself as well as the projects it armed (R6), or it would go on arming
     /// new projects under terms nobody agreed to.
     pub granted_under: super::grant_terms::GrantTerms,
+    /// A fresh onboarding choice to include existing eligible sessions in
+    /// every watched folder, including sources connected later. Missing on
+    /// older grants, which retain their from-now snapshot protection.
+    #[serde(default)]
+    pub include_existing: bool,
     /// Sources recorded so far, by name and root.
     #[serde(default)]
     pub recorded_sources: BTreeSet<String>,
@@ -956,9 +963,9 @@ impl ProjectPolicy {
             || self.holds_back_from_arming(project_key, session_path, source_key)
     }
 
-    /// Give the Flow 1 grant, replacing any earlier one. Arms nothing until
-    /// a source has been recorded, and then nothing from that source's
-    /// recording pass.
+    /// Give the legacy from-now Flow 1 grant, replacing any earlier one.
+    /// Fresh onboarding can explicitly widen it to existing sessions before
+    /// persisting. Every grant waits until its source has been recorded.
     pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
         // Giving the grant again answers a notice that it had stopped, and
         // only that one: a project's, or the contribution override's, is
@@ -968,9 +975,35 @@ impl ProjectPolicy {
         self.automatic_grant = Some(AutomaticGrant {
             granted_at: now,
             granted_under: terms,
+            include_existing: false,
             recorded_sources: BTreeSet::new(),
             projects_on_disk: BTreeSet::new(),
         });
+    }
+
+    /// Whether the confirmed onboarding grant covers existing history.
+    pub fn includes_existing_automatically(&self) -> bool {
+        self.automatic_grant
+            .as_ref()
+            .is_some_and(|grant| grant.include_existing)
+    }
+
+    /// Expand the fresh grant to all watched history. A fresh global choice
+    /// supersedes old global modes and per-folder Automatic-from-now limits,
+    /// while folder Never and every per-session decision remain in force.
+    pub fn include_existing_under_grant(&mut self) {
+        let Some(grant) = self.automatic_grant.as_mut() else {
+            return;
+        };
+        grant.include_existing = true;
+        self.clear_contribution_override();
+        let projects = &self.projects;
+        self.armed_from_now.retain(|key, _| {
+            projects
+                .get(key)
+                .is_none_or(|entry| entry.mode != ProjectMode::AutoUpload)
+        });
+        self.prune_arming_record();
     }
 
     /// Withdraw the Flow 1 grant. Projects it already armed keep their own
@@ -1018,24 +1051,36 @@ impl ProjectPolicy {
     /// Whether the grant arms `project_key` on seeing the session at
     /// `session_path` from `source_key`: a recorded source, a real project
     /// with no entry of its own, and neither the project nor the session on
-    /// disk when the grant recorded it.
+    /// disk when the grant recorded it. An explicit include-existing grant
+    /// also arms existing Ask folders, while Never remains excluded.
     pub fn arms_by_default(&self, project_key: &str, session_path: &str, source_key: &str) -> bool {
         let Some(grant) = self.automatic_grant.as_ref() else {
             return false;
         };
         grant.recorded_sources.contains(source_key)
             && project_key != UNKNOWN_PROJECT_KEY
-            && !self.projects.contains_key(project_key)
-            && !grant.projects_on_disk.contains(project_key)
-            && !self.sessions_on_disk_at_grant.contains(session_path)
+            && if grant.include_existing {
+                // This fresh global choice includes Ask folders; Never is
+                // still an explicit exclusion and must always win.
+                self.folder_mode(project_key) == ProjectMode::NotifyOnly
+            } else {
+                !self.projects.contains_key(project_key)
+                    && !grant.projects_on_disk.contains(project_key)
+                    && !self.sessions_on_disk_at_grant.contains(session_path)
+            }
     }
 
     /// Whether the session at `session_path` must not be approved unattended
     /// in `project_key`: the grant armed the project, and the session was on
-    /// disk at a grant. It waits for the contributor instead.
+    /// disk at a grant. It waits for the contributor instead, unless a fresh
+    /// include-existing grant explicitly covers that history.
     pub fn holds_back_unattended(&self, project_key: &str, session_path: &str) -> bool {
         self.armed_by_grant.contains(project_key)
             && self.sessions_on_disk_at_grant.contains(session_path)
+            && !self
+                .automatic_grant
+                .as_ref()
+                .is_some_and(|grant| grant.include_existing)
     }
 
     /// Arm `project_key` on the grant's behalf.

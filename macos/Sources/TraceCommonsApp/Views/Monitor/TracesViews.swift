@@ -594,10 +594,9 @@ struct TracesTreeView: View, Equatable {
         let offer = store.groupOffer(folder)
         let submits = offer.offersContribute && store.mayContributeFolder(folder)
         let busy = store.submittingFolder == folder.id
-        // The switch and the Ignore menu need a mode the core listed and
-        // both ends of the switch among the modes it accepts.
-        let switchable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore)
+        // Ignore remains available when a global Automatic default removes
+        // the per-folder Ask choice.
+        let switchable = folder.mode != nil && folder.offerableModes.contains(.ignore)
         let ignorable = switchable && !ignored
         // The row menu holds the contribution rule (owner, 2026-10-19), the
         // Folder inspector's picker, whenever the core lists a mode and
@@ -740,8 +739,7 @@ struct TracesTreeView: View, Equatable {
     /// A folder row's open menu: its rule and Ignore, or Submit all as.
     @ViewBuilder
     private func folderMenus(_ folder: TracesTree.FolderNode) -> some View {
-        let ignorable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
+        let ignorable = folder.mode != nil && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
         if rowMenu == .folder(folder.id), let words = store.words {
             TracesFolderMenu(
                 folder: folder, ruleTitle: words.inspector.contributionRule,

@@ -980,9 +980,10 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertLessThan(frameCall.lowerBound, note.lowerBound)
         XCTAssertLessThan(note.lowerBound, graphic.lowerBound, "an argument of the footer, not content")
 
-        let near = try XCTUnwrap(source.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n                nearAICard"))
-        let invite = try XCTUnwrap(source.range(of: "if JoinScreenLayout.showsInviteCard(runner.state) {\n                    inviteCard"))
-        let passkey = try XCTUnwrap(source.range(of: "if JoinScreenLayout.showsPasskeyCard(runner.state) {\n                    passkeyCard"))
+        let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let near = try XCTUnwrap(flat.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { nearAICard"))
+        let invite = try XCTUnwrap(flat.range(of: "if JoinScreenLayout.showsInviteCard(runner.state) { inviteCard"))
+        let passkey = try XCTUnwrap(flat.range(of: "if JoinScreenLayout.showsPasskeyCard(runner.state) { passkeyCard"))
         XCTAssertLessThan(near.lowerBound, invite.lowerBound)
         XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
     }
@@ -1088,6 +1089,7 @@ private final class NoDaemon: FirstRunDaemon {
     func nearAILogin() async -> Bool { false }
     func cancelNearAILogin() async -> Bool { false }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { .refused(label: "near_ai_enroll_unavailable") }
+    func setAskEachTime() async -> Bool { false }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { false }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool { false }
     func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool { false }
