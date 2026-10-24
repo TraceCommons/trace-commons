@@ -146,7 +146,7 @@ struct StatusReply {
     /// The body, for exactly HTTP 200 and nothing else.
     body: Option<StatusBody>,
     /// A rotated account session, whatever the status.
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 /// When a spent allowance may be asked about again: `retry_after_seconds`
@@ -439,12 +439,13 @@ async fn fetch_status(cfg: &ContributorConfig, token: &str) -> StatusReply {
         };
     };
     let response = client
-        .call_json_with_response_header::<(), StatusBody>(
+        .call_json_with_response_headers::<(), StatusBody>(
             Method::GET,
             "/v1/account/contribution-status",
             &[],
             None,
             trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     StatusReply {
@@ -454,7 +455,10 @@ async fn fetch_status(cfg: &ContributorConfig, token: &str) -> StatusReply {
             Some(reqwest::StatusCode::OK) => response.result.ok(),
             _ => None,
         },
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 

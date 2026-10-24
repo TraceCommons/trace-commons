@@ -213,13 +213,26 @@ async fn server_once(
     body: Value,
     rotation: Option<&str>,
 ) -> (String, tokio::task::JoinHandle<String>) {
+    let headers: Vec<(&str, &str)> = rotation
+        .map(|token| (ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, token))
+        .into_iter()
+        .collect();
+    server_once_with_headers(status, body, &headers).await
+}
+
+async fn server_once_with_headers(
+    status: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> (String, tokio::task::JoinHandle<String>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let body = body.to_string();
-    let extra = rotation
-        .map(|s| format!("{}: {}\r\n", ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, s))
-        .unwrap_or_default();
+    let extra: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}",
         body.len()
@@ -389,6 +402,80 @@ async fn authenticated_http_refusal_still_retains_rotated_token_and_origin() {
         resolve_origin(&shared.store, &json!({})).unwrap(),
         NATIVE_ACCOUNT_ORIGIN
     );
+}
+
+/// A server that extends the session on rotation sends the new expiry with
+/// the new token. The daemon stores both, so the session it holds and the one
+/// it reloads stay usable past the 12 hours it was signed in for.
+#[tokio::test]
+async fn authenticated_rotation_stores_the_extended_expiry() {
+    let (_dir, shared) = shared();
+    let expected = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(&shared.store,&expected,NATIVE_ACCOUNT_ORIGIN,&json!({"access_token":"tcn1_original","token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"})).unwrap();
+    let mut session = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .unwrap();
+    let signed_in_until = session.session.expires_at;
+    let extended = chrono::DateTime::parse_from_rfc3339(
+        &(signed_in_until + chrono::TimeDelta::hours(20))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+    .unwrap()
+    .with_timezone(&chrono::Utc);
+    let extended_header = extended.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (origin, worker) = server_once_with_headers(
+        "200 OK",
+        json!({"passkeys":[]}),
+        &[
+            (ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, "tcn1_rotated"),
+            (
+                trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
+                &extended_header,
+            ),
+        ],
+    )
+    .await;
+    authenticated(
+        &shared,
+        &origin,
+        &mut session,
+        Method::GET,
+        "/v1/account/passkeys",
+        None,
+    )
+    .await
+    .expect("served");
+    worker.await.unwrap();
+    assert_eq!(session.session.access_token, "tcn1_rotated");
+    assert_eq!(session.session.expires_at, extended, "the held session");
+    let stored = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .expect("still signed in");
+    assert_eq!(stored.session.access_token, "tcn1_rotated");
+    assert_eq!(stored.session.expires_at, extended, "the stored session");
+    assert!(stored.session.expires_at > signed_in_until);
+    assert_eq!(stored.stored_binding_state().as_deref(), Some("bound"));
+
+    // An older server rotates without an expiry: the token moves, the expiry
+    // stays where it was.
+    let (origin, worker) =
+        server_once("200 OK", json!({"passkeys":[]}), Some("tcn1_rotated_again")).await;
+    authenticated(
+        &shared,
+        &origin,
+        &mut session,
+        Method::GET,
+        "/v1/account/passkeys",
+        None,
+    )
+    .await
+    .expect("served");
+    worker.await.unwrap();
+    let stored = account_auth::try_load_session_with_snapshot(&shared.store)
+        .unwrap()
+        .expect("still signed in");
+    assert_eq!(stored.session.access_token, "tcn1_rotated_again");
+    assert_eq!(stored.session.expires_at, extended);
 }
 
 #[test]

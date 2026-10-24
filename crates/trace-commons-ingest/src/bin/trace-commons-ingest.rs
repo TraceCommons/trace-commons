@@ -19321,11 +19321,24 @@ async fn account_auth_middleware(
             request.extensions_mut().insert(binding);
             next.run(request).await
         };
-        if let Some((token, _)) = rotated_secret_value {
+        if let Some((token, expires_at)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
                     .insert(ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, value);
+                // The rotation extended the session; the new expiry travels
+                // with the new token, so the client stores both together. An
+                // older client ignores the header and keeps its stored expiry,
+                // which is earlier than the real one, so it only re-signs in
+                // sooner than it needs to. Whole seconds, truncated: never
+                // later than the stored expiry.
+                if let Ok(value) = HeaderValue::from_str(
+                    &expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ) {
+                    response
+                        .headers_mut()
+                        .insert(ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER, value);
+                }
                 response.headers_mut().insert(
                     axum::http::header::CACHE_CONTROL,
                     HeaderValue::from_static("no-store"),
@@ -21271,6 +21284,9 @@ async fn mint_login_link_handler(
 /// presented the old token.
 const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str =
     trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
+/// The rotated native session's new expiry, sent beside the rotated token.
+const ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER: &str =
+    trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER;
 
 /// Query/form field naming the pending native authorization request that the
 /// browser redeem should complete. Optional everywhere: a plain browser login

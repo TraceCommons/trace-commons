@@ -30,6 +30,13 @@ pub mod witness_provenance;
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
 
+/// Response header carrying the new expiry of a rotated native session, as an
+/// RFC 3339 UTC timestamp. Sent only beside
+/// [`ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER`]: a rotation extends the session, and
+/// the client stores this with the new token. A server that does not extend
+/// sends no such header, and the client keeps the expiry it had.
+pub const ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER: &str = "x-trace-commons-session-expires-at";
+
 #[cfg(feature = "near-ai-privacy-filter")]
 pub mod privacy_filter_near_ai;
 

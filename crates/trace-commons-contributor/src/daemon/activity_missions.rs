@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, time::Duration};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::de::DeserializeOwned;
 use trace_commons_protocol::{
-    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
     activity_missions::{
         ActivityCatalogue, ActivityProgress, MAX_PREDICATE_TITLE_CHARS, MAX_PREDICATE_VALUES,
     },
@@ -26,7 +26,7 @@ const CREDENTIAL_UNAVAILABLE: &str = "commons_credential_storage_unavailable";
 
 struct Call<T> {
     result: Result<T, ()>,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 fn empty_params(req: &Request) -> bool {
@@ -281,6 +281,14 @@ async fn fetch<T: DeserializeOwned>(
     {
         return failed();
     }
+    let rotated_token = crate::account_auth::RotatedToken::from_headers(
+        rotated_token,
+        response
+            .headers()
+            .get(ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+    );
     let refused = || Call {
         result: Err(()),
         rotated_token: rotated_token.clone(),

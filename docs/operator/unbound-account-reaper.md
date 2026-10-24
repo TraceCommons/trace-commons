@@ -27,7 +27,8 @@ without the second window they would have piled up without limit.
 
 **A live session does not put the reap off** (decided 2026-09-30). An earlier
 draft kept either kind while it held an unrevoked, unexpired session. Native
-sessions last 12 hours, so signing in about twice a day kept an unbound
+sessions last 12 hours (since 2026-10-24 sliding: 12 hours from their last
+rotation, up to 30 days), so signing in about twice a day kept an unbound
 account, and its slot under the unbound ceiling, indefinitely. Now each kind
 is reaped once its window has passed, whatever sessions it holds, and those
 sessions are deleted in the same transaction as the account, by the
