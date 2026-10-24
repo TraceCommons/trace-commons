@@ -693,8 +693,21 @@ default build refuses the same upload as before (`legacy_admission_unconfigured`
 default-build twin `a_default_build_refuses_the_first_upload_without_the_admission_ledger`
 hold both sides, and `a_production_build_never_admits_without_the_ledger`
 holds the compiled-out branch. Staging keeps
-`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=false` from the pilot, which the
-upload path needs, because a staging account has no grant.
+`TRACE_COMMONS_REQUIRE_TENANT_ACCESS_GRANTS=false` from the pilot: uploads
+are admitted by the provisioned device, not by a grant.
+
+**Consent reaches the trace (2026-10-24).** A staging account's traces
+carried only `debugging, evaluation, aggregate_analytics` whatever the
+contributor consented to in the app, because NEAR AI sign-up wrote no
+contributor grant and the issuer, with no grant to read, gave the floor; its
+scoring award was then withheld as `policy_mismatch` for lack of
+`model_training`. Owner decision "Honor app consent": sign-up writes the
+contributor grant invite enrollment writes, from the deployment's template,
+`TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`, set identically in the
+staging ingest and issuer envs, and the issuer attaches the grant database
+(`TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB=true`) to read it
+and to write it at claim time for an account made before. New traces only.
+See the addendum to `2026-07-08-consent-scope-broadening-design.md`.
 
 ## 4. The staging macOS app
 

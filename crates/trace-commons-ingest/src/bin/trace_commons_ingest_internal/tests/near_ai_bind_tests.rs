@@ -870,6 +870,7 @@ async fn pg_a_bind_that_aborts_mid_transaction_leaves_the_account_unbound() {
                     expires_at: Utc::now() + Duration::hours(1),
                 },
                 &identity(),
+                None,
             )
             .await;
         assert!(result.is_err(), "{what}: the bind must fail");
@@ -1611,6 +1612,7 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[0]),
             &identity(),
+            None,
         )
         .await;
     let error = format!("{:?}", result.expect_err("no UPDATE on the binding table"));
@@ -1632,6 +1634,7 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[1]),
             &identity(),
+            None,
         )
         .await
         .expect("bind as the runtime role");
@@ -1653,6 +1656,7 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             &Device::new().public_bytes(),
             session(&hashes[2]),
             &identity(),
+            None,
         )
         .await
         .expect("refuse branch as the runtime role");
@@ -2259,6 +2263,7 @@ async fn pg_a_refuse_branch_that_lost_the_race_provisions_nothing_for_x() {
                 expires_at: Utc::now() + Duration::hours(1),
             },
             &identity(),
+            None,
         )
         .await;
     match refused {
@@ -2600,6 +2605,7 @@ async fn pg_enrolment_works_as_the_runtime_role() {
                 expires_at: Utc::now() + Duration::hours(1),
             },
             &identity(),
+            None,
         )
         .await
         .expect("enrol as the runtime role");
@@ -2629,6 +2635,7 @@ async fn pg_enrolment_works_as_the_runtime_role() {
                 expires_at: Utc::now() + Duration::hours(1),
             },
             &identity(),
+            None,
         )
         .await
         .expect_err("another identity");
@@ -2695,6 +2702,7 @@ impl ClaimPath {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template: None,
         };
         let issuer = issuer::trace_upload_claim_issuer_router(config).expect("issuer router");
         let mut ingest = h.state.clone();
@@ -3071,6 +3079,121 @@ mod open_sign_up {
         assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
         assert_eq!(reply.json()["outcome"], "bound");
         drop_tenants(&admin, &[&tenant, &account.tenant]).await;
+    }
+
+    /// The contributor grant rows for a device principal:
+    /// `(allowed_uses, metadata source)`.
+    async fn contributor_grants(
+        admin: &deadpool_postgres::Object,
+        tenant: &str,
+        device_key_id: &str,
+    ) -> Vec<(serde_json::Value, Option<String>)> {
+        let principal =
+            trace_commons_server::account_trust::device_principal_ref(tenant, device_key_id);
+        admin
+            .query(
+                "SELECT allowed_uses, metadata_json->>'source' FROM trace_tenant_access_grants
+                  WHERE tenant_id = $1 AND principal_ref = $2 AND role = 'contributor'
+                    AND status = 'active'",
+                &[&tenant, &principal],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect()
+    }
+
+    /// Owner decision 2026-10-24 ("Honor app consent"): with the deployment's
+    /// sign-up policy template configured, a NEAR AI sign-up and a bind each
+    /// write the device's contributor grant from it -- the grant the issuer
+    /// reads as the claim ceiling, so `model_training` the contributor
+    /// consented to reaches their traces. Without a template, none is
+    /// written and the floor stays.
+    #[tokio::test]
+    async fn sign_up_and_bind_write_the_contributor_grant_from_the_template() {
+        let Some(mut h) = harness().await else { return };
+        let admin = h.admin().await;
+        let template =
+            trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate::parse(
+                r#"{"policy_version":"ingest-test-v1",
+                    "allowed_consent_scopes":["debugging_evaluation","model_training","public_attribution"],
+                    "allowed_uses":["debugging","evaluation","model_training","aggregate_analytics"]}"#,
+            )
+            .unwrap();
+        let expected = vec![(
+            serde_json::json!([
+                "debugging",
+                "evaluation",
+                "model_training",
+                "aggregate_analytics"
+            ]),
+            Some("near_ai_signup".to_string()),
+        )];
+
+        // Without a template: an account, no grant.
+        let subject = unseen_subject();
+        h.sign_in_to_near_ai_as(&subject);
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let reply = finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let untemplated_tenant = reply.json()["tenant_id"].as_str().unwrap().to_string();
+        let untemplated_device = reply.json()["device_key_id"].as_str().unwrap().to_string();
+        assert!(
+            contributor_grants(&admin, &untemplated_tenant, &untemplated_device)
+                .await
+                .is_empty(),
+            "no template, no grant"
+        );
+
+        Arc::get_mut(&mut h.state)
+            .expect("the harness owns its state")
+            .near_ai_signup_policy_template = Some(template);
+
+        // Sign-up with the template.
+        h.sign_in_to_near_ai_as(&unseen_subject());
+        let device = Device::new();
+        let started = start(&h.state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let reply = finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        let tenant = reply.json()["tenant_id"].as_str().unwrap().to_string();
+        let device_key_id = reply.json()["device_key_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            contributor_grants(&admin, &tenant, &device_key_id).await,
+            expected
+        );
+
+        // Bind with the template: the bound device gets the same grant.
+        h.sign_in_to_near_ai_as(&unseen_subject());
+        let account = unbound_account(&h.backend).await;
+        let reply = bind(&h, &account, &Device::new()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert_eq!(reply.json()["outcome"], "bound");
+        let bound_device = reply.json()["device_key_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            contributor_grants(&admin, &account.tenant, &bound_device).await,
+            expected
+        );
+        drop_tenants(&admin, &[&untemplated_tenant, &tenant, &account.tenant]).await;
     }
 
     /// The sign-in with no admission ledger and no witness: what a staging

@@ -627,3 +627,13 @@ cargo clippy --workspace --all-targets -- -D warnings -A clippy::type_complexity
 git add README.md docs/
 git commit -m "Document scope-based consent and complete verification sweep"
 ```
+
+## Follow-up 2026-10-24: NEAR AI sign-up grants
+
+NEAR AI-provisioned devices had no grant row and so always got the floor
+(the "invite-code device keys: unchanged" branch above). Per the owner
+decision of 2026-10-24 ("Honor app consent"), NEAR AI provisioning, bind and
+enrollment now write the contributor grant from
+`TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`, and the issuer backfills the
+grant at claim time for a NEAR AI device provisioned before that. Design,
+backfill choice and tests: the spec's addendum of the same date.

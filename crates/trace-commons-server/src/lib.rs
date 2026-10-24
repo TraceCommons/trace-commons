@@ -42,6 +42,7 @@ pub mod near_ai_api;
 pub mod near_ai_login;
 pub mod near_ai_rail;
 pub mod near_ai_rail_config;
+pub mod near_ai_signup_policy;
 pub mod near_ai_transfer;
 pub mod near_attestation;
 pub mod near_credit;

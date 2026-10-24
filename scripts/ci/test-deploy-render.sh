@@ -506,6 +506,14 @@ if [ -f "$issuer" ]; then
   expect "$issuer" TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_AUDIENCE trace-commons-ingest
   expect "$issuer" DATABASE_URL postgres://app:dummystagingdbpassword@127.0.0.1:5432/tracecommons
   expect "$issuer" TRACE_COMMONS_ONBOARDING_INGEST_URL https://ingest.staging.tracecommons.ai
+  expect "$issuer" TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB true
+  # One sign-up policy template, the same in both processes.
+  if [ -n "$(value_of "$issuer" TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE)" ] && [ -f "$ingest" ] \
+    && [ "$(value_of "$issuer" TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE)" = "$(value_of "$ingest" TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE)" ]; then
+    pass "the staging ingest and issuer carry one NEAR AI sign-up policy template"
+  else
+    fail "the staging ingest and issuer NEAR AI sign-up policy templates are missing or differ"
+  fi
   if grep -q -E '^TRACE_COMMONS_ALLOWLIST_SOURCE=' "$issuer"; then
     fail "the staging issuer env names an invite allowlist"
   else

@@ -3919,8 +3919,9 @@ impl Database for PgBackend {
         device_public_key: &[u8; 32],
         session: crate::db::NewSession<'_>,
         identity: &crate::near_account_identity::NearAccountIdentity,
+        grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
-        self.near_ai_login_provision(login, device_public_key, session, identity)
+        self.near_ai_login_provision(login, device_public_key, session, identity, grant_template)
             .await
     }
 
@@ -3949,6 +3950,7 @@ impl Database for PgBackend {
         device_public_key: &[u8; 32],
         session: crate::db::NewSession<'_>,
         identity: &crate::near_account_identity::NearAccountIdentity,
+        grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         self.near_ai_login_bind(
             tenant_id,
@@ -3957,6 +3959,7 @@ impl Database for PgBackend {
             device_public_key,
             session,
             identity,
+            grant_template,
         )
         .await
     }
@@ -3969,6 +3972,7 @@ impl Database for PgBackend {
         device_public_key: &[u8; 32],
         session: crate::db::NewSession<'_>,
         identity: &crate::near_account_identity::NearAccountIdentity,
+        grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_ai_login_enrol(
             tenant_id,
@@ -3977,8 +3981,20 @@ impl Database for PgBackend {
             device_public_key,
             session,
             identity,
+            grant_template,
         )
         .await
+    }
+
+    async fn backfill_near_ai_signup_device_grant(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        template: &crate::near_ai_signup_policy::NearAiSignupPolicyTemplate,
+        issued_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        self.near_ai_signup_grant_backfill(tenant_id, device_key_id, template, issued_at)
+            .await
     }
 
     async fn get_near_provisioned_anchor(
@@ -6360,6 +6376,71 @@ async fn upsert_onboarding_device_tenant_access_grant(
     .await
     .map_err(DatabaseError::Postgres)?;
     Ok(())
+}
+
+/// `created_by_principal_ref` and `metadata_json.source` on a NEAR AI sign-up
+/// grant: the same grant invite enrollment writes, labelled so an export can
+/// tell the two apart.
+const NEAR_AI_SIGNUP_GRANT_CREATED_BY: &str = "system:near_ai_signup";
+const NEAR_AI_SIGNUP_GRANT_SOURCE: &str = "near_ai_signup";
+const NEAR_AI_SIGNUP_GRANT_REASON: &str = "near ai sign-up contributor access from policy template";
+
+/// Write the contributor grant a NEAR AI sign-up carries (owner decision
+/// 2026-10-24): the grant invite enrollment writes, for the same device
+/// principal and under the same deterministic `grant_id`, with its scopes and
+/// uses from the deployment's sign-up policy template.
+///
+/// Insert-only, unlike the invite path's upsert: an existing row for this
+/// device, active or revoked, is left exactly as it is. Re-provisioning, a
+/// further sign-in, bind, enrollment or the issuer's backfill therefore never
+/// duplicates a grant, never revives a revoked one, and never moves an
+/// existing grant to a later template. Runs in the caller's tenant
+/// transaction. `issued_at` is the database's `NOW()` when `None`; the
+/// issuer's backfill passes the instant it lists grants at, so the grant it
+/// just wrote is already in force for the claim that wrote it. Returns
+/// whether a row was written.
+pub(super) async fn insert_near_ai_signup_device_tenant_access_grant(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    device_key_id: &str,
+    template: &crate::near_ai_signup_policy::NearAiSignupPolicyTemplate,
+    issued_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, DatabaseError> {
+    let grant_id = onboarding_device_tenant_access_grant_id(tenant_id, device_key_id);
+    let principal_ref = onboarding_device_principal_ref(tenant_id, device_key_id);
+    let allowed_consent_scopes = serde_json::json!(template.allowed_consent_scopes());
+    let allowed_uses = serde_json::json!(template.allowed_uses());
+    let metadata_json = serde_json::json!({
+        "source": NEAR_AI_SIGNUP_GRANT_SOURCE,
+        "capability": "policy_template",
+        "policy_version": template.policy_version(),
+    });
+    let inserted = tx
+        .execute(
+            "INSERT INTO trace_tenant_access_grants (
+                tenant_id, grant_id, principal_ref, role, status,
+                allowed_consent_scopes, allowed_uses, issuer, audience, subject,
+                issued_at, expires_at, revoked_at, created_by_principal_ref,
+                revoked_by_principal_ref, reason, metadata_json
+             ) VALUES ($1, $2, $3, 'contributor', 'active',
+                $4, $5, NULL, NULL, NULL, COALESCE($9, NOW()), NULL, NULL,
+                $6, NULL, $7, $8)
+             ON CONFLICT (tenant_id, grant_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &grant_id,
+                &principal_ref,
+                &allowed_consent_scopes,
+                &allowed_uses,
+                &NEAR_AI_SIGNUP_GRANT_CREATED_BY,
+                &NEAR_AI_SIGNUP_GRANT_REASON,
+                &metadata_json,
+                &issued_at,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(inserted == 1)
 }
 
 fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str) -> Uuid {

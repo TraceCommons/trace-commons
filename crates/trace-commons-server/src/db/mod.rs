@@ -1185,6 +1185,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
 
     /// Provision from a verified NEAR AI login (#836).
     ///
+    /// With `grant_template`, the device also gets the contributor grant
+    /// invite enrollment writes, from that template, insert-only (owner
+    /// decision 2026-10-24). Bind and enrollment below take the same
+    /// argument with the same meaning. `None` writes no grant.
+    ///
     /// The default refuses, like its wallet sibling: a backend that has not
     /// implemented this has not configured login provisioning, and the
     /// fail-closed answer is the only safe one for a path that mints an
@@ -1195,6 +1200,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool(
             "near_ai_login_provisioning_unconfigured".into(),
@@ -1226,6 +1232,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// belongs to another account, provision that account exactly as
     /// [`Self::provision_near_ai_login`] would and close the passkey account.
     /// The default refuses.
+    #[allow(clippy::too_many_arguments)]
     async fn bind_near_ai_login(
         &self,
         _tenant_id: &str,
@@ -1234,6 +1241,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
     }
@@ -1246,6 +1254,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// [`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`] having
     /// written nothing. Never claims an anchor or mints a tenant or account.
     /// The default refuses.
+    #[allow(clippy::too_many_arguments)]
     async fn enrol_near_ai_login(
         &self,
         _tenant_id: &str,
@@ -1254,8 +1263,33 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
+    /// provisioned before sign-up wrote one (owner decision 2026-10-24).
+    ///
+    /// The issuer calls this at claim time when a device has no active
+    /// contributor grant. In one transaction in `tenant_id`, it checks that
+    /// the device is a live `near_ai`-origin key there, and if so inserts the
+    /// grant sign-up would have written from `template`, never replacing a
+    /// grant row that exists (so a revoked grant stays revoked and a later
+    /// template does not rewrite an earlier one). Returns whether the device
+    /// was eligible; `false` writes nothing. A written grant is issued at
+    /// `issued_at`, the instant the caller lists grants at. The default
+    /// refuses.
+    async fn backfill_near_ai_signup_device_grant(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _template: &crate::near_ai_signup_policy::NearAiSignupPolicyTemplate,
+        _issued_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_signup_grant_backfill_unconfigured".into(),
+        ))
     }
 
     async fn resolve_near_public_key_tenant(

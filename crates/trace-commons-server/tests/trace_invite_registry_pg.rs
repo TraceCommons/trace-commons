@@ -1252,6 +1252,7 @@ mod lookup_route {
             invite_admin_backend: Some(backend),
             invite_admin_registry: Some(registry),
             invite_registry_authoritative: authoritative,
+            near_ai_signup_policy_template: None,
         })
         .expect("router")
     }

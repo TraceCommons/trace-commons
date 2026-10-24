@@ -188,6 +188,7 @@ async fn a_device_reads_back_the_invite_it_was_onboarded_with() {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template: None,
         })
         .expect("router")
     };

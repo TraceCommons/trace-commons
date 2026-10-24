@@ -1641,6 +1641,7 @@ async fn shared_file_invite_still_onboards_new_devices_after_pooling() {
         invite_admin_backend: None,
         invite_admin_registry: None,
         invite_registry_authoritative: false,
+        near_ai_signup_policy_template: None,
     };
     let onboard = |device: &Device| {
         let router = trace_upload_claim_issuer_router(issuer_config()).expect("router");

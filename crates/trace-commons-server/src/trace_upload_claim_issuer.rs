@@ -238,6 +238,16 @@ pub struct TraceUploadClaimIssuerConfig {
     /// Cutover flag from [`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV`].
     /// `false` keeps `/v1/onboard` on the unchanged file-allowlist path.
     pub invite_registry_authoritative: bool,
+    /// The NEAR AI sign-up policy template
+    /// ([`crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV`],
+    /// the same value ingest provisions with). When set, a device-key claim
+    /// from a NEAR AI-provisioned device that has no contributor grant --
+    /// one provisioned before sign-up wrote grants -- first writes the grant
+    /// sign-up would have written, then takes its ceiling from it. Requires
+    /// `tenant_access_grant_db`; `build_state` refuses the pair otherwise.
+    /// `None` leaves such devices on the floor.
+    pub near_ai_signup_policy_template:
+        Option<crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -261,6 +271,13 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
             .field(
                 "require_tenant_access_grants",
                 &self.require_tenant_access_grants,
+            )
+            .field(
+                "near_ai_signup_policy_template",
+                &self
+                    .near_ai_signup_policy_template
+                    .as_ref()
+                    .map(|template| template.policy_version().to_string()),
             )
             .field("shutdown_grace_seconds", &self.shutdown_grace_seconds)
             .field("request_timeout_seconds", &self.request_timeout_seconds)
@@ -420,6 +437,8 @@ impl TraceUploadClaimIssuerConfig {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template:
+                crate::near_ai_signup_policy::NearAiSignupPolicyTemplate::from_env()?,
         })
     }
 
@@ -427,6 +446,15 @@ impl TraceUploadClaimIssuerConfig {
         anyhow::ensure!(
             self.max_ttl_seconds > 0,
             "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_MAX_TTL_SECONDS must be positive"
+        );
+        // A template the issuer cannot read grants with would be inert: the
+        // ceiling is never taken from a grant without the grant database, so
+        // NEAR AI devices would stay on the floor while the configuration
+        // says otherwise. Refuse the pair rather than run it.
+        anyhow::ensure!(
+            self.near_ai_signup_policy_template.is_none() || self.tenant_access_grant_db.is_some(),
+            "{} requires {TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV}=true",
+            crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV
         );
         let signing_private_key_pem =
             validate_eddsa_private_key_pem(&self.signing_private_key_pem)?;
@@ -510,6 +538,7 @@ impl TraceUploadClaimIssuerConfig {
             workload_public_key_pem,
             tenant_access_grant_db: self.tenant_access_grant_db.clone(),
             require_tenant_access_grants: self.require_tenant_access_grants,
+            near_ai_signup_policy_template: self.near_ai_signup_policy_template.clone(),
             allowlist_source,
             allowlist_max_stale: StdDuration::from_secs(self.allowlist_max_stale_seconds),
             onboarding_device_key_db: self.onboarding_device_key_db.clone(),
@@ -693,6 +722,8 @@ struct TraceUploadClaimIssuerState {
     workload_public_key_pem: String,
     tenant_access_grant_db: Option<Arc<dyn Database>>,
     require_tenant_access_grants: bool,
+    near_ai_signup_policy_template:
+        Option<crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     allowlist_source: Option<Arc<dyn AllowlistSource>>,
     allowlist_max_stale: StdDuration,
     onboarding_device_key_db: Option<Arc<dyn Database>>,
@@ -1993,9 +2024,17 @@ impl TraceUploadClaimIssuerState {
     /// Ceiling for a device principal: parsed scopes from active contributor
     /// grants when a grant DB is configured and rows exist; otherwise the
     /// hardcoded pilot floor. PublicAttribution is always included.
+    ///
+    /// A device with no contributor grant gets one first when it is a NEAR AI
+    /// sign-up and the issuer has the sign-up policy template: the backfill
+    /// for accounts NEAR AI provisioned before sign-up wrote grants (owner
+    /// decision 2026-10-24). After it the grant exists, so it writes at most
+    /// once per device, and it never replaces a grant row, so a revoked grant
+    /// still leaves the floor.
     async fn resolve_device_scope_ceiling(
         &self,
         tenant_id: &str,
+        device_key_id: &str,
         grant_principal_ref: &str,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ConsentScope>, Vec<TraceAllowedUse>), IssuerError> {
@@ -2008,25 +2047,32 @@ impl TraceUploadClaimIssuerState {
         let Some(db) = self.tenant_access_grant_db.as_ref() else {
             return Ok(hardcoded_floor());
         };
-        let grants = db
-            .list_active_trace_tenant_access_grants_for_principal(
-                tenant_id,
-                grant_principal_ref,
-                now,
-            )
-            .await
-            .map_err(|_| IssuerError::internal())?;
-        let matching_grants: Vec<&TraceTenantAccessGrantRecord> = grants
-            .iter()
-            .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
-            .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
-            .collect();
+        let mut matching_grants =
+            active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now).await?;
+        if matching_grants.is_empty()
+            && let Some(template) = self.near_ai_signup_policy_template.as_ref()
+        {
+            let eligible = db
+                .backfill_near_ai_signup_device_grant(tenant_id, device_key_id, template, now)
+                .await
+                .map_err(|_| IssuerError::internal())?;
+            if eligible {
+                tracing::info!(
+                    device_key_id = %device_key_id,
+                    policy_version = %template.policy_version(),
+                    "NEAR AI sign-up contributor grant backfilled at claim time"
+                );
+                matching_grants =
+                    active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now)
+                        .await?;
+            }
+        }
         if matching_grants.is_empty() {
             return Ok(hardcoded_floor());
         }
         let mut scope_union: BTreeSet<ConsentScope> = BTreeSet::new();
         let mut use_union: BTreeSet<TraceAllowedUse> = BTreeSet::new();
-        for grant in matching_grants {
+        for grant in &matching_grants {
             if grant.allowed_consent_scopes.is_empty() {
                 scope_union.extend(device_key_allowed_consent_scopes());
             } else {
@@ -2095,7 +2141,7 @@ impl TraceUploadClaimIssuerState {
             subject.as_deref(),
         );
         let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .resolve_device_scope_ceiling(&tenant_id, &device_key_id, &grant_principal_ref, now)
             .await?;
         let granted_scopes = intersect_requested_with_ceiling(
             &request.consent_scopes,
@@ -2152,7 +2198,12 @@ impl TraceUploadClaimIssuerState {
         let grant_principal_ref =
             crate::account_trust::device_principal_ref(&tenant_id, &auth.device_key_id);
         let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .resolve_device_scope_ceiling(
+                &tenant_id,
+                &auth.device_key_id,
+                &grant_principal_ref,
+                now,
+            )
             .await?;
         let granted_scopes = intersect_requested_with_ceiling(
             &request.consent_scopes,
@@ -2994,6 +3045,24 @@ fn valid_device_key_id(value: &str) -> bool {
     })
 }
 
+/// Active `contributor` grants for a device principal.
+async fn active_contributor_grants(
+    db: &dyn Database,
+    tenant_id: &str,
+    grant_principal_ref: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<TraceTenantAccessGrantRecord>, IssuerError> {
+    let grants = db
+        .list_active_trace_tenant_access_grants_for_principal(tenant_id, grant_principal_ref, now)
+        .await
+        .map_err(|_| IssuerError::internal())?;
+    Ok(grants
+        .into_iter()
+        .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+        .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
+        .collect())
+}
+
 fn device_key_allowed_consent_scopes() -> Vec<ConsentScope> {
     vec![
         ConsentScope::DebuggingEvaluation,
@@ -3692,7 +3761,36 @@ mod tests {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template: None,
         }
+    }
+
+    /// A sign-up template without the grant database would never be read --
+    /// the ceiling only comes from a grant when the issuer can read grants --
+    /// so NEAR AI devices would stay on the floor while the configuration
+    /// claims otherwise. The issuer refuses to start in that state.
+    #[test]
+    fn a_sign_up_template_without_the_grant_database_refuses_to_start() {
+        let template = crate::near_ai_signup_policy::NearAiSignupPolicyTemplate::parse(
+            r#"{"policy_version":"v","allowed_consent_scopes":["model_training"],"allowed_uses":["model_training"]}"#,
+        )
+        .unwrap();
+        let mut config = test_config();
+        config.near_ai_signup_policy_template = Some(template);
+        let error = config
+            .build_state()
+            .err()
+            .expect("template without grant database must refuse")
+            .to_string();
+        assert!(
+            error.contains(crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV)
+                && error.contains(TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV),
+            "{error}"
+        );
+        assert!(
+            test_config().build_state().is_ok(),
+            "no template: unchanged"
+        );
     }
 
     fn workload_token(issuer: &str, audience: &str) -> String {
@@ -4660,6 +4758,7 @@ mod tests {
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
+                near_ai_signup_policy_template: self.near_ai_signup_policy_template.clone(),
                 // The self-serve claim surfaces have their own hermetic tests in
                 // `near_legion_claim` and `celestine_sloth_claim`; these issuer
                 // tests build state without either.
@@ -4845,6 +4944,7 @@ mod tests {
         // redeem again after a config mistake.
         let config = TraceUploadClaimIssuerConfig {
             invite_registry_authoritative: true,
+            near_ai_signup_policy_template: None,
             ..test_config()
         };
         let (status, body) = post_onboard(config, onboard_request("INVOK001INVOK001")).await;
