@@ -909,6 +909,122 @@ for class in PERMISSION_DENIED NOT_FOUND; do
   fi
 done
 
+# The scoring driver and the scoring award (the staging settlement test).
+# Off by default: a default render names none of the four settings. Synthetic
+# values only.
+scoring_keys='^TRACE_COMMONS_(PERPLEXITY_DRIVER_ENABLED|GATE_DRIVER_DATABASE_URL|NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE|NOVELTY_UTILITY_SETTLE_FROM)='
+if grep -Eq "$scoring_keys" "$ingest_default"; then
+  fail "the default staging render sets a scoring driver or scoring award setting"
+else
+  pass "the default staging render leaves the scoring driver and award settings unset"
+fi
+expect "$ingest_default" TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA 0
+
+gate_driver_ok=dummystaginggatedriverpassword
+scoring_refused() {
+  # $1: stem; the rest: render overrides. A refusal must name itself.
+  local stem="$1"
+  shift
+  if run_render "$stem" "$@"; then
+    fail "render-env.sh accepted $stem"
+  elif ! refused "$stem"; then
+    fail "render-env.sh failed on $stem without refusing"
+  else
+    pass "render-env.sh refuses $stem"
+  fi
+}
+no_duplicate_keys() {
+  local dups
+  dups="$(grep -E '^[A-Z_][A-Z0-9_]*=' "$1" | sed 's/=.*//' | sort | uniq -d)"
+  if [ -z "$dups" ]; then
+    pass "$2 assigns no key twice"
+  else
+    fail "$2 assigns a key twice: $dups"
+  fi
+}
+
+if run_render driver-on TC_SCORING_DRIVER=1 \
+  "TC_SECRET_tc_staging_db_gate_driver_password=$gate_driver_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED true
+  expect "$out/ingest.env" TRACE_COMMONS_GATE_DRIVER_DATABASE_URL \
+    "postgres://tc_gate_driver_login:$gate_driver_ok@127.0.0.1:5432/tracecommons"
+  expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA 0
+  no_duplicate_keys "$out/ingest.env" "the scoring driver render"
+else
+  fail "render-env.sh failed with the scoring driver on"
+  cat "$scratch/driver-on.err" >&2
+fi
+scoring_refused driver-no-secret TC_SCORING_DRIVER=1
+if grep -q 'tc-staging-db-gate-driver-password' "$scratch/driver-no-secret.err"; then
+  pass "the scoring driver refusal names the gate driver secret"
+else
+  fail "the scoring driver refusal does not name the gate driver secret"
+fi
+scoring_refused driver-bad-password TC_SCORING_DRIVER=1 \
+  "TC_SECRET_tc_staging_db_gate_driver_password=pass/word@host:1"
+scoring_refused driver-bad-toggle TC_SCORING_DRIVER=yes \
+  "TC_SECRET_tc_staging_db_gate_driver_password=$gate_driver_ok"
+# Without the toggle the secret is not read, set or not.
+if run_render driver-off-secret-set \
+  "TC_SECRET_tc_staging_db_gate_driver_password=$gate_driver_ok" \
+  && ! grep -Eq "$scoring_keys" "$out/ingest.env"; then
+  pass "a render without TC_SCORING_DRIVER ignores the gate driver secret"
+else
+  fail "a render without TC_SCORING_DRIVER wrote scoring settings"
+fi
+
+settle_ok=2026-11-01T00:00:00Z
+scoring_refused delta-no-settle-from TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=5
+if grep -q 'TC_NOVELTY_UTILITY_SETTLE_FROM' "$scratch/delta-no-settle-from.err"; then
+  pass "the delta refusal names TC_NOVELTY_UTILITY_SETTLE_FROM"
+else
+  fail "the delta refusal does not name TC_NOVELTY_UTILITY_SETTLE_FROM"
+fi
+for bad in 2026-11-01 "2026-11-01 00:00:00Z" 2026-11-01T00:00:00 2026-11-01T00:00:00+02:00 \
+  2026-13-01T00:00:00Z 2026-11-32T00:00:00Z 2026-11-01T24:00:00Z tomorrow; do
+  scoring_refused "settle-from-invalid-${bad//[^0-9A-Za-z]/_}" \
+    TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=5 "TC_NOVELTY_UTILITY_SETTLE_FROM=$bad"
+done
+for bad in -1 abc 1e3 "5 6"; do
+  scoring_refused "delta-invalid-${bad//[^0-9A-Za-z]/_}" \
+    "TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=$bad" "TC_NOVELTY_UTILITY_SETTLE_FROM=$settle_ok"
+done
+for good in 5 0.5 12.25; do
+  if run_render "delta-$good" "TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=$good" \
+    "TC_NOVELTY_UTILITY_SETTLE_FROM=$settle_ok"; then
+    expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA "$good"
+    expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE true
+    expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM "$settle_ok"
+    no_duplicate_keys "$out/ingest.env" "the delta $good render"
+  else
+    fail "render-env.sh failed with delta $good and a cut-over"
+    cat "$scratch/delta-$good.err" >&2
+  fi
+done
+# A zero delta needs neither control and renders none.
+if run_render delta-zero TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0 \
+  && ! grep -Eq "$scoring_keys" "$out/ingest.env"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA 0
+else
+  fail "render-env.sh failed or wrote award settings at delta 0"
+fi
+# Everything on at once.
+if run_render scoring-all TC_SCORING_DRIVER=1 \
+  "TC_SECRET_tc_staging_db_gate_driver_password=$gate_driver_ok" \
+  TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=5 "TC_NOVELTY_UTILITY_SETTLE_FROM=$settle_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED true
+  expect "$out/ingest.env" TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM "$settle_ok"
+  no_duplicate_keys "$out/ingest.env" "the full scoring render"
+  if grep -q "$gate_driver_ok" "$scratch/scoring-all.out" "$scratch/scoring-all.err"; then
+    fail "render-env.sh printed the gate driver password"
+  else
+    pass "render-env.sh did not print the gate driver password"
+  fi
+else
+  fail "render-env.sh failed with the driver and the award on"
+  cat "$scratch/scoring-all.err" >&2
+fi
+
 # 4. caddy adapt, where caddy is installed.
 if command -v caddy >/dev/null 2>&1; then
   for file in "$scratch/pilot-Caddyfile" "$caddyfile"; do

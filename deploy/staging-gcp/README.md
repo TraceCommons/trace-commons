@@ -80,6 +80,7 @@ nothing else.
 | `tc-staging-nearai-inference-key` | yes | yes | `TRACE_COMMONS_NEAR_AI_API_KEY`, `TRACE_NEAR_AI_PRIVACY_API_KEY` | a NEAR AI staging API key |
 | `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role. 16 or more letters and digits; any other character refuses (see below) |
 | `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6. 16 or more letters and digits |
+| `tc-staging-db-gate-driver-password` | yes | yes, read only when `TC_SCORING_DRIVER=1` | the password in `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | set on `tc_gate_driver_login` (see [Scoring driver and scoring award](#scoring-driver-and-scoring-award)). 16 or more letters and digits |
 | `tc-staging-nearai-reseller-key` | yes | yes, read only when payout is on | `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` | the reseller org's credential on NEAR AI staging |
 | `tc-staging-payout-control-token` | **no** | yes, read only when payout is `live` | `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | `openssl rand -hex 32` (32 or more characters of letters, digits and `._~+/=-`, one line). The operator's token for payout halt, resume and holds; a `live` rail refuses to render, and the ingest to boot, without it |
 | `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (exactly 64 hex characters) |
@@ -394,6 +395,49 @@ which installs and restarts in place, reads the new ingest's `/health`, and,
 unless it reports `near_ai_staging: true`, puts the previous ingest binary
 back, restarts it and fails. The issuer, installed first, is not rolled back
 (it has no channel).
+
+## Scoring driver and scoring award
+
+Two opt-in render settings let scored traces earn a settling award, for the
+settlement test. A render without them is unchanged.
+
+| Render variable | Writes | Notes |
+|---|---|---|
+| `TC_SCORING_DRIVER=1` | `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED=true` and `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | The URL uses the LOGIN role `tc_gate_driver_login` on the local `tracecommons` database. Reads `tc-staging-db-gate-driver-password`, which must exist, or the render refuses. Any value but `1` refuses. |
+| `TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | A non-negative decimal. Replaces the pilot template's `0`; the rendered file holds one value. |
+| `TC_NOVELTY_UTILITY_SETTLE_FROM` | `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` | An RFC 3339 UTC time such as `2026-11-01T00:00:00Z`. Required when the delta is above 0; only awards written at or after it settle. Written only when the delta is above 0. |
+
+With a delta above 0 the render also writes
+`TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true`, and refuses
+without the cut-over, mirroring the ingest's boot refusals
+(`novelty_utility_credit_requires_production_gate`,
+`novelty_utility_settle_from_missing`, `novelty_utility_settle_from_invalid`).
+The award is settlement-eligible: a delta above 0 is paid at the next live
+settlement run (`docs/operator/env-reference.md`).
+
+Create the driver's role once, after the first boot and the migrations
+(`docs/operator/perplexity-scoring-driver.md`), the password reaching `psql`
+on stdin as in step 6:
+
+```bash
+pw="$(gcloud secrets versions access latest --secret tc-staging-db-gate-driver-password \
+  --project tracecommons-pilot-2026)"
+{ printf '\\set pw %s\n' "'$pw'"; cat <<'SQL'
+CREATE ROLE tc_gate_driver_login LOGIN NOBYPASSRLS PASSWORD :'pw';
+GRANT trace_gate_driver TO tc_gate_driver_login;
+SQL
+} | PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
+      --project tracecommons-pilot-2026)" \
+    psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1
+unset pw
+```
+
+Then rerun step 4 with, for example, `TC_SCORING_DRIVER=1`,
+`TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=<points>` and
+`TC_NOVELTY_UTILITY_SETTLE_FROM=<time>`, and restart the ingest. The driver
+issues its award as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`; with
+`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` set and that
+issuer unset or unlisted, every award is withheld as `central_issuer_denied`.
 
 ## Not here yet
 
