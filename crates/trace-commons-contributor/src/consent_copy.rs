@@ -4066,10 +4066,7 @@ mod payout_link_copy_tests {
         // The section's line when the account session is gone, instead of
         // hiding: a sentence on its own, naming no org, distinct from the
         // NEAR AI sign-in line.
-        assert_eq!(
-            copy.session_ended,
-            "Sign in again"
-        );
+        assert_eq!(copy.session_ended, "Sign in again");
         assert_ne!(copy.session_ended, copy.sign_in);
         assert!(!copy.session_ended.contains("{org_name}"));
     }
