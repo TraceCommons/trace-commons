@@ -614,8 +614,8 @@ private struct HomeCardRows<Item: Identifiable, Words: View, Tag: View>: View {
     }
 }
 
-/// History, in Ron's #1146 order, in the left pane: his page description,
-/// the three stat cards, community standing, every contribution from this
+/// History, in Ron's #1146 order, in the left pane: the three stat cards,
+/// community standing, every contribution from this
 /// machine under SUBMISSIONS, grouped by PROJECT, with Open and Withdraw on
 /// its row, the credit record, and what is held for privacy review (apart,
 /// never as rejected). The record by period, which #1146 has no place for,
@@ -637,12 +637,6 @@ private struct HistoryPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                if let words {
-                    Text(words.historyDescription)
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 // A failed rollup read says so; the cells it feeds
                 // read a dash, never the store's earlier counts.
                 if let failure = store.failures["history_rollup"] {
@@ -681,22 +675,13 @@ private struct HistoryPage: View {
         SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
     }
 
-    /// Ron's SUBMISSIONS eyebrow over "Contribution history", with the
-    /// refresh control beside them. Without the core's words, History's own
-    /// word alone.
+    /// One section heading with its refresh control beside it.
     private var submissionsHeader: some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                Text(words?.submissions ?? MonitorWords.history)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
-                if let words {
-                    Text(words.contributionHistory)
-                        .glassType(GlassTokens.TypeScale.title)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .accessibilityAddTraits(.isHeader)
-                }
-            }
+        HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+            Text(words?.submissions ?? MonitorWords.history)
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             refresh
         }

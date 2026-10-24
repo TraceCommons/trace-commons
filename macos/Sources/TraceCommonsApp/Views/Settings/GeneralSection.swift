@@ -40,8 +40,7 @@ struct GeneralSection: View {
         }
     }
 
-    /// The edge rail, under the Desktop eyebrow the Startup section's system
-    /// integrations card uses.
+    /// The edge rail and its discovery tutorial.
     @ViewBuilder
     private var edgeRailCard: some View {
         if let rail = MonitorWords.table?.edgeRail {

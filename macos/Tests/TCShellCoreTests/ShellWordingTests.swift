@@ -81,7 +81,7 @@ final class ShellWordingTests: XCTestCase {
         // the What's in it and Permissions tabs, which nothing drew any
         // more, were deleted (their facts are the session card's). Then
         // 14 -> 13: Ron's glass search field states its prompt once.
-        "TraceCommonsApp/Views/PreviewSheet.swift": 9,
+        "TraceCommonsApp/Views/PreviewSheet.swift": 6,
         // Lowered from 46 at #1146 parity (2026-10-07): the profile's words are
         // the core's (`shell_words_copy`). What is left is
         // `PublicProfileCopyCheck`'s defect lines, which name a broken
