@@ -125,6 +125,38 @@ Include:
 
 - The app's status label.
 - The time it happened.
+- If you were signed out, or Sign in again did not work: the account-session
+  renewal log, below.
+
+### The account-session renewal log
+
+The app renews its 12-hour commons session by itself, and the person's Sign
+in again runs the same step. Each attempt adds one line to
+`account-session-renewal.jsonl` in the data folder (the last 200 are kept):
+
+```bash
+cat ~/Library/Application\ Support/trace-commons-staging/account-session-renewal.jsonl
+```
+
+(`~/Library/Application Support/trace-commons/` for the production app.)
+Each line has `at`, `trigger` (`automatic` or `sign_in`), `outcome`
+(`renewed` or `failed`) and, on a failure, `failure`, one of:
+
+| `failure` | Meaning |
+| --- | --- |
+| `near_ai_sign_in_required` | NEAR AI refused the stored login. Sign in again signs in to NEAR AI first. |
+| `near_ai_unavailable` | NEAR AI could not be reached or answered something else. |
+| `commons_start_failed` | The commons refused or did not answer the ceremony's start. |
+| `commons_refused` | The commons refused the ceremony's finish. |
+| `commons_answer_mismatch` | The commons answered for another account or tenant; nothing was stored. |
+| `commons_address_refused` | The enrolled commons address failed the signup allowlist. |
+| `local_check_failed` | A local check refused the ceremony or its answer (for example a clock far off). |
+| `storage_unavailable` | The session could not be stored. |
+| `unavailable` | Anything else. |
+
+The lines carry no token, URL, account id or tenant, so the file is safe to
+send. `account_session_status` reports the same class as `renewal_failure`
+while the 10-minute retry wait holds.
 
 Do not send a trace body, a key, an organization id or a screenshot of a real
 session.

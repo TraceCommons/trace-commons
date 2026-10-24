@@ -645,13 +645,48 @@ fn passkey_state(store: &ConfigStore, state: &str, near_ai_connected: Option<boo
 /// session is read only, never presented to the commons, so a poll rotates
 /// nothing; an expired one renews once, and a refused renewal is not tried
 /// again for the same record and login for its backoff.
+///
+/// Never waits long for a renewal: past `READ_WAIT` it answers
+/// `renewal: "renewing"` and the renewal finishes on its own. A refused one
+/// answers `renewal: "failed"` with its class (`renewal_failure`), and
+/// `sign_in: "near_ai"` says Sign in again (`near_ai_account_sign_in`) is
+/// this account's way back.
 async fn status(shared: &DaemonShared) -> Value {
-    match super::account_session_renewal::account_session_live(shared).await {
-        Ok(Some(loaded)) => {
-            json!({"state":"known","signed_in":true,"expires_at":loaded.session.expires_at})
+    use super::account_session_renewal as renewal;
+    let sign_in = renewal::near_ai_enrolled(shared).then_some("near_ai");
+    match renewal::account_session_for_read(shared).await {
+        Ok((Some(loaded), _)) => json!({
+            "state": "known",
+            "signed_in": true,
+            "expires_at": loaded.session.expires_at,
+            "renewal": null,
+            "renewal_failure": null,
+            "sign_in": sign_in,
+        }),
+        Ok((None, renewing)) => {
+            let failure = (!renewing).then(|| renewal::last_failure(shared)).flatten();
+            let state = if renewing {
+                Some("renewing")
+            } else {
+                failure.map(|_| "failed")
+            };
+            json!({
+                "state": "known",
+                "signed_in": false,
+                "expires_at": null,
+                "renewal": state,
+                "renewal_failure": failure,
+                "sign_in": sign_in,
+            })
         }
-        Ok(None) => json!({"state":"known","signed_in":false,"expires_at":null}),
-        Err(_) => json!({"state":"unknown","signed_in":null,"expires_at":null}),
+        Err(_) => json!({
+            "state": "unknown",
+            "signed_in": null,
+            "expires_at": null,
+            "renewal": null,
+            "renewal_failure": null,
+            "sign_in": sign_in,
+        }),
     }
 }
 async fn sign_out(shared: &DaemonShared) -> Result<Value> {

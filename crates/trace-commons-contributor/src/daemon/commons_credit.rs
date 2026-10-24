@@ -89,7 +89,11 @@ pub(super) async fn handle_commons_credit_summary(
     let posture = crate::commons_credit::fetch_settlement_posture(&shared.store, &cfg).await;
     let mut credential_persisted = true;
     let mut session_required = false;
-    let points = match super::account_session_renewal::account_session_live(shared).await {
+    // A status read: renewed in the background, waited for briefly.
+    let points = match super::account_session_renewal::account_session_for_read(shared)
+        .await
+        .map(|(session, _)| session)
+    {
         Ok(Some(mut session)) => {
             let call = crate::commons_credit::call_credit_summary(
                 &cfg.ingest_url,
@@ -132,6 +136,14 @@ fn cached(key: &PathBuf) -> Option<serde_json::Value> {
     let cache = cache().lock().ok()?;
     let (at, ttl, value) = cache.get(key)?;
     (at.elapsed() < *ttl).then(|| value.clone())
+}
+
+/// Drop `dir`'s cached summary: the account session changed (a renewal or
+/// Sign in again), so a "sign in" answer cached a moment ago is stale.
+pub(crate) fn forget(dir: &std::path::Path) {
+    if let Ok(mut cache) = cache().lock() {
+        cache.remove(dir);
+    }
 }
 
 fn remember(key: PathBuf, ttl: Duration, value: &serde_json::Value) {

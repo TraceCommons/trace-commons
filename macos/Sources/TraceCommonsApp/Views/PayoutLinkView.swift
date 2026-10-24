@@ -23,15 +23,31 @@ struct PayoutLinkView: View {
                 }
             } else if let surface = model.surface, let refusal = model.statusRefusal {
                 GlassEyebrowCard(surface.copy.title) {
-                    Text(surface.refusalLine(refusal))
-                        .glassType(GlassTokens.TypeScale.body)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if refusal == .sessionEnded {
+                        // The session ended: the line is the action
+                        // (owner: "It should just say Sign in again").
+                        Button(surface.refusalLine(refusal)) {
+                            Task {
+                                await app.signInToAccount()
+                                await model.refresh()
+                            }
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(app.accountSigningIn)
+                    } else {
+                        Text(surface.refusalLine(refusal))
+                            .glassType(GlassTokens.TypeScale.body)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }
         .task(id: app.payoutLinkDaemonClient.map(ObjectIdentifier.init)) {
             model.attach(app.payoutLinkDaemonClient)
             await model.refresh()
+        }
+        .onChange(of: app.accountSessionGeneration) {
+            Task { await model.refresh() }
         }
     }
 

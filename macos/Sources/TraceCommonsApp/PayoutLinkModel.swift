@@ -38,9 +38,9 @@ final class PayoutLinkModel: ObservableObject {
             statusRefusal = nil
             return
         }
-        let result = await Task.detached(priority: .userInitiated) {
+        let result = await DaemonWork.run {
             Result { try client.payoutLink.status() }
-        }.value
+        }
         switch result {
         case .success(let rails):
             rail = PayoutLinkSurface.nearAiRail(in: rails)
@@ -61,18 +61,18 @@ final class PayoutLinkModel: ObservableObject {
 
     private func reloadStatusForNames() async {
         guard let client else { return }
-        let result = await Task.detached(priority: .userInitiated) {
+        let result = await DaemonWork.run {
             Result { try client.payoutLink.status() }
-        }.value
+        }
         if case .success(let rails) = result { rail = PayoutLinkSurface.nearAiRail(in: rails) }
     }
 
     func loadOrganizations() async {
         guard let client, !busy else { return }
         picker.beginLoading()
-        let result = await Task.detached(priority: .userInitiated) {
+        let result = await DaemonWork.run {
             Result { try client.payoutLink.organizations() }
-        }.value
+        }
         switch result {
         case .success(let listing):
             refusal = nil
@@ -112,7 +112,7 @@ final class PayoutLinkModel: ObservableObject {
         busy = true
         defer { busy = false }
         let version = rail.version
-        let result = await Task.detached(priority: .userInitiated) {
+        let result = await DaemonWork.run {
             Result {
                 let link = client.payoutLink
                 try link.startLink(
@@ -120,7 +120,7 @@ final class PayoutLinkModel: ObservableObject {
                     orgsRevision: revision, expectedVersion: version)
                 try link.confirmLink(railId: PayoutLinkSurface.nearAiRailId, organizationId: org.id)
             }
-        }.value
+        }
         await finish(result)
     }
 
@@ -131,13 +131,13 @@ final class PayoutLinkModel: ObservableObject {
         busy = true
         defer { busy = false }
         let version = rail.version
-        let result = await Task.detached(priority: .userInitiated) {
+        let result = await DaemonWork.run {
             Result {
                 let link = client.payoutLink
                 try link.startUnlink(railId: PayoutLinkSurface.nearAiRailId, expectedVersion: version)
                 try link.confirmUnlink(railId: PayoutLinkSurface.nearAiRailId)
             }
-        }.value
+        }
         await finish(result)
     }
 

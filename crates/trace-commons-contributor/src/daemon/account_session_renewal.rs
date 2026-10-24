@@ -41,10 +41,41 @@
 //! counts against the commons' provisioning rate limit. Signing in to NEAR
 //! AI again lifts the wait.
 //!
+//! # Never waited for by a read
+//!
+//! A ceremony is three HTTPS calls, each allowed 30 seconds. The status
+//! reads the app makes on every screen (`account_session_status`,
+//! `payout_rails_status`, `commons_credit_summary`,
+//! `activity_missions_status`) used to wait for all of it, and a renewal
+//! that stalled held each of them as long. On a running daemon they now
+//! start the renewal on the daemon's own runtime ([`account_session_for_read`])
+//! and wait at most [`READ_WAIT`]: a quick renewal is reported by the read
+//! that started it, a slow one answers `renewing` and finishes on its own.
+//! Actions (withdraw, payout link changes, publish) still wait: they were
+//! asked for by a click and can show their own progress.
+//!
+//! # Failure classes and the log
+//!
+//! Every attempt that reaches the ceremony is classified ([`classify`]) into
+//! a fixed label and appended to [`RENEWAL_LOG_FILE`] in the state
+//! directory, label only: when, what triggered it, renewed or failed, and
+//! the class. `near_ai_sign_in_required` is the one a person acts on: NEAR
+//! AI refused the stored login (spent, revoked, or bound to another agent),
+//! and no retry can fix it; the app offers Sign in again, which signs in to
+//! NEAR AI first.
+//!
+//! # Sign in again
+//!
+//! [`sign_in`] is the same ceremony run because the person asked
+//! (`near_ai_account_sign_in`): the backoff does not apply, and it also
+//! signs in a NEAR AI account whose record is absent -- after a sign-out, a
+//! NEAR AI-only contributor had no other way back short of unenrolling.
+//!
 //! # Not renewed
 //!
-//! - **An absent record.** Sign-out removes it; the person left, and is not
-//!   signed back in behind their back.
+//! - **An absent record**, automatically. Sign-out removes it; the person
+//!   left, and is not signed back in behind their back. Only [`sign_in`]
+//!   signs them in.
 //! - **Any other tenant**, including a passkey account: it signs in again
 //!   with its passkey.
 
@@ -64,12 +95,41 @@ use crate::identity::DeviceIdentity;
 /// How long a failed renewal of one stored record waits before the next.
 pub(super) const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 
-/// One renewal at a time, across every store this process serves.
-static RENEWING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// How long a status read waits for a renewal it started (module doc).
+pub(crate) const READ_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(1_000)
+} else {
+    Duration::from_secs(2)
+};
 
-/// Per state directory: the [`attempt_key`] a renewal last failed for, and
-/// when.
-static FAILED: Mutex<Option<HashMap<PathBuf, (String, Instant)>>> = Mutex::new(None);
+/// The renewal log, in the state directory (module doc). JSON lines.
+pub const RENEWAL_LOG_FILE: &str = "account-session-renewal.jsonl";
+
+/// The renewal log's ceiling, in lines; the oldest go first.
+const RENEWAL_LOG_LINES: usize = 200;
+
+/// The class [`classify`] gives a refusal of the stored NEAR AI login.
+pub const FAILURE_NEAR_AI_SIGN_IN_REQUIRED: &str = "near_ai_sign_in_required";
+
+/// Per state directory: one renewal at a time, so the reads that arrive
+/// together renew once.
+static RENEWING: Mutex<Option<HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    Mutex::new(None);
+
+fn renewing(dir: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    std::sync::Arc::clone(
+        RENEWING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .entry(dir.to_path_buf())
+            .or_default(),
+    )
+}
+
+/// Per state directory: the [`attempt_key`] a renewal last failed for, its
+/// class, and when.
+static FAILED: Mutex<Option<HashMap<PathBuf, (String, &'static str, Instant)>>> = Mutex::new(None);
 
 /// Where a renewal's calls go: NEAR AI for the token exchange and the
 /// enrolled commons for the ceremony.
@@ -126,7 +186,8 @@ pub(super) async fn account_session(
     let Some(via) = via else {
         return Ok(None);
     };
-    let _turn = RENEWING.lock().await;
+    let turn = renewing(shared.store.dir());
+    let _turn = turn.lock().await;
     // Renewed by another call while this one waited.
     if let Some(session) = super::withdraw::account_session(shared)? {
         return Ok(Some(session));
@@ -136,6 +197,260 @@ pub(super) async fn account_session(
     } else {
         Ok(None)
     }
+}
+
+/// [`account_session_live`] for a read that must answer quickly (module
+/// doc, "Never waited for by a read"): `(session, renewing)`, where
+/// `renewing` says a renewal is still running after [`READ_WAIT`]. Without
+/// a daemon runtime to run it on (a test or a one-shot command) the renewal
+/// runs inline, as before.
+pub(crate) async fn account_session_for_read(
+    shared: &DaemonShared,
+) -> anyhow::Result<(Option<LoadedAccountSession>, bool)> {
+    if let Some(session) = super::withdraw::account_session(shared)? {
+        return Ok((Some(session), false));
+    }
+    if !may_renew(shared) {
+        return Ok((None, false));
+    }
+    let Some(task) = shared.spawn_detached(|shared| async move {
+        let _ = account_session_live(&shared).await;
+    }) else {
+        return account_session_live(shared)
+            .await
+            .map(|session| (session, false));
+    };
+    // Dropping the handle on the deadline leaves the task running.
+    let finished = tokio::time::timeout(READ_WAIT, task).await.is_ok();
+    let session = super::withdraw::account_session(shared)?;
+    Ok((session.clone(), session.is_none() && !finished))
+}
+
+/// Whether an automatic renewal could be attempted at all, from local
+/// reads only: a `nearai-` enrollment with a stored (expired) record, a
+/// retained NEAR AI login, and no refusal for this record and login inside
+/// the backoff. Checked so a read that cannot renew spawns nothing.
+fn may_renew(shared: &DaemonShared) -> bool {
+    near_ai_enrolled(shared)
+        && shared
+            .settings
+            .lock()
+            .map(|settings| settings.near_ai_session.is_some())
+            .unwrap_or(false)
+        && matches!(
+            commons_credentials::load(&shared.store, Kind::Account),
+            Ok(Some(raw)) if !recently_failed(shared.store.dir(), &attempt_key(shared, &raw))
+        )
+}
+
+/// Whether this device is enrolled in a `nearai-` tenant: the accounts
+/// [`sign_in`] can sign in.
+pub(crate) fn near_ai_enrolled(shared: &DaemonShared) -> bool {
+    matches!(
+        shared.store.load_config(),
+        Ok(Some(cfg)) if super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
+    )
+}
+
+/// The class of the last refused renewal of the stored record and NEAR AI
+/// login, while its backoff holds. `None` after a renewal, a new NEAR AI
+/// sign-in, or the backoff.
+pub(crate) fn last_failure(shared: &DaemonShared) -> Option<&'static str> {
+    let raw = commons_credentials::load(&shared.store, Kind::Account)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let key = attempt_key(shared, &raw);
+    let failed = FAILED.lock().unwrap_or_else(PoisonError::into_inner);
+    failed
+        .as_ref()
+        .and_then(|by_dir| by_dir.get(shared.store.dir()))
+        .filter(|(digest, _, at)| *digest == key && at.elapsed() < RETRY_AFTER)
+        .map(|(_, class, _)| *class)
+}
+
+/// Sign in again: the ceremony run because the person asked (module doc).
+/// The backoff does not apply and an absent record is signed in. Refusals
+/// are fixed labels, `near_ai_sign_in_required` among them.
+pub(super) async fn sign_in(
+    shared: &DaemonShared,
+    via: &RenewVia<'_>,
+) -> Result<LoadedAccountSession, &'static str> {
+    let turn = renewing(shared.store.dir());
+    let _turn = turn.lock().await;
+    let store = &shared.store;
+    let Ok(Some(cfg)) = store.load_config() else {
+        return Err("near_ai_sign_in_not_enrolled");
+    };
+    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) {
+        return Err("near_ai_sign_in_not_near_ai_account");
+    }
+    if let Ok(Some(session)) = super::withdraw::account_session(shared) {
+        return Ok(session);
+    }
+    let Ok(Some(identity)) = DeviceIdentity::load(store) else {
+        return Err("near_ai_sign_in_not_enrolled");
+    };
+    if shared
+        .settings
+        .lock()
+        .map(|settings| settings.near_ai_session.is_none())
+        .unwrap_or(true)
+    {
+        // Nothing to present: the shell signs in to NEAR AI first.
+        return Err(FAILURE_NEAR_AI_SIGN_IN_REQUIRED);
+    }
+    let Ok(loaded) =
+        super::run_blocking(|| commons_credentials::load_with_snapshot(store, Kind::Account))
+    else {
+        return Err("commons_credential_storage_unavailable");
+    };
+    let (raw, previous, expected) = match loaded {
+        Some((raw, expected)) => {
+            let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+                return Err("near_ai_sign_in_unavailable");
+            };
+            (raw, Some(previous), expected)
+        }
+        None => {
+            let Ok(expected) = commons_credentials::snapshot(store, Kind::Account) else {
+                return Err("commons_credential_storage_unavailable");
+            };
+            (Vec::new(), None, expected)
+        }
+    };
+    let result = match via.commons(&cfg) {
+        Ok(commons) => {
+            super::nearai_onboarding::renew_account_session(
+                shared, via.api, &commons, &cfg, &identity, previous, expected,
+            )
+            .await
+        }
+        Err(_) => Err(anyhow::anyhow!("near_ai_enroll_endpoint_refused")),
+    };
+    match result {
+        Ok(()) => {
+            record(shared, Trigger::SignIn, None);
+            clear_failed(store.dir());
+            super::commons_credit::forget(store.dir());
+            super::withdraw::account_session(shared)
+                .ok()
+                .flatten()
+                .ok_or("near_ai_sign_in_unavailable")
+        }
+        Err(error) => {
+            let class = classify(&error);
+            record(shared, Trigger::SignIn, Some(class));
+            failed(store.dir(), attempt_key(shared, &raw), class);
+            Err(match class {
+                FAILURE_NEAR_AI_SIGN_IN_REQUIRED => FAILURE_NEAR_AI_SIGN_IN_REQUIRED,
+                _ => "near_ai_sign_in_unavailable",
+            })
+        }
+    }
+}
+
+/// `near_ai_account_sign_in` against the live NEAR AI service (a test's
+/// stub under `cfg(test)`, as for [`account_session_live`]).
+pub(crate) async fn sign_in_live(
+    shared: &DaemonShared,
+) -> Result<LoadedAccountSession, &'static str> {
+    #[cfg(test)]
+    {
+        let Some(origin) = test_route(&shared.store) else {
+            return Err("near_ai_sign_in_unavailable");
+        };
+        let api = CloudApi::for_test(&origin).map_err(|_| "near_ai_sign_in_unavailable")?;
+        let commons = super::native_identity::client(&origin, "unauthenticated")
+            .map_err(|_| "near_ai_sign_in_unavailable")?;
+        sign_in(shared, &RenewVia::at(&api, commons)).await
+    }
+    #[cfg(not(test))]
+    {
+        let api = CloudApi::live().map_err(|_| "near_ai_sign_in_unavailable")?;
+        sign_in(shared, &RenewVia::live(&api)).await
+    }
+}
+
+/// A renewal failure's fixed class, from the control name the ceremony
+/// failed with. Never the error's text: the errors underneath can quote a
+/// remote body.
+pub(crate) fn classify(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "near_ai_enroll_near_ai_sign_in_required" | "near_ai_enroll_no_session" => {
+            FAILURE_NEAR_AI_SIGN_IN_REQUIRED
+        }
+        // NEAR AI unreachable, timed out, or answering something other
+        // than a refusal of the login.
+        "near_ai_enroll_token_unavailable" => "near_ai_unavailable",
+        "near_ai_enroll_start_failed" => "commons_start_failed",
+        "near_ai_enroll_verification_failed" => "commons_refused",
+        "near_ai_enroll_endpoint_refused" => "commons_address_refused",
+        "account-enrollment-mismatch" => "commons_answer_mismatch",
+        // The device proof (a ceremony window this clock refuses) or the
+        // commons's answer failed a local check.
+        "near_ai_enroll_invalid" => "local_check_failed",
+        "commons_credential_worker_unavailable" => "storage_unavailable",
+        _ => "unavailable",
+    }
+}
+
+/// What started an attempt, for the log.
+#[derive(Clone, Copy)]
+enum Trigger {
+    /// A feature or status read, or the supervisor's pass.
+    Automatic,
+    /// The person's Sign in again.
+    SignIn,
+}
+
+/// Append one label-only line to [`RENEWAL_LOG_FILE`], and the same to
+/// `tracing`. Best effort: a renewal is not refused for want of a log line.
+fn record(shared: &DaemonShared, trigger: Trigger, failure: Option<&'static str>) {
+    let trigger = match trigger {
+        Trigger::Automatic => "automatic",
+        Trigger::SignIn => "sign_in",
+    };
+    let outcome = if failure.is_some() {
+        "failed"
+    } else {
+        "renewed"
+    };
+    match failure {
+        None => tracing::info!(target: "account_session", trigger, "account_session_renewed"),
+        Some(failure) => tracing::warn!(
+            target: "account_session",
+            trigger,
+            failure,
+            "account_session_renewal_failed"
+        ),
+    }
+    let line = serde_json::json!({
+        "at": chrono::Utc::now(),
+        "trigger": trigger,
+        "outcome": outcome,
+        "failure": failure,
+    });
+    let store = &shared.store;
+    let mut lines: Vec<String> = store
+        .read_daemon_file(RENEWAL_LOG_FILE)
+        .ok()
+        .flatten()
+        .and_then(|body| String::from_utf8(body).ok())
+        .map(|text| {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(line.to_string());
+    if lines.len() > RENEWAL_LOG_LINES {
+        lines.drain(..lines.len() - RENEWAL_LOG_LINES);
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let _ = store.write_daemon_file(RENEWAL_LOG_FILE, body.as_bytes());
 }
 
 /// [`account_session`] against the live NEAR AI service: the entry point
@@ -258,23 +573,31 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     let renewed = match via.commons(&cfg) {
         Ok(commons) => {
             super::nearai_onboarding::renew_account_session(
-                shared, via.api, &commons, &cfg, &identity, previous, expected,
+                shared,
+                via.api,
+                &commons,
+                &cfg,
+                &identity,
+                Some(previous),
+                expected,
             )
             .await
         }
-        Err(error) => Err(error),
+        Err(_) => Err(anyhow::anyhow!("near_ai_enroll_endpoint_refused")),
     };
     match renewed {
         Ok(()) => {
-            tracing::info!(target: "account_session", "account_session_renewed");
+            record(shared, Trigger::Automatic, None);
+            super::commons_credit::forget(store.dir());
             true
         }
-        Err(_) => {
+        Err(error) => {
             // Label only: the errors underneath can quote a remote body.
-            tracing::warn!(target: "account_session", "account_session_renewal_failed");
+            let class = classify(&error);
+            record(shared, Trigger::Automatic, Some(class));
             // Keyed after the attempt, so the NEAR AI rotation it made is
             // the login a retry would present.
-            failed(store.dir(), attempt_key(shared, &raw));
+            failed(store.dir(), attempt_key(shared, &raw), class);
             false
         }
     }
@@ -303,15 +626,25 @@ fn recently_failed(dir: &std::path::Path, record: &str) -> bool {
     failed
         .as_ref()
         .and_then(|by_dir| by_dir.get(dir))
-        .is_some_and(|(digest, at)| digest == record && at.elapsed() < RETRY_AFTER)
+        .is_some_and(|(digest, _, at)| digest == record && at.elapsed() < RETRY_AFTER)
 }
 
-fn failed(dir: &std::path::Path, record: String) {
+fn failed(dir: &std::path::Path, record: String, class: &'static str) {
     FAILED
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
-        .insert(dir.to_path_buf(), (record, Instant::now()));
+        .insert(dir.to_path_buf(), (record, class, Instant::now()));
+}
+
+fn clear_failed(dir: &std::path::Path) {
+    if let Some(by_dir) = FAILED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+    {
+        by_dir.remove(dir);
+    }
 }
 
 #[cfg(test)]

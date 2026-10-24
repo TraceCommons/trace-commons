@@ -57,6 +57,23 @@ public enum NearAILoginPoll: Equatable, Sendable {
         guard let attempt = status.attemptStatus else { return .waiting }
         return attempt == waitingForBrowser ? .waiting : .ended
     }
+
+    /// The ceremony's word for an attempt that stored its session.
+    public static let complete = "complete"
+
+    /// For a sign-in begun while a session is kept, because NEAR AI refused
+    /// that session (Sign in again's `near_ai_sign_in_required`). The kept
+    /// session says nothing about this attempt, so only the attempt's own
+    /// word counts: `complete` is signed in, waiting or unread waits, any
+    /// other word is over.
+    public static func freshVerdict(_ status: CredentialStatus?) -> NearAILoginPoll {
+        guard let attempt = status?.attemptStatus else { return .waiting }
+        switch attempt {
+        case complete: return .signedIn
+        case waitingForBrowser: return .waiting
+        default: return .ended
+        }
+    }
 }
 
 /// Where the first run commits answers to the daemon.

@@ -43,6 +43,10 @@ struct Commons {
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
+    /// What NEAR AI answers the token exchange with: 200 unless set.
+    refresh_status: Mutex<u16>,
+    /// How long the commons takes to answer the start, in milliseconds.
+    start_delay_ms: Mutex<u64>,
     /// The bearer each payout status read presented.
     status_bearers: Mutex<Vec<String>>,
     /// Every other account route asked, with the bearer it was asked with.
@@ -73,6 +77,8 @@ async fn spawn(device_public_key: String) -> Stub {
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
+        refresh_status: Mutex::new(200),
+        start_delay_ms: Mutex::new(0),
         status_bearers: Mutex::new(Vec::new()),
         feature_calls: Mutex::new(Vec::new()),
         device_public_key,
@@ -87,11 +93,20 @@ async fn spawn(device_public_key: String) -> Stub {
                 move || async move {
                     let mut n = state.refreshes.lock().unwrap();
                     *n += 1;
-                    Json(json!({
-                        "access_token": format!("near-access-{n}"),
-                        "refresh_token": format!("rt-synthetic-rotated-{n}"),
-                        "refresh_token_expiration": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-                    }))
+                    let status = *state.refresh_status.lock().unwrap();
+                    if status != 200 {
+                        // NEAR AI's refusal of a spent, revoked or
+                        // agent-mismatched refresh token: a bare status.
+                        return (StatusCode::from_u16(status).unwrap(), Json(json!({})));
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "access_token": format!("near-access-{n}"),
+                            "refresh_token": format!("rt-synthetic-rotated-{n}"),
+                            "refresh_token_expiration": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                        })),
+                    )
                 }
             }),
         )
@@ -101,6 +116,10 @@ async fn spawn(device_public_key: String) -> Stub {
                 let (state, challenge) = (Arc::clone(&state), Arc::clone(&challenge));
                 move |Json(body): Json<Value>| async move {
                     *state.starts.lock().unwrap() += 1;
+                    let delay = *state.start_delay_ms.lock().unwrap();
+                    if delay > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
                     assert_eq!(body["device_public_key"], state.device_public_key.as_str());
                     *challenge.lock().unwrap() = body["code_challenge"].as_str().unwrap().into();
                     Json(json!({
@@ -367,6 +386,40 @@ impl Fixture {
             .filter(|(path, _)| path.starts_with(prefix))
             .map(|(_, bearer)| bearer.clone())
             .collect()
+    }
+
+    /// As the running daemon is: a request can start work that outlives
+    /// it, on the daemon's own runtime.
+    fn as_running_daemon(&self) {
+        self.shared.adopt_runtime();
+        self.shared.adopt_self();
+    }
+
+    fn refuse_near_ai_login(&self) {
+        *self.stub.state.refresh_status.lock().unwrap() = 401;
+    }
+
+    fn renewal_log_text(&self) -> String {
+        self.shared
+            .store
+            .read_daemon_file(RENEWAL_LOG_FILE)
+            .unwrap()
+            .map(|body| String::from_utf8(body).unwrap())
+            .unwrap_or_default()
+    }
+
+    fn renewal_log(&self) -> Vec<Value> {
+        self.renewal_log_text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    async fn status(&self) -> Value {
+        self.call("account_session_status", json!({}))
+            .await
+            .result
+            .expect("status answered")
     }
 
     fn enable_missions(&self) {
@@ -757,4 +810,243 @@ async fn the_admission_read_asks_for_a_renewal_when_it_finds_no_session() {
         !fx.shared.account_admission.take_session_missing(),
         "taken once"
     );
+}
+
+// The staging failure (2026-10-24): an expired session on a NEAR AI
+// account, the NEAR AI login still stored, and NEAR AI refusing it. The
+// commons saw a start and never a finish, and nothing on the Mac said why.
+
+#[tokio::test]
+async fn a_refused_near_ai_login_stops_after_the_start_and_asks_for_a_near_ai_sign_in() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.refuse_near_ai_login();
+
+    let payout = fx.payout_status().await;
+
+    assert_eq!(refusal(&payout), Some("account-session-required"));
+    assert_eq!(
+        fx.ceremonies(),
+        (1, 0),
+        "start answered, finish never sent: what the staging commons logged"
+    );
+    let status = fx.status().await;
+    assert_eq!(status["signed_in"], false);
+    assert_eq!(status["renewal"], "failed");
+    assert_eq!(status["renewal_failure"], "near_ai_sign_in_required");
+    assert_eq!(status["sign_in"], "near_ai");
+    assert_eq!(fx.ceremonies(), (1, 0), "not retried silently");
+    let log = fx.renewal_log();
+    assert_eq!(log.len(), 1, "one attempt, one line");
+    assert_eq!(log[0]["outcome"], "failed");
+    assert_eq!(log[0]["failure"], "near_ai_sign_in_required");
+    assert_eq!(log[0]["trigger"], "automatic");
+    assert!(log[0]["at"].is_string());
+}
+
+#[tokio::test]
+async fn each_failure_is_logged_by_its_class_and_never_by_its_secrets() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+
+    let _ = fx.payout_status().await;
+
+    assert_eq!(fx.ceremonies(), (1, 1));
+    let log = fx.renewal_log();
+    assert_eq!(log[0]["failure"], "commons_refused");
+    let text = fx.renewal_log_text();
+    for secret in [
+        "rt-synthetic",
+        "near-access-",
+        "tcn1_",
+        ACCOUNT,
+        fx.stub.origin.as_str(),
+        tenant().as_str(),
+    ] {
+        assert!(!text.contains(secret), "the renewal log carries {secret}");
+    }
+}
+
+#[tokio::test]
+async fn a_renewal_is_logged_when_it_succeeds() {
+    let fx = Fixture::new(Session::Expired).await;
+
+    assert_eq!(refusal(&fx.payout_status().await), None);
+
+    let log = fx.renewal_log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["outcome"], "renewed");
+    assert!(log[0]["failure"].is_null());
+}
+
+// The freeze: the status read waited on the whole ceremony.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_renewal_does_not_hold_the_status_read() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.as_running_daemon();
+    *fx.stub.state.start_delay_ms.lock().unwrap() = 6_000;
+
+    let mut reads = Vec::new();
+    for _ in 0..2 {
+        let started = std::time::Instant::now();
+        reads.push(fx.status().await);
+        let waited = started.elapsed();
+        // The read's own wait, plus slack for a loaded test machine; the
+        // renewal takes six seconds.
+        assert!(
+            waited < READ_WAIT + std::time::Duration::from_millis(1_500),
+            "a status read took {waited:?} behind a renewal"
+        );
+    }
+    for status in &reads {
+        assert_eq!(status["state"], "known");
+        assert_eq!(status["signed_in"], false);
+        assert_eq!(status["renewal"], "renewing");
+    }
+    // The renewal carries on without anyone waiting for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let status = fx.status().await;
+        if status["signed_in"] == true {
+            assert!(status["renewal"].is_null());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the renewal never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(fx.ceremonies(), (1, 1), "the reads started one renewal");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_renewal_does_not_hold_the_home_reads() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.as_running_daemon();
+    fx.enable_missions();
+    *fx.stub.state.start_delay_ms.lock().unwrap() = 6_000;
+
+    let started = std::time::Instant::now();
+    let (payout, credit, missions) = tokio::join!(
+        fx.call("payout_rails_status", json!({})),
+        fx.call("commons_credit_summary", json!({})),
+        fx.call("activity_missions_status", json!({})),
+    );
+    let waited = started.elapsed();
+
+    assert!(
+        waited < READ_WAIT + std::time::Duration::from_millis(1_500),
+        "the Home reads took {waited:?} behind a renewal"
+    );
+    assert_eq!(refusal(&payout), Some("account-session-required"));
+    assert_ne!(credit.result.as_ref().unwrap()["points_state"], "known");
+    assert_eq!(refusal(&missions), Some("account-session-required"));
+}
+
+// "No obvious way to sign in": Sign in again, for a NEAR AI account.
+
+async fn sign_in_again(fx: &Fixture) -> Response {
+    fx.call("near_ai_account_sign_in", json!({})).await
+}
+
+#[tokio::test]
+async fn sign_in_again_renews_even_during_the_backoff() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    *fx.stub.state.refuse.lock().unwrap() = false;
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), None);
+    let answer = response.result.unwrap();
+    assert_eq!(answer["signed_in"], true);
+    assert!(answer.get("access_token").is_none());
+    assert_eq!(fx.ceremonies(), (2, 2), "the person's click runs it again");
+    let status = fx.status().await;
+    assert_eq!(status["signed_in"], true);
+    assert!(
+        status["renewal"].is_null(),
+        "the earlier failure is cleared"
+    );
+    assert_eq!(fx.renewal_log().last().unwrap()["trigger"], "sign_in");
+}
+
+#[tokio::test]
+async fn sign_in_again_signs_a_signed_out_near_ai_account_in() {
+    let fx = Fixture::new(Session::Absent).await;
+    assert_eq!(fx.status().await["sign_in"], "near_ai");
+    let config_before = fx.config();
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), None);
+    assert_eq!(fx.ceremonies(), (1, 1));
+    let loaded = crate::account_auth::try_load_session_with_snapshot(&fx.shared.store)
+        .unwrap()
+        .expect("a session is stored");
+    assert_eq!(loaded.session.access_token, renewed_token());
+    assert_eq!(loaded.session.account_id, ACCOUNT);
+    assert_eq!(fx.config(), config_before, "the enrollment is untouched");
+}
+
+#[tokio::test]
+async fn sign_in_again_with_a_refused_near_ai_login_asks_for_a_near_ai_sign_in() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.refuse_near_ai_login();
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), Some("near_ai_sign_in_required"));
+    assert_eq!(fx.ceremonies(), (1, 0));
+    assert!(
+        crate::account_auth::try_load_session_with_snapshot(&fx.shared.store)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn sign_in_again_without_a_near_ai_login_asks_for_one_and_spends_nothing() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.shared.settings.lock().unwrap().near_ai_session = None;
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), Some("near_ai_sign_in_required"));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+#[tokio::test]
+async fn sign_in_again_is_not_offered_to_a_passkey_account() {
+    let fx = Fixture::with_tenant(Session::Expired, "tenant-passkey").await;
+
+    assert!(fx.status().await["sign_in"].is_null());
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(
+        refusal(&response),
+        Some("near_ai_sign_in_not_near_ai_account")
+    );
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+#[tokio::test]
+async fn enrolling_an_enrolled_device_is_still_refused() {
+    // Sign in again is the path back; enrollment stays a one-time step.
+    let fx = Fixture::new(Session::Expired).await;
+
+    let response = fx
+        .call(
+            "near_ai_account_enroll",
+            json!({"ingest_url": "https://commons.example"}),
+        )
+        .await;
+
+    assert_eq!(refusal(&response), Some("near_ai_enroll_already_enrolled"));
+    assert_eq!(fx.ceremonies(), (0, 0));
 }
