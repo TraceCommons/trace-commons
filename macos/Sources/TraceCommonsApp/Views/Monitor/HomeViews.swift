@@ -1518,11 +1518,12 @@ struct HomeAccountTiles: View {
 
     var body: some View {
         let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: MonitorWords.table?.homeHistory)
+        let signIn = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
                 HomeStatTile(label: HomeFormat.creditPendingWord,
                              value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
-                             detail: delta?.text, detailInk: delta?.ink,
+                             detail: signIn ?? delta?.text, detailInk: signIn == nil ? delta?.ink : nil,
                              systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
@@ -1676,6 +1677,20 @@ enum HomeFormat {
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
+    }
+
+    /// The payout link's "session ended" line from the core (the same
+    /// constant, not a string of this shell's); nil if the export did not
+    /// arrive.
+    static let creditSignInLine: String? = TCConsentCopy.payoutLinkCopyJSON()
+        .flatMap(PayoutLinkCopy.decode(fromJSON:))?.sessionEnded
+
+    /// The Credit tile's reason line: `line` when the commons' points are
+    /// unknown because no account session could be used or renewed, else
+    /// nil (the tile keeps its dash, as for every other unknown).
+    static func creditSignIn(_ credit: DaemonData.CommonsCreditSummary?, line: String?) -> String? {
+        guard credit?.accountSessionRequired == true, let line, !line.isEmpty else { return nil }
+        return line
     }
 
     /// Home's Credit tile value: total credit, or a dash when unknown.

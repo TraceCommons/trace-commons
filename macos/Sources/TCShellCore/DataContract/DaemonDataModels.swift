@@ -1378,6 +1378,9 @@ extension DaemonData {
         public let commonsSettlementExplanation: String?
         public let commonsGraded: Bool?
         public let pointsState: String
+        /// Why the points are unknown, when the person can act on it:
+        /// `account-session-required`. Absent from an older core.
+        public let pointsUnknownReason: String?
         public let commonsPointsEarnedThisPeriod: Int?
         public let commonsPointsLifetimeEarned: Int?
         public let commonsPendingReview: Int?
@@ -1394,6 +1397,7 @@ extension DaemonData {
             case commonsSettlementExplanation = "commons_settlement_explanation"
             case commonsGraded = "commons_graded"
             case pointsState = "points_state"
+            case pointsUnknownReason = "points_unknown_reason"
             case commonsPointsEarnedThisPeriod = "commons_points_earned_this_period"
             case commonsPointsLifetimeEarned = "commons_points_lifetime_earned"
             case commonsPendingReview = "commons_pending_review"
@@ -1407,6 +1411,11 @@ extension DaemonData {
 
         public var postureKnown: Bool { postureState == "known" }
         public var pointsKnown: Bool { pointsState == "known" }
+        /// The points are unknown because no account session could be used
+        /// or renewed on this Mac.
+        public var accountSessionRequired: Bool {
+            !pointsKnown && pointsUnknownReason == "account-session-required"
+        }
     }
 }
 
