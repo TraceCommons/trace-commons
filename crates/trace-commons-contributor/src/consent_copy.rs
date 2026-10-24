@@ -2522,8 +2522,9 @@ pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organiz
 /// DRAFT, NEEDS APPROVAL. Shown in place of the section when this device
 /// holds no usable Trace Commons account session and could not renew one
 /// (`account-session-required` from `payout_rails_status`). Before this the
-/// section hid itself, so a contributor could not tell it existed.
-pub const PAYOUT_LINK_SESSION_ENDED: &str = "Sign in again to choose where credit goes.";
+/// section hid itself, so a contributor could not tell it existed. Wording
+/// set by the owner, 2026-10-24: "It should just say Sign In again".
+pub const PAYOUT_LINK_SESSION_ENDED: &str = "Sign in again";
 /// DRAFT, NEEDS APPROVAL. The NEAR AI user owns no active organization.
 pub const PAYOUT_LINK_NO_ORGANIZATION: &str = "You don't own an active NEAR AI organization.";
 /// DRAFT, NEEDS APPROVAL. The org list changed after it was shown
@@ -4067,7 +4068,7 @@ mod payout_link_copy_tests {
         // NEAR AI sign-in line.
         assert_eq!(
             copy.session_ended,
-            "Sign in again to choose where credit goes."
+            "Sign in again"
         );
         assert_ne!(copy.session_ended, copy.sign_in);
         assert!(!copy.session_ended.contains("{org_name}"));
