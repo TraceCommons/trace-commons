@@ -1,3 +1,8 @@
 [workspace]
 members = ["src-tauri"]
 resolver = "2"
+
+# Narrow maintained backport for GTK 3 until Tauri can move to patched GTK 4
+# bindings. See vendor/glib/TRACE_COMMONS_BACKPORT.md for provenance and removal.
+[patch.crates-io]
+glib = { path = "vendor/glib" }
