@@ -81,6 +81,7 @@ nothing else.
 | `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role. 16 or more letters and digits; any other character refuses (see below) |
 | `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6. 16 or more letters and digits |
 | `tc-staging-nearai-reseller-key` | yes | yes, read only when payout is on | `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` | the reseller org's credential on NEAR AI staging |
+| `tc-staging-payout-control-token` | **no** | yes, read only when payout is `live` | `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | `openssl rand -hex 32` (32 or more characters of letters, digits and `._~+/=-`, one line). The operator's token for payout halt, resume and holds; a `live` rail refuses to render, and the ingest to boot, without it |
 | `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (exactly 64 hex characters) |
 | `tc-staging-artifact-key` | **no** | yes | `TRACE_COMMONS_ARTIFACT_KEY_HEX` | `openssl rand -hex 32` (64 hex characters). Losing it loses every stored artifact |
 | `tc-staging-near-account-index-pepper` | **no** | yes | `TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER` | `openssl rand -base64 32` (base64 of at least 32 bytes) |
@@ -221,6 +222,30 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    `app` holds the admin option on `trace_login_resolver` because its
    migration created the role (PostgreSQL 16 gives the creator of a role that
    option).
+
+   **Payout rail grant (before the rail leaves `disabled`).** Migration V132
+   makes two NOLOGIN roles the payout pass assumes, `trace_payout_enumerator`
+   (lists tenants with a link) and `trace_payout_config_writer` (appends rate
+   epochs and control rows), and deliberately grants neither to
+   `trace_ingest_runtime`. The operator grants both to the login the ingest
+   connects as, here `app`, with no inheritance, so only the pass can use them:
+
+   ```bash
+   PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
+       --project tracecommons-pilot-2026)" \
+     psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
+   GRANT trace_payout_enumerator, trace_payout_config_writer
+       TO app WITH INHERIT FALSE, SET TRUE;
+   SQL
+   ```
+
+   `app` created both roles by migration, so it holds the admin option that
+   `GRANT` needs. Without the grant an enabled rail reports
+   `payout_store_failed` on every tick. The pass also reads `trace_accounts`,
+   `trace_credit_holds` and the settlement tables; `app` owns them on staging,
+   so no further grant is made. Check that before `dry_run` rather than
+   assuming it (an enabled rail that reports `payout_store_failed` after the
+   grant above is a missing table privilege).
 
 7. **Verify.**
 
@@ -372,14 +397,33 @@ back, restarts it and fails. The issuer, installed first, is not rolled back
 
 ## Not here yet
 
-- The payout rail (design 3.10) stays `disabled`. The ingest reads
-  `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` at boot: `dry_run` or `live` records
-  the settlement table's rate as an epoch and refuses to boot without the
-  payout store. The rail's other settings (`NearAiRailConfig::from_env`) have
-  no caller yet. When they do, rerun step 4 with
-  `TC_NEAR_AI_PAYOUT_MODE=dry_run` and `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`,
-  `_SENDER_ORG`, `_SOURCE` and `_ACCOUNT_CEILING_NANO`, which also reads
-  `tc-staging-nearai-reseller-key`.
+- The payout rail (design 3.10) stays `disabled` until the owner turns it
+  on. To turn it on, in order: install the settlement table (the file that
+  carries the payout rate, from the operator, not committed) at an absolute
+  path the `tracecommons` user can read; run the payout rail grant in step 6;
+  then rerun step 4 with `TC_NEAR_AI_PAYOUT_MODE=dry_run`,
+  `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`, `_SENDER_ORG`, `_SOURCE` (`payment` for
+  an org funded with paid credit; no default), `_ACCOUNT_CEILING_NANO` and
+  `TC_CREDIT_SETTLEMENT_TABLE_PATH`, which also reads
+  `tc-staging-nearai-reseller-key` (an `oc_` credential, `oc_` and 64 hex).
+  The ingest then refuses to boot unless sign-up provisioning is on with the
+  account-index pepper and account-name KEK set (the link routes seal each
+  recipient under them); the staging template already sets all three. Values
+  come only from the render's environment and Secret Manager.
+- Before `TC_NEAR_AI_PAYOUT_MODE=live`, create the payout control token once
+  (the operator does this; nothing here creates it):
+
+  ```bash
+  openssl rand -hex 32 | tr -d '\n' | new_secret tc-staging-payout-control-token
+  ```
+
+  with `new_secret` from [Secrets](#secrets). It is the only credential
+  `POST /v1/admin/payout-rails/near_ai/halt` and `.../resume` accept, so
+  keep a way to read it when you need to halt. A `live` render refuses
+  without it (32 or more characters on one line), and the ingest refuses to
+  boot a `live` rail without it (`payout_control_token_unconfigured`).
+  `dry_run` sends nothing and neither reads nor needs it. Rotate it like any
+  other secret: add a version, rerun step 4, restart.
 - Alerting on a failed backup or restore check: today a failure shows only
   as a failed unit (`systemctl --failed`) and in the journal.
 - Open sign-up from the app (step 7).

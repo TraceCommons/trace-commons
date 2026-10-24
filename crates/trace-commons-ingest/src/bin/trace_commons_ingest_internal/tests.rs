@@ -15,6 +15,10 @@ mod mission_catalog_tests;
 mod native_passkey_tests;
 #[path = "tests/near_ai_bind_tests.rs"]
 mod near_ai_bind_tests;
+#[path = "tests/payout_link_tests.rs"]
+mod payout_link_tests;
+#[path = "tests/payout_rails_tests.rs"]
+mod payout_rails_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
@@ -6374,6 +6378,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
         credit_settlement_table: None,
+        payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
+        payout_store: None,
+        payout_control_token_hash: None,
         first_run_estimate: Default::default(),
         root,
         near_provisioning_enabled: false,
@@ -11742,6 +11749,14 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
             "status": "not_ready",
             "reason": "pipeline_runtime_absent",
             "drain_tenant_count": 0,
+            // Every payout rail, each disabled by default, never a factor
+            // in `status`.
+            "payout_rails": [
+                {"rail_id": "trace_credit", "mode": "internal", "halted": false,
+                 "rate_epoch": null, "qualified": true},
+                {"rail_id": "near_ai", "mode": "disabled", "halted": false,
+                 "rate_epoch": null, "qualified": false},
+            ],
         })
     );
 }
@@ -14356,6 +14371,14 @@ async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
             "status": "not_ready",
             "reason": "pipeline_worker_not_ready",
             "drain_tenant_count": 0,
+            // Every payout rail, each disabled by default, never a factor
+            // in `status`.
+            "payout_rails": [
+                {"rail_id": "trace_credit", "mode": "internal", "halted": false,
+                 "rate_epoch": null, "qualified": true},
+                {"rail_id": "near_ai", "mode": "disabled", "halted": false,
+                 "rate_epoch": null, "qualified": false},
+            ],
         })
     );
 }
@@ -30494,6 +30517,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
         credit_settlement_table: None,
+        payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
+        payout_store: None,
+        payout_control_token_hash: None,
         first_run_estimate: Default::default(),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,

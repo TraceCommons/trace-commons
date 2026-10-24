@@ -92,7 +92,10 @@ pub enum AccountAuthMethod {
     /// 'native'`). It is a SESSION, not a device credential: it expires, it
     /// rotates on use, and `revoke-all` kills it. It is deliberately WEAK for
     /// the strong-authenticator gate — a native token can read and withdraw,
-    /// never change authenticators or redirect payouts.
+    /// never change authenticators or redirect the NEAR wallet payout. It
+    /// may link a payout rail's recipient (the NEAR AI org): the owner chose
+    /// the signed-in session as that authority on 2026-10-23, behind the
+    /// server's own ownership check with NEAR AI (payout spec section 5).
     NativeToken,
 }
 

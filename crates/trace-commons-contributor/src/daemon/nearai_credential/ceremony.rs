@@ -648,6 +648,8 @@ pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     super::spend_org::clear_locked(store);
     // And so does what was kept about its credit.
     super::arrivals::clear_locked(store);
+    // And the payout org names read with it.
+    crate::daemon::payout_link::clear_org_names_locked(store);
     if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.

@@ -5564,6 +5564,16 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
 }
 
 #[test]
+fn the_payout_link_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::payout_link_copy;
+    use trace_commons_contributor_ffi::tc_payout_link_copy_json;
+    let copy = json_owned(tc_payout_link_copy_json());
+    assert_eq!(copy, serde_json::to_value(payout_link_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{org_name}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
     use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
     use trace_commons_contributor_ffi::tc_settings_ranges_json;

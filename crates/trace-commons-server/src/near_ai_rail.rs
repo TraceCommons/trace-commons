@@ -176,11 +176,18 @@ fn refusal(call: Call, error: NearAiTransferError) -> RailRefusal {
             (409, Code::OrganizationTransferLimitExceeded) if call == Call::Probe => {
                 RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
             }
+            // On a send (or the zero read, which is one) either code is a
+            // limit on our own credential or org: its budget, its source,
+            // or its recipient list, which the link probe already checked.
+            // None of that is the recipient's standing, so it holds no
+            // account: stop the rail and change no row, the pending line
+            // included, and the next pass resends it once an operator has
+            // raised the limit.
             (409, Code::CredentialTransferLimitExceeded) => {
-                RailRefusal::HoldLine("near_ai_credential_transfer_limit_exceeded")
+                RailRefusal::StopPass("near_ai_credential_transfer_limit_exceeded")
             }
             (409, Code::OrganizationTransferLimitExceeded) => {
-                RailRefusal::HoldLine("near_ai_organization_transfer_limit_exceeded")
+                RailRefusal::StopPass("near_ai_organization_transfer_limit_exceeded")
             }
             (409, Code::CapacityOverflow) => RailRefusal::HoldLine("near_ai_capacity_overflow"),
             (_, _) if call != Call::Send => RailRefusal::StopPass("near_ai_reply_unexpected"),
@@ -301,6 +308,13 @@ impl PayoutRail for NearAiRail {
 
     fn adapter_identity(&self) -> &str {
         NEAR_AI_ADAPTER_IDENTITY
+    }
+
+    /// The real rail, outside a staging build. Readiness ANDs this with the
+    /// rest of the rail's conditions (`live`, a rate epoch, the startup
+    /// capacity probe, not halted).
+    fn production_qualified(&self) -> bool {
+        !crate::near_ai_api::near_ai_staging()
     }
 
     fn program_for_link(&self, link_id: Uuid) -> String {
@@ -469,6 +483,22 @@ mod tests {
         assert_eq!(
             descriptor.wire_max,
             Some(AtomicUnits::from_raw(i64::MAX as u128))
+        );
+    }
+
+    #[test]
+    fn the_rail_is_qualified_only_outside_staging() {
+        let client =
+            NearAiTransferClient::new(crate::near_ai_transfer::NearAiTransferCredentials {
+                token: secrecy::SecretString::from(format!("oc_{}", "ab".repeat(32))),
+                credential_id: Uuid::from_u128(2),
+                sender_org: Uuid::from_u128(1),
+                source: crate::near_ai_transfer::NearAiCreditSource::Payment,
+            })
+            .unwrap();
+        assert_eq!(
+            NearAiRail::new(client).production_qualified(),
+            !crate::near_ai_api::near_ai_staging()
         );
     }
 

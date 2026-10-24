@@ -13301,6 +13301,50 @@ async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
 /// settled leg, its finalized batch, and the committed Settle outcome
 /// untouched -- there is no reprocessing path that could revisit them, and
 /// this locks that in.
+/// Payout spec section 7: every path that commits a finalized settlement
+/// batch wakes each payout rail after its transaction commits, and only
+/// then. The pipeline holds the notifier and nothing else of the payout.
+#[tokio::test]
+async fn a_finalized_credit_batch_wakes_the_payout_rails() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let notifier = trace_commons_server::payout_worker::PayoutNotifier::new(vec![wake.clone()]);
+    assert!(service.attach_payout_notifier(notifier.clone()));
+    assert!(!service.attach_payout_notifier(notifier), "attached once");
+    let tenant = format!("settle-wakes-payout-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), wake.notified())
+            .await
+            .is_err(),
+        "nothing settled yet, nothing woken"
+    );
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "settled").await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+            .await
+            .is_ok(),
+        "the finalized batch woke the payout rails"
+    );
+}
+
 #[tokio::test]
 async fn settled_credit_stays_when_withdrawal_follows_settlement() {
     let Some(backend) = runtime_backend(4).await else {

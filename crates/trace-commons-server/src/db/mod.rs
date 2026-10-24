@@ -2846,6 +2846,11 @@ pub struct SealedRecipient {
     pub recipient_key_ref: String,
     pub index_pepper_ref: String,
     pub subject_index: String,
+    /// What the status route reports so the app can check the server holds
+    /// the recipient it chose (for `near_ai`,
+    /// `trace_commons_protocol::payout_link::near_ai_recipient_ref`). A hash;
+    /// `None` on a link written without one.
+    pub recipient_ref: Option<String>,
 }
 
 impl std::fmt::Debug for SealedRecipient {
@@ -3118,6 +3123,64 @@ pub struct PayoutLinkRequest {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// What a confirm writes beside the request it takes: the new link's id and
+/// program (for a `link`) and the confirming account's actor hash. The
+/// recipient comes from the request row, never from the confirm call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkConfirmWrite {
+    pub link_id: Uuid,
+    pub program: String,
+    pub actor_ref_hash: String,
+}
+
+/// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
+/// variant but `Confirmed` changed nothing but consuming the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkConfirm {
+    Confirmed {
+        action: PayoutLinkAction,
+        /// The account's link version on the rail after the change.
+        version: i64,
+    },
+    /// No request with that handle on this account and rail, or a newer
+    /// request on the same account and rail superseded it.
+    NotFound,
+    Expired,
+    /// The account's link version on the rail is not the one the request
+    /// was made against: the link changed since the app showed it.
+    VersionConflict,
+    /// A link already waits for the pass, or an unlink is already recorded.
+    ChangePending,
+    /// An unlink with no active link.
+    NotLinked,
+}
+
+/// One account's link state on one rail, for the link routes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccountLinkView {
+    /// Counts every link the account was given on the rail and every unlink
+    /// it confirmed: it moves on each change the person makes and on none
+    /// the pass makes, so it says whether the recipient changed since an app
+    /// read it. 0 with no history.
+    pub version: i64,
+    /// The newest link that is not closed: the waiting one if there is one,
+    /// else the active or closing one.
+    pub newest: Option<PayoutLink>,
+    /// An unexpired request waits for a confirm.
+    pub pending_request: bool,
+}
+
+impl std::fmt::Debug for PayoutAccountLinkView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccountLinkView")
+            .field("version", &self.version)
+            .field("newest", &self.newest)
+            .field("pending_request", &self.pending_request)
+            .finish()
+    }
+}
+
 // Hash-only logging (spec, "Hash-only logging"): these `Debug` impls print
 // the rail, kinds and states, never an account id, its hash, a program, a
 // handle or a recipient. `payout_debug_tests` pins it.
@@ -3211,6 +3274,51 @@ pub struct PayoutControl {
     pub halted: bool,
     pub label: Option<String>,
     pub changed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The account state every rail shares (payout spec section 4, "Holds", and
+/// section 6): whether the account is open, and whether a credit hold is
+/// open on it or on any principal linked to it. Each rail checks it itself,
+/// before every send, and holds only its own sends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutAccountStanding {
+    /// The account row exists in this tenant.
+    pub exists: bool,
+    /// `trace_accounts.closed_at` is set.
+    pub closed: bool,
+    /// An open `trace_credit_holds` row names the account's `account:` key
+    /// or a principal actively linked to it.
+    pub credit_held: bool,
+}
+
+/// An account whose row is gone or closed.
+pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
+/// An open credit hold on the account or a principal linked to it.
+pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+
+impl PayoutAccountStanding {
+    /// The shared hold label, if any. A missing account row holds like a
+    /// closed one: nothing is sent to an account this tenant does not have.
+    pub fn hold_label(&self) -> Option<&'static str> {
+        if !self.exists || self.closed {
+            Some(PAYOUT_ACCOUNT_CLOSED)
+        } else if self.credit_held {
+            Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else {
+            None
+        }
+    }
+}
+
+pub use postgres_payout::{
+    PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
+};
+
+/// One open hold on a rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutHold {
+    pub account_id: Uuid,
+    pub label: String,
 }
 
 /// The payout rail store. Implemented for PostgreSQL in `postgres_payout`.
@@ -3439,6 +3547,14 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<Vec<String>, DatabaseError>;
 
+    /// Every open hold in `tenant` on `rail`, by account and label: the
+    /// operator's view before clearing one.
+    async fn open_payout_holds(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutHold>, DatabaseError>;
+
     /// Records a request with its audit row.
     async fn insert_payout_link_request(
         &self,
@@ -3460,6 +3576,40 @@ pub trait PayoutStore: Send + Sync {
     /// database clock; returns how many. Requests are audited when made, so
     /// a discard writes no audit row.
     async fn purge_expired_payout_link_requests(&self, tenant: &str) -> Result<u64, DatabaseError>;
+
+    /// The account's version, newest live link and pending-request flag on
+    /// `rail` ([`PayoutAccountLinkView`]).
+    async fn payout_account_link_view(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutAccountLinkView, DatabaseError>;
+
+    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
+    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
+    /// proof's subject must match. Empty for an account with none.
+    async fn payout_account_login_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Takes the account's request on `rail` with that handle hash and, in
+    /// the same transaction, writes what it asks for: a `waiting` link
+    /// carrying the request's sealed recipient, or the unlink mark on the
+    /// active link, each with its audit rows. Serialized per account and
+    /// rail. Refuses (consuming the request) when it expired, a newer
+    /// request superseded it, or the account's link version is no longer
+    /// the request's `expected_current_version`.
+    async fn confirm_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+        confirm: &PayoutLinkConfirmWrite,
+    ) -> Result<PayoutLinkConfirm, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(
@@ -3506,6 +3656,33 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Vec<String>, DatabaseError>;
+
+    /// The shared account state a rail checks before every send (spec
+    /// section 4, "Holds"). Reads only.
+    async fn payout_account_standing(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<PayoutAccountStanding, DatabaseError>;
+
+    /// The sum of `delta` over the link's `confirmed` lines: what the
+    /// commons has confirmed landing on the link's program.
+    async fn payout_link_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<u128, DatabaseError>;
+
+    /// Takes the rail's single-flight pass lock (spec section 4, "One pass,
+    /// per rail", step 0): a session-level
+    /// `pg_try_advisory_lock(hashtextextended('payout-pass-v1:' || rail, 0))`
+    /// on a connection pinned until [`PayoutPassLock::release`]. `None` when
+    /// another pass of the same rail holds it. Each rail has its own key, so
+    /// passes on two rails never wait on each other.
+    async fn try_acquire_payout_pass_lock(
+        &self,
+        rail: &RailId,
+    ) -> Result<Option<PayoutPassLock>, DatabaseError>;
 }
 
 #[cfg(test)]
@@ -3538,6 +3715,7 @@ mod payout_debug_tests {
             recipient_key_ref: "key".into(),
             index_pepper_ref: "pepper".into(),
             subject_index: "sha256:11".into(),
+            recipient_ref: None,
         }
     }
 

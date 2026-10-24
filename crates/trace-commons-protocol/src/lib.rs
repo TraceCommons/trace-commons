@@ -18,6 +18,7 @@ pub mod mission_draft;
 pub mod mission_evaluation;
 pub mod near_ai_measurements;
 pub mod onboarding;
+pub mod payout_link;
 pub mod privacy;
 pub mod public_run;
 mod redaction;

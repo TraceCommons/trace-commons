@@ -51,8 +51,19 @@ set +x
 #   TC_NEAR_AI_PAYOUT_MODE
 #                       default disabled. dry_run or live also require
 #                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID, _SENDER_ORG, _SOURCE
-#                       and _ACCOUNT_CEILING_NANO, and read the secret
-#                       tc-staging-nearai-reseller-key.
+#                       (payment, grant or staking_farm; no default) and
+#                       _ACCOUNT_CEILING_NANO, and read the secret
+#                       tc-staging-nearai-reseller-key, which must be an org
+#                       credential: oc_ and 64 hex characters. They also
+#                       require TC_CREDIT_SETTLEMENT_TABLE_PATH, the absolute
+#                       path of the installed settlement table (an existing
+#                       file; it carries the payout rate), written as
+#                       TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH.
+#                       live also reads the secret
+#                       tc-staging-payout-control-token (32 or more
+#                       characters on one line), the operator's token for
+#                       halt and resume, written as
+#                       TRACE_COMMONS_PAYOUT_CONTROL_TOKEN; dry_run does not.
 #   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
 #                       optional, both or neither: the first run's estimated
 #                       NEAR AI credit per accepted trace, in micro-dollars,
@@ -268,15 +279,46 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
       var="TC_NEAR_AI_PAYOUT_$setting"
       [[ "${!var:-}" =~ ^[A-Za-z0-9_-]+$ ]] || refuse "$var is not set (payout $TC_NEAR_AI_PAYOUT_MODE)"
     done
+    # The credit type the sender org sends from. No default: staging's org
+    # holds paid credit (`payment`), and the right one is the operator's call.
+    case "$TC_NEAR_AI_PAYOUT_SOURCE" in
+      payment | grant | staking_farm) ;;
+      *) refuse "TC_NEAR_AI_PAYOUT_SOURCE must be payment, grant or staking_farm" ;;
+    esac
+    # The rate the pass prices accruals at is the installed settlement
+    # table's. Without one the ingest still boots, but the rail has no rate
+    # in force: every pass stops with `payout_rate_unavailable` before it
+    # accrues or sends, even when an earlier boot stored a rate epoch, and
+    # readiness shows the rail unqualified. An enabled rail therefore refuses
+    # to render without the table. The file is the operator's, installed
+    # before this render; only its path is here.
+    table_path="${TC_CREDIT_SETTLEMENT_TABLE_PATH:-}"
+    [[ "$table_path" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+      || refuse "TC_CREDIT_SETTLEMENT_TABLE_PATH is not an absolute path (payout $TC_NEAR_AI_PAYOUT_MODE)"
+    [ -f "$table_path" ] \
+      || refuse "TC_CREDIT_SETTLEMENT_TABLE_PATH is not a file (payout $TC_NEAR_AI_PAYOUT_MODE)"
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH=$table_path"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=$TC_NEAR_AI_PAYOUT_MODE"$'\n'
     reseller_key="$(secret tc-staging-nearai-reseller-key)"
+    # An org credential, as cloud-api issues it and the ingest parses it:
+    # `oc_` and 64 hex. An API key (`sk-...`) is the wrong credential.
     shaped tc-staging-nearai-reseller-key "$reseller_key" \
-      '^[A-Za-z0-9._~+/=:-]+$' "one token of letters, digits and ._~+/=:-"
+      '^oc_[0-9A-Fa-f]{64}$' "an org credential (oc_ and 64 hex characters)"
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL=$reseller_key"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID=$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG=$TC_NEAR_AI_PAYOUT_SENDER_ORG"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE=$TC_NEAR_AI_PAYOUT_SOURCE"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO=$TC_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO"$'\n'
+    # A live rail must be haltable: the operator's payout control token is
+    # the only credential halt and resume accept, and the ingest refuses to
+    # boot a live rail without one (payout_control_token_unconfigured).
+    # dry_run sends nothing, so it neither needs nor reads it.
+    if [ "$TC_NEAR_AI_PAYOUT_MODE" = live ]; then
+      control_token="$(secret tc-staging-payout-control-token)"
+      shaped tc-staging-payout-control-token "$control_token" \
+        '^[A-Za-z0-9._~+/=-]{32,}$' "32 or more characters of letters, digits and ._~+/=- (openssl rand -hex 32)"
+      extra+="TRACE_COMMONS_PAYOUT_CONTROL_TOKEN=$control_token"$'\n'
+    fi
     ;;
   *) refuse "TC_NEAR_AI_PAYOUT_MODE must be disabled, dry_run or live" ;;
 esac

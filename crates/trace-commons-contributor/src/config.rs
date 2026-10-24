@@ -53,6 +53,17 @@ pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// installation wrote into the config. Belongs to this enrollment, so it is
 /// swept by `wipe()` with the config it describes.
 pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The payout links confirmed from this device (`daemon::payout_link`): per
+/// rail, the idempotency key and NEAR AI org id the link was made with, so
+/// the recipient ref the commons reports can be recomputed here. Never an
+/// org name. Belongs to this enrollment; swept by `wipe()`.
+pub const DAEMON_PAYOUT_LINK_FILE: &str = "daemon-payout-link.json";
+/// The display name of the NEAR AI org a payout link from this device names
+/// (`daemon::payout_link`): org id to the name last read from NEAR AI, for
+/// the linked or pending org only, never the rest of the listing, so status
+/// can show it after a restart. Cleared with the NEAR AI session on forget;
+/// belongs to this enrollment and swept by `wipe()`.
+pub const DAEMON_PAYOUT_ORG_NAMES_FILE: &str = "daemon-payout-org-names.json";
 /// The reference to the second device key a legacy invite migration stages
 /// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
 /// Swept by `wipe()`: a logout mid-migration ends the migration.
@@ -93,9 +104,11 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 6] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 8] = [
     CONFIG_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
+    DAEMON_PAYOUT_LINK_FILE,
+    DAEMON_PAYOUT_ORG_NAMES_FILE,
     IDENTITY_SWITCH_JOURNAL_FILE,
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
@@ -1434,6 +1447,8 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
             STAGED_DEVICE_KEY_FILE,
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
@@ -1461,6 +1476,8 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
             STAGED_DEVICE_KEY_FILE,
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
@@ -2204,6 +2221,8 @@ mod tests {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();

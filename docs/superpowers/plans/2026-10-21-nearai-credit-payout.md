@@ -2,13 +2,37 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Pay every settled Trace Credit award out on N parallel external rails, each exactly-once, capped, haltable and reconcilable on its own, and ship the first external rail: NEAR AI inference credit to an org the contributor links with a passkey.
+**Goal:** Pay every settled Trace Credit award out on N parallel external rails, each exactly-once, capped, haltable and reconcilable on its own, and ship the first external rail: NEAR AI inference credit to an org the contributor links from the app's signed-in session (D5's passkey superseded 2026-10-23).
 
-**Architecture:** A `PayoutRail` contract in `trace-commons-gate-api` (rail id, instrument with decimals, rate, recipient-link kind, exactly-once send keyed by line, reads, preflight, refusal mapping). One set of `trace_payout_*` tables keyed by `rail_id`. A per-rail payout pass in `trace-commons-server` (own advisory lock, mode, kill switch, ceilings, readiness) that accrues from finalized settlement batch lines and sends through the rail. The NEAR AI rail wraps a #1271 transfer client in cumulative mode. Ingest gains link routes behind a passkey step-up, the per-rail worker, readiness and a reconciliation drill. The contributor daemon lists owned NEAR AI orgs on the device and starts a link; the native macOS app shows the org picker. A keyed, 18-decimal test rail proves the contract is not #1271-shaped.
+**Architecture:** A `PayoutRail` contract in `trace-commons-gate-api` (rail id, instrument with decimals, rate, recipient-link kind, exactly-once send keyed by line, reads, preflight, refusal mapping). One set of `trace_payout_*` tables keyed by `rail_id`. A per-rail payout pass in `trace-commons-server` (own advisory lock, mode, kill switch, ceilings, readiness) that accrues from finalized settlement batch lines and sends through the rail. The NEAR AI rail wraps a #1271 transfer client in cumulative mode. Ingest gains link routes on the signed-in account session with a server-side NEAR AI ownership check, the per-rail worker, readiness and a reconciliation drill. The contributor daemon lists owned NEAR AI orgs on the device and starts a link; the native macOS app shows the org picker. A keyed, 18-decimal test rail proves the contract is not #1271-shaped.
 
 **Tech Stack:** Rust (gate-api, gate-enclave, server on axum + PostgreSQL, ingest, protocol, contributor daemon on tokio), C ABI (`trace-commons-contributor-ffi`), Swift / SwiftUI (`macos/`).
 
 **Spec:** `docs/superpowers/specs/2026-10-21-nearai-credit-payout-design.md` (draft PR #1532). Owner decisions D1-D8 are settled; do not re-litigate them. Section 12's three defaults are the current answers; build them, and keep each in one place so an owner override is a small change. Every implementer reads the spec sections their task cites.
+
+## Owner decisions after the plan was written
+
+- **2026-10-23, D5 superseded:** "We aren't using passkeys at all in the
+  app right now." Link, change and unlink are authorized by the
+  contributor's signed-in app session only. No passkey gate, no step-up
+  page section, and nothing may require the account to have a passkey. The
+  server still verifies org membership with NEAR AI (`/users/me`, the
+  contributor's NEAR AI token used for that check and never stored), keeps
+  the org-changed-since-shown check, and audits every link, change and
+  unlink. Every passkey step below (the goal line, Review Focus 7, Task 6's
+  `require_passkey_step_up` and step-up page section, Task 7's step-up
+  redirect, Task 8's passkey copy) is replaced by this when that task is
+  built; this note governs where they disagree. Task 6 is built this way (see its section), and so is task 7: the daemon calls the confirm route itself once the person confirms in the app, with no step-up URL. Task 8 follows it.
+- **2026-10-23, payout source:** `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` is
+  `payment`, `grant` or `staking_farm`, required in `dry_run`/`live`, with
+  no default (the staging sender is funded with paid credit, so staging
+  runs `payment`). Built in task 5, which also tightened the staging render
+  to accept only an `oc_` plus 64 hex payout credential.
+- **2026-10-23, task 5 seam:** the pass opens a link's sealed recipient
+  through `PayoutRecipientOpener`. Task 5 ships `UnconfiguredRecipientOpener`
+  (opens nothing, so any link is held `payout_link_unreadable`); task 6,
+  which seals recipients, supplies the real opener (`SealedRecipientOpener`)
+  and refuses the start with a rail enabled and no recipient key.
 
 ## Global Constraints
 
@@ -58,8 +82,8 @@ Repo and process rules (every task):
 | 3 | `payout-rail-accrual` | `payout-rail-schema` | rate sources, rate epochs at boot, accrual of credit and reversal rows, per rail; no network |
 | 4 | `payout-rail-near-ai-client` | `payout-rail-accrual` | #1271 client, `near_ai` rail, refusal mapping, shared compiled-in host, `near-ai-staging` feature |
 | 5 | `payout-rail-pass` | `payout-rail-near-ai-client` | per-rail pass: lock, owed, send, recovery, close, ceilings, holds, modes (default `disabled`), halt/resume, notify, tick, readiness |
-| 6 | `payout-rail-link-routes` | `payout-rail-pass` | link request/confirm/status routes, `/users/me` verifier, liveness probe, `require_passkey_step_up`, step-up page section, protocol types |
-| 7 | `payout-rail-daemon-link` | `payout-rail-link-routes` | daemon org listing (on device), link/unlink IPC, ingest client, core copy keys |
+| 6 | `payout-rail-link-routes` | `payout-rail-pass` | link request/confirm/status routes on the signed-in session (D5 superseded), `/users/me` verifier, liveness probe, recipient seal and opener, protocol types |
+| 7 | `payout-rail-daemon-link` | `payout-rail-link-routes` | daemon org listing (on device), link/confirm/unlink IPC on the signed-in session, ingest client, core copy keys and their C ABI export |
 | 8 | `payout-rail-macos-picker` | `payout-rail-daemon-link` | macOS org picker, status, consent copy surfaces (copy marked for owner review) |
 | 9 | `payout-rail-reconcile-drill` | `payout-rail-macos-picker` | per-rail reconciliation drill wired into rollout-smoke evidence |
 | 10 | `payout-rail-runbook` | `payout-rail-reconcile-drill` | operator runbook, README index, staging test steps |
@@ -74,7 +98,7 @@ Tasks 4 and 9 depend only on tasks 1-3 and 1-5 respectively in code; they stay i
 4. **A credential 403 changes no row** on a read and on a send. Test: `a_credential_refusal_stops_the_rail_and_changes_no_row` (task 5).
 5. **Precision.** `u128` amounts near `10^38` round-trip through `NUMERIC(39,0)`; a `near_ai` target above `i64::MAX` holds as `payout_amount_out_of_range`, never wraps. Tests: `atomic_units_round_trip_numeric_39` (task 2), `near_ai_target_above_i64_holds` (task 4).
 6. **Rate immutability.** A rate version re-installed with a different rate refuses boot. Test: `a_changed_rate_under_one_version_refuses_boot` (task 3).
-7. **The passkey gate has no carve-out.** An account with zero passkeys cannot confirm a link; a `near` session cannot either. Tests in task 6.
+7. ~~**The passkey gate has no carve-out.**~~ Superseded 2026-10-23 (see "Owner decisions after the plan was written"): no passkey; the signed-in session authorizes a link, the server verifies org membership, and every change is audited. Tests in task 6.
 
 ---
 
@@ -247,7 +271,7 @@ Spec: section 2 step 6, section 4 ("The NEAR AI client", "`near_ai` refusal mapp
 - Modify: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/near_provisioning.rs` (drop the local `NEAR_AI_API_BASE_URL`, use the server constant; keep the `cfg(test)` override exactly as it is)
 - Create: `crates/trace-commons-server/src/near_ai_transfer.rs` (`NearAiTransferClient`: `SecretString` credential, sender org, source type; `send_cumulative`, `capacity`, `history_page`; `redirect(Policy::none())`, TLS-or-loopback, fixed user agent, 15 s timeout, `bearer_auth`; error body `error.type` into a closed `NearAiTransferError` enum; a `#[cfg(test)]`/test-only constructor taking a loopback base)
 - Create: `crates/trace-commons-server/src/near_ai_rail.rs` (`NearAiRail: PayoutRail`; program `tc1-` + first 32 hex of `sha256("nearai-payout-program-v1:" || link_id)`; probe program `tcprobe-v1`; metadata `{"tc": sha256("nearai-payout-line-v1:" || line_id)}`; memo empty; `receipt_hash = sha256("nearai-transfer-v1:" || id)`; `target_total` narrowed to `i64` or `HoldLine("payout_amount_out_of_range")`; the refusal table from the spec, verbatim)
-- Create: `crates/trace-commons-server/src/near_ai_rail_config.rs` (env parsing: `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` default `disabled`, `_CREDENTIAL` (`oc_` + 64 hex, `SecretString`), `_CREDENTIAL_ID`, `_SENDER_ORG` (UUID), `_SOURCE` (`grant`|`payment`), `_ACCOUNT_CEILING_NANO`; any missing or malformed in `dry_run`/`live` -> `near_ai_payout_config_missing`; no base-URL variable exists)
+- Create: `crates/trace-commons-server/src/near_ai_rail_config.rs` (env parsing: `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` default `disabled`, `_CREDENTIAL` (`oc_` + 64 hex, `SecretString`), `_CREDENTIAL_ID`, `_SENDER_ORG` (UUID), `_SOURCE` (`payment`|`grant`|`staking_farm`, no default; widened 2026-10-23), `_ACCOUNT_CEILING_NANO`; any missing or malformed in `dry_run`/`live` -> `near_ai_payout_config_missing`; no base-URL variable exists)
 - Modify: `crates/trace-commons-server/Cargo.toml`, `crates/trace-commons-ingest/Cargo.toml` (feature `near-ai-staging`, ingest forwards to server and contributor where it links them), `crates/trace-commons-contributor/Cargo.toml` (feature `near-ai-staging` switching `CLOUD_API_ORIGIN` in `src/daemon/nearai_credential/api.rs`; the daemon's status reports it)
 - Modify: `scripts/ci/check-release-credential-store.sh` or add `scripts/ci/check-release-staging-feature.sh` beside it (same shape, with its own self-test), and call it from the `cargo fmt --check` job in `.github/workflows/ci.yml`, so no release workflow or shipped manifest enables `near-ai-staging`
 - Create: `crates/trace-commons-server/tests/near_ai_rail_mock.rs` (a loopback mock #1271 server built on axum, which the server already depends on)
@@ -327,49 +351,62 @@ Spec: section 3 ("Independence"), section 4 ("Holds", "Ceilings", "Modes and the
 
 ---
 
-### Task 6: Link routes with the passkey gate (`payout-rail-link-routes`, base `payout-rail-pass`)
+### Task 6: Link routes on the signed-in session (`payout-rail-link-routes`, base `payout-rail-pass`)
 
-Spec: section 5 (all), section 6.
+Spec: section 5 (all, including "Who confirms"), section 6.
 
-**Files:**
-- Create: `crates/trace-commons-protocol/src/payout_link.rs` (permissive; `PayoutLinkRequest { action, idempotency_key, expected_current_version, proof: Option<PayoutLinkProof> }`, `#[serde(tag = "rail")] enum PayoutLinkProof { #[serde(rename = "near_ai")] NearAi { organization_id: Uuid, near_ai_access_token: String } }`, response and status types, outcome label enum, `recipient_ref` derivation `sha256("nearai-payout-org-ref-v1:" || idempotency_key || ":" || org_id)`; every struct `deny_unknown_fields`; the token field is redacted in `Debug`)
+**D5 superseded (owner, 2026-10-23).** No passkey gate: link, change and unlink are authorized by the contributor's signed-in account session (any kind; a device bearer is refused). `require_passkey_step_up`, the `confirm-payout-link` step-up page section and the `native-step-up-page.md` change are dropped. The two calls stay (start, then confirm from the same account) so the app can show the consent between them and nothing is written before the person confirms. The server still verifies org ownership with NEAR AI (`/users/me` with the person's token, never stored), keeps the "changed since shown" check (`expected_current_version` against the account's link version on the rail, checked at start before the token leaves the machine and again at confirm), and audits every request and confirmation.
+
+**Files (as built):**
+- Create: `crates/trace-commons-protocol/src/payout_link.rs` (permissive; `PayoutLinkRequest { action, idempotency_key, expected_current_version, proof: Option<PayoutLinkProof> }`, `#[serde(tag = "rail")] enum PayoutLinkProof { #[serde(rename = "near_ai")] NearAi { organization_id: Uuid, near_ai_access_token: String } }`, start, confirm and status response types, the outcome label enum, `near_ai_recipient_ref`; every struct `deny_unknown_fields`; the token is redacted in `Debug`)
 - Modify: `crates/trace-commons-protocol/src/lib.rs`
-- Create: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link.rs` (routes `POST /v1/account/payout-rails/{rail_id}/link-requests`, `POST .../link-requests/{handle}/confirm`, `GET /v1/account/payout-rails`, copying `inference_connection.rs`'s session extraction; `DeviceBearer` refused 403)
-- Create: `crates/trace-commons-server/src/payout_recipient_proof.rs` (`trait RecipientProofVerifier`; `NearAiOrgVerifier`: one `GET /v1/users/me` at `NEAR_AI_API_BASE_URL` with the user's token, deserialized into a struct holding `id` and `organizations[]{id, role, is_active}` only, never `name`; subject check per the spec table; then `rail.probe_recipient`)
-- Modify: `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` (`require_passkey_step_up` beside `require_authenticator_change_allowed` at ~22776, which stays unchanged; route registration)
-- Modify: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/step_up_page.rs` and `step_up_page.js` (a fourth section `confirm-payout-link`; `ALL` gains it; the page names "the organization you chose in the app" and never a name)
-- Modify: `docs/operator/native-step-up-page.md` (the new section)
-- Tests: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link_pg_tests.rs` (ingest bin, runs under `ingest-bin-postgres`), protocol unit tests
+- Create: `crates/trace-commons-server/src/payout_recipient_proof.rs` (`trait RecipientProofVerifier`; `NearAiOrgVerifier`: one `GET {base}/users/me` with the person's token, read into a struct of `id` and `organizations[]{id, role, is_active}` only, never `name`; the subject check against the account's `near_ai_login` anchors; `role == "owner"`, active; then `rail.probe_recipient`, mapped by `RailRefusal`)
+- Create: `crates/trace-commons-server/src/payout_recipient_seal.rs` (sealing under the NEAR account identity's key with a recipient index, a subject index and a link handle, each keyed under its own domain; `SealedRecipientOpener`, the real `PayoutRecipientOpener` task 5 left a seam for)
+- Modify: `crates/trace-commons-server/src/near_account_identity.rs` (crate-private `keyed_label` and `seal_bound_to`)
+- Modify: `crates/trace-commons-server/src/db/mod.rs`, `db/postgres_payout.rs` (`SealedRecipient.recipient_ref`; `payout_account_link_view`, `payout_account_login_anchors`, `confirm_payout_link_request`, which takes the request and writes the link or the unlink mark with its audit rows in one transaction, serialized per account and rail)
+- Create: `migrations/V134__payout_link_recipient_ref.sql` (`recipient_ref` on links and link requests); register it in `db/postgres.rs`
+- Modify: `crates/trace-commons-server/src/payout_worker.rs` (`PayoutRailEntry::rail`, `PayoutRails::from_config_at_loopback` for tests)
+- Create: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/payout_link.rs` (routes `POST /v1/account/payout-rails/{rail_id}/link-requests`, `POST .../link-requests/{handle}/confirm`, `GET /v1/account/payout-rails`)
+- Modify: `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` (route registration; boot refuses an enabled rail without the recipient key), `.../account_routes.rs` (the three routes `Refused` for an unbound account), `.../payout_rails.rs` (the sealed-recipient opener)
+- Tests: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/tests/payout_link_tests.rs` (ingest lib, runs under `ingest-bin-postgres`), unit tests in the protocol and server modules
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // protocol
 #[test] fn link_requests_refuse_unknown_fields_and_unknown_rails()
 #[test] fn the_access_token_never_appears_in_debug()
 #[test] fn recipient_ref_is_recomputable_by_the_client()
+// server
+#[test] fn a_sealed_recipient_opens_only_under_its_own_keys()
+#[test] fn the_subject_index_is_not_the_login_anchor()
+#[tokio::test] async fn a_non_owner_inactive_or_absent_org_is_refused_before_the_probe()
+#[tokio::test] async fn probe_404_and_409_and_403_map_to_their_outcomes()
 // ingest pg
 #[tokio::test] async fn a_link_request_with_an_owned_active_org_is_pending_confirmation_and_changes_nothing()
+#[tokio::test] async fn an_account_with_no_passkey_links_from_its_signed_in_session()
 #[tokio::test] async fn a_non_owner_or_inactive_org_is_refused()
 #[tokio::test] async fn a_nearai_tenant_with_a_different_subject_is_refused()
-#[tokio::test] async fn the_org_name_is_never_deserialized_or_stored()    // mock /users/me returns a name with a sentinel; grep the DB dump and logs
+#[tokio::test] async fn the_org_name_and_token_are_never_stored_or_returned()
 #[tokio::test] async fn probe_404_and_409_and_403_map_to_their_outcomes()
-#[tokio::test] async fn confirm_requires_a_fresh_passkey_session_on_the_same_account()
-#[tokio::test] async fn an_account_with_no_passkey_gets_passkey_required()   // no zero-authenticator carve-out
-#[tokio::test] async fn a_near_wallet_session_cannot_confirm()
+#[tokio::test] async fn confirm_needs_the_same_account_session_and_no_passkey()
 #[tokio::test] async fn an_expired_or_second_request_is_discarded()
+#[tokio::test] async fn a_link_that_changed_since_it_was_shown_is_refused()
 #[tokio::test] async fn a_device_bearer_is_refused()
 #[tokio::test] async fn a_disabled_rail_answers_payout_unavailable_and_an_unknown_rail_is_refused()
 #[tokio::test] async fn status_lists_each_enabled_rail_without_a_recipient()
 #[tokio::test] async fn change_and_unlink_on_one_rail_leave_another_rails_link_alone()
 #[tokio::test] async fn every_request_and_confirmation_writes_an_audit_row()
+#[tokio::test] async fn an_enabled_rail_without_the_recipient_key_refuses_the_start()
 ```
 
-- [ ] **Step 2: Run to verify they fail.** **Step 3: Implement.**
-- [ ] **Step 4: Verify** — protocol tests and `--no-default-features` check; the whole ingest bin pg run; `cargo test -p trace-commons-server --test license_boundary`; global checks.
-- [ ] **Step 5: Commit** — `Let an account link a payout recipient with a passkey`.
+The passkey tests the plan first listed (`confirm_requires_a_fresh_passkey_session_on_the_same_account`, `an_account_with_no_passkey_gets_passkey_required`, `a_near_wallet_session_cannot_confirm`) are dropped with D5.
 
-**Done when:** a link changes nothing until a passkey confirms it, the server alone verifies ownership with the person's token against the compiled-in host, no org name or id reaches storage unsealed or a log, and every test passes against PostgreSQL with output pasted.
+- [x] **Step 2: Run to verify they fail.** **Step 3: Implement.**
+- [x] **Step 4: Verify** — protocol tests and `--no-default-features` check; the whole ingest lib pg run; `cargo test -p trace-commons-server --test license_boundary`; global checks.
+- [x] **Step 5: Commit** — `Let an account link a payout recipient from its signed-in session`.
+
+**Done when:** a link changes nothing until the same account confirms it, the server alone verifies ownership with the person's token against the compiled-in host, no org name or id reaches storage unsealed or a log, nothing asks for a passkey, and every test passes against PostgreSQL with output pasted.
 
 ---
 
@@ -377,15 +414,23 @@ Spec: section 5 (all), section 6.
 
 Spec: section 5 ("Verification on the server, not the client" steps 1-3, 7; "Consent copy").
 
-**Files:**
-- Create: `crates/trace-commons-contributor/src/payout_link.rs` (ingest client for the three routes, copying `inference_connection.rs`'s client shape)
-- Create: `crates/trace-commons-contributor/src/daemon/payout_link.rs` (exchange the refresh session for a fresh access token, `GET {CLOUD_API_ORIGIN}/v1/users/me`, keep owned active orgs `{id, name}` in memory only; start link with the chosen id, the token and a fresh idempotency key; open the step-up URL with `return=confirm-payout-link`; unlink; status with `recipient_ref` recomputed locally and compared; a `connection_revision`-style check that refuses a confirm if the displayed org list changed)
-- Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (methods `payout_rails_status`, `payout_link_orgs`, `payout_link_start`, `payout_link_unlink`, added to the method list near line 431 and the dispatch near 3587)
-- Modify: `crates/trace-commons-contributor/src/consent_copy.rs` (the spec's draft keys, one each for title, body, scope line, button, secondary, accessibility name, no-passkey line, unlink button and body, four status lines; each doc-commented `DRAFT, NEEDS APPROVAL`; templates take `{org name}`)
-- Modify: `crates/trace-commons-contributor-ffi/src/lib.rs` and both `trace_commons.h` copies only if the consent copy export needs a new function (prefer the existing copy-JSON export)
-- Tests: unit tests in both new modules; `crates/trace-commons-contributor/src/daemon/` test file beside `ipc_witness_flow_test.rs` for the IPC round trip against a mock ingest and mock cloud-api
+**D5 superseded (owner, 2026-10-23).** No step-up URL and no passkey. The daemon presents its account session on start and on confirm and calls `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm` itself once the person confirms in the app, after the app has shown the consent for the org they chose. The status `version` the app showed is passed through as `expected_current_version` on every start. The copy keys drop the passkey lines.
 
-- [ ] **Step 1: Write the failing tests**
+**Files (as built):**
+- Create: `crates/trace-commons-contributor/src/payout_link.rs` (ingest client for the three routes, in `inference_connection.rs`'s client shape: account session bearer, rotated token kept on refusals too, fixed-label errors; a server refusal keeps its `PayoutLinkOutcome` label, matched before the 401/403 session fallthrough; a started link must answer `near_ai_recipient_ref(idempotency_key, org)` or it is refused as `payout-link-recipient-mismatch` and never confirmed; rail ids and handles are checked before they become path segments)
+- Create: `crates/trace-commons-contributor/src/daemon/payout_link.rs` and `payout_link_tests.rs`. Five IPC methods, not the four first planned, because start and confirm stay separate (the app shows the consent between them, and nothing is saved before the click):
+  - `payout_link_orgs`: exchange the retained NEAR AI refresh session for a fresh access token, `GET {CLOUD_API_ORIGIN}/v1/users/me` with it, keep active orgs with `role == "owner"` and a UUID id as `{id, name}` in memory only, and answer them with an `orgs_revision` (a domain-separated hash over every shown id and name). The token is dropped; the commons is not called.
+  - `payout_link_start` (`rail_id`, `organization_id`, `orgs_revision`, `expected_current_version`, all required; nothing is preselected): exchange again for a fresh token, read `/users/me` again, refuse `payout-link-orgs-changed` before anything reaches the commons if the revision differs, then send the org id and that token in the start body once and drop the token. The handle is held in memory.
+  - `payout_link_confirm` (`rail_id`, `action`, `organization_id` for a link, `confirmed: true`): refuses `payout-link-confirmation-required` without the flag and `payout-link-changed` if the action or org is not the started one; on success records the idempotency key and org id (never the name) in `daemon-payout-link.json`.
+  - `payout_link_unlink` (`rail_id`, `expected_current_version`): starts an unlink with no proof and no NEAR AI call; confirmed with `payout_link_confirm`.
+  - `payout_rails_status`: the commons' status per rail, plus `recipient_ref_check` (`match`, `mismatch`, `unknown`, or null with nothing linked) recomputed from the local record, the org name only on a match, from the listing in memory or, after a restart, from `daemon-payout-org-names.json` (owner decision 2026-10-23: "save the org names to disk"; the linked or pending org's name only, 0600, refreshed on every list read, deleted on NEAR AI forget), and `pending_here` for a started request.
+  - A wallet-only account (no NEAR AI session) answers `payout-link-near-ai-sign-in-required`. Audit rows are labels only.
+- Modify: `crates/trace-commons-contributor/src/daemon/nearai_credential/api.rs` (`CloudApi::owned_organizations`; reads only `organizations[]{id, name, role, is_active}`), `daemon/ipc.rs` (the five methods in `METHODS`, `ASYNC_ONLY_METHODS` and the async dispatcher; `DaemonShared::payout_link`), `daemon/mod.rs`, `lib.rs`, `config.rs` (`DAEMON_PAYOUT_LINK_FILE`, an enrollment file swept by `wipe()` and unenroll)
+- Modify: `crates/trace-commons-contributor/src/consent_copy.rs` (`PayoutLinkCopy`, `payout_link_copy()`, `render_org_name`, `PAYOUT_COPY_PLACEHOLDERS`: title, body, scope line, button, secondary, accessibility name, unlink button, its accessibility name and body, five status lines (linked, none, waiting, unavailable, mismatch) and four refusal lines; each doc-commented `DRAFT, NEEDS APPROVAL`; templates take `{org_name}`; no passkey line)
+- Modify: `crates/trace-commons-contributor-ffi/src/lib.rs` and both `trace_commons.h` copies (`tc_payout_link_copy_json`; `tc_consent_copy`'s payload is left alone so no shell's decoder changes)
+- Tests: the client's in `payout_link.rs`, the IPC flow against a stub commons and a stub cloud-api in `daemon/payout_link_tests.rs`, the copy's in `consent_copy.rs`, and `the_payout_link_copy_crosses_the_abi` in the FFI `abi` test
+
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn org_listing_keeps_only_owned_active_orgs_and_never_sends_names_to_ingest()
@@ -393,15 +438,21 @@ Spec: section 5 ("Verification on the server, not the client" steps 1-3, 7; "Con
 #[tokio::test] async fn start_sends_the_fresh_token_once_and_drops_it()
 #[tokio::test] async fn a_changed_org_list_refuses_the_confirm()
 #[tokio::test] async fn status_flags_a_recipient_ref_mismatch()
+#[tokio::test] async fn unlink_starts_and_confirms_without_a_token_or_a_near_ai_call()
+#[tokio::test] async fn a_wallet_only_account_is_sent_to_near_ai_sign_in()
+#[tokio::test] async fn the_shown_version_is_required_and_passed_through()
+#[tokio::test] async fn a_refused_confirm_keeps_the_commons_label_and_ends_the_request()
+#[tokio::test] async fn audit_rows_are_labels_only()
+#[tokio::test] async fn every_method_requires_an_account_session()
 #[test] fn every_payout_copy_key_is_marked_draft_and_follows_the_copy_guide() // short action labels, separate title and accessibility keys
 #[test] fn copy_says_other_members_can_spend_and_overage_is_paid_first()       // D7, recipient debt
 ```
 
-- [ ] **Step 2: Run to verify they fail.** **Step 3: Implement.**
-- [ ] **Step 4: Verify** — `cargo test -p trace-commons-contributor` against baseline; `RUSTFLAGS="-D warnings" cargo check -p trace-commons-contributor --no-default-features`; `cargo test -p trace-commons-contributor-ffi`; `diff` of the two headers if touched; global checks.
-- [ ] **Step 5: Commit** — `Let the daemon list owned NEAR AI orgs and start a payout link`.
+- [x] **Step 2: Run to verify they fail.** **Step 3: Implement.**
+- [x] **Step 4: Verify** — `cargo test -p trace-commons-contributor` against baseline; `RUSTFLAGS="-D warnings" cargo check -p trace-commons-contributor --no-default-features`; `cargo test -p trace-commons-contributor-ffi`; `diff` of the two headers; global checks.
+- [x] **Step 5: Commit** — `Let the daemon list owned NEAR AI orgs and start a payout link`.
 
-**Done when:** org names never leave the device, the daemon can start, confirm-via-browser and undo a link against mocks, copy keys exist and are marked for owner review, and every check is green with output pasted.
+**Done when:** org names never leave the device, the daemon can start, confirm and undo a link against mocks with no passkey, copy keys exist and are marked for owner review, and every check is green with output pasted.
 
 ---
 
@@ -430,6 +481,8 @@ The `near-ai-staging` feature from task 4 switches only the daemon's credential 
 - [ ] **Step 4: Verify** — `cargo test -p trace-commons-contributor` and `--features near-ai-staging`, both against baseline; the release staging check and its self-test; global checks.
 - [ ] **Step 5: Commit** — `Point the whole NEAR AI path at staging in a staging build`.
 
+**Built in the channel module and this PR:** the daemon half (every NEAR AI host, the app identity and the pin set switch together under `near-ai-staging`, from `crates/trace-commons-contributor/src/channel.rs`, ratcheted by `tests/channel_hosts.rs`) landed before this stack. This PR covers the server deployment half: `deploy/staging-gcp/render-env.sh` and `ingest.env.template` now carry every key an enabled payout rail reads, including `TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH` (required whenever the mode is `dry_run` or `live`, supplied only at render time, an absolute path to an existing file), and the staging README documents the V132 role grant (`GRANT trace_payout_enumerator, trace_payout_config_writer TO <ingest login> WITH INHERIT FALSE, SET TRUE`), the recipient-key requirement (provisioning on, pepper, account-name KEK) and the order to enable the rail. `scripts/ci/test-deploy-render.sh` checks that every setting `NearAiRailConfig` and the rate path name is rendered. Link confirmation is the signed-in session only (D5 superseded 2026-10-23); nothing here needs a passkey.
+
 **Blocked on facts from NEAR AI:** the staging inference host, and staging's gateway measurements and receipt-signer keys (spec section 12 item 9). Build the switch with placeholders that fail closed until they are filled in.
 
 **Done when:** a staging build signs in, makes an attested Private AI call and receives a payout, all on staging, and no shipped build can enable the feature.
@@ -438,20 +491,17 @@ The `near-ai-staging` feature from task 4 switches only the daemon's credential 
 
 ### Task 8: macOS org picker (`payout-rail-macos-picker`, base `payout-rail-daemon-link`)
 
-Spec: section 5 ("Consent copy"), D1, D5, D7.
+Spec: section 5 ("Consent copy"), D1, D5 (superseded 2026-10-23), D7.
 
-**Files:**
-- Create: `macos/Sources/TraceCommonsApp/DaemonClient+PayoutLink.swift` (the four IPC calls through `DaemonCalling`)
-- Create: `macos/Sources/TCShellCore/PayoutLinkSurface.swift` (pure state: no org chosen / waiting for passkey / linked / unavailable; picker rows; nothing preselected with more than one org)
-- Create: `macos/Sources/TraceCommonsApp/Views/PayoutLinkView.swift` (Settings section: org picker, consent body, "Continue with passkey", "Not now", unlink; opens the step-up page)
-- Modify: `macos/Sources/TCBridge/TCConsentCopy.swift` (read the new keys)
-- Tests: `macos/Tests/TCShellCoreTests/PayoutLinkSurfaceTests.swift`
+**D5 superseded:** no passkey state, no "Continue with passkey", no step-up page and no add-passkey route; where this section says otherwise, the owner decisions note at the top governs. The daemon's five IPC calls and the copy (`tc_payout_link_copy_json`) are task 7's.
 
-- [ ] **Step 1: Write the failing Swift tests** — `testNothingIsPreselectedWithTwoOrgs`, `testOneOrgStillNeedsConfirm`, `testStatusLinesMapEachState`, `testNoPasskeyRoutesToAddPasskey`, `testCopyComesFromCoreKeys` (no literal English in the view model).
-- [ ] **Step 2: Run to verify they fail** — `cargo build -p trace-commons-contributor-ffi && swift test --package-path macos --filter PayoutLinkSurfaceTests`.
-- [ ] **Step 3: Implement.** The view hides itself unless status lists `near_ai` as enabled.
-- [ ] **Step 4: Verify** — `swift test --package-path macos` full run against baseline (rebuild the dylib first); global Rust checks unchanged.
-- [ ] **Step 5: Commit** — `Add the NEAR AI payout org picker to the macOS app`. The PR body says the copy is draft and asks the owner to review it.
+**As built:**
+- `macos/Sources/TCShellCore/PayoutLinkSurface.swift`: `PayoutLinkCopy` (decodes the core export, refuses a payload with a missing or blank field), the wire types for `payout_rails_status` and `payout_link_orgs`, `PayoutLinkSurface` (status line per rail state, when choosing and stopping are offered), `PayoutPicker` (nothing preselected even with one org; the consent for the selected org is built before the Choose button), `PayoutLinkRefusal` (routes the daemon's labels to the sign-in, changed and failed lines) and `PayoutLinkClient` (the five IPC calls over `DaemonTransport`, asserted with a fake transport).
+- `macos/Sources/TraceCommonsApp/DaemonClient+PayoutLink.swift`, `PayoutLinkModel.swift`, `Views/PayoutLinkView.swift`: the model drives the calls off the main actor; the view sits in the Private AI settings section and draws nothing unless the commons lists `near_ai` as `dry_run` or `live`.
+- `TCConsentCopy.payoutLinkCopyJSON()` reads `tc_payout_link_copy_json`.
+- Choose is one click that runs start then confirm, after the consent for the selected org is on screen. Stop sending credit does the same for an unlink. There is no separate waiting state to show: the confirm is the person's click.
+- The picker shows while no link is active (or a mismatch or a gone org needs a new choice). An active link has a direct Change button (owner decision 2026-10-23): it lists the orgs and runs the same consent, start and confirm as a first link, with the `version` shown as `expected_current_version`, so a link that moved since is refused. Its label is "Change" and its accessibility name "Change the organization that receives NEAR AI credit" (core copy keys `change_button`, `change_accessibility_name`, drafts).
+- The owner approved the payout wording as written on 2026-10-23 ("Wording is fine"); the constants keep their `DRAFT, NEEDS APPROVAL` markers until the copy test's marker rule is retired.
 
 **Done when:** the picker works end to end against a local daemon and mock services (describe the manual run; no screenshots of the user's screen), Swift tests pass with output pasted, and every visible string comes from core copy.
 

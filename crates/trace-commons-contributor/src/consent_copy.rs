@@ -2460,6 +2460,132 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Payout link (docs/superpowers/specs/2026-10-21-nearai-credit-payout-design.md,
+// section 5, "Consent copy")
+//
+// The words for choosing the NEAR AI organization the commons sends payout
+// credit to. Every sentence here is DRAFT, NEEDS APPROVAL: none is approved
+// until the owner signs it off. The passkey lines of the spec's draft are
+// gone (D5 superseded 2026-10-23: the signed-in session confirms, and
+// nothing asks for a passkey). Templates carry `{org_name}`, which a shell
+// fills with the name the daemon's `payout_link_orgs` returned
+// ([`render_org_name`]); the name never leaves the device.
+
+/// The one placeholder the payout-link templates carry.
+pub const PAYOUT_COPY_PLACEHOLDERS: &[&str] = &["org_name"];
+
+/// DRAFT, NEEDS APPROVAL. The section's title.
+pub const PAYOUT_LINK_TITLE: &str = "Get paid in NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. The consent, shown for the org chosen before the
+/// person confirms. Says the credit is extra, stays in the org, can be spent
+/// by its other members (D7), and pays the org's past NEAR AI use first.
+pub const PAYOUT_LINK_BODY: &str = "The commons will send NEAR AI credit to {org_name} for traces you contribute, as soon as their credit settles. This is on top of your Trace Credit, which you keep. Credit sent to {org_name} stays there and can't be moved. Other members of {org_name} can spend it too. If {org_name} owes NEAR AI for past use, new credit pays that first.";
+/// DRAFT, NEEDS APPROVAL. Beside the confirm button.
+pub const PAYOUT_LINK_SCOPE: &str = "Sends credit to {org_name} only.";
+/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown. The
+/// spec left this to be drafted after the passkey label was dropped.
+pub const PAYOUT_LINK_BUTTON: &str = "Choose";
+/// DRAFT, NEEDS APPROVAL. Leaves without choosing.
+pub const PAYOUT_LINK_SECONDARY: &str = "Not now";
+/// DRAFT, NEEDS APPROVAL. The confirm button's accessibility name.
+pub const PAYOUT_LINK_ACCESSIBILITY_NAME: &str = "Choose {org_name} for NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. The unlink button. Three words, the spec's draft;
+/// "Stop" alone would not say what stops.
+pub const PAYOUT_LINK_UNLINK_BUTTON: &str = "Stop sending credit";
+/// DRAFT, NEEDS APPROVAL. The unlink button's accessibility name.
+pub const PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME: &str = "Stop sending credit to {org_name}";
+/// DRAFT, NEEDS APPROVAL. Changes the org while a link is active, without
+/// stopping it first: shows the org list, then the same consent and Choose.
+pub const PAYOUT_LINK_CHANGE_BUTTON: &str = "Change";
+/// DRAFT, NEEDS APPROVAL. The change button's accessibility name.
+pub const PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME: &str =
+    "Change the organization that receives NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. Beside the unlink button.
+pub const PAYOUT_LINK_UNLINK_BODY: &str =
+    "Credit you earn is kept and sent when you choose an organization again.";
+/// DRAFT, NEEDS APPROVAL. Status: an active link this device made.
+pub const PAYOUT_LINK_STATUS_LINKED: &str = "Credit goes to {org_name}";
+/// DRAFT, NEEDS APPROVAL. Status: no link.
+pub const PAYOUT_LINK_STATUS_NONE: &str = "No organization chosen";
+/// DRAFT, NEEDS APPROVAL. Status: a confirmed link the rail has not made
+/// active yet (it replaces the spec's "Waiting for passkey confirmation").
+pub const PAYOUT_LINK_STATUS_WAITING: &str = "Credit goes to {org_name} from the next payout";
+/// DRAFT, NEEDS APPROVAL. Status: NEAR AI answered that the org is gone.
+pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable. Choose another.";
+/// DRAFT, NEEDS APPROVAL. Status: the commons holds another org than the one
+/// chosen on this device (`recipient_ref_check: "mismatch"`).
+pub const PAYOUT_LINK_STATUS_MISMATCH: &str =
+    "Credit may be going to an organization you didn't choose. Choose again.";
+/// DRAFT, NEEDS APPROVAL. No NEAR AI session on this device.
+pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organization.";
+/// DRAFT, NEEDS APPROVAL. The NEAR AI user owns no active organization.
+pub const PAYOUT_LINK_NO_ORGANIZATION: &str = "You don't own an active NEAR AI organization.";
+/// DRAFT, NEEDS APPROVAL. The org list changed after it was shown
+/// (`payout-link-orgs-changed`, `payout-link-changed`).
+pub const PAYOUT_LINK_CHANGED: &str = "Your organizations changed. Choose again.";
+/// DRAFT, NEEDS APPROVAL. Any other refusal of a start or confirm.
+pub const PAYOUT_LINK_FAILED: &str = "Nothing changed. Try again.";
+
+/// Every payout-link string, in one payload, for the shells
+/// (`tc_payout_link_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct PayoutLinkCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub scope: &'static str,
+    pub button: &'static str,
+    pub secondary: &'static str,
+    pub accessibility_name: &'static str,
+    pub unlink_button: &'static str,
+    pub unlink_accessibility_name: &'static str,
+    pub unlink_body: &'static str,
+    pub change_button: &'static str,
+    pub change_accessibility_name: &'static str,
+    pub status_linked: &'static str,
+    pub status_none: &'static str,
+    pub status_waiting: &'static str,
+    pub status_unavailable: &'static str,
+    pub status_mismatch: &'static str,
+    pub sign_in: &'static str,
+    pub no_organization: &'static str,
+    pub changed: &'static str,
+    pub failed: &'static str,
+}
+
+/// The payout-link words.
+#[must_use]
+pub fn payout_link_copy() -> PayoutLinkCopy {
+    PayoutLinkCopy {
+        title: PAYOUT_LINK_TITLE,
+        body: PAYOUT_LINK_BODY,
+        scope: PAYOUT_LINK_SCOPE,
+        button: PAYOUT_LINK_BUTTON,
+        secondary: PAYOUT_LINK_SECONDARY,
+        accessibility_name: PAYOUT_LINK_ACCESSIBILITY_NAME,
+        unlink_button: PAYOUT_LINK_UNLINK_BUTTON,
+        unlink_accessibility_name: PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME,
+        unlink_body: PAYOUT_LINK_UNLINK_BODY,
+        change_button: PAYOUT_LINK_CHANGE_BUTTON,
+        change_accessibility_name: PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME,
+        status_linked: PAYOUT_LINK_STATUS_LINKED,
+        status_none: PAYOUT_LINK_STATUS_NONE,
+        status_waiting: PAYOUT_LINK_STATUS_WAITING,
+        status_unavailable: PAYOUT_LINK_STATUS_UNAVAILABLE,
+        status_mismatch: PAYOUT_LINK_STATUS_MISMATCH,
+        sign_in: PAYOUT_LINK_SIGN_IN,
+        no_organization: PAYOUT_LINK_NO_ORGANIZATION,
+        changed: PAYOUT_LINK_CHANGED,
+        failed: PAYOUT_LINK_FAILED,
+    }
+}
+
+/// `template` with `{org_name}` filled in.
+#[must_use]
+pub fn render_org_name(template: &str, org_name: &str) -> String {
+    template.replace("{org_name}", org_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3822,5 +3948,129 @@ mod tests {
         let value = serde_json::to_value(copy).expect("serialises");
         assert_eq!(value["body"], GATE_STATEMENT);
         assert_eq!(value["action"], "Look, then decide");
+    }
+}
+
+#[cfg(test)]
+mod payout_link_copy_tests {
+    use super::*;
+
+    /// The `PAYOUT_LINK_*` constants as declared in this file, each with
+    /// the doc comment above it.
+    fn declared() -> Vec<(String, String)> {
+        let source = include_str!("consent_copy.rs");
+        let mut out = Vec::new();
+        let mut docs = String::new();
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(doc) = trimmed.strip_prefix("///") {
+                docs.push_str(doc);
+                docs.push('\n');
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("pub const PAYOUT_LINK_")
+                && let Some(name) = rest.split(':').next()
+            {
+                out.push((format!("PAYOUT_LINK_{name}"), docs.clone()));
+            }
+            docs.clear();
+        }
+        out
+    }
+
+    fn every_string(copy: &PayoutLinkCopy) -> Vec<String> {
+        serde_json::to_value(copy)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn every_payout_copy_key_is_marked_draft_and_follows_the_copy_guide() {
+        let declared = declared();
+        let copy = payout_link_copy();
+        let fields = serde_json::to_value(copy).unwrap();
+        let fields = fields.as_object().unwrap();
+        assert_eq!(
+            declared.len(),
+            fields.len(),
+            "every constant is in the payload, and only they are: {declared:?}"
+        );
+        for (name, docs) in &declared {
+            assert!(
+                docs.contains("DRAFT, NEEDS APPROVAL"),
+                "{name} is not marked for owner review"
+            );
+        }
+        for text in every_string(&copy) {
+            assert!(!text.trim().is_empty());
+            assert_eq!(text, text.trim(), "{text:?}");
+            // No passkey anywhere: D5 was superseded on 2026-10-23.
+            assert!(!text.to_lowercase().contains("passkey"), "{text}");
+            // Only the one placeholder.
+            for (index, _) in text.match_indices('{') {
+                assert!(text[index..].starts_with("{org_name}"), "{text}");
+            }
+        }
+        // Rule 1: buttons name an action in one or two words, most of the
+        // time; the unlink button is the spec's draft and is flagged long.
+        for button in [copy.button, copy.secondary] {
+            assert!(button.split_whitespace().count() <= 2, "{button}");
+            assert!(!button.contains("{org_name}"), "{button}");
+        }
+        // The direct change while a link is active: one word, named for
+        // assistive tech by the whole action, with no org to fill.
+        assert_eq!(copy.change_button, "Change");
+        assert_eq!(
+            copy.change_accessibility_name,
+            "Change the organization that receives NEAR AI credit"
+        );
+        assert!(
+            copy.change_accessibility_name
+                .starts_with(copy.change_button)
+        );
+        assert!(!copy.change_accessibility_name.contains("{org_name}"));
+        // Rule 4: titles and buttons are separate keys and separate words.
+        assert_ne!(copy.title, copy.button);
+        // Rule 5: the accessibility name includes the visible action and
+        // names the target.
+        assert!(copy.accessibility_name.starts_with(copy.button));
+        assert!(copy.accessibility_name.contains("{org_name}"));
+        assert!(
+            copy.unlink_accessibility_name
+                .starts_with(copy.unlink_button)
+        );
+        // Rule 3: the scope stays beside the action.
+        assert!(copy.scope.contains("{org_name}"));
+        // The status lines are distinct.
+        let statuses = [
+            copy.status_linked,
+            copy.status_none,
+            copy.status_waiting,
+            copy.status_unavailable,
+        ];
+        let distinct: std::collections::BTreeSet<_> = statuses.iter().collect();
+        assert_eq!(distinct.len(), statuses.len());
+        assert_eq!(PAYOUT_COPY_PLACEHOLDERS, &["org_name"]);
+    }
+
+    /// D7 and the recipient's debt: the consent says other members can
+    /// spend the credit, and that past NEAR AI use is paid first.
+    #[test]
+    fn copy_says_other_members_can_spend_and_overage_is_paid_first() {
+        let body = payout_link_copy().body;
+        assert!(body.contains("Other members of {org_name} can spend it too."));
+        assert!(
+            body.contains("If {org_name} owes NEAR AI for past use, new credit pays that first.")
+        );
+        assert!(body.contains("can't be moved"));
+        assert!(body.contains("which you keep"));
+        assert_eq!(
+            render_org_name("Credit goes to {org_name}", "Synthetic Org"),
+            "Credit goes to Synthetic Org"
+        );
     }
 }

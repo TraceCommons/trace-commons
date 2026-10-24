@@ -910,6 +910,84 @@ impl CloudApi {
         }
         Ok(usage)
     }
+
+    /// The organizations this session's user may direct NEAR AI payout
+    /// credit to: active, and owned (`role == "owner"`), read from
+    /// `GET /v1/users/me`. The same rule the commons applies on its own
+    /// `/users/me` read before it stores a link, so an org shown here is one
+    /// the server will accept.
+    ///
+    /// The names are for the person on this device: the payout-link flow
+    /// keeps them in memory and never sends one to the commons. An org whose
+    /// id is not a UUID is left out (the commons accepts only UUIDs), and so
+    /// is one whose name could not be shown as one line.
+    pub async fn owned_organizations(
+        &self,
+        session: &SessionTokens,
+    ) -> Result<Vec<OwnedOrganization>> {
+        let me: UsersMe = self
+            .call(reqwest::Method::GET, "/v1/users/me", session, None)
+            .await?;
+        let organizations = me.organizations.unwrap_or_default();
+        if organizations.len() > MAX_USER_ORGANIZATIONS {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(organizations
+            .into_iter()
+            .filter(|org| org.is_active && org.role == OWNER_ROLE)
+            .filter_map(|org| {
+                let id = uuid::Uuid::parse_str(&org.id)
+                    .ok()
+                    .filter(|id| !id.is_nil())?;
+                let name = org.name.trim();
+                (!name.is_empty()
+                    && name.len() <= MAX_ORGANIZATION_NAME_BYTES
+                    && !name.chars().any(char::is_control))
+                .then(|| OwnedOrganization {
+                    id,
+                    name: name.to_owned(),
+                })
+            })
+            .collect())
+    }
+}
+
+/// The NEAR AI role that may direct credit to an org.
+const OWNER_ROLE: &str = "owner";
+/// More organizations than this is not a `/users/me` this client reads.
+const MAX_USER_ORGANIZATIONS: usize = 256;
+/// The longest organization name shown.
+const MAX_ORGANIZATION_NAME_BYTES: usize = 256;
+
+/// `GET /v1/users/me`, read for its organizations and nothing else.
+#[derive(Deserialize)]
+struct UsersMe {
+    #[serde(default)]
+    organizations: Option<Vec<UsersMeOrganization>>,
+}
+
+#[derive(Deserialize)]
+struct UsersMeOrganization {
+    id: String,
+    name: String,
+    role: String,
+    is_active: bool,
+}
+
+/// An active organization the signed-in NEAR AI user owns.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnedOrganization {
+    pub id: uuid::Uuid,
+    /// For display on this device only.
+    pub name: String,
+}
+
+impl std::fmt::Debug for OwnedOrganization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedOrganization")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

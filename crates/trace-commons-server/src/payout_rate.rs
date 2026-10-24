@@ -255,6 +255,23 @@ pub async fn near_ai_rate_epoch_at_boot(
         .map(Some)
 }
 
+/// The version of the NEAR AI rail's rate in force for this process: the
+/// installed settlement table's, or `None` with no table or a table without
+/// a positive rate. Stored epochs never count here. They price batches by
+/// date, but only while a rate source is installed: a rail whose source is
+/// gone accrues and sends nothing and is never qualified, however many
+/// epochs an earlier boot recorded.
+pub fn near_ai_rate_version_in_force(
+    table: Option<&SettlementEstimateTable>,
+) -> Result<Option<String>, PayoutRateError> {
+    let Some(table) = table else {
+        return Ok(None);
+    };
+    Ok(SettlementTableRate::new(table)?
+        .current()
+        .map(|rate| rate.version().to_owned()))
+}
+
 /// The epoch that prices a batch created at `at` on one rail: the latest
 /// epoch observed at or before `at`, or, for a batch older than the rail's
 /// first epoch, the first. `None` only when the rail has no epoch at all.
@@ -384,6 +401,25 @@ mod tests {
                     .await;
             assert_eq!(outcome, Err(PayoutRateError::StoreUnavailable));
         }
+    }
+
+    #[test]
+    fn the_rate_in_force_is_the_current_sources_version_only() {
+        // No table, or a table without a positive rate: no rate in force,
+        // whatever epochs an earlier boot stored.
+        assert_eq!(near_ai_rate_version_in_force(None), Ok(None));
+        assert_eq!(
+            near_ai_rate_version_in_force(Some(&table(None, 1_000_000))),
+            Ok(None)
+        );
+        assert_eq!(
+            near_ai_rate_version_in_force(Some(&table(Some(0), 1_000_000))),
+            Ok(None)
+        );
+        assert_eq!(
+            near_ai_rate_version_in_force(Some(&table(Some(2_000_000), 1_000_000))),
+            Ok(Some("settle-test-1".to_owned()))
+        );
     }
 
     fn epoch(version: &str, second: i64) -> PayoutRateEpoch {

@@ -147,6 +147,7 @@ jobs:
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_payout_rails
+        admission_test_payout_pass
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -346,6 +347,15 @@ jobs:
         run: cargo test -p trace-commons-server --test payout_rails_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_rails
+      # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
+      # once across a crash on the cumulative and the keyed rail, one rail's
+      # stop or halt never reaching another, a credential refusal changing no
+      # row, closing by reads, relinks and netting. Against a loopback mock of
+      # cloud-api #1271 and the keyed test rail, as a real LOGIN role.
+      - name: payout_pass_pg
+        run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
       - name: inference connection HTTP session selection
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:

@@ -22,6 +22,10 @@ struct PrivateAISection: View {
             // Which NEAR AI organization Private AI spends from. Drawn only
             // with two or more organizations.
             SpendOrganizationCard()
+            // NEAR AI credit payout: which owned organization earned credit
+            // goes to. Hides itself unless the commons lists the rail as
+            // enabled.
+            PayoutLinkView()
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
             // switch waits for it (R-43): no Insights write is reachable

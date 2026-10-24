@@ -82,6 +82,7 @@ pub(crate) mod os_secret_store {
     pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
 }
 pub mod past_sessions;
+pub mod payout_link;
 pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;

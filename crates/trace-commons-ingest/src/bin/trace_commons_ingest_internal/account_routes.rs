@@ -107,6 +107,19 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
             "/v1/account/inference-connection/{connection_id}",
             Refused,
         ),
+        // Refused: payout recipient links. An unbound account binds first;
+        // it has no settled credit to pay.
+        ("GET", "/v1/account/payout-rails", Refused),
+        (
+            "POST",
+            "/v1/account/payout-rails/{rail_id}/link-requests",
+            Refused,
+        ),
+        (
+            "POST",
+            "/v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm",
+            Refused,
+        ),
         // Refused: traces, sessions of traces and credit (empty anyway).
         ("GET", "/v1/account/traces", Refused),
         ("POST", "/v1/account/source-sessions/status", Refused),
