@@ -895,7 +895,13 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
     let before = provisioning_snapshot(&admin, &device).await;
     let t = token("login-cross-tenant");
     let refused = db
-        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .provision_near_ai_login(
+            &login,
+            &bytes(&device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
         .await;
     let after = provisioning_snapshot(&admin, &device).await;
     assert_eq!(
@@ -917,6 +923,7 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
             &bytes(&fresh_device),
             native_session(&t),
             &identity(),
+            None,
         )
         .await
         .expect("a device registered nowhere provisions");
@@ -927,6 +934,7 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
             &bytes(&fresh_device),
             native_session(&t),
             &identity(),
+            None,
         )
         .await
         .expect("a retry from the same device and account is idempotent");
@@ -936,7 +944,13 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
     let before = provisioning_snapshot(&admin, &device).await;
     let t = token("login-cross-tenant-returning");
     let refused = db
-        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .provision_near_ai_login(
+            &login,
+            &bytes(&device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
         .await;
     assert_eq!(
         refusal_label(refused),
@@ -944,4 +958,622 @@ async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_t
     );
     assert_eq!(provisioning_snapshot(&admin, &device).await, before);
     task.abort();
+}
+
+// --- NEAR AI sign-up writes the contributor grant (owner decision 2026-10-24) --
+//
+// Invite enrollment writes a contributor tenant access grant for the device
+// principal from the instance's policy template, and the issuer reads that
+// grant as the device's claim ceiling. NEAR AI sign-up wrote none, so every
+// NEAR AI account's claims got the floor (no `model_training`) whatever the
+// contributor consented to. These pin the grant the sign-up now writes, its
+// idempotency, the issuer-side backfill for accounts provisioned before it,
+// and the claim the issuer then mints.
+
+const SIGNUP_TEMPLATE: &str = r#"{"policy_version":"signup-test-v1",
+    "allowed_consent_scopes":["debugging_evaluation","ranking_training","model_training","public_attribution"],
+    "allowed_uses":["debugging","evaluation","ranking_model_training","model_training","aggregate_analytics"]}"#;
+
+/// Narrower than [`SIGNUP_TEMPLATE`]: a re-provisioning under it must not
+/// narrow (or, the other way round, widen) a grant already written.
+const NARROW_TEMPLATE: &str = r#"{"policy_version":"signup-test-narrow",
+    "allowed_consent_scopes":["debugging_evaluation"],
+    "allowed_uses":["debugging"]}"#;
+
+fn signup_template(
+    value: &str,
+) -> trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate {
+    trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate::parse(value)
+        .expect("fixture template parses")
+}
+
+/// A verified NEAR AI login for a fresh subject, from a stub `/users/me`.
+async fn stub_near_ai_login(
+    label: &str,
+) -> (
+    trace_commons_server::near_ai_login::VerifiedNearAiLogin,
+    tokio::task::JoinHandle<()>,
+) {
+    let subject = format!("auth0|{label}-{}", uuid::Uuid::new_v4().simple());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = axum::Router::new().route(
+        "/users/me",
+        axum::routing::get(move || {
+            let subject = subject.clone();
+            async move { axum::Json(serde_json::json!({"id": subject, "auth_provider": "google"})) }
+        }),
+    );
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let login = trace_commons_server::near_ai_login::introspect_login(
+        &base,
+        &SecretString::from("stub-token".to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("stub introspection");
+    (login, task)
+}
+
+fn device_bytes(device: &Ed25519KeyPair) -> [u8; 32] {
+    device.public_key().as_ref().try_into().unwrap()
+}
+
+fn session_hash(label: &str) -> String {
+    hash(&format!("{label}-{}", uuid::Uuid::new_v4()))
+}
+
+/// The grant rows for one device principal, read past RLS:
+/// `(status, allowed_consent_scopes, allowed_uses, metadata source)`.
+async fn signup_grants(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    device_key_id: &str,
+) -> Vec<(String, serde_json::Value, serde_json::Value, Option<String>)> {
+    let principal =
+        trace_commons_server::account_trust::device_principal_ref(tenant, device_key_id);
+    admin
+        .query(
+            "SELECT status, allowed_consent_scopes, allowed_uses, metadata_json->>'source'
+               FROM trace_tenant_access_grants
+              WHERE tenant_id = $1 AND principal_ref = $2 AND role = 'contributor'",
+            &[&tenant, &principal],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect()
+}
+
+fn template_grant_row(
+    value: &str,
+) -> (String, serde_json::Value, serde_json::Value, Option<String>) {
+    let template = signup_template(value);
+    (
+        "active".to_string(),
+        serde_json::json!(template.allowed_consent_scopes()),
+        serde_json::json!(template.allowed_uses()),
+        Some("near_ai_signup".to_string()),
+    )
+}
+
+#[tokio::test]
+async fn near_ai_sign_up_writes_the_contributor_grant_from_the_template_once() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("signup-grant").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let device = fresh_keypair();
+
+    let t = session_hash("signup");
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&device),
+            native_session(&t),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("sign-up provisions");
+    assert_eq!(
+        signup_grants(&admin, &first.tenant_id, &first.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)],
+        "sign-up writes one active contributor grant carrying the template"
+    );
+
+    // Signing in again, under the same template or a different one, neither
+    // duplicates the grant nor rewrites it.
+    for value in [SIGNUP_TEMPLATE, NARROW_TEMPLATE] {
+        let t = session_hash("signin");
+        let again = db
+            .provision_near_ai_login(
+                &login,
+                &device_bytes(&device),
+                native_session(&t),
+                &identity(),
+                Some(&signup_template(value)),
+            )
+            .await
+            .expect("a returning sign-in provisions");
+        assert_eq!(again.tenant_id, first.tenant_id);
+        assert_eq!(
+            signup_grants(&admin, &first.tenant_id, &first.device_key_id).await,
+            vec![template_grant_row(SIGNUP_TEMPLATE)],
+            "re-provisioning leaves the first grant exactly as written"
+        );
+    }
+
+    // A revoked grant stays revoked: provisioning never revives it.
+    let principal = trace_commons_server::account_trust::device_principal_ref(
+        &first.tenant_id,
+        &first.device_key_id,
+    );
+    admin
+        .execute(
+            "UPDATE trace_tenant_access_grants SET status = 'revoked', revoked_at = now()
+              WHERE tenant_id = $1 AND principal_ref = $2",
+            &[&first.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
+    let t = session_hash("after-revoke");
+    db.provision_near_ai_login(
+        &login,
+        &device_bytes(&device),
+        native_session(&t),
+        &identity(),
+        Some(&template),
+    )
+    .await
+    .expect("a sign-in after revocation still provisions");
+    let rows = signup_grants(&admin, &first.tenant_id, &first.device_key_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "revoked", "a revoked grant is never revived");
+
+    // No template: no grant, so the issuer keeps the floor.
+    let (other_login, other_task) = stub_near_ai_login("signup-no-template").await;
+    let other_device = fresh_keypair();
+    let t = session_hash("no-template");
+    let other = db
+        .provision_near_ai_login(
+            &other_login,
+            &device_bytes(&other_device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .expect("sign-up without a template provisions");
+    assert!(
+        signup_grants(&admin, &other.tenant_id, &other.device_key_id)
+            .await
+            .is_empty(),
+        "without a template sign-up writes no grant"
+    );
+    task.abort();
+    other_task.abort();
+}
+
+#[tokio::test]
+async fn a_near_ai_account_from_before_the_grant_is_backfilled_once_and_nothing_else_is() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("signup-backfill").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let device = fresh_keypair();
+    let t = session_hash("pre-grant");
+    // Provisioned the way every NEAR AI account was before this change.
+    let account = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        signup_grants(&admin, &account.tenant_id, &account.device_key_id)
+            .await
+            .is_empty()
+    );
+
+    for round in 0..2 {
+        assert!(
+            db.backfill_near_ai_signup_device_grant(
+                &account.tenant_id,
+                &account.device_key_id,
+                &template,
+                Utc::now()
+            )
+            .await
+            .unwrap(),
+            "a live NEAR AI device is eligible (round {round})"
+        );
+        assert_eq!(
+            signup_grants(&admin, &account.tenant_id, &account.device_key_id).await,
+            vec![template_grant_row(SIGNUP_TEMPLATE)],
+            "the backfill writes the sign-up grant once (round {round})"
+        );
+    }
+    // A later, different template does not rewrite it.
+    db.backfill_near_ai_signup_device_grant(
+        &account.tenant_id,
+        &account.device_key_id,
+        &signup_template(NARROW_TEMPLATE),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        signup_grants(&admin, &account.tenant_id, &account.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)]
+    );
+
+    // An invite-enrolled device is not a NEAR AI sign-up: no grant.
+    let invite_device = fresh_keypair();
+    let invite_tenant = seed_legacy_device(&admin, &invite_device).await;
+    let invite_device_key_id =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            invite_device.public_key().as_ref(),
+        );
+    assert!(
+        !db.backfill_near_ai_signup_device_grant(
+            &invite_tenant,
+            &invite_device_key_id,
+            &template,
+            Utc::now()
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        signup_grants(&admin, &invite_tenant, &invite_device_key_id)
+            .await
+            .is_empty()
+    );
+
+    // A revoked NEAR AI device is not eligible either.
+    let (revoked_login, revoked_task) = stub_near_ai_login("signup-backfill-revoked").await;
+    let revoked_device = fresh_keypair();
+    let t = session_hash("revoked-device");
+    let revoked = db
+        .provision_near_ai_login(
+            &revoked_login,
+            &device_bytes(&revoked_device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "UPDATE device_keys SET revoked_at = now() WHERE device_key_id = $1",
+            &[&revoked.device_key_id],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !db.backfill_near_ai_signup_device_grant(
+            &revoked.tenant_id,
+            &revoked.device_key_id,
+            &template,
+            Utc::now()
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        signup_grants(&admin, &revoked.tenant_id, &revoked.device_key_id)
+            .await
+            .is_empty()
+    );
+
+    // A device id under the wrong tenant finds nothing (RLS-scoped lookup).
+    assert!(
+        !db.backfill_near_ai_signup_device_grant(
+            &invite_tenant,
+            &account.device_key_id,
+            &template,
+            Utc::now()
+        )
+        .await
+        .unwrap()
+    );
+    task.abort();
+    revoked_task.abort();
+}
+
+/// A NEAR AI-provisioned device's claim, through the real issuer router over
+/// the real database: the consented `model_training` is granted when the
+/// template allows it, a request past the template is clipped, and with no
+/// template the floor stays.
+#[tokio::test]
+async fn a_near_ai_device_claim_honours_consent_up_to_the_template() {
+    use axum::body::{Body, to_bytes};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+    use trace_commons_server::trace_upload_claim_issuer::{
+        TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION, TraceUploadClaimIssuerConfig,
+        generate_upload_claim_keypair, trace_upload_claim_issuer_router,
+    };
+
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let db = Arc::new(db);
+    let issuer_keys = generate_upload_claim_keypair().unwrap();
+    let workload_keys = generate_upload_claim_keypair().unwrap();
+    let config = |template: Option<&str>| TraceUploadClaimIssuerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        signing_private_key_pem: issuer_keys.private_key_pem.clone(),
+        signing_public_key_pem: issuer_keys.public_key_pem.clone(),
+        signing_kid: "issuer-test".into(),
+        issuer: "trace-commons-upload-issuer".into(),
+        audience: "trace-commons-upload".into(),
+        max_ttl_seconds: 300,
+        workload_public_key_pem: workload_keys.public_key_pem.clone(),
+        workload_issuer: None,
+        workload_audience: None,
+        tenant_access_grant_db: Some(db.clone() as Arc<dyn Database>),
+        require_tenant_access_grants: false,
+        shutdown_grace_seconds: 30,
+        request_timeout_seconds: 10,
+        max_request_bytes: 64 * 1024,
+        allowlist_source: None,
+        allowlist_refresh_interval_seconds: 60,
+        allowlist_max_stale_seconds: 3600,
+        onboarding_device_key_db: Some(db.clone() as Arc<dyn Database>),
+        onboarding_ingest_url: Some("https://ingest.example".into()),
+        onboarding_community_url: None,
+        onboarding_profile_url: None,
+        onboarding_leaderboard_url: None,
+        admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
+        invite_registry_authoritative: false,
+        near_ai_signup_policy_template: template.map(signup_template),
+    };
+    let claim = |config: TraceUploadClaimIssuerConfig,
+                 tenant: String,
+                 device_key_id: String,
+                 device: &Ed25519KeyPair,
+                 scopes: Vec<&str>| {
+        // What the contributor daemon sends: its consented scopes and the uses
+        // they imply (`consent::scopes_to_allowed_uses`).
+        let mut uses: Vec<&str> = Vec::new();
+        for scope in &scopes {
+            uses.extend(match *scope {
+                "debugging_evaluation" => &["debugging", "evaluation"][..],
+                "benchmark_only" => &["benchmark_generation"][..],
+                "ranking_training" => &["ranking_model_training"][..],
+                "model_training" => &["model_training"][..],
+                _ => &[][..],
+            });
+        }
+        uses.push("aggregate_analytics");
+        let body = serde_json::json!({
+            "schema_version": TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION,
+            "tenant_id": tenant,
+            "audience": "trace-commons-upload",
+            "consent_scopes": scopes,
+            "allowed_uses": uses,
+            "requested_at": Utc::now(),
+        })
+        .to_string();
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(device.sign(body.as_bytes()).as_ref());
+        let router = trace_upload_claim_issuer_router(config).expect("router");
+        async move {
+            let response = router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri("/v1/trace-upload-claim")
+                        .header("content-type", "application/json")
+                        .header("x-trace-device-key-id", device_key_id)
+                        .header("x-trace-device-signature", signature)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let set = |key: &str| {
+                body[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            (set("consent_scopes"), set("allowed_uses"))
+        }
+    };
+    let names = |values: &[&str]| {
+        values
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let consented = vec![
+        "debugging_evaluation",
+        "benchmark_only",
+        "ranking_training",
+        "model_training",
+        "public_attribution",
+    ];
+
+    // Signed up with the template in force.
+    let (login, task) = stub_near_ai_login("claim-signup").await;
+    let device = fresh_keypair();
+    let t = session_hash("claim-signup");
+    let signed_up = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&device),
+            native_session(&t),
+            &identity(),
+            Some(&signup_template(SIGNUP_TEMPLATE)),
+        )
+        .await
+        .unwrap();
+    let (scopes, uses) = claim(
+        config(Some(SIGNUP_TEMPLATE)),
+        signed_up.tenant_id.clone(),
+        signed_up.device_key_id.clone(),
+        &device,
+        consented.clone(),
+    )
+    .await;
+    assert_eq!(
+        scopes,
+        names(&[
+            "debugging_evaluation",
+            "ranking_training",
+            "model_training",
+            "public_attribution"
+        ]),
+        "consent is granted up to the template; benchmark_only is clipped"
+    );
+    assert_eq!(
+        uses,
+        names(&[
+            "debugging",
+            "evaluation",
+            "ranking_model_training",
+            "model_training",
+            "aggregate_analytics"
+        ]),
+        "model_training reaches the claim; benchmark_generation is clipped"
+    );
+
+    // Provisioned before the grant existed, issuer without a template: the
+    // floor, exactly as before.
+    let (old_login, old_task) = stub_near_ai_login("claim-pre-grant").await;
+    let old_device = fresh_keypair();
+    let t = session_hash("claim-pre-grant");
+    let old = db
+        .provision_near_ai_login(
+            &old_login,
+            &device_bytes(&old_device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .unwrap();
+    let floor = claim(
+        config(None),
+        old.tenant_id.clone(),
+        old.device_key_id.clone(),
+        &old_device,
+        consented.clone(),
+    )
+    .await;
+    assert_eq!(
+        floor,
+        (
+            names(&["debugging_evaluation", "public_attribution"]),
+            names(&["debugging", "evaluation", "aggregate_analytics"])
+        ),
+        "no grant and no template: the floor"
+    );
+    assert!(
+        signup_grants(&admin, &old.tenant_id, &old.device_key_id)
+            .await
+            .is_empty()
+    );
+
+    // The same account's next claim once the issuer has the template: the
+    // issuer writes the missing grant and the claim carries model_training.
+    let (_, uses) = claim(
+        config(Some(SIGNUP_TEMPLATE)),
+        old.tenant_id.clone(),
+        old.device_key_id.clone(),
+        &old_device,
+        consented.clone(),
+    )
+    .await;
+    assert!(uses.contains("model_training"), "{uses:?}");
+    assert_eq!(
+        signup_grants(&admin, &old.tenant_id, &old.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)],
+        "the claim backfilled the sign-up grant"
+    );
+
+    // An invite-enrolled device without a grant is not backfilled: floor.
+    let invite_device = fresh_keypair();
+    let invite_tenant = seed_legacy_device(&admin, &invite_device).await;
+    let invite_device_key_id =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            invite_device.public_key().as_ref(),
+        );
+    let (_, uses) = claim(
+        config(Some(SIGNUP_TEMPLATE)),
+        invite_tenant.clone(),
+        invite_device_key_id.clone(),
+        &invite_device,
+        consented.clone(),
+    )
+    .await;
+    assert_eq!(
+        uses,
+        names(&["debugging", "evaluation", "aggregate_analytics"])
+    );
+    assert!(
+        signup_grants(&admin, &invite_tenant, &invite_device_key_id)
+            .await
+            .is_empty()
+    );
+
+    // A revoked sign-up grant is not rewritten by the backfill: floor.
+    let principal = trace_commons_server::account_trust::device_principal_ref(
+        &signed_up.tenant_id,
+        &signed_up.device_key_id,
+    );
+    admin
+        .execute(
+            "UPDATE trace_tenant_access_grants SET status = 'revoked', revoked_at = now()
+              WHERE tenant_id = $1 AND principal_ref = $2",
+            &[&signed_up.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
+    let (_, uses) = claim(
+        config(Some(SIGNUP_TEMPLATE)),
+        signed_up.tenant_id.clone(),
+        signed_up.device_key_id.clone(),
+        &device,
+        consented,
+    )
+    .await;
+    assert_eq!(
+        uses,
+        names(&["debugging", "evaluation", "aggregate_analytics"]),
+        "a revoked grant leaves the floor"
+    );
+    task.abort();
+    old_task.abort();
 }

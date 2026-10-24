@@ -856,6 +856,7 @@ async fn enroll_mint_submit_round_trip() {
         invite_admin_backend: None,
         invite_admin_registry: None,
         invite_registry_authoritative: false,
+        near_ai_signup_policy_template: None,
         workload_public_key_pem: keys.public_key_pem.clone(),
         workload_issuer: None,
         workload_audience: None,

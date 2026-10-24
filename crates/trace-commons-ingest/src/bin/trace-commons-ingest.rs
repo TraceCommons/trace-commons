@@ -1775,6 +1775,15 @@ struct AppState {
     /// provisioning is disabled; when it is enabled, boot fails rather than
     /// leaving this unset, so no request path can find it missing and improvise.
     near_account_identity: Option<Arc<NearAccountIdentity>>,
+    /// The NEAR AI sign-up policy template
+    /// (`TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`, owner decision
+    /// 2026-10-24). NEAR AI provisioning, bind and device enrollment write the
+    /// device's contributor grant from it -- the grant invite enrollment
+    /// writes, which the issuer reads as the claim ceiling. `None` writes no
+    /// grant, so the device's claims keep the floor. A malformed value fails
+    /// boot.
+    near_ai_signup_policy_template:
+        Option<trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     root: PathBuf,
     /// #438: per-driver liveness, so a background loop that has been failing
     /// for days is visible as such instead of only as a repeating WARN.
@@ -5145,6 +5154,8 @@ impl AppState {
             near_provisioning_enabled: std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED")
                 .is_ok_and(|v| v == "true"),
             near_account_identity: build_near_account_identity_from_env().await?,
+            near_ai_signup_policy_template:
+                trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate::from_env()?,
             account_native_requests,
             account_native_codes,
             account_near_config,

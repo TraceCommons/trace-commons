@@ -6662,6 +6662,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
+        near_ai_signup_policy_template: None,
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,
@@ -30803,6 +30804,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
+        near_ai_signup_policy_template: None,
         near_provisioning_public_origin: None,
         near_provisioning_admission_ready: false,
         near_attestation_client: None,
@@ -88561,6 +88563,7 @@ async fn mint_login_link_account_for_subject(
         invite_admin_backend: None,
         invite_admin_registry: None,
         invite_registry_authoritative: false,
+        near_ai_signup_policy_template: None,
     };
 
     // Build the claim request; include the per-user subject when provided.
@@ -89103,6 +89106,7 @@ async fn device_key_claims_honor_grant_scope_ceiling() {
         invite_admin_backend: None,
         invite_admin_registry: None,
         invite_registry_authoritative: false,
+        near_ai_signup_policy_template: None,
     };
 
     async fn post_device_claim(

@@ -1368,6 +1368,7 @@ async fn near_ai_finish(
                 expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
             },
             identity,
+            state.near_ai_signup_policy_template.as_ref(),
         )
         .await
         .ok()?;
@@ -1685,6 +1686,7 @@ async fn near_ai_bind_finish(
                     expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
                 },
                 identity,
+                state.near_ai_signup_policy_template.as_ref(),
             )
             .await
             .map_err(|error| {
@@ -1716,6 +1718,7 @@ async fn near_ai_bind_finish(
                 expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
             },
             identity,
+            state.near_ai_signup_policy_template.as_ref(),
         )
         .await
         .map_err(|error| {

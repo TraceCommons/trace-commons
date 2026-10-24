@@ -10,6 +10,7 @@ use crate::account_onboarding::{
 use crate::account_onboarding::DEVICE_KEY_REGISTERED_ELSEWHERE;
 use crate::db::NewSession;
 use crate::near_account_identity::{NearAccountIdentity, random_near_tenant_id};
+use crate::near_ai_signup_policy::NearAiSignupPolicyTemplate;
 use base64::Engine;
 
 fn refused() -> DatabaseError {
@@ -182,7 +183,18 @@ impl NearAiAnchorMaterial {
 
 /// Everything a NEAR AI login writes once its account is decided: the device
 /// key (`near_ai` origin), the device principal linked to `account`, the
-/// provisioned-device row naming `anchor_hash`, and a fresh native session.
+/// provisioned-device row naming `anchor_hash`, a fresh native session, and,
+/// when the deployment has a sign-up policy template, the device's
+/// contributor grant from it.
+///
+/// The grant (owner decision 2026-10-24, "Honor app consent") is the one
+/// invite enrollment writes: it is what the upload-claim issuer reads as the
+/// device's claim ceiling, so without it every NEAR AI account's claims got
+/// the floor, `model_training` never among them, whatever the contributor
+/// consented to in the app. It is insert-only
+/// (`insert_near_ai_signup_device_tenant_access_grant`): a returning sign-in,
+/// a bind or an enrollment of the same device never duplicates, widens or
+/// revives it. With no template, no grant is written and the floor stays.
 ///
 /// Shared by provisioning (#836), where the account was just found or minted,
 /// and by bind (Z2 S3), where it is the passkey account that started the
@@ -197,6 +209,7 @@ async fn attach_near_ai_login_device(
     device_public_key: &[u8; 32],
     anchor_hash: &str,
     session: &NewSession<'_>,
+    grant_template: Option<&NearAiSignupPolicyTemplate>,
 ) -> Result<(String, String), DatabaseError> {
     let device =
         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(device_public_key);
@@ -204,6 +217,12 @@ async fn attach_near_ai_login_device(
     let public_key = base64::engine::general_purpose::STANDARD.encode(device_public_key);
     claim_provisioned_device_key(tx, tenant, &device, &public_key, "near_ai").await?;
     link_provisioned_principal(tx, tenant, account, &principal).await?;
+    if let Some(template) = grant_template {
+        super::insert_near_ai_signup_device_tenant_access_grant(
+            tx, tenant, &device, template, None,
+        )
+        .await?;
+    }
     tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,account,&device,&anchor_hash]).await?;
     tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at]).await?;
     Ok((device, principal))
@@ -536,6 +555,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: NewSession<'_>,
         identity: &NearAccountIdentity,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<ProvisionedNearAccount, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
@@ -559,6 +579,7 @@ impl PgBackend {
                     &sealed_json,
                     &pepper_ref,
                     &key_ref,
+                    grant_template,
                 )
             },
         )
@@ -581,6 +602,7 @@ impl PgBackend {
         sealed_json: &serde_json::Value,
         pepper_ref: &str,
         key_ref: &str,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<Option<ProvisionedNearAccount>, DatabaseError> {
         let provider = login.auth_provider().to_string();
         let mut client = self.trace_pool().get().await?;
@@ -621,6 +643,7 @@ impl PgBackend {
             device_public_key,
             anchor_hash,
             session,
+            grant_template,
         )
         .await?;
         // Hash-only, like its wallet sibling: the audit row names the identity
@@ -675,6 +698,7 @@ impl PgBackend {
     ///   uses, in X's tenant only, and then this account is closed in its own
     ///   tenant only. No transaction touches both tenants, and nothing of this
     ///   account moves to X. (The cross-tenant fold is the deferred S6.)
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn near_ai_login_bind(
         &self,
         tenant: &str,
@@ -683,6 +707,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: NewSession<'_>,
         identity: &NearAccountIdentity,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
@@ -702,6 +727,7 @@ impl PgBackend {
                         device_public_key,
                         session_ref,
                         material_ref,
+                        grant_template,
                     )
                     .await
                 } else {
@@ -713,6 +739,7 @@ impl PgBackend {
                         device_public_key,
                         session_ref,
                         material_ref,
+                        grant_template,
                     )
                     .await
                 }
@@ -727,6 +754,7 @@ impl PgBackend {
     /// transaction waited on the advisory lock; dropping the transaction rolls
     /// back the state flip and everything else, so the account is exactly as
     /// unbound as before.
+    #[allow(clippy::too_many_arguments)]
     async fn near_ai_bind_in_place(
         &self,
         tenant: &str,
@@ -735,6 +763,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: &NewSession<'_>,
         material: &NearAiAnchorMaterial,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
         let provider = login.auth_provider().to_string();
         let mut client = self.trace_pool().get().await?;
@@ -773,6 +802,7 @@ impl PgBackend {
             device_public_key,
             &material.anchor_hash,
             session,
+            grant_template,
         )
         .await?;
         let actor = crate::account_session::account_actor_ref(
@@ -810,6 +840,7 @@ impl PgBackend {
     /// two are one refusal
     /// ([`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`]) and
     /// this path can never disclose, or create, another account.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn near_ai_login_enrol(
         &self,
         tenant: &str,
@@ -818,6 +849,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: NewSession<'_>,
         identity: &NearAccountIdentity,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<ProvisionedNearAccount, DatabaseError> {
         if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
             return Err(refused());
@@ -856,6 +888,7 @@ impl PgBackend {
             device_public_key,
             &material.anchor_hash,
             &session,
+            grant_template,
         )
         .await?;
         let actor = crate::account_session::account_actor_ref(
@@ -869,6 +902,50 @@ impl PgBackend {
             device_key_id: device,
             anchor_hash: material.anchor_hash,
         })
+    }
+
+    /// The issuer's backfill of the sign-up grant for a NEAR AI device
+    /// provisioned before sign-up wrote one. See
+    /// [`crate::db::Database::backfill_near_ai_signup_device_grant`].
+    ///
+    /// One transaction in `tenant`, under forced RLS: the device row must be
+    /// this tenant's, `near_ai` origin and unrevoked (share-locked so a
+    /// concurrent revocation waits), and only then is the grant inserted, by
+    /// the same insert-only writer sign-up uses. A device under another
+    /// tenant is invisible here, exactly like one that does not exist.
+    pub(super) async fn near_ai_signup_grant_backfill(
+        &self,
+        tenant: &str,
+        device_key_id: &str,
+        template: &NearAiSignupPolicyTemplate,
+        issued_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let eligible = tx
+            .query_opt(
+                "SELECT 1 FROM device_keys
+                  WHERE tenant_id = trace_current_tenant_id() AND device_key_id = $1
+                    AND onboarding_origin = 'near_ai' AND revoked_at IS NULL
+                  FOR SHARE",
+                &[&device_key_id],
+            )
+            .await?
+            .is_some();
+        if !eligible {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        super::insert_near_ai_signup_device_tenant_access_grant(
+            &tx,
+            tenant,
+            device_key_id,
+            template,
+            Some(issued_at),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// The existing-account branch: re-check the passkey account, provision X
@@ -898,6 +975,7 @@ impl PgBackend {
         device_public_key: &[u8; 32],
         session: &NewSession<'_>,
         material: &NearAiAnchorMaterial,
+        grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
         if !self
             .near_ai_bind_account_still_unbound(own_tenant, account)
@@ -915,6 +993,7 @@ impl PgBackend {
                 &material.sealed_json,
                 &material.pepper_ref,
                 &material.key_ref,
+                grant_template,
             )
             .await?
         else {
