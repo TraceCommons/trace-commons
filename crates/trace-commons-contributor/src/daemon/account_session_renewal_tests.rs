@@ -675,13 +675,18 @@ async fn a_refused_renewal_is_not_retried_by_another_feature() {
     *fx.stub.state.refuse.lock().unwrap() = true;
 
     let status = fx.call("account_session_status", json!({})).await;
+    assert_eq!(fx.ceremonies(), (1, 1), "the status read attempted it");
     let missions = fx.call("activity_missions_status", json!({})).await;
     let payout = fx.payout_status().await;
 
     assert_eq!(status.result.as_ref().unwrap()["signed_in"], false);
     assert_eq!(refusal(&missions), Some("account-session-required"));
     assert_eq!(refusal(&payout), Some("account-session-required"));
-    assert_eq!(fx.ceremonies(), (1, 1), "the backoff is shared");
+    assert_eq!(
+        fx.ceremonies(),
+        (1, 1),
+        "neither retried during the backoff"
+    );
 }
 
 #[tokio::test]
