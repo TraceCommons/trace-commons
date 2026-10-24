@@ -125,6 +125,10 @@ pub struct AccountAdmissionState {
     observed_scope: Mutex<Option<String>>,
     answer: Mutex<Option<Answer>>,
     session: Arc<SessionCache>,
+    /// The last full pass that asked found no usable account session.
+    /// Taken by the supervisor, which starts a renewal off the pass
+    /// (`account_session_renewal::renew_off_pass`).
+    session_missing: AtomicBool,
 }
 
 /// The fields of the status body this client reads. Everything else is
@@ -302,6 +306,12 @@ impl AccountAdmissionState {
         }
     }
 
+    /// Whether the last pass that asked found no usable account session,
+    /// once: the flag is cleared by the read.
+    pub(super) fn take_session_missing(&self) -> bool {
+        self.session_missing.swap(false, Ordering::SeqCst)
+    }
+
     fn drop_session(&self) {
         *self.session.loaded.lock().expect("session lock") = None;
     }
@@ -381,6 +391,10 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         return;
     }
     let Some(session) = state.session(shared).await else {
+        // The 12-hour session of a NEAR AI-provisioned account ran out, or
+        // the person signed out: the supervisor asks for a renewal off the
+        // pass, which renews only the former.
+        state.session_missing.store(true, Ordering::SeqCst);
         state.record(key, None, now);
         return;
     };

@@ -22,7 +22,7 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
-mod account_session_renewal;
+pub(crate) mod account_session_renewal;
 pub mod activity_missions;
 pub mod admission_setup;
 pub mod approved_envelope;
@@ -684,6 +684,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // Skipped, and any earlier answer dropped, in a dry run and
                 // when nothing is armed.
                 account_admission::refresh(shared, now, dry_run).await;
+                // No usable session: renew an expired one off the pass, so
+                // R3 can lift at the next pass. Not awaited.
+                if shared.account_admission.take_session_missing() {
+                    let _ = account_session_renewal::renew_off_pass(shared);
+                }
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }

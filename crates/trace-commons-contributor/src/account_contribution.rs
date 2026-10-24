@@ -232,6 +232,9 @@ pub(crate) async fn handle(
             .store
             .load_config()?
             .ok_or_else(|| anyhow::anyhow!("account-enrollment-required"))?;
+        // An expired session on a NEAR AI-provisioned account is renewed
+        // first; `Operation` then reads the stored session as before.
+        crate::daemon::account_session_renewal::account_session_live(shared).await?;
         let operation = Operation::open(&shared.store, &cfg).await?;
         if let Some(expected) = req.params.get("account_scope").and_then(|v| v.as_str()) {
             if expected != operation.scope { bail!("account-session-changed"); }

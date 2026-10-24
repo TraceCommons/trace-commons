@@ -50,7 +50,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::ipc::{DaemonShared, Request, Response};
-use super::withdraw::{account_session, keep_rotated_token};
+use super::withdraw::keep_rotated_token;
 use crate::commons_credit::{CommonsCreditSummary, CommonsSettlementPosture};
 
 /// How long an answer with both halves known is served from the cache.
@@ -88,7 +88,7 @@ pub(super) async fn handle_commons_credit_summary(
     };
     let posture = crate::commons_credit::fetch_settlement_posture(&shared.store, &cfg).await;
     let mut credential_persisted = true;
-    let points = match account_session(shared) {
+    let points = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(mut session)) => {
             let call = crate::commons_credit::call_credit_summary(
                 &cfg.ingest_url,

@@ -68,7 +68,10 @@ pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Respo
     let Ok(Some(config)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
     };
-    let session = match account_session(shared) {
+    // An expired session on a NEAR AI-provisioned account is renewed first.
+    // The validation reload below never renews: it must see the session
+    // this call was made with.
+    let session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, CREDENTIAL_UNAVAILABLE),

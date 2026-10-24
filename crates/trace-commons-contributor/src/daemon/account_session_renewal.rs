@@ -16,10 +16,26 @@
 //! contributor's own NEAR AI login is what signs them in, as the first time;
 //! the device key gains no authority.
 //!
+//! # Every feature
+//!
+//! [`account_session_live`] is the entry point every daemon method that
+//! presents the account session uses: payout link, withdrawal, Trace
+//! Credit, activity missions, the inference connection, the public run,
+//! account contributions, and `account_session_status`, so the app's
+//! signed-in state follows a renewal. Automatic upload's admission read
+//! (`account_admission`, the gate's R3) runs on the supervisor's pass,
+//! which never waits on a ceremony; it asks for one off the pass
+//! ([`renew_off_pass`]) and the next pass reads the renewed session.
+//!
+//! A read that only validates a session already loaded (that it is still
+//! the same account after a call) never renews: a renewal there would adopt
+//! a session the call was not made with.
+//!
 //! # Bounded
 //!
-//! Renewals run one at a time, so the app's status read and org list, which
-//! arrive together, renew once and both get the session. A renewal that
+//! Renewals run one at a time across every caller, so the app's status
+//! read, org list and Home reads, which arrive together, renew once and all
+//! get the session. A renewal that
 //! fails is not tried again for the same stored session and NEAR AI login
 //! for [`RETRY_AFTER`]: each attempt rotates the NEAR AI refresh token and
 //! counts against the commons' provisioning rate limit. Signing in to NEAR
@@ -120,6 +136,89 @@ pub(super) async fn account_session(
     } else {
         Ok(None)
     }
+}
+
+/// [`account_session`] against the live NEAR AI service: the entry point
+/// for every daemon method that presents the account session. A usable
+/// session is answered without building anything.
+pub(crate) async fn account_session_live(
+    shared: &DaemonShared,
+) -> anyhow::Result<Option<LoadedAccountSession>> {
+    if let Some(session) = super::withdraw::account_session(shared)? {
+        return Ok(Some(session));
+    }
+    #[cfg(test)]
+    {
+        // Never the live service from a test: the stub a fixture named for
+        // this state directory, or no renewal at all.
+        let Some(origin) = test_route(&shared.store) else {
+            return account_session(shared, None).await;
+        };
+        let api = CloudApi::for_test(&origin)?;
+        let commons = super::native_identity::client(&origin, "unauthenticated")?;
+        account_session(shared, Some(&RenewVia::at(&api, commons))).await
+    }
+    #[cfg(not(test))]
+    {
+        let api = CloudApi::live().ok();
+        let via = api.as_ref().map(RenewVia::live);
+        account_session(shared, via.as_ref()).await
+    }
+}
+
+/// Per state directory: when the supervisor's pass last started a renewal.
+static OFF_PASS: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
+
+/// Start a renewal off the supervisor's pass, for automatic upload's
+/// admission read, which found no usable session. At most once per
+/// [`RETRY_AFTER`] for this state directory, whatever the outcome: the pass
+/// runs every minute, and each attempt that gets as far as the ceremony
+/// rotates the NEAR AI refresh token. One that starts while a feature call
+/// renews waits its turn and finds the renewed session. Every safeguard of [`account_session`] applies (signed out, not
+/// a `nearai-` tenant, no NEAR AI login: nothing is asked).
+pub(super) fn renew_off_pass(
+    shared: &std::sync::Arc<DaemonShared>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    {
+        let mut started = OFF_PASS.lock().unwrap_or_else(PoisonError::into_inner);
+        let by_dir = started.get_or_insert_with(HashMap::new);
+        let dir = shared.store.dir().to_path_buf();
+        if by_dir
+            .get(&dir)
+            .is_some_and(|at| at.elapsed() < RETRY_AFTER)
+        {
+            return None;
+        }
+        by_dir.insert(dir, Instant::now());
+    }
+    let shared = std::sync::Arc::clone(shared);
+    Some(tokio::spawn(async move {
+        let _ = account_session_live(&shared).await;
+    }))
+}
+
+/// Per state directory: the stub a test renews through.
+#[cfg(test)]
+static TEST_ROUTES: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
+/// Renew through the stub at `origin` for `store`'s state directory.
+#[cfg(test)]
+pub(super) fn route_for_test(store: &crate::config::ConfigStore, origin: &str) {
+    TEST_ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(store.dir().to_path_buf(), origin.to_string());
+}
+
+#[cfg(test)]
+fn test_route(store: &crate::config::ConfigStore) -> Option<String> {
+    TEST_ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()?
+        .get(store.dir())
+        .cloned()
 }
 
 /// Whether a session was renewed and stored. Every refusal is `false`.
