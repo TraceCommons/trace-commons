@@ -3375,6 +3375,15 @@ final class AppModel: ObservableObject {
     /// or before a read.
     @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
+    /// The last status read's `renewal_failure`: `near_ai_sign_in_required`
+    /// when NEAR AI refused the stored login, so only a fresh browser
+    /// sign-in helps. Nil when the last read named none, and before a read.
+    @Published private(set) var accountRenewalFailure: String?
+    /// The Private AI tab's Sign in is running (`signInToNearAI`), the
+    /// browser wait included.
+    @Published private(set) var nearAiSigningIn = false
+    /// The last `signInToNearAI` did not leave a usable login.
+    @Published private(set) var nearAiSignInFailed = false
     @Published private(set) var accountSignInFailure: AccountSignInFailure?
     @Published private(set) var historyRefresh: HistoryRefreshState = .idle
 
@@ -3384,7 +3393,10 @@ final class AppModel: ObservableObject {
         if accountSession == .unread { accountSession = .checking }
         Task {
             let read = await firstRunCall { try $0.accountSessionStatus() }
-            if case .success(let session) = read { accountSignInPath = session.signIn }
+            if case .success(let session) = read {
+                accountSignInPath = session.signIn
+                accountRenewalFailure = session.renewalFailure
+            }
             if case .success(let session) = read, session.signedIn == true {
                 accountSession = .signedIn
             } else {
@@ -3423,12 +3435,44 @@ final class AppModel: ObservableObject {
         await rereadAccountSessionAfterSignIn()
     }
 
+    /// The Private AI tab's Sign in (owner, 2026-10-24): the balance and
+    /// billing cards run this when the NEAR AI login is not usable. It is
+    /// the flow Settings' "Sign in again" runs, not a second one: a NEAR AI
+    /// account goes through `signInAgain` (NEAR AI browser sign-in when NEAR
+    /// AI refused the login, then `near_ai_account_sign_in`); a passkey
+    /// account has no commons session to renew here, so only the NEAR AI
+    /// browser sign-in runs. Then the balance is read again, and the
+    /// sections that read the account (billing, payout) follow
+    /// `accountSessionGeneration`.
+    func signInToNearAI() async {
+        guard !nearAiSigningIn, !accountSigningIn else { return }
+        nearAiSigningIn = true
+        nearAiSignInFailed = false
+        defer { nearAiSigningIn = false }
+        if accountSignInPath == nil,
+           case .success(let session) = await firstRunCall({ try $0.accountSessionStatus() }) {
+            accountSignInPath = session.signIn
+            accountRenewalFailure = session.renewalFailure
+        }
+        if accountSignInPath == "near_ai" {
+            await signInAgain()
+            nearAiSignInFailed = accountSignInFailure != nil
+        } else if await nearAILogin(fresh: true) {
+            accountSessionGeneration &+= 1
+        } else {
+            nearAiSignInFailed = true
+        }
+        refreshNearAiCredential()
+        refreshNearAiBalance(fresh: true)
+    }
+
     /// After a sign-in: the session read again, and only that read trusted.
     private func rereadAccountSessionAfterSignIn() async {
         switch await firstRunCall({ try $0.accountSessionStatus() }) {
         case .success(let session) where session.signedIn == true:
             accountSession = .signedIn
             accountSignInPath = session.signIn
+            accountRenewalFailure = session.renewalFailure
             // The refusals sign-in answers are forgotten: those rows offer
             // Withdraw again, which asks first.
             withdrawals = withdrawals.filter { $0.value != .noAccountSession }

@@ -6,7 +6,7 @@ import XCTest
 
 /// A NEAR AI account whose commons session ended: what the staging app met
 /// on 2026-10-24, with no way to sign in. Every value is synthetic.
-private final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
+final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     private let lock = NSLock()
     private var _calls: [String] = []
     var calls: [String] { lock.withLock { _calls } }
@@ -18,6 +18,10 @@ private final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     /// How long `near_ai_account_sign_in` blocks its thread, as a ceremony
     /// waiting on the network does.
     var signInDelay: TimeInterval = 0
+    /// `sign_in` on the status read: `near_ai` or `passkey`.
+    var signInPath = "near_ai"
+    /// The browser sign-in ends without a login (closed, timed out).
+    var attemptFails = false
     private var attempt = "absent"
 
     func call(_ method: String, params: String) -> String {
@@ -30,7 +34,7 @@ private final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
             return Self.ok(["state": "known", "signed_in": now, "expires_at": NSNull(),
                             "renewal": now ? NSNull() : "failed",
                             "renewal_failure": now ? NSNull() : "near_ai_sign_in_required",
-                            "sign_in": "near_ai"])
+                            "sign_in": signInPath])
         case "near_ai_account_sign_in":
             if signInDelay > 0 { Thread.sleep(forTimeInterval: signInDelay) }
             return lock.withLock {
@@ -41,7 +45,7 @@ private final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
                 return Self.ok(["signed_in": true, "expires_at": NSNull()])
             }
         case "near_ai_credential_start":
-            lock.withLock { attempt = "waiting_for_browser" }
+            lock.withLock { attempt = attemptFails ? "failed" : "waiting_for_browser" }
             return Self.ok(["attempt_id": "synthetic-attempt",
                             "browser_url": "https://cloud.example.invalid/native-login",
                             "status": "waiting_for_browser"])

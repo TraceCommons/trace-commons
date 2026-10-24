@@ -202,8 +202,9 @@ struct PrivateAIStatCard: View {
 
 /// #1146's `PrivateAiBalancePanel`, drawn in the main pane and in the
 /// inspector: the balance eyebrow and heading with its own re-read link, then
-/// the balance row's sentence or figures. Its sign-in button is the
-/// credential card's, never a second one here.
+/// the balance row's sentence or figures. When the NEAR AI login is not
+/// usable it also draws the Private AI tab's Sign in, which opens the browser
+/// (the Settings credential card keeps its own, with the provider chooser).
 struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
@@ -216,6 +217,11 @@ struct PrivateAIBalanceCard: View {
             refresh: .init(
                 copy.panelBalanceRefreshAccessibility,
                 isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance(fresh: true) }),
-            content: { BalanceRow(copy: copy, showsScope: false) })
+            content: {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    BalanceRow(copy: copy, showsScope: false)
+                    NearAiSignInControl(copy: copy)
+                }
+            })
     }
 }

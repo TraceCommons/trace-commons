@@ -420,6 +420,39 @@ final class FundingTests: XCTestCase {
         XCTAssertEqual(view.opened.map(\.absoluteString), [try XCTUnwrap(expected().browserURL).absoluteString])
     }
 
+    /// Signed out, the billing card's button is the balance card's Sign in
+    /// (owner, 2026-10-24): pressing it runs the sign-in flow, not another
+    /// funding read ("Check account" cannot help without a login).
+    @MainActor
+    func testHostedSignedOutBillingButtonRunsTheSignInFlow() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        let entered = expectation(description: "Visible row reads its account")
+        _ = view.daemon.enqueue(
+            try response(["state": "no_session", "view": ["message": "Sign in to manage billing."]]),
+            entered: entered)
+        view.show()
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        let fundingReads = view.daemon.calls.filter { $0.method == "near_ai_funding" }.count
+
+        try await view.press()
+        try await view.draw()
+        let deadline = Date().addingTimeInterval(3)
+        while !view.daemon.calls.contains(where: { $0.method == "near_ai_credential_start" }),
+              Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let methods = view.daemon.calls.map(\.method)
+        let start = try XCTUnwrap(methods.firstIndex(of: "near_ai_credential_start"),
+                                  "the flow starts the NEAR AI browser sign-in: \(methods)")
+        XCTAssertEqual(fundingReads, 1)
+        XCTAssertEqual(
+            methods[..<start].filter { $0 == "near_ai_funding" }.count, fundingReads,
+            "Check account must not run when signed out: \(methods)")
+    }
+
     @MainActor
     func testHostedManageRefusesChangedOrganizationOrRevisionAndRecovers() async throws {
         for field in ["organization_id", "connection_revision"] {

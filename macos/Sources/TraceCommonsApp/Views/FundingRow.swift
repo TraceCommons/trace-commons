@@ -128,21 +128,33 @@ struct FundingRow: View {
         // on the right, and what the button opens behind the info icon.
         GlassIconCard(
             systemImage: "creditcard", title: copy.fundingTitle,
-            subtitle: [status?.view.message ?? copy.fundingUnavailable],
+            subtitle: [
+                NearAiSignInOffer.progressLine(
+                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
+                    ?? status?.view.message ?? copy.fundingUnavailable
+            ],
             // What the button opens, behind the info icon (owner, 2026-10-10).
             info: copy.fundingWhat,
             trailing: {
+                // Signed out, the button is the balance card's Sign in (owner,
+                // 2026-10-24), not Check account: checking cannot help.
+                let signIn = NearAiSignInOffer.billingOffers(state: status?.state)
                 Button {
-                    load(opening: status?.destination)
+                    if signIn {
+                        Task { await model.signInToNearAI() }
+                    } else {
+                        load(opening: status?.destination)
+                    }
                 } label: {
                     // The glass style's own 28pt, as every inline card button
                     // (owner, 2026-10-08); a 44pt label made it the odd one out.
-                    Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
+                    Text(signIn ? NearAiSignInOffer.label(copy)
+                         : status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
                         .lineLimit(1)
                 }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(signIn ? .primary : .glass))
                 .fixedSize()
-                .disabled(model.credentialBusy || request != nil)
+                .disabled(model.credentialBusy || model.nearAiSigningIn || (!signIn && request != nil))
             })
         .onAppear {
             visible = true
@@ -163,6 +175,10 @@ struct FundingRow: View {
         .onReceive(model.$credentialBusy.removeDuplicates().dropFirst()) { busy in
             invalidate()
             if !busy { reloadAfterPublication() }
+        }
+        // A Sign in that ends leaves the account read again.
+        .onReceive(model.$nearAiSigningIn.removeDuplicates().dropFirst()) { signingIn in
+            if !signingIn { reloadAfterPublication() }
         }
         .onReceive(model.$credentialStatus.map(\.sessionState).removeDuplicates().dropFirst()) { _ in
             invalidate()
