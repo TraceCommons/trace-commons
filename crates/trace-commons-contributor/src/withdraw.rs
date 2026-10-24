@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
+};
 
 use crate::config::allowlist_for;
 
@@ -147,12 +149,13 @@ pub async fn call_withdraw(
     };
     let path = format!("/v1/account/traces/{submission_id}/withdraw");
     let response = client
-        .call_json_with_response_header::<(), WithdrawResponseBody>(
+        .call_json_with_response_headers::<(), WithdrawResponseBody>(
             Method::POST,
             &path,
             &[],
             None,
             ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     WithdrawCall {
@@ -163,7 +166,10 @@ pub async fn call_withdraw(
                 distribution_reach: body.distribution_reach,
             })
             .map_err(|e| classify(&e)),
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 
@@ -171,7 +177,7 @@ pub async fn call_withdraw(
 /// server handed back with it, if it rotated one.
 pub struct WithdrawCall {
     pub result: Result<WithdrawOutcome, WithdrawError>,
-    pub rotated_token: Option<String>,
+    pub rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 /// Tier-aware confirmation copy, verbatim where the design doc gives it.

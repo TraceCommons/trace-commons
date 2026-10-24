@@ -35,10 +35,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 use trace_commons_protocol::inference_connection::{
     DISCLOSURE_VERSION, InferenceConnectionOffer, SelectInferenceConnection,
     SelectedInferenceConnection, valid_digest, valid_identifier,
+};
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
 };
 
 use crate::config::allowlist_for;
@@ -175,7 +177,7 @@ impl ConnectionError {
 /// caller must persist `rotated_token` whatever `result` is.
 pub struct ConnectionCall<T> {
     pub result: Result<T, ConnectionError>,
-    pub rotated_token: Option<String>,
+    pub rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 /// Where a call goes and what it presents. Built from the same enrolled
@@ -215,17 +217,21 @@ impl Endpoint<'_> {
             }
         };
         let response = client
-            .call_json_with_response_header::<Req, Resp>(
+            .call_json_with_response_headers::<Req, Resp>(
                 method,
                 path,
                 &[],
                 body,
                 ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+                ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
             )
             .await;
         ConnectionCall {
             result: response.result.map_err(|error| classify(&error)),
-            rotated_token: response.response_header,
+            rotated_token: crate::account_auth::RotatedToken::from_headers(
+                response.response_header,
+                response.companion_header,
+            ),
         }
     }
 }

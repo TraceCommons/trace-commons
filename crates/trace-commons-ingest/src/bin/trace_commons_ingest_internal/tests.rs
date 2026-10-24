@@ -13,6 +13,8 @@ mod legacy_invite_link_tests;
 mod mission_catalog_tests;
 #[path = "tests/native_passkey_tests.rs"]
 mod native_passkey_tests;
+#[path = "tests/native_session_sliding_expiry_tests.rs"]
+mod native_session_sliding_expiry_tests;
 #[path = "tests/near_ai_bind_tests.rs"]
 mod near_ai_bind_tests;
 #[path = "tests/payout_link_tests.rs"]

@@ -102,12 +102,13 @@ async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
     .build()
     .map_err(|_| anyhow::anyhow!("account-contribution-unavailable"))?;
     let reply = client
-        .call_json_with_response_header::<B, T>(
+        .call_json_with_response_headers::<B, T>(
             method,
             route,
             &[],
             body,
             trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     // Reject a response for a principal that signed out or changed during the request.
@@ -118,8 +119,10 @@ async fn call<B: Serialize + ?Sized, T: DeserializeOwned>(
     {
         bail!("account-session-changed");
     }
-    if let Some(token) = reply.response_header {
-        crate::daemon::run_blocking(|| account_auth::store_rotated_token(store, &loaded, token))?;
+    if let Some(rotated) =
+        account_auth::RotatedToken::from_headers(reply.response_header, reply.companion_header)
+    {
+        crate::daemon::run_blocking(|| account_auth::store_rotated_token(store, &loaded, rotated))?;
     }
     match reply.status {
         Some(reqwest::StatusCode::OK) => {}

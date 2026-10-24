@@ -55,7 +55,7 @@ pub(super) fn account_session(
 pub(super) fn keep_rotated_token(
     shared: &DaemonShared,
     session: &mut crate::account_auth::LoadedAccountSession,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 ) -> bool {
     let Some(rotated_token) = rotated_token else {
         return true;
@@ -68,7 +68,14 @@ pub(super) fn keep_rotated_token(
     match super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
     {
         Ok(Some(reloaded)) if stored => *session = reloaded,
-        _ => session.session.access_token = rotated_token,
+        _ => {
+            // Not stored: present the new token, and its new expiry when the
+            // server sent one, for the rest of this batch.
+            session.session.access_token = rotated_token.token;
+            if let Some(expires_at) = rotated_token.expires_at {
+                session.session.expires_at = expires_at;
+            }
+        }
     }
     stored
 }

@@ -31,11 +31,13 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 use trace_commons_protocol::payout_link::{
     PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction, PayoutLinkConfirmed, PayoutLinkOutcome,
     PayoutLinkProof, PayoutLinkRequest, PayoutLinkStarted, PayoutRailsStatus,
     near_ai_recipient_ref,
+};
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
 };
 
 use crate::config::allowlist_for;
@@ -113,7 +115,7 @@ impl PayoutLinkError {
 /// caller must persist `rotated_token` whatever `result` is.
 pub struct PayoutCall<T> {
     pub result: Result<T, PayoutLinkError>,
-    pub rotated_token: Option<String>,
+    pub rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 impl<T> PayoutCall<T> {
@@ -157,17 +159,21 @@ impl Endpoint<'_> {
             Err(_) => return PayoutCall::refused(PayoutLinkError::Unavailable),
         };
         let response = client
-            .call_json_with_response_header::<Req, Resp>(
+            .call_json_with_response_headers::<Req, Resp>(
                 method,
                 path,
                 &[],
                 body,
                 ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+                ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
             )
             .await;
         PayoutCall {
             result: response.result.map_err(|error| classify(&error)),
-            rotated_token: response.response_header,
+            rotated_token: crate::account_auth::RotatedToken::from_headers(
+                response.response_header,
+                response.companion_header,
+            ),
         }
     }
 }
@@ -753,7 +759,10 @@ mod tests {
         }
         let call = start_unlink(&endpoint(&server.base), "near_ai", Uuid::new_v4(), Some(1)).await;
         assert!(call.result.is_err());
-        assert_eq!(call.rotated_token.as_deref(), Some("tcn1_rotated.session"));
+        assert_eq!(
+            call.rotated_token.as_ref().map(|r| r.token.as_str()),
+            Some("tcn1_rotated.session")
+        );
     }
 
     #[test]

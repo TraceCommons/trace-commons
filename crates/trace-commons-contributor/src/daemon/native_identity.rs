@@ -10,7 +10,9 @@ use chrono::Utc;
 use reqwest::Method;
 use serde_json::{Value, json};
 use trace_commons_operator_client::Client;
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
+};
 
 use super::commons_credentials::{self, Kind, Snapshot};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
@@ -178,16 +180,20 @@ pub(super) async fn authenticated(
         origin,
         &session.session.access_token,
     )?
-    .call_json_with_response_header::<Value, Value>(
+    .call_json_with_response_headers::<Value, Value>(
         method,
         path,
         &[],
         body,
         ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+        ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
     )
     .await;
-    if let Some(token) = response.response_header {
-        account_auth::store_rotated_token(&shared.store, session, token)
+    if let Some(rotated) = account_auth::RotatedToken::from_headers(
+        response.response_header,
+        response.companion_header,
+    ) {
+        account_auth::store_rotated_token(&shared.store, session, rotated)
             .map_err(|_| anyhow!("account-session-changed"))?;
         let next = account_auth::try_load_session_with_snapshot(&shared.store)?
             .ok_or_else(|| anyhow!("account-session-changed"))?;

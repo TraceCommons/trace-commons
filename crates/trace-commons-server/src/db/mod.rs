@@ -2183,9 +2183,12 @@ pub struct ValidatedSession {
     /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
     /// which is never gated.
     pub binding: crate::account_binding::AccountBindingState,
-    /// The session's absolute expiry, as stored. Rotation-on-use never moves
-    /// it; the auth middleware caps a rotated cookie's Max-Age at what is left
-    /// of it, so a rotated cookie never outlives its row.
+    /// The session's expiry, as stored once this validation is done. A
+    /// browser session's rotation never moves it; the auth middleware caps a
+    /// rotated cookie's Max-Age at what is left of it, so a rotated cookie never
+    /// outlives its row. A native session's rotation extends it (see
+    /// `account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS`), and this is the
+    /// extended value, which the middleware hands back beside the new token.
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 

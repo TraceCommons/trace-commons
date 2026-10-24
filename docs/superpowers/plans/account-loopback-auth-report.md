@@ -21,7 +21,7 @@ request left the machine.
    The port does not stay open.
 5. `POST /v1/account/native/token` takes `(request_id, code, code_verifier)`
    and returns a `tcn1_` bearer backed by a real `trace_sessions` row
-   (`client_kind = 'native'`, 12h TTL).
+   (`client_kind = 'native'`, 12h TTL, sliding: see below).
 
 `account_auth_middleware` now accepts either the cookie or a `tcn1_` bearer.
 The prefix is the whole dispatch, so a device upload claim and a native session
@@ -41,6 +41,45 @@ A native session is pinned WEAK for the strong-authenticator gate
 it can never change authenticators or redirect a payout. The resolver also
 refuses a non-`native` session presented as a `tcn1_` bearer, so a browser
 cookie's secret cannot be replayed over this transport.
+
+## Sliding expiry (2026-10-24)
+
+A native session no longer dies 12 hours after sign-in while the account is
+in use. Its token rotates on use once it is older than
+`NATIVE_SESSION_ROTATION_INTERVAL_SECS` (1 hour; browser sessions keep the
+12-hour cadence), and each rotation of a native session sets
+
+```text
+expires_at = GREATEST(expires_at,
+                      LEAST(now() + NATIVE_SESSION_TTL_HOURS (12h),
+                            created_at + NATIVE_SESSION_MAX_LIFETIME_DAYS (30d)))
+```
+
+So an account used at least once every 11 hours keeps its session, up to 30
+days from the sign-in that created it; one left alone for 12 hours signs in
+again, and so does every account at the 30-day cap. The 3-day idle cap that
+browser sessions use still applies, though the 12-hour sliding lifetime is the
+tighter rule for a native session. A browser session's expiry never moves.
+
+Before this, the native rotation could not fire at all: the rotation cadence
+was 12 hours for every session and a native session lived 12 hours, so its
+token expired before it was old enough to rotate.
+
+The rotation UPDATE also re-checks `revoked_at IS NULL AND expires_at > now()`
+and the current `token_hash`, and hands out a token only when it changed a
+row. A sign-out that lands between a request's read and its rotation stands
+(no resurrection, no extension), and of two requests racing to rotate one
+token, exactly one rotates and only that token is handed back; before, the
+loser was handed a token that was never stored.
+
+The new expiry travels with the new token in
+`x-trace-commons-session-expires-at` (RFC 3339, UTC, whole seconds truncated
+down), sent only beside `x-trace-commons-session-token`. The contributor
+daemon stores both in one write. A server without this change sends no expiry
+header and a client keeps the expiry it had; a client without it ignores the
+header and keeps the earlier expiry, so it only signs in sooner than it needs
+to. The daemon's renewal of an expired NEAR AI account session stays the
+fallback for an account idle past expiry or at the cap.
 
 ## Attacks with tests
 

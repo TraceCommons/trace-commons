@@ -6859,7 +6859,10 @@ it; publication consent remains separate from contribution and profile consent.
 
 Every authenticated account response may rotate the native session token,
 including an error response. The daemon persists that header before handling
-the route result. A committed publication or withdrawal remains successful if
+the route result, together with the session's new expiry from
+`x-trace-commons-session-expires-at` when the server sends one (a rotation
+extends a native session; see
+`docs/superpowers/plans/account-loopback-auth-report.md`). A committed publication or withdrawal remains successful if
 the credential store fails afterward; the response carries
 `commons_credential_storage_unavailable` so the app can show the required
 sign-in action.

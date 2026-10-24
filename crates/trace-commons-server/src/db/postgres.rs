@@ -4138,14 +4138,22 @@ impl Database for PgBackend {
         // interval. We always read back the row's CURRENT `token_hash` so the
         // last_seen / rotate UPDATE keys on the canonical hash, not the presented
         // one (which may be the prev token).
+        //
+        // A native session rotates on its own, shorter cadence
+        // (`NATIVE_SESSION_ROTATION_INTERVAL_SECS`), never slower than the
+        // browser one, because its rotation is also what extends it (below).
         let interval_secs = session_rotation_interval_secs();
+        let native_interval_secs =
+            interval_secs.min(crate::account_native_auth::NATIVE_SESSION_ROTATION_INTERVAL_SECS);
         let grace_secs = session_rotation_grace_secs();
         let row = tx
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
                         s.expires_at,
                         (s.token_hash = $1) AS matched_current,
-                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
+                        (s.token_issued_at < now() - make_interval(secs =>
+                            CASE WHEN s.client_kind = $4 THEN $3::float8 ELSE $2::float8 END))
+                            AS needs_rotate,
                         b.state AS binding_state
                    FROM trace_sessions s
                    JOIN trace_accounts a
@@ -4163,7 +4171,12 @@ impl Database for PgBackend {
                     AND s.expires_at > now()
                     AND s.revoked_at IS NULL
                     AND s.last_seen_at > now() - INTERVAL '3 days'",
-                &[&token_hash, &(interval_secs as f64)],
+                &[
+                    &token_hash,
+                    &(interval_secs as f64),
+                    &(native_interval_secs as f64),
+                    &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
+                ],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -4193,7 +4206,7 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
-        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
+        let mut expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
@@ -4214,19 +4227,70 @@ impl Database for PgBackend {
             // Same-tx rotation: park the old hash as the prev token for `grace`,
             // swap in the new hash, reset the issue clock, slide last_seen. Keyed on
             // the canonical current hash.
-            tx.execute(
-                "UPDATE trace_sessions
-                    SET prev_token_hash = token_hash,
-                        prev_token_valid_until = now() + make_interval(secs => $2),
-                        token_hash = $3,
-                        token_issued_at = now(),
-                        last_seen_at = now()
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND token_hash = $1",
-                &[&current_token_hash, &(grace_secs as f64), &new_hash],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            //
+            // A NATIVE session's rotation also slides its expiry to a fresh
+            // `NATIVE_SESSION_TTL_HOURS` from now, never past `created_at +
+            // NATIVE_SESSION_MAX_LIFETIME_DAYS` and never earlier than it already
+            // was. A browser session keeps its fixed expiry.
+            //
+            // Concurrency. The SELECT above took no row lock, so another request
+            // may rotate, revoke or sign out this row before this UPDATE runs.
+            // Under READ COMMITTED the UPDATE waits for that writer and then
+            // re-checks its WHERE against the committed row: a rotation that lost
+            // the race no longer matches `token_hash = $1`, and a revoked or
+            // expired row no longer matches the liveness predicates. Either way
+            // zero rows change, and this request hands out NO token (it would
+            // name a token that is not stored) and extends nothing. The request
+            // itself is still served on the token it presented, which is now the
+            // within-grace previous token or was live when it was read.
+            let rotated = tx
+                .query_opt(
+                    "UPDATE trace_sessions
+                        SET prev_token_hash = token_hash,
+                            prev_token_valid_until = now() + make_interval(secs => $2),
+                            token_hash = $3,
+                            token_issued_at = now(),
+                            last_seen_at = now(),
+                            expires_at = CASE
+                                WHEN client_kind = $4 THEN GREATEST(
+                                    expires_at,
+                                    LEAST(
+                                        now() + make_interval(hours => $5),
+                                        created_at + make_interval(days => $6)
+                                    )
+                                )
+                                ELSE expires_at
+                            END
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND token_hash = $1
+                        AND revoked_at IS NULL
+                        AND expires_at > now()
+                    RETURNING expires_at",
+                    &[
+                        &current_token_hash,
+                        &(grace_secs as f64),
+                        &new_hash,
+                        &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
+                        &(crate::account_native_auth::NATIVE_SESSION_TTL_HOURS as i32),
+                        &(crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS as i32),
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            match rotated {
+                Some(rotated) => expires_at = rotated.get("expires_at"),
+                None => {
+                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    return Ok(Some(crate::db::ValidatedSession {
+                        account_id,
+                        auth_credential_id,
+                        client_kind,
+                        rotated_secret: None,
+                        binding,
+                        expires_at,
+                    }));
+                }
+            }
 
             // Hash-only audit. Records only the action and actor (reserved-prefix
             // account actor); never a token, secret, or hash.

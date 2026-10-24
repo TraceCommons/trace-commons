@@ -140,7 +140,7 @@ pub(super) fn current_account_binding(
 pub(super) fn persist_rotated_token(
     shared: &DaemonShared,
     session: &crate::account_auth::LoadedAccountSession,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 ) -> Result<(), ()> {
     let Some(rotated_token) = rotated_token else {
         return Ok(());
