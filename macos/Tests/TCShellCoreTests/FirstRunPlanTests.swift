@@ -351,8 +351,10 @@ final class FirstRunPlanTests: XCTestCase {
     func test_askMeNeverGrants() {
         var state = signedIn()
         state.scopes = ["research"]
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start).count, 3,
+                       "Ask must explicitly stop an earlier Automatic choice before saving scopes")
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start),
-            [.setConsentScopes(["research"]), .markComplete])
+            [.setAskEachTime, .setConsentScopes(["research"]), .markComplete])
     }
 
     /// Review Focus 5: Start finishes watching. Watch only holds no
@@ -447,11 +449,12 @@ final class FirstRunPlanTests: XCTestCase {
         state.scopes = ["research"]
         XCTAssertEqual(
             FirstRunPlan.calls(for: state, at: .start),
-            [.setConsentScopes(["research"]), .markComplete])
+            [.setAskEachTime, .setConsentScopes(["research"]), .markComplete])
         state.rules = ["p1": .autoUpload]
         state.pastSelections = ["p1": ["s1"]]
         state.privateAI = true
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setAskEachTime,
             .setConsentScopes(["research"]),
             .setProjectMode(projectID: "p1", .autoUpload),
             .includePastSessions(projectID: "p1", ["s1"]),
@@ -469,6 +472,7 @@ final class FirstRunPlanTests: XCTestCase {
         state.scopes = ["research"]
         state.rules = ["p1": .autoUpload, "p2": .ask]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setAskEachTime,
             .setConsentScopes(["research"]),
             .setProjectMode(projectID: "p1", .autoUpload),
             .setProjectMode(projectID: "p2", .ask),
@@ -491,6 +495,7 @@ final class FirstRunPlanTests: XCTestCase {
         state.rules = ["p1": .ignore]
         state.pastSelections = ["p1": ["s1"], "p2": []]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setAskEachTime,
             .setConsentScopes(["research"]),
             .setProjectMode(projectID: "p1", .ignore),
             .markComplete,

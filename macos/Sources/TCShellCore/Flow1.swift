@@ -92,16 +92,19 @@ public struct Flow1GrantRequest: Decodable, Equatable, Sendable {
 }
 
 /// The daemon's `grant_automatic` answer. An ungranted answer carries only
-/// `granted`, so the other two are optional.
+/// `granted`, so the other fields are optional.
 public struct AutomaticGrant: Decodable, Equatable, Sendable {
     public let granted: Bool
     public let grantedAt: Date?
     /// A source has been recorded under the grant (not every source).
     public let onDiskRecorded: Bool?
+    /// Older daemons omit this, so onboarding can refuse an unsupported scope.
+    public let includeExisting: Bool?
 
     enum CodingKeys: String, CodingKey {
         case granted
         case grantedAt = "granted_at"
         case onDiskRecorded = "on_disk_recorded"
+        case includeExisting = "include_existing"
     }
 }

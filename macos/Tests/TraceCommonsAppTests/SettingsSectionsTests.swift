@@ -120,7 +120,7 @@ final class SettingsSectionsTests: XCTestCase {
             .watching: ("WatchingSection",
                         "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle)"),
             .consent: ("ConsentSection",
-                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading)"),
+                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),

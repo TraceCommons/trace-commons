@@ -305,6 +305,20 @@ final class DaemonClient {
         return try call("list_audit", params: ["limit": limit], as: Wrapper.self).entries
     }
 
+    /// A confirmed Ask choice holds prior unattended approvals as well.
+    func setAskEachTime() throws -> DaemonData.ContributionOverrideResult {
+        let result = try call("set_contribution_override", params: ["mode": ProjectMode.ask.rawValue],
+                              as: DaemonData.ContributionOverrideResult.self)
+        guard result.contributionOverride?.mode == ProjectMode.ask.rawValue else {
+            throw Failure(code: "unavailable", message: "sharing-choice-unconfirmed")
+        }
+        // Stop sends before withdrawing the standing default: projects the
+        // grant armed retain their own policy entries after withdrawal.
+        struct Withdrawal: Decodable { let withdrawn: Bool }
+        _ = try call("withdraw_automatic_grant", as: Withdrawal.self)
+        return result
+    }
+
     func consentOptions() throws -> [ConsentScope] {
         struct Wrapper: Decodable { let scopes: [ConsentScope] }
         return try call("consent_options", as: Wrapper.self).scopes

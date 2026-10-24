@@ -295,7 +295,7 @@ mod live {
     };
     use std::sync::{Arc, Mutex};
 
-    const ORG: &str = "org-1";
+    const ORG: &str = "66666666-7777-4888-9999-aaaaaaaaaaaa";
 
     fn shared() -> DaemonShared {
         let (dir, store) = crate::config::tests_support::temp_store();
@@ -322,6 +322,43 @@ mod live {
         s
     }
 
+    async fn link_recipient(s: &DaemonShared) -> crate::payout_link::test_support::Server {
+        use trace_commons_protocol::payout_link::near_ai_recipient_ref;
+        let ingest = crate::payout_link::test_support::spawn().await;
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.ingest_url = ingest.base.clone();
+        s.store.save_config(&cfg).unwrap();
+        let account = crate::account_auth::AccountSession {
+            access_token: "tcn1_dGVuYW50.account".into(),
+            expires_at: Utc::now() + Duration::hours(6),
+            account_id: "acct".into(),
+        };
+        s.store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&account).unwrap(),
+            )
+            .unwrap();
+        let key = uuid::Uuid::new_v4();
+        let org = uuid::Uuid::parse_str(ORG).unwrap();
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_PAYOUT_LINK_FILE,
+                &serde_json::to_vec(&serde_json::json!({
+                    "rails": {"near_ai": {"idempotency_key": key, "organization_id": org}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        {
+            let mut status = ingest.stub.lock().unwrap();
+            status.linked = true;
+            status.version = 1;
+            status.recipient_ref = Some(near_ai_recipient_ref(key, org));
+        }
+        ingest
+    }
+
     /// What the stub serves and saw.
     #[derive(Clone, Default)]
     struct Stub {
@@ -333,6 +370,7 @@ mod live {
         /// `(path and query, bearer)` for every call.
         calls: Arc<Mutex<Vec<(String, String)>>>,
         exchanges: Arc<Mutex<u32>>,
+        transfer_barrier: Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>,
     }
 
     fn bearer(request: &Request) -> String {
@@ -351,6 +389,7 @@ mod live {
         let refuse = stub.refuse.clone();
         let remaining = stub.remaining.clone();
         let calls = stub.calls.clone();
+        let transfer_barrier = stub.transfer_barrier.clone();
         let router = Router::new()
             .route(
                 "/v1/users/me/access-tokens",
@@ -386,7 +425,12 @@ mod live {
                     move |Query(query): Query<std::collections::HashMap<String, String>>| {
                         let ledger = ledger.lock().unwrap().clone();
                         let refuse = *refuse.lock().unwrap();
+                        let barrier = transfer_barrier.lock().unwrap().take();
                         async move {
+                            if let Some((started, release)) = barrier {
+                                started.notify_one();
+                                release.notified().await;
+                            }
                             if let Some(status) = refuse {
                                 return (status, Json(serde_json::json!({}))).into_response();
                             }
@@ -447,6 +491,7 @@ mod live {
     #[tokio::test]
     async fn a_poll_counts_every_page_once_and_shares_one_exchange_with_the_balance() {
         let s = shared();
+        let _ingest = link_recipient(&s).await;
         let stub = Stub::default();
         *stub.remaining.lock().unwrap() = 7 * DOLLAR;
         *stub.ledger.lock().unwrap() = vec![
@@ -462,8 +507,9 @@ mod live {
         assert_eq!(record.organization_id.as_deref(), Some(ORG));
         assert!(record.scanned);
         assert_eq!(record.received_total_nanos, 6 * DOLLAR);
-        assert_eq!(record.samples.len(), 1);
-        assert_eq!(record.samples[0].remaining_nanos, 7 * DOLLAR);
+        let balance = balance_snapshot(&s.store);
+        assert_eq!(balance.samples.len(), 1);
+        assert_eq!(balance.samples[0].remaining_nanos, 7 * DOLLAR);
         // Credit already there at the first read is history, not an
         // arrival: it becomes the baseline, silently.
         assert_eq!(record.notified_received_total_nanos, Some(6 * DOLLAR));
@@ -513,6 +559,7 @@ mod live {
     #[tokio::test]
     async fn the_first_credit_after_an_empty_ledger_is_announced() {
         let s = shared();
+        let _ingest = link_recipient(&s).await;
         let stub = Stub::default();
         let api = serve(&stub).await;
         assert_eq!(poll_with(&s, &api).await.unwrap(), 0);
@@ -532,6 +579,7 @@ mod live {
     #[tokio::test]
     async fn a_member_who_is_not_an_owner_is_refused_and_nothing_is_counted() {
         let s = shared();
+        let _ingest = link_recipient(&s).await;
         let stub = Stub::default();
         *stub.refuse.lock().unwrap() = Some(StatusCode::FORBIDDEN);
         let api = serve(&stub).await;
@@ -541,12 +589,13 @@ mod live {
         assert_eq!(record.candidacy(), None);
         // The balance sample was still kept: the 24-hour change does not
         // need the ledger.
-        assert_eq!(record.samples.len(), 1);
+        assert_eq!(balance_snapshot(&s.store).samples.len(), 1);
     }
 
     #[tokio::test]
     async fn forgetting_the_sign_in_forgets_the_record() {
         let s = shared();
+        let _ingest = link_recipient(&s).await;
         let stub = Stub::default();
         *stub.ledger.lock().unwrap() = vec![row("t1", DOLLAR, "2026-10-20T10:00:00Z")];
         let api = serve(&stub).await;
@@ -565,8 +614,177 @@ mod live {
         assert!(!s.store.daemon_path(ARRIVALS_FILE).exists());
         assert_eq!(snapshot(&s.store), ArrivalsRecord::default());
         // With the session gone, a late write cannot bring it back.
-        assert!(update(&s, |record| record.adopt(ORG)).is_none());
+        assert!(update_record(&s, records(), ARRIVALS_FILE, |record| record.adopt(ORG)).is_none());
         assert!(!s.store.daemon_path(ARRIVALS_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn payout_arrivals_are_read_without_a_private_ai_key() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.near_ai_inference = None;
+            settings.save_for_test(&s.store).unwrap();
+        }
+        let stub = Stub::default();
+        let api = serve(&stub).await;
+        assert_eq!(poll_with(&s, &api).await.unwrap(), 0);
+        assert!(
+            snapshot(&s.store).scanned,
+            "signed-in contributors can monitor the linked payout recipient without Private AI"
+        );
+        stub.ledger
+            .lock()
+            .unwrap()
+            .push(row("payout-1", DOLLAR, "2026-10-23T10:00:00Z"));
+        assert_eq!(poll_with(&s, &api).await.unwrap(), DOLLAR);
+        assert_eq!(
+            pending_notification(&s).map(|credit| (credit.amount, credit.received_total)),
+            Some((DOLLAR, DOLLAR))
+        );
+    }
+
+    #[tokio::test]
+    async fn payout_arrivals_never_use_a_different_spending_organization() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.near_ai_inference.as_mut().unwrap().organization_id = "spending-only".into();
+            settings.save_for_test(&s.store).unwrap();
+        }
+        let stub = Stub::default();
+        let api = serve(&stub).await;
+        *stub.ledger.lock().unwrap() = vec![row("payout-1", DOLLAR, "2026-10-23T10:00:00Z")];
+        assert_eq!(poll_with(&s, &api).await.unwrap(), DOLLAR);
+        assert_eq!(snapshot(&s.store).organization_id.as_deref(), Some(ORG));
+        // A later read of the spending balance cannot replace the payout
+        // recipient's seen IDs and turn the same transfer into news again.
+        note_balance(
+            &s,
+            Some("spending-only"),
+            &balance::BalanceReading {
+                remaining_nanos: Some(5 * DOLLAR),
+                spend_limit_nanos: None,
+                total_spent_nanos: 0,
+                total_requests: 0,
+                total_tokens: 0,
+                observed_at: Utc::now() + Duration::hours(1),
+            },
+        );
+        assert_eq!(snapshot(&s.store).received_total_nanos, DOLLAR);
+        assert_eq!(poll_with(&s, &api).await.unwrap(), 0);
+        let calls = stub.calls.lock().unwrap();
+        assert!(calls.iter().any(|(path, _)| {
+            path.starts_with(&format!("/v1/organizations/{ORG}/credit/transfers"))
+        }));
+        assert!(
+            !calls
+                .iter()
+                .any(|(path, _)| path
+                    .starts_with("/v1/organizations/spending-only/credit/transfers"))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_linked_payout_recipient_never_counts_spending_org_transfers() {
+        let s = shared();
+        let stub = Stub::default();
+        *stub.ledger.lock().unwrap() = vec![row("unrelated", DOLLAR, "2026-10-20T10:00:00Z")];
+        let api = serve(&stub).await;
+        assert_eq!(poll_with(&s, &api).await.unwrap(), 0);
+        assert!(!snapshot(&s.store).scanned);
+        assert_eq!(pending_notification(&s), None);
+        let calls = stub.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .all(|(path, _)| !path.contains("/credit/transfers"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|(path, _)| path.contains("/usage/balance"))
+        );
+        assert_eq!(balance_snapshot(&s.store).samples.len(), 1);
+    }
+
+    async fn unlink(s: &DaemonShared) {
+        for (method, params) in [
+            (
+                "payout_link_unlink",
+                serde_json::json!({"rail_id":"near_ai", "expected_current_version":1}),
+            ),
+            (
+                "payout_link_confirm",
+                serde_json::json!({"rail_id":"near_ai", "action":"unlink", "confirmed":true}),
+            ),
+        ] {
+            let response = crate::daemon::ipc::handle_request_async(
+                s,
+                &crate::daemon::ipc::Request {
+                    id: 1,
+                    method: method.into(),
+                    params,
+                },
+            )
+            .await;
+            assert!(response.error.is_none(), "{method} was refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_inflight_poll_cannot_restore_an_unlinked_recipient() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        let stub = Stub::default();
+        let api = serve(&stub).await;
+        poll_with(&s, &api).await.unwrap();
+        stub.ledger
+            .lock()
+            .unwrap()
+            .push(row("late-credit", DOLLAR, "2026-10-23T10:00:00Z"));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *stub.transfer_barrier.lock().unwrap() = Some((started.clone(), release.clone()));
+        let poll = poll_with(&s, &api);
+        tokio::pin!(poll);
+        tokio::select! {
+            _ = started.notified() => {},
+            result = &mut poll => panic!("poll finished before its blocked ledger response: {result:?}"),
+        }
+        unlink(&s).await;
+        let mut events = s.events.subscribe();
+        release.notify_one();
+        assert_eq!(poll.await.unwrap(), 0);
+        assert_eq!(snapshot(&s.store).received_total_nanos, 0);
+        assert_eq!(pending_notification(&s), None);
+        assert!(
+            events.try_recv().is_err(),
+            "a stale poll published a balance event"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prepared_credit_notification_is_suppressed_after_unlink() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        let stub = Stub::default();
+        let api = serve(&stub).await;
+        poll_with(&s, &api).await.unwrap();
+        stub.ledger
+            .lock()
+            .unwrap()
+            .push(row("credit", DOLLAR, "2026-10-23T10:00:00Z"));
+        assert_eq!(poll_with(&s, &api).await.unwrap(), DOLLAR);
+        let credit = pending_notification(&s).unwrap();
+        unlink(&s).await;
+        assert!(!publish_notification(&s, &credit, || panic!(
+            "stale recipient credit was published"
+        )));
+        assert_eq!(pending_notification(&s), None);
+        assert_eq!(snapshot(&s.store).notified_received_total_nanos, None);
     }
 
     #[test]

@@ -1869,16 +1869,42 @@ pub fn credential_store_self_check() -> i32 {
 }
 
 /// The order one upload pass sends its approved entries in: every entry a
-/// person approved before any a folder's standing Automatic approved, each
-/// group in queue order.
+/// person approved before any a folder's standing Automatic approved.
+/// Person approvals retain queue order; Automatic sends oldest traces first.
 ///
 /// A pass sends at most `MAX_UPLOADS_PER_PASS`. Switching a folder to
 /// Automatic approves its whole backlog (#1473), and in plain queue order a
 /// trace the contributor sent by hand waited behind all of it, at that many
 /// per poll. The contributor is waiting on theirs; the backlog is not.
 fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
-    // Stable, so queue order holds within each group.
-    approved.sort_by_key(|e| e.approved_unattended);
+    let age = |entry: &queue::QueueEntry| {
+        // Match discovery's conversation start where available. The durable
+        // source-write time survives re-offers; the observation is a fallback
+        // for queue files written before that provenance was recorded.
+        entry
+            .shape
+            .as_ref()
+            .and_then(|shape| shape.started_at)
+            .or(entry.last_modified_at)
+            .or(entry.observed_modified_at)
+    };
+    approved.sort_by(|left, right| {
+        left.approved_unattended
+            .cmp(&right.approved_unattended)
+            .then_with(|| {
+                if !left.approved_unattended {
+                    // Stable sort preserves the person's existing queue order.
+                    return std::cmp::Ordering::Equal;
+                }
+                let left_age = age(left);
+                let right_age = age(right);
+                (left_age.is_none(), left_age, left.entry_id).cmp(&(
+                    right_age.is_none(),
+                    right_age,
+                    right.entry_id,
+                ))
+            })
+    });
     approved
 }
 
@@ -4334,6 +4360,86 @@ mod tests {
             1,
             "one backlog entry left for the next pass"
         );
+    }
+
+    /// The queue may discover a recent trace before an older history item.
+    /// The upload cap must choose from the chronological order, not discard
+    /// the older tail before sorting the first twenty candidates.
+    #[tokio::test]
+    async fn automatic_backlog_sends_older_sessions_before_applying_the_pass_cap() {
+        let h = TransientRetryHarness::new().await;
+        for index in 0..MAX_UPLOADS_PER_PASS {
+            h.add_session(
+                &format!("{index:08x}-dddd-4ddd-8ddd-dddddddddddd"),
+                &format!("backfill session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let entries = h.entries();
+        assert_eq!(entries.len(), MAX_UPLOADS_PER_PASS + 1);
+        let newest = entries[0].entry_id;
+        let oldest = entries.last().unwrap().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            for (index, entry) in entries.iter().enumerate() {
+                q.entry_mut_for_test(entry.entry_id).unwrap().shape = Some(queue::SessionShape {
+                    started_at: Some(
+                        at("2026-08-08T10:00:00Z") - chrono::Duration::days(index as i64),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        let after = h.entries();
+        let state_of = |id| {
+            after
+                .iter()
+                .find(|entry| entry.entry_id == id)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state_of(oldest), queue::QueueState::Uploaded);
+        assert_eq!(state_of(newest), queue::QueueState::Approved);
+    }
+
+    #[test]
+    fn send_order_uses_source_age_with_stable_manual_priority_and_unknowns_last() {
+        let entry = |id: u128,
+                     unattended: bool,
+                     started: Option<chrono::DateTime<Utc>>,
+                     modified,
+                     observed| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(id),
+            approved_unattended: unattended,
+            shape: started.map(|started_at| queue::SessionShape {
+                started_at: Some(started_at),
+                ..Default::default()
+            }),
+            last_modified_at: modified,
+            observed_modified_at: observed,
+            ..Default::default()
+        };
+        let old = at("2026-01-01T00:00:00Z");
+        let middle = at("2026-02-01T00:00:00Z");
+        let recent = at("2026-03-01T00:00:00Z");
+        let ordered = send_order(vec![
+            entry(1, true, Some(recent), Some(old), None),
+            entry(9, false, Some(recent), None, None),
+            entry(7, true, None, None, None),
+            entry(5, true, Some(old), None, None),
+            entry(8, false, Some(old), None, None),
+            entry(4, true, None, Some(middle), Some(old)),
+            entry(3, true, Some(old), None, None),
+            entry(2, true, None, None, None),
+            entry(6, true, None, None, Some(middle)),
+        ]);
+        let ids: Vec<_> = ordered
+            .iter()
+            .map(|entry| entry.entry_id.as_u128())
+            .collect();
+        assert_eq!(ids, vec![9, 8, 3, 5, 4, 6, 1, 2, 7]);
     }
 
     /// Person approvals first, each group in queue order.
