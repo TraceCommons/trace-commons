@@ -70,6 +70,22 @@ set +x
 #                       written as TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_*.
 #                       Unset, the app words its first run in points. The
 #                       values are the operator's and are never committed.
+#   TC_SCORING_DRIVER   optional: 1 turns on the perplexity-scoring driver,
+#                       written as TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED=true
+#                       with TRACE_COMMONS_GATE_DRIVER_DATABASE_URL on the
+#                       local database as the LOGIN role tc_gate_driver_login.
+#                       Reads the secret tc-staging-db-gate-driver-password
+#                       (16 or more letters and digits). Unset, nothing is
+#                       rendered and the secret is not read.
+#   TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA, TC_NOVELTY_UTILITY_SETTLE_FROM
+#                       optional: the gate's scoring award, a settling credit.
+#                       The delta (a decimal, default the pilot template's 0)
+#                       replaces TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA.
+#                       Above 0 it also requires the cut-over, an RFC 3339 UTC
+#                       time such as 2026-11-01T00:00:00Z, written as
+#                       TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM, and renders
+#                       TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true,
+#                       as the ingest refuses to boot without both.
 #   TC_RENDER_OUT_DIR   default /etc/tracecommons.
 #   TC_SITE_ROOT        default /var/lib/tracecommons-site.
 #   TC_DEPLOY_DIR       default ~/deploy of the user who ran sudo.
@@ -271,6 +287,52 @@ if [ -n "$first_run_min" ] || [ -n "$first_run_max" ]; then
     || refuse "TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN and _MAX must both be set, in digits"
   extra+="TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN=$first_run_min"$'\n'
   extra+="TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX=$first_run_max"$'\n'
+fi
+# The scoring driver: scores the staging corpus's traces in the background,
+# and with the scoring award below it earns each scored trace a settling
+# award. Off unless TC_SCORING_DRIVER=1. It reads the whole corpus through
+# the narrow trace_gate_driver role, so it needs that role's LOGIN member,
+# tc_gate_driver_login, made after the first boot like the login resolver's.
+case "${TC_SCORING_DRIVER:-}" in
+  "") ;;
+  1)
+    gate_driver_password="$(secret tc-staging-db-gate-driver-password)"
+    db_password tc-staging-db-gate-driver-password "$gate_driver_password"
+    extra+="TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED=true"$'\n'
+    extra+="TRACE_COMMONS_GATE_DRIVER_DATABASE_URL=postgres://tc_gate_driver_login:$gate_driver_password@127.0.0.1:5432/tracecommons"$'\n'
+    ;;
+  *) refuse "TC_SCORING_DRIVER must be 1 or unset" ;;
+esac
+# The gate's scoring award. The pilot template sets the delta to 0 and staging
+# inherits it; a delta above 0 replaces that line, and then, as the ingest
+# refuses to boot otherwise, the production-gate requirement is rendered and a
+# cut-over is required (novelty_utility_credit_requires_production_gate,
+# novelty_utility_settle_from_missing/_invalid). Checked here so a bad render
+# fails at render time.
+award_delta="${TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA:-}"
+award_settle_from="${TC_NOVELTY_UTILITY_SETTLE_FROM:-}"
+if [ -n "$award_settle_from" ]; then
+  # RFC 3339 in UTC, as the cut-over is written: 2026-11-01T00:00:00Z.
+  [[ "$award_settle_from" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?Z$ ]] \
+    || refuse "TC_NOVELTY_UTILITY_SETTLE_FROM is not an RFC 3339 UTC time (2026-11-01T00:00:00Z)"
+  if [ "$((10#${BASH_REMATCH[2]}))" -lt 1 ] || [ "$((10#${BASH_REMATCH[2]}))" -gt 12 ] \
+    || [ "$((10#${BASH_REMATCH[3]}))" -lt 1 ] || [ "$((10#${BASH_REMATCH[3]}))" -gt 31 ] \
+    || [ "$((10#${BASH_REMATCH[4]}))" -gt 23 ] || [ "$((10#${BASH_REMATCH[5]}))" -gt 59 ] \
+    || [ "$((10#${BASH_REMATCH[6]}))" -gt 59 ]; then
+    refuse "TC_NOVELTY_UTILITY_SETTLE_FROM is not an RFC 3339 UTC time (2026-11-01T00:00:00Z)"
+  fi
+fi
+if [ -n "$award_delta" ]; then
+  # Shape only; the ingest checks the policy ceiling and refuses to boot over it.
+  [[ "$award_delta" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+    || refuse "TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA is not a non-negative decimal number"
+  extra+="TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=$award_delta"$'\n'
+  if [[ "$award_delta" =~ [1-9] ]]; then
+    [ -n "$award_settle_from" ] \
+      || refuse "TC_NOVELTY_UTILITY_SETTLE_FROM is not set (TC_NOVELTY_UTILITY_CREDIT_POINTS_DELTA is above 0)"
+    extra+="TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true"$'\n'
+    extra+="TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=$award_settle_from"$'\n'
+  fi
 fi
 case "$TC_NEAR_AI_PAYOUT_MODE" in
   disabled) ;;
