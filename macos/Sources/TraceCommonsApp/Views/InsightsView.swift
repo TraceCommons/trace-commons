@@ -273,7 +273,7 @@ struct InsightsView: View {
                 }.disabled(model.busy)
                 if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
                 if !model.invalidatedEpisodeIDs.isEmpty {
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    LazyVStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
                         Text(model.text("episode_invalidated_notice"))
                         ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
                             Text(id).insightsMono()
@@ -344,7 +344,7 @@ struct InsightsView: View {
     private var savedSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsSectionTitle(model.text("saved"))
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                 if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
                 ForEach(model.snapshots) { insight in
                     Button { model.explain(insight.id) } label: {

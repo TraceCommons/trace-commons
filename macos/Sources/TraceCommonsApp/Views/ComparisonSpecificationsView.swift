@@ -36,7 +36,7 @@ struct ComparisonSpecificationsView: View {
     }
 
     private var draft: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsGroupHeading(text("comparison_specification_draft"))
             if model.options.isEmpty { Text(text("comparison_specification_need_context")) }
             GlassSelect(text("comparison_specification_stratum"), selection: Binding(
@@ -77,7 +77,7 @@ struct ComparisonSpecificationsView: View {
     }
 
     private var saved: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsGroupHeading(text("comparison_specification_saved"))
             if model.specifications.isEmpty { Text(text("comparison_specifications_empty")) }
             ForEach(model.specifications) { spec in
@@ -102,7 +102,7 @@ struct ComparisonSpecificationsView: View {
     }
 
     private func specificationView(_ spec: ComparisonSpecification) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        LazyVStack(alignment: .leading, spacing: 5) {
             Text("\(spec.date_start) – \(spec.date_end)").insightsHeading()
             Text("\(spec.cohort_labels.joined(separator: " / ")) \(text("comparison_cohort_declared_not_verified"))")
             Text("\(text("comparison_specification_cutoff")): \(InsightsDate.label(spec.evidence_cutoff))")
@@ -114,15 +114,19 @@ struct ComparisonSpecificationsView: View {
             }
             InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                 Text(spec.id); Text(spec.specification_digest); Text(spec.saved_record_digest)
-                ForEach(spec.cutoff_task_evidence) { evidence in
-                    Text(evidence.task_id); Text(evidence.material_digest); Text(evidence.substantive_material_digest)
+                LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(spec.cutoff_task_evidence) { evidence in
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                            Text(evidence.task_id); Text(evidence.material_digest); Text(evidence.substantive_material_digest)
+                        }
+                    }
                 }
             }.insightsMono().textSelection(.enabled)
         }
     }
 
     private func resultView(_ result: DescriptiveComparisonResult) -> some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             // What the result is and what its counts are out of, behind the
             // heading's "i".
             InsightsGroupHeading(text("comparison_specification_result"), info: [

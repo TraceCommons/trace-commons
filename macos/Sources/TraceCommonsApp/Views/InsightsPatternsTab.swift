@@ -343,7 +343,7 @@ struct InsightsPatternSessionsView: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(InsightsPatternsWords.title(found.pattern, copy: copy)).insightsTitle()
             VStack(alignment: .leading, spacing: 0) {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(found.sessions) { session in
                         InsightsDrillRow(
                             title: session.session_ref,

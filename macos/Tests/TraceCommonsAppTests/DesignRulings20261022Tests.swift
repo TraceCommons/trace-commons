@@ -250,14 +250,38 @@ final class DesignRulings20261022Tests: XCTestCase {
         for needle in [
             "expanded: folder.sessions.isEmpty ? nil : expanded.contains(folder.id),",
             "onToggleExpand: { toggle(folder.id) },",
-            "if expanded.contains(folder.id) {",
-            "sessionRow(entry, off: folder.mode == .ignore, words: words)",
+            "ForEach(Self.drawnRows(folders, expanded: expanded))",
+            "case .session(let entry, let off): sessionRow(entry, off: off, words: words)",
             "depth: .session, tile: TracesTreeView.sessionTile(entry), title: TracesTreeView.when(entry),",
             "onSelect: { open(.traces(entryId: entry.entryId)) },",
             "EdgeRailFolderListHeights.rows(folders, expanded: expanded)",
         ] {
             XCTAssertTrue(rail.contains(needle), "the rail lacks \(needle)")
         }
+    }
+
+    /// Opening a folder inserts every one of its sessions immediately
+    /// after it. Closing removes only those rows; the remaining row ids
+    /// stay stable for the lazy stack and its menu anchors.
+    func test_theTracesPeekExpansionPreservesRowsAndTheirIdentity() async throws {
+        let sessions = try await SampleDaemonClient(.normalDay).listPending(projectId: nil)
+        let first = try XCTUnwrap(sessions.first)
+        let second = try XCTUnwrap(sessions.dropFirst().first)
+        let folder = TracesTree.FolderNode(id: "one", label: "one", mode: .ask, sessions: [first, second])
+        let next = TracesTree.FolderNode(id: "two", label: "two", mode: .ask, sessions: [])
+        let folders = [folder, next]
+        let closed = EdgeRailFolderList.drawnRows(folders, expanded: [])
+        XCTAssertEqual(closed, [.folder(folder), .folder(next)])
+
+        let opened = EdgeRailFolderList.drawnRows(folders, expanded: [folder.id])
+        XCTAssertEqual(opened, [.folder(folder), .session(first, off: false), .session(second, off: false), .folder(next)])
+        XCTAssertEqual(opened.first?.id, closed.first?.id)
+        XCTAssertEqual(opened.last?.id, closed.last?.id)
+        XCTAssertEqual(Set(opened.map(\.id)).count, opened.count)
+        XCTAssertEqual(EdgeRailFolderListHeights.rows(folders, expanded: [folder.id]), opened.count)
+        XCTAssertEqual(EdgeRailFolderList.drawnRows(folders, expanded: ["no-longer-present"]), closed)
+        XCTAssertEqual(EdgeRailFolderList.drawnRows(folders, expanded: []), closed)
+        XCTAssertEqual(EdgeRailFolderList.drawnRows(folders, expanded: [folder.id]).map(\.id), opened.map(\.id))
     }
 
     /// No link or line under a peek (owner, 2026-10-22): the Open link and

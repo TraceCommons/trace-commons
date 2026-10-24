@@ -32,7 +32,7 @@ struct InsightModelDetails: View {
     let copy: [String: String]
     private func text(_ key: String) -> String { copy[key] ?? "" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        LazyVStack(alignment: .leading, spacing: 6) {
             Text("\(text("model_record_count")): \(observations.record_count.formatted())")
             Text("\(text("model_candidates")): \(observations.candidate_records.formatted())")
             Text("\(text("model_valid")): \(observations.valid_declarations.formatted())")
@@ -64,7 +64,7 @@ struct InsightEvidenceControls: View {
     }
     private func text(_ key: String) -> String { model.text(key) }
     var body: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             // What a link is and is not, behind the heading's "i".
             InsightsGroupHeading(text("linked_evidence_title"), info: [text("link_notice")])
             InsightsDisclosure(text("link_git")) {
@@ -144,7 +144,7 @@ struct InsightOutcomeDetails: View {
     let copy: [String: String]
     private func text(_ key: String) -> String { copy[key] ?? "" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        LazyVStack(alignment: .leading, spacing: 6) {
             Text(text("link_user_provenance"))
             Text("\(text("link_id")): \(link.id)").insightsMono()
             Text("\(text("source_digest")): \(link.source_digest)").insightsMono()

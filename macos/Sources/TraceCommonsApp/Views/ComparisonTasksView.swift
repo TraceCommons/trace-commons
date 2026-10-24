@@ -56,7 +56,7 @@ struct ComparisonTasksView: View {
     }
 
     private var listView: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsGroupHeading(text("comparison_task_create_heading"))
             episodeChooser(selection: $model.createSelection)
             Button(text("comparison_task_create")) { model.create() }
@@ -132,7 +132,7 @@ struct ComparisonTasksView: View {
     }
 
     private func staleReview(_ detail: ComparisonTaskDetail) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        LazyVStack(alignment: .leading, spacing: 4) {
             Text(text("comparison_task_stale_reasons")).insightsHeading()
             if detail.stale_reasons.isEmpty { Text(text("comparison_task_stale_none")) }
             ForEach(detail.stale_reasons, id: \.self) { reason in
@@ -146,10 +146,10 @@ struct ComparisonTasksView: View {
     }
 
     private func frozenEvidence(_ detail: ComparisonTaskDetail) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        LazyVStack(alignment: .leading, spacing: 6) {
             Text(text("comparison_task_frozen_evidence")).insightsHeading()
             ForEach(detail.task.episodes) { episode in
-                VStack(alignment: .leading, spacing: 3) {
+                LazyVStack(alignment: .leading, spacing: 3) {
                     let current = episodes.first { $0.id == episode.episode_id }?.episode
                     Text(current == nil ? text("comparison_task_current_missing")
                          : current?.revision == episode.revision && current?.membership_revision == episode.membership_revision
@@ -160,14 +160,19 @@ struct ComparisonTasksView: View {
                         Button(text("comparison_task_open_current_episode")) { openEpisode(episode.episode_id) }
                     }
                     ForEach(episode.members, id: \.snapshot_id) { member in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("insightsFrozenMembers", "comparison-frozen-\(episode.episode_id)-\(member.snapshot_id)")
+                        #endif
                         Button(text("comparison_task_open_frozen_snapshot")) { openSnapshot(member.snapshot_id) }
                     }
                     InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                         Text(episode.episode_id).insightsMono()
                         Text("\(text("comparison_task_revision")): \(episode.revision) · \(text("episode_membership_revision")): \(episode.membership_revision)")
                         Text(episode.members_digest).insightsMono().textSelection(.enabled)
-                        ForEach(episode.members, id: \.snapshot_id) { member in
-                            Text(member.snapshot_id).insightsMono().lineLimit(1)
+                        LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                            ForEach(episode.members, id: \.snapshot_id) { member in
+                                Text(member.snapshot_id).insightsMono().lineLimit(1)
+                            }
                         }
                     }
                 }.insightsCard()
@@ -236,7 +241,7 @@ struct ComparisonTasksView: View {
     }
 
     private func episodeChooser(selection: Binding<Set<String>>) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        LazyVStack(alignment: .leading, spacing: 5) {
             ForEach(episodes) { entry in
                 Toggle(isOn: Binding(get: { selection.wrappedValue.contains(entry.id) }, set: { selected in
                     if selected { selection.wrappedValue.insert(entry.id) }

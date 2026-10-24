@@ -401,12 +401,21 @@ private struct EdgeRailPrivateAIMap: View {
 /// do. Submit sends the folder at once, as the tree's does. A session's
 /// Review, Submit all as, and a rule change that asks first open the
 /// Traces tab, where their reviews and dialogs are: the rail holds none.
-private struct EdgeRailFolderList: View {
+struct EdgeRailFolderList: View {
     let store: TracesStore
     let open: (MonitorDestination) -> Void
     @State private var rowMenu: TracesTreeView.RowMenu?
     /// The folders open to show their sessions; none at first.
     @State private var expanded: Set<String> = []
+
+    /// Flat children let the lazy stack defer individual sessions, even
+    /// when a folder contains most of the queue.
+    static func drawnRows(_ folders: [TracesTree.FolderNode], expanded: Set<String>) -> [TracesTreeView.DrawnRow] {
+        folders.flatMap { folder in
+            [.folder(folder)] + (expanded.contains(folder.id)
+                ? folder.sessions.map { .session($0, off: folder.mode == .ignore) } : [])
+        }
+    }
 
     var body: some View {
         let folders = store.tree.folders.filter { $0.mode != .ignore }
@@ -418,13 +427,11 @@ private struct EdgeRailFolderList: View {
                     .accessibilityAddTraits(.isHeader)
                     .padding(.bottom, GlassTokens.Space.s2)
                 ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(folders) { folder in
-                            row(folder, words: words)
-                            if expanded.contains(folder.id) {
-                                ForEach(folder.sessions, id: \.entryId) { entry in
-                                    sessionRow(entry, off: folder.mode == .ignore, words: words)
-                                }
+                    LazyVStack(spacing: 2) {
+                        ForEach(Self.drawnRows(folders, expanded: expanded)) { drawn in
+                            switch drawn {
+                            case .folder(let folder): row(folder, words: words)
+                            case .session(let entry, let off): sessionRow(entry, off: off, words: words)
                             }
                         }
                     }
@@ -446,6 +453,9 @@ private struct EdgeRailFolderList: View {
     /// rule to change or can be ignored.
     @ViewBuilder
     private func row(_ folder: TracesTree.FolderNode, words: MonitorTracesCopy) -> some View {
+        #if DEBUG
+        let _ = OtherCollectionRowBodies.record("railFolders", folder.id)
+        #endif
         let offer = store.groupOffer(folder)
         let submits = offer.offersContribute && store.mayContributeFolder(folder)
         let busy = store.submittingFolder == folder.id
@@ -491,6 +501,9 @@ private struct EdgeRailFolderList: View {
     /// Traces tab, where its review is. No "..." menu: Dismiss asks first,
     /// and the rail holds no dialog.
     private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool, words: MonitorTracesCopy) -> some View {
+        #if DEBUG
+        OtherCollectionRowBodies.record("railSessions", entry.entryId)
+        #endif
         let lines = store.lines(entry)
         return GlassListRow(
             depth: .session, tile: TracesTreeView.sessionTile(entry), title: TracesTreeView.when(entry),
