@@ -79,6 +79,10 @@ enum OpenMonitor {
     /// still a request.
     @MainActor private static var pending: (held: Bool, destination: MonitorDestination?, activate: Bool) = (false, nil, true)
 
+    /// An explicit opener can cause the first activation itself. Record its
+    /// delivery before calling the handler, which may reenter the delegate.
+    @MainActor private static var deliveredActivatingRequest = false
+
     /// Every opener activates the app, as a click does; only the launch's
     /// own request may stay quiet (R-44).
     @MainActor
@@ -87,13 +91,28 @@ enum OpenMonitor {
             pending = (true, destination, activate)
             return
         }
+        if activate { deliveredActivatingRequest = true }
         handler(destination, activate)
+    }
+
+    /// The first foreground activation opens the app without needing a
+    /// Dock click. A notification or deep link may already be waiting for
+    /// the launcher; keep its destination instead of replacing it with nil.
+    @MainActor
+    static func requestForInitialActivation() {
+        guard !deliveredActivatingRequest else { return }
+        if pending.held {
+            pending.activate = true
+        } else {
+            request()
+        }
     }
 
     /// Tests only: no handler and nothing held.
     @MainActor
     static func reset() {
         pending = (false, nil, true)
+        deliveredActivatingRequest = false
         handler = nil
     }
 
@@ -102,6 +121,7 @@ enum OpenMonitor {
         guard let handler, pending.held else { return }
         let held = pending
         pending = (false, nil, true)
+        if held.activate { deliveredActivatingRequest = true }
         handler(held.destination, held.activate)
     }
 }

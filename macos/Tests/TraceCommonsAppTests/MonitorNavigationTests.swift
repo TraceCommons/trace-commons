@@ -1,5 +1,6 @@
 @testable import TCShellCore
 import XCTest
+import AppKit
 
 @testable import TraceCommonsApp
 
@@ -325,6 +326,67 @@ final class MonitorNavigationTests: XCTestCase {
         OpenMonitor.handler = { destination, _ in opened.append(destination) }
         XCTAssertEqual(opened.count, 1)
         XCTAssertEqual(opened.first, .some(nil))
+    }
+
+    /// A foreground launch must open its window without a second Dock click.
+    /// The delegate can beat the SwiftUI launcher; the request stays queued.
+    func test_theFirstActivationOpensTheWindowOnceEvenBeforeTheLauncherExists() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        let notification = Notification(name: NSApplication.didBecomeActiveNotification)
+        delegate.applicationDidBecomeActive?(notification)
+        delegate.applicationDidBecomeActive?(notification)
+        var activations: [Bool] = []
+        OpenMonitor.handler = { _, activate in activations.append(activate) }
+        XCTAssertEqual(activations, [true], "a foreground launch opens and activates the window")
+        delegate.applicationDidBecomeActive?(notification)
+        XCTAssertEqual(activations, [true], "switching back after closing the window must not reopen it")
+    }
+
+    func test_initialActivationPreservesAndActivatesAPendingDestination() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        OpenMonitor.request(.traces(entryId: "entry-7"), activate: false)
+        delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+        var opened: [MonitorDestination?] = []
+        var activations: [Bool] = []
+        OpenMonitor.handler = { destination, activate in
+            opened.append(destination)
+            activations.append(activate)
+        }
+        XCTAssertEqual(opened, [.traces(entryId: "entry-7")])
+        XCTAssertEqual(activations, [true], "a queued quiet request becomes a foreground one")
+    }
+
+    /// An explicit opener already raised its requested place. In particular,
+    /// Settings must not acquire an unrelated Monitor window on activation.
+    func test_anExplicitOpeningSatisfiesTheInitialActivation() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        var opened: [MonitorDestination?] = []
+        OpenMonitor.handler = { destination, activate in
+            opened.append(destination)
+            if activate {
+                // Activation can reenter the delegate before the opener returns.
+                delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+            }
+        }
+        OpenMonitor.request(.settings(.compute))
+        XCTAssertEqual(opened, [.settings(.compute)])
+    }
+
+    func test_aBackgroundLaunchOpensNothingUntilTheFirstActivation() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        var activations: [Bool] = []
+        OpenMonitor.handler = { _, activate in activations.append(activate) }
+        XCTAssertTrue(activations.isEmpty)
+        delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+        XCTAssertEqual(activations, [true])
     }
 
     /// A held request keeps whether it activates: the launch's own request
