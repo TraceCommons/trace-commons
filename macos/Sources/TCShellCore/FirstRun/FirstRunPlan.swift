@@ -22,6 +22,8 @@ public enum FirstRunCall: Equatable, Sendable {
     /// call: the person goes through the sheets, whose ceremony completes
     /// with the daemon this commit started.
     case openPasskeySheets
+    /// Explicit global Ask, including when setup is revisited after Automatic.
+    case setAskEachTime
     case setConsentScopes([String])
     case setProjectMode(projectID: String, ProjectMode)
     case includePastSessions(projectID: String, [String])
@@ -221,12 +223,23 @@ public enum FirstRunPlan {
         let watchOnly = state.account == .watchOnly
         if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }
-        var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
+        var calls: [FirstRunCall] = []
+        if !watchOnly {
+            if state.sharing == .askMe { calls.append(.setAskEachTime) }
+            calls.append(.setConsentScopes(state.scopes.sorted()))
+        }
         for projectID in state.rules.keys.sorted() {
             // A folder's Automatic can be picked and confirmed before sign-in
             // (Ron, 2026-10-22); it is armed here, after the scopes, once the
             // enrollment it needs is held, and never for watching only.
-            if let mode = state.rules[projectID], mode != .autoUpload || FirstRunNavigation.canChooseAutomatic(state) {
+            // Under Ask each time a folder's Automatic is not sent: the
+            // global Ask override sent above decides every folder, so the
+            // arming would be recorded but not in force, and would start
+            // sending if that override were later cleared.
+            if let mode = state.rules[projectID],
+                mode != .autoUpload
+                    || (FirstRunNavigation.canChooseAutomatic(state) && state.sharing != .askMe)
+            {
                 calls.append(.setProjectMode(projectID: projectID, mode))
             }
         }

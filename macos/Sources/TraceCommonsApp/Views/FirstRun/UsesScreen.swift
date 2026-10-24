@@ -19,7 +19,7 @@ enum UsesScreenLayout {
         options.first(where: \.alwaysOn)
     }
 
-    /// The other data uses, inside the expander.
+    /// The three optional data uses, always shown independently.
     static func optionalScopes(_ options: [ConsentScope]) -> [ConsentScope] {
         options.filter { !$0.alwaysOn && $0.grantsDataUse }
     }
@@ -36,11 +36,10 @@ enum UsesScreenLayout {
         optionalScopes(options)
     }
 
-    /// The scope rows on screen, in order: the required use, the optional
-    /// uses while the group is open, then the handle, always.
+    /// Data uses shown on this screen; public attribution is in profile
+    /// settings. The retained argument accepts older callers.
     static func visibleScopes(_ options: [ConsentScope], optionalOpen: Bool) -> [ConsentScope] {
-        (requiredScope(options).map { [$0] } ?? []) + (optionalOpen ? expandedScopes(options) : [])
-            + handleScopes(options)
+        (requiredScope(options).map { [$0] } ?? []) + optionalScopes(options)
     }
 
     static func isTicked(_ scope: String, in state: FirstRunState) -> Bool {
@@ -114,14 +113,18 @@ enum UsesScreenLayout {
     ) -> String {
         if isLoading { return uses.sharingLoading }
         guard let grant, let split = split(path: path, grant: grant) else { return uses.sharingUnavailable }
-        return split.line
+        return path == .automatic ? (uses.automaticScope ?? split.line) : split.line
     }
 
     /// The rest of the path's words, behind the Sharing line's info button:
     /// Ask's detail; Automatic's detail, then the scrub's scope and
     /// limit. Nil whenever the line is a fallback.
-    static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?) -> String? {
-        grant.flatMap { split(path: path, grant: $0)?.detail }
+    static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?, uses: FirstRunCopy.Uses? = nil) -> String? {
+        guard let grant, let detail = split(path: path, grant: grant)?.detail else { return nil }
+        if path == .automatic, let scope = uses?.automaticScope, let scrub = grant.scrub {
+            return [scope, scrub.scope, scrub.limit].joined(separator: " ")
+        }
+        return detail
     }
 
     private static func split(path: SharingPath, grant: AutomaticGrantCopy) -> (line: String, detail: String)? {
@@ -153,8 +156,10 @@ enum UsesScreenLayout {
     ) -> [GlassRadioOption<SharingPath>] {
         FirstRunNavigation.sharingPaths(for: state).compactMap { path in
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
-            guard let title = modes?.label(for: mode) else { return nil }
+            guard let modeTitle = modes?.label(for: mode) else { return nil }
+            let title = path == .askMe ? (uses.askEachTime ?? modeTitle) : modeTitle
             var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }
+            if path == .automatic, let scope = uses.automaticScope { lines = [scope] }
             if path == .automatic, !FirstRunNavigation.canChooseAutomatic(state) {
                 lines.append(uses.automaticAfterSignIn)
             }
@@ -180,6 +185,7 @@ enum UsesScreenLayout {
         case .none: return nil
         case .grantRefused: return uses.sharingRefused
         case .scopesFailed: return uses.scopesFailed
+        case .sharingFailed: return uses.sharingSaveFailed ?? uses.rulesFailed
         case .rulesFailed: return uses.rulesFailed
         case .privateAIFailed: return privateAI?.writeUnconfirmed ?? uses.privateAiFailed
         // The marker was not written, so setup did not finish: its own
@@ -554,7 +560,6 @@ struct UsesScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
 
-    @State private var optionalOpen = false
     /// The core's sharing words for this configuration, read once on
     /// appear; nil shows the fallback line, and Start stays disabled.
     @State private var grant: AutomaticGrantCopy?
@@ -578,9 +583,14 @@ struct UsesScreen: View {
         } title: {
             FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
         } content: {
-            list(options: options, required: required)
-                .firstRunCard()
-                .fixedSize(horizontal: true, vertical: false)
+            ScrollView {
+                list(options: options, required: required)
+                    .frame(maxWidth: 460, alignment: .leading)
+                    .firstRunCard()
+                    .frame(maxWidth: .infinity)
+            }
+            .frame(maxWidth: 520)
+            .scrollBounceBehavior(.basedOnSize)
         }
         // The required use is in the state as soon as it is known, so the
         // state matches its ticked box; Start includes it again regardless.
@@ -600,68 +610,38 @@ struct UsesScreen: View {
     private func list(options: [ConsentScope], required: ConsentScope?) -> some View {
         let optional = UsesScreenLayout.optionalScopes(options)
         return VStack(alignment: .leading, spacing: 0) {
-            eyebrow(copy.uses.eyebrow)
             if let required {
                 HStack(spacing: GlassTokens.Space.s2) {
-                    // Always included, so ticked and locked: the person
-                    // cannot untick it (owner, 2026-10-08).
-                    Toggle(required.title, isOn: .constant(true))
-                        .toggleStyle(GlassCheckboxStyle())
-                        .disabled(true)
-                    infoButton(title: required.title, text: required.description)
+                    // Required for participation, so state it once.
+                    Text(required.title)
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                     // Ron's inline "required" in the on colour, not a tag
                     // (Ron's review of #1235, item 15).
                     Text(copy.uses.required)
                         .glassType(GlassTokens.TypeScale.mono)
                         .foregroundStyle(GlassTokens.Color.statusOnText.color)
                 }
-                .frame(height: 32)
+                .frame(minHeight: 32)
+                Text(required.description)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !optional.isEmpty {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    // The box ticks every optional use; the words beside it
-                    // open the group (Ron, 2026-10-22).
-                    Toggle(sources: optional.map { scope($0.name) }, isOn: \.self) { EmptyView() }
-                        .toggleStyle(GlassCheckboxStyle())
-                        .accessibilityLabel(copy.uses.allOptional)
-                    Button {
-                        optionalOpen.toggle()
-                    } label: {
-                        HStack(spacing: GlassTokens.Space.s2) {
-                            Image(systemName: "chevron.right")
-                                .glassGlyph(9, weight: .semibold)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .rotationEffect(.degrees(optionalOpen ? 90 : 0))
-                                .animation(GlassMotion.standard(reduceMotion), value: optionalOpen)
-                                .frame(width: 14)
-                                .accessibilityHidden(true)
-                            Text(copy.uses.allOptional)
-                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                                .foregroundStyle(GlassColor.textPrimary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(optionalOpen ? .isSelected : [])
+                Text(copy.uses.rewardOpportunities ?? "")
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                ForEach(optional) { option in
+                    scopeRow(option)
                 }
-                .frame(height: 32)
-                if optionalOpen {
-                    ForEach(UsesScreenLayout.expandedScopes(options)) { option in
-                        scopeRow(option)
-                            .padding(.leading, 26)
-                            .transition(.opacity)
-                    }
-                }
-            }
-            // The handle: its own row after the group, always shown.
-            ForEach(UsesScreenLayout.handleScopes(options)) { option in
-                scopeRow(option)
             }
             GlassHairline()
                 .padding(.top, GlassTokens.Space.s3)
             HStack(spacing: GlassTokens.Space.s2) {
                 eyebrow(copy.uses.sharing)
-                if let detail = UsesScreenLayout.sharingDetail(path: runner.state.sharing, grant: grant) {
+                if let detail = UsesScreenLayout.sharingDetail(path: runner.state.sharing, grant: grant, uses: copy.uses) {
                     infoButton(title: copy.uses.sharing, text: detail)
                 }
             }
@@ -677,7 +657,6 @@ struct UsesScreen: View {
                     for: runner.state, modes: ProjectModeWords.table, grant: grant, uses: copy.uses))
                 .padding(.bottom, GlassTokens.Space.s3)
         }
-        .animation(GlassMotion.spatial(reduceMotion, duration: 0.42), value: optionalOpen)
     }
 
     private func eyebrow(_ text: String) -> some View {
@@ -688,16 +667,19 @@ struct UsesScreen: View {
             .padding(.bottom, GlassTokens.Space.s2)
     }
 
-    /// A scope's box and title, then its description behind an info button
-    /// after the title (Ron, 2026-10-22). The description is the core
-    /// consent table's.
+    /// Each permission names its use and shows the scope before choosing.
     private func scopeRow(_ option: ConsentScope) -> some View {
-        HStack(spacing: GlassTokens.Space.s2) {
-            Toggle(option.title, isOn: scope(option.name))
-                .toggleStyle(GlassCheckboxStyle())
-            infoButton(title: option.title, text: option.description)
+        Toggle(isOn: scope(option.name)) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                Text(option.description)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .frame(height: 32)
+        .toggleStyle(GlassCheckboxStyle())
+        .padding(.vertical, GlassTokens.Space.s3)
     }
 
     private func infoButton(title: String, text: String) -> some View {

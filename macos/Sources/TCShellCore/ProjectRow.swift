@@ -101,6 +101,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// a daemon predating the field. Can undercount `sessionCount`: never
     /// assert the two sum.
     public let tools: [ProjectTool]
+    /// Modes the running daemon will accept; absent on older daemons.
+    private let daemonOfferableModes: [ProjectMode]?
 
     public var id: String { projectId }
 
@@ -119,7 +121,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         fromNow: Bool? = nil,
         automaticDisclosure: String? = nil,
         folderMode: ProjectMode? = nil,
-        tools: [ProjectTool] = []
+        tools: [ProjectTool] = [],
+        daemonOfferableModes: [ProjectMode]? = nil
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -136,6 +139,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.automaticDisclosure = automaticDisclosure
         self.folderMode = folderMode
         self.tools = tools
+        self.daemonOfferableModes = daemonOfferableModes
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -154,6 +158,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case automaticDisclosure = "automatic_disclosure"
         case folderMode = "folder_mode"
         case tools
+        case daemonOfferableModes = "offerable_modes"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -184,6 +189,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         automaticDisclosure = try c.decodeIfPresent(String.self, forKey: .automaticDisclosure)
         folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
         tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
+        daemonOfferableModes = try c.decodeIfPresent([ProjectMode].self, forKey: .daemonOfferableModes)
     }
 
     /// Whether this project could ever be armed to contribute without asking.
@@ -221,7 +227,9 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// honest answer; offering it disabled still puts an arming affordance
     /// on a row that has none.
     public var offerableModes: [ProjectMode] {
-        canBeArmed ? [.ask, .autoUpload, .ignore] : [.ask, .ignore]
+        let supported = canBeArmed ? [ProjectMode.ask, .autoUpload, .ignore] : [.ask, .ignore]
+        guard let daemonOfferableModes else { return supported }
+        return supported.filter(daemonOfferableModes.contains)
     }
 
     /// The name to show for this row.

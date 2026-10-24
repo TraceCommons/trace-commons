@@ -65,8 +65,7 @@ struct PrivateAISwitchCard: View {
     let refusal: String?
     let onSet: (Bool) -> Void
     let onDismiss: () -> Void
-    /// Re-reads the connection. With it the card wears #1146's panel header
-    /// (the connection eyebrow over the title, and a re-read link).
+    /// Re-reads the connection from the refresh control beside its heading.
     var onRefresh: (() -> Void)?
     /// The sign-in, drawn inside the card between the words and the switch,
     /// as #1146 draws the credential in its connection panel.

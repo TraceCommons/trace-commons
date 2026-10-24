@@ -49,9 +49,9 @@ struct ConnectionSection: View {
         }
     }
 
-    /// #1146's head: CONNECTION over Connected or Not connected, with the
-    /// Ready or Local only chip. Before the core's first answer there is no
-    /// title and no chip: "Not connected" would be an answer nothing gave.
+    /// Connected or Not connected beside the Ready or Local only chip.
+    /// Before the core's first answer, use the Connection heading and no
+    /// chip: "Not connected" would be an answer nothing gave.
     private var connectionTitle: String? {
         guard model.statusRead == .answered else { return nil }
         return model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected

@@ -449,8 +449,7 @@ private struct EdgeRailFolderList: View {
         let offer = store.groupOffer(folder)
         let submits = offer.offersContribute && store.mayContributeFolder(folder)
         let busy = store.submittingFolder == folder.id
-        let switchable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore)
+        let switchable = folder.mode != nil && folder.offerableModes.contains(.ignore)
         let menu = (folder.mode != nil && !folder.offerableModes.isEmpty) || (switchable && folder.mode != .ignore)
         let outcome = store.disclosure?.outcome
         let split = submits && outcome != nil
@@ -523,8 +522,7 @@ private struct EdgeRailFolderList: View {
            let anchor = anchors[TracesTreeView.rowID(.folder(projectID: id))],
            let folder = store.tree.folders.first(where: { $0.id == id }) {
             let rect = space[anchor]
-            let ignorable = folder.mode != nil && folder.offerableModes.contains(.ask)
-                && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
+            let ignorable = folder.mode != nil && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
             Group {
                 if menu == .folder(id) {
                     TracesFolderMenu(

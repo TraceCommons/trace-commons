@@ -211,9 +211,9 @@ fn tick_over(
             source_indices.push(index);
         }
     }
-    // Before any session is visited, so nothing on disk in a source recorded
-    // now can be armed by the grant. A source whose discovery failed is not
-    // recorded, and arms nothing until a pass records it.
+    // Before any session is visited, so legacy grants can exclude on-disk
+    // history. Include-existing grants explicitly cover that history. A
+    // source whose discovery failed still waits until a full pass records it.
     if let Some(grant) = grant {
         record_sources_for_grant(shared, &ctx, grant, &discovered);
     }
@@ -222,10 +222,11 @@ fn tick_over(
     if !armings.is_empty() {
         record_sources_for_armings(shared, &ctx, &armings, &discovered);
     }
-    for (source, refs) in &discovered {
-        for session_ref in refs {
-            visit_session(shared, &ctx, *source, session_ref, &mut out);
-        }
+    // Onboarding starts discovery before the sharing choice is committed.
+    // Order every full pass across sources before bounded-queue admission,
+    // so a fresh install cannot fill that queue with recent traces first.
+    for (source, session_ref) in discovered_in_age_order(&discovered) {
+        visit_session(shared, &ctx, source, session_ref, &mut out);
     }
     // Insights feed T, after the offers: a full pass only, and only while
     // the contributor has switched it on. Only the job is made here; the
@@ -488,7 +489,8 @@ fn project_key_of(
 }
 
 /// Arm `project_key` under the Flow 1 grant when this session is the first
-/// sign of a project discovered after it (K3). The arming writes an explicit
+/// sign of a project it covers: a new project for legacy grants, or any
+/// nonignored Ask project for an include-existing grant. The arming writes an explicit
 /// policy entry, the terms it is granted under, and an audit row -- recorded
 /// first, as `set_project_mode` does, so there is never an armed project
 /// with no record of how it was armed. Returns the mode now in force.
@@ -522,7 +524,7 @@ fn arm_by_default(
         detail: None,
     };
     if super::audit::append(&shared.store, &entry).is_err() {
-        tracing::warn!("could not record arming a new project; it asks first");
+        tracing::warn!("could not record automatic project arming; it asks first");
         return ProjectMode::NotifyOnly;
     }
     // Arming can move the badge with no queue change (entries already
@@ -559,7 +561,7 @@ fn arm_under_grant(
         super::arming_wording::grant_arming_claim(ctx.disclosure),
     );
     if policy.save(&shared.store).is_err() {
-        tracing::warn!("could not persist arming a new project");
+        tracing::warn!("could not persist automatic project arming");
     }
     ProjectMode::AutoUpload
 }
@@ -1383,6 +1385,38 @@ impl PassOutcome {
     }
 }
 
+/// Oldest available source age first, independent of source traversal.
+/// Discovery's timestamp can be an adapter's cheap file-time estimate;
+/// after loading, the upload order uses the transcript's actual start.
+fn discovered_in_age_order<'a>(
+    discovered: &'a [(&'a dyn TraceSource, Vec<SessionRef>)],
+) -> Vec<(&'a dyn TraceSource, &'a SessionRef)> {
+    let mut sessions: Vec<_> = discovered
+        .iter()
+        .flat_map(|(source, refs)| {
+            refs.iter().map(move |session| {
+                (
+                    *source,
+                    session,
+                    session.started_at.or_else(|| session_modified_at(session)),
+                )
+            })
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        (a.2.is_none(), a.2, a.0.name(), &a.1.path).cmp(&(
+            b.2.is_none(),
+            b.2,
+            b.0.name(),
+            &b.1.path,
+        ))
+    });
+    sessions
+        .into_iter()
+        .map(|(source, session, _)| (source, session))
+        .collect()
+}
+
 /// Sources backed by a database have stable virtual paths, so their own
 /// modification time is authoritative. File sources retain the stat fallback.
 fn session_modified_at(session_ref: &SessionRef) -> Option<DateTime<Utc>> {
@@ -1541,6 +1575,19 @@ fn visit_session(
         let mode = {
             let policy = shared.policy.lock().expect("policy lock");
             policy.resolve(&project_key)
+        };
+        // Onboarding can grant Automatic after discovery has already queued
+        // these sessions. Give that grant the same arming path as a newly
+        // loaded session; otherwise unchanged history would wait forever.
+        let mode = if mode == ProjectMode::NotifyOnly && !from_trajectory {
+            arm_by_default(shared, ctx, source, &project_key, &obs.path);
+            shared
+                .policy
+                .lock()
+                .expect("policy lock")
+                .resolve(&project_key)
+        } else {
+            mode
         };
         if mode == ProjectMode::Ignore {
             out.report.ignored += 1;
@@ -4256,6 +4303,301 @@ mod tests {
         let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
         let policy = f.shared.policy.lock().unwrap();
         (policy.resolve(&key), policy.projects.contains_key(&key))
+    }
+
+    fn grant_automatic_with_existing(f: &WatcherFixture) {
+        let cfg = f.shared.store.load_config().unwrap().unwrap();
+        let response = super::super::ipc::handle_request(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "grant_automatic_including_existing".to_string(),
+                params: serde_json::json!({
+                    "confirmed": true,
+                    "witness_signing_address": cfg.witness.map(|w| w.signing_address),
+                    "include_existing": true,
+                }),
+            },
+        );
+        assert!(response.error.is_none(), "{:?}", response.error);
+    }
+
+    #[tokio::test]
+    async fn onboarding_automatic_includes_existing_eligible_sessions_except_ignored_folders() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("ask", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("never", "33333333-3333-3333-3333-333333333333", 0);
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            for (project, mode) in [
+                ("ask", ProjectMode::NotifyOnly),
+                ("never", ProjectMode::Ignore),
+            ] {
+                let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
+                policy.set_mode(&key, mode, Utc::now()).unwrap();
+            }
+            policy
+                .set_contribution_override(ProjectMode::NotifyOnly, Utc::now(), None)
+                .unwrap();
+        }
+        // Already queued history must be promoted too, not only a fresh discovery.
+        f.settle(Utc::now() + chrono::Duration::hours(29)).await;
+        grant_automatic_with_existing(&f);
+        let after = tick(&f.shared, Utc::now() + chrono::Duration::hours(30))
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::AutoUpload, true));
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::AutoUpload, true));
+        assert_eq!(mode_of(&f, "never"), (ProjectMode::Ignore, true));
+        assert_eq!(after.auto_ready, 2, "{after:?}");
+        f.write_session("new", "44444444-4444-4444-4444-444444444444", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        let reloaded = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
+        assert_eq!(reloaded, *f.shared.policy.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn onboarding_existing_opt_in_covers_a_watched_source_connected_later() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        let watch = f.shared.settings.lock().unwrap().claude_source.clone();
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Off);
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        f.shared.settings.lock().unwrap().claude_source = watch;
+        let after = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(after.auto_ready, 1, "{after:?}");
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::AutoUpload, true));
+    }
+
+    #[tokio::test]
+    async fn onboarding_existing_grant_supersedes_global_modes_but_keeps_folder_exclusions() {
+        for mode in [
+            ProjectMode::NotifyOnly,
+            ProjectMode::Ignore,
+            ProjectMode::AutoUpload,
+        ] {
+            let f = WatcherFixture::new();
+            let cfg = grant_test_cfg(&["debugging_evaluation"]);
+            f.shared.store.save_config(&cfg).unwrap();
+            f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+            f.write_session("never", "22222222-2222-2222-2222-222222222222", 0);
+            {
+                let mut policy = f.shared.policy.lock().unwrap();
+                let key = project_key_for(Some(&abs("Users/testuser/code/never")));
+                policy
+                    .set_mode(&key, ProjectMode::Ignore, Utc::now())
+                    .unwrap();
+                policy
+                    .set_contribution_override(
+                        mode,
+                        Utc::now(),
+                        Some((
+                            crate::daemon::grant_terms::GrantTerms::in_force_for(&f.shared, &cfg),
+                            crate::daemon::arming_wording::grant_arming_claim(
+                                crate::daemon::automatic_gate::disclosure(Some(&cfg)),
+                            ),
+                        )),
+                    )
+                    .unwrap();
+            }
+            grant_automatic_with_existing(&f);
+            assert!(
+                f.shared
+                    .policy
+                    .lock()
+                    .unwrap()
+                    .contribution_override
+                    .is_none()
+            );
+            let after = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+            assert_eq!(after.auto_ready, 1, "prior global {mode:?}: {after:?}");
+            assert_eq!(mode_of(&f, "never"), (ProjectMode::Ignore, true));
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_history_fills_a_bounded_queue_with_older_sources_first() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.set_max_queue_entries(1);
+        let newer = f.write_session("a-newer", "11111111-1111-1111-1111-111111111111", 0);
+        let older = f.write_session("z-older", "22222222-2222-2222-2222-222222222222", 0);
+        for (path, instant) in [
+            (&older, at("2026-08-01T00:00:00Z")),
+            (&newer, at("2026-09-01T00:00:00Z")),
+        ] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(instant.timestamp() as u64),
+                )
+                .unwrap();
+        }
+        grant_automatic_with_existing(&f);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entries = live_entries(&f);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, older);
+        assert_eq!(entries[0].state, QueueState::Approved);
+    }
+
+    #[tokio::test]
+    async fn onboarding_existing_grant_expands_old_automatic_from_now_history() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let path = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(29)).await;
+        arm_via_ipc(&f, "old", Some(false));
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
+    }
+
+    #[tokio::test]
+    async fn onboarding_broad_grant_offers_only_effective_modes_and_refuses_stale_ask() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let key = project_key_for(Some(&abs("Users/testuser/code/old")));
+        let listed = ipc_call(&f, "list_projects", serde_json::json!({}))
+            .result
+            .unwrap();
+        let rows = listed["projects"].as_array().unwrap();
+        let id = crate::daemon::policy::project_id_for(&key);
+        let row = rows.iter().find(|row| row["project_id"] == id).unwrap();
+        assert_eq!(
+            row["offerable_modes"],
+            serde_json::json!(["auto_upload", "ignore"])
+        );
+        let before = f.shared.policy.lock().unwrap().clone();
+        for params in [
+            serde_json::json!({"project_id": id, "mode": "notify_only"}),
+            serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
+        ] {
+            assert!(ipc_call(&f, "set_project_mode", params).error.is_some());
+            assert_eq!(*f.shared.policy.lock().unwrap(), before);
+        }
+        // Re-sending Automatic must not introduce a new history hold.
+        assert!(
+            ipc_call(
+                &f,
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "auto_upload"})
+            )
+            .error
+            .is_none()
+        );
+        assert!(
+            !f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .waits_for_a_person_at_send(&key, &f.claude_root.join("unused").to_string_lossy())
+        );
+        assert!(
+            ipc_call(
+                &f,
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "ignore"})
+            )
+            .error
+            .is_none()
+        );
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::Ignore, true));
+    }
+
+    #[tokio::test]
+    async fn malformed_existing_opt_in_preserves_the_grant_and_policy() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic(&f);
+        let before = f.shared.policy.lock().unwrap().clone();
+        for invalid in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let response = super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: "grant_automatic_including_existing".to_string(),
+                    params: serde_json::json!({"confirmed": true, "witness_signing_address": null, "include_existing": invalid}),
+                },
+            );
+            assert!(response.error.is_some(), "malformed scope must be refused");
+            assert_eq!(*f.shared.policy.lock().unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_existing_grant_save_restores_the_entire_policy() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic(&f);
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .grant_voids
+            .push(crate::daemon::policy::GrantVoidNotice {
+                id: 7,
+                voided_at: Utc::now(),
+                project_key: None,
+                reasons: vec!["scopes-widened".to_string()],
+                contribution_override: false,
+            });
+        let before = f.shared.policy.lock().unwrap().clone();
+        let policy_path = f
+            .shared
+            .store
+            .daemon_path(crate::config::DAEMON_PROJECTS_FILE);
+        std::fs::remove_file(&policy_path).unwrap();
+        std::fs::create_dir(&policy_path).unwrap();
+        let response = super::super::ipc::handle_request(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "grant_automatic_including_existing".to_string(),
+                params: serde_json::json!({"confirmed": true, "witness_signing_address": null, "include_existing": true}),
+            },
+        );
+        assert!(response.error.is_some());
+        assert_eq!(*f.shared.policy.lock().unwrap(), before);
     }
 
     /// K3: under the Flow 1 grant a project first seen after it is armed,

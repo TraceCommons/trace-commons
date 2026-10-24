@@ -31,25 +31,25 @@ use crate::consent::{VALID_SCOPES, validate_scopes};
 const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "debugging_evaluation",
-        "Finding bugs and measuring agents",
+        "Debugging and evaluation",
         "Researchers read traces to find where coding agents fail, and score agents against each other.",
         true,
     ),
     (
         "benchmark_only",
-        "Turn my traces into test cases",
+        "Create benchmarks",
         "Parts of your traces may become benchmark problems that agents are scored against.",
         true,
     ),
     (
         "ranking_training",
-        "Train models that judge agent output",
+        "Train evaluators",
         "Used to train models that rank or grade what an agent produced. Not models that write code.",
         true,
     ),
     (
         "model_training",
-        "Train coding models directly",
+        "Train coding models",
         "Your traces become training data for models that write code, potentially including commercial ones.",
         true,
     ),
@@ -299,10 +299,10 @@ mod tests {
         assert_eq!(
             titles,
             [
-                ("debugging_evaluation", "Finding bugs and measuring agents"),
-                ("benchmark_only", "Turn my traces into test cases"),
-                ("ranking_training", "Train models that judge agent output"),
-                ("model_training", "Train coding models directly"),
+                ("debugging_evaluation", "Debugging and evaluation"),
+                ("benchmark_only", "Create benchmarks"),
+                ("ranking_training", "Train evaluators"),
+                ("model_training", "Train coding models"),
                 (
                     "public_attribution",
                     "List my handle publicly as a contributor"

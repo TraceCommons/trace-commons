@@ -456,6 +456,7 @@ pub struct SettingsWords {
     /// The optional scopes' heading. Approved 2026-10-07: it was "Optional \u{2014} each one lets your traces do
     /// more".
     pub optional_data_use: &'static str,
+    pub reward_opportunities: &'static str,
     pub credit: &'static str,
     /// The tag on the always-on scope.
     pub required: &'static str,
@@ -471,7 +472,7 @@ pub struct SettingsWords {
 #[must_use]
 pub fn settings_words() -> SettingsWords {
     SettingsWords {
-        consent_heading: "How may your traces be used?",
+        consent_heading: "Data uses",
         connected: "Connected",
         not_connected: "Not connected",
         queued_nothing_sent: concat!(
@@ -523,6 +524,7 @@ pub fn settings_words() -> SettingsWords {
         ),
         always_included: "Always included",
         optional_data_use: "Optional data use",
+        reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
         credit: "Credit",
         required: "required",
         nothing_preselected: "Nothing here is pre-selected on your behalf.",

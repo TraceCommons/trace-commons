@@ -107,8 +107,8 @@ final class SettingsSectionsTests: XCTestCase {
 
     /// Each section's heading is the one the list names it by: the same
     /// source, read in the section's own file. Startup, Watching and Uses
-    /// take #1146's two-level card heads instead (an eyebrow over an h2);
-    /// the modal's section rule still names each by the list's word.
+    /// use their specific card titles; the section rule still names each
+    /// by the list's word.
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
             .general: ("GeneralSection", "GlassEyebrowCard(SettingsWords.appearance)"),
@@ -120,7 +120,7 @@ final class SettingsSectionsTests: XCTestCase {
             .watching: ("WatchingSection",
                         "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle)"),
             .consent: ("ConsentSection",
-                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading)"),
+                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),

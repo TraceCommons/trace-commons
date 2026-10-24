@@ -699,6 +699,10 @@ pub const AUTO_PATH_ASK_FIRST_DETAIL: &str = "Nothing is contributed until you a
 /// (`first_run_copy`'s `uses.required`).
 pub const SCOPE_TAG_REQUIRED: &str = "required";
 
+/// Reward guidance approved by the owner for the independent data-use choices.
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str =
+    "Allow all data uses to maximize your reward opportunities.";
+
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
 /// can draw it. Approved 2026-10-06.
