@@ -701,6 +701,13 @@ final class AppModel: ObservableObject {
     /// go of the attempt, so cancel, failure and timeout all stop it.
     private(set) var credentialPoll: Task<Void, Never>?
 
+    /// The shared credential poll owns notifications for its ceremony,
+    /// including one recovered from the daemon. Account/first-run browser
+    /// flows publish their own completion. An epoch invalidates reads that
+    /// were already in flight when a ceremony was cancelled or replaced.
+    private var credentialSignInNotifiesAccount = false
+    private var credentialSignInNotificationEpoch = 0
+
     /// A sign-in is pending while this shell holds its attempt or the shared
     /// table still offers a cancel for the status last read. The second half
     /// covers an app restarted while the daemon kept its ceremony running.
@@ -725,27 +732,51 @@ final class AppModel: ObservableObject {
     /// flight: the ceremony finishes in a browser this app does not own, so
     /// nothing here is told when it does.
     func refreshNearAiCredential() {
+        guard let client else { return }
         let attempt = credentialAttempt?.attemptID
+        let notificationEpoch = credentialSignInNotificationEpoch
+        let followsAccountFlow = nearAiBrowserSignInWaiting || accountSigningIn || nearAiSigningIn
         perform(
             CredentialSurface.statusMethod,
             work: { try $0.nearAiCredentialStatus(attemptID: attempt) }
         ) { status in
+            guard self.client === client,
+                  notificationEpoch == self.credentialSignInNotificationEpoch else { return }
+            let wasPending = self.credentialSignInPending
             self.publishIfChanged(\.credentialStatus, status)
             // The attempt is let go the moment the shared table stops
             // offering a cancel for it. Holding a finished attempt's id
             // would keep polling a ceremony nobody is waiting on.
             if CredentialSurface.action(status, calls: self.credentialCalls) == .cancel {
+                if !followsAccountFlow, !self.nearAiBrowserSignInWaiting,
+                   !self.accountSigningIn, !self.nearAiSigningIn {
+                    self.credentialSignInNotifiesAccount = true
+                }
                 self.startCredentialPollIfNeeded()
             } else {
+                // Finish this observation epoch before publishing completion:
+                // a slower waiting reply must not resurrect the ceremony.
+                if wasPending { self.credentialSignInNotificationEpoch &+= 1 }
+                let notifiesAccount = self.credentialSignInNotifiesAccount
+                self.credentialSignInNotifiesAccount = false
                 let wasHeld = self.credentialAttempt != nil
                 self.credentialAttempt = nil
                 // The sign-in landed: everything the key is behind is read
                 // again, as after a write (`submitNearAiCredential`), so the
                 // notices and cards that wait on it go by themselves.
-                if wasHeld, status.state == CredentialSurface.statePresent {
+                if wasHeld || notifiesAccount, status.state == CredentialSurface.statePresent {
                     self.refreshSettings()
                     self.refreshHarnesses()
                     self.refreshManagedSessions()
+                }
+                // An inference key can outlive its Cloud session. A named
+                // failed/cancelled attempt can also leave an older session,
+                // so trust its lifecycle when the daemon reports one.
+                let verdict = status.attemptStatus == nil
+                    ? NearAILoginPoll.verdict(status) : NearAILoginPoll.freshVerdict(status)
+                if notifiesAccount, status.sessionState == CredentialSurface.statePresent,
+                   verdict == .signedIn {
+                    self.accountSessionGeneration &+= 1
                 }
             }
         }
@@ -902,6 +933,8 @@ final class AppModel: ObservableObject {
             lastActionError = privateInferenceCopy?.writeUnconfirmed
             return nil
         }
+        credentialSignInNotificationEpoch &+= 1
+        credentialSignInNotifiesAccount = true
         credentialAttempt = attempt
         startCredentialPollIfNeeded()
         refreshNearAiCredential()
@@ -914,6 +947,8 @@ final class AppModel: ObservableObject {
     /// whatever sign-in it is running, so an app restarted mid-ceremony can
     /// still stop the one it never started.
     func cancelNearAiCredential() {
+        credentialSignInNotificationEpoch &+= 1
+        credentialSignInNotifiesAccount = false
         let attemptID = credentialAttempt?.attemptID
         submitNearAiCredential { try $0.nearAiCredentialCancel(attemptID: attemptID) }
     }
@@ -4062,6 +4097,8 @@ extension AppModel: FirstRunDaemon {
         // A Cancel before the browser opens: no attempt is begun, and none
         // that began meanwhile opens the browser.
         if Task.isCancelled { return false }
+        credentialSignInNotificationEpoch &+= 1
+        credentialSignInNotifiesAccount = false
         nearAiBrowserGeneration &+= 1
         nearAiBrowserSignInWaiting = true
         defer {

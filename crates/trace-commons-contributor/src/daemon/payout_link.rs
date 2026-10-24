@@ -77,7 +77,6 @@ use super::account_session_renewal::{RenewVia, account_session};
 use super::audit::{self, AuditEntry};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::nearai_credential::api::{CloudApi, OwnedOrganization};
-use super::nearai_credential::loopback::SessionTokens;
 use super::nearai_credential::session;
 use super::settings::NearAiSession;
 use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, keep_rotated_token};
@@ -308,11 +307,16 @@ fn near_ai_label(error: &anyhow::Error) -> &'static str {
 
 /// The retained NEAR AI session, read under the credential commit lock and
 /// released before any await.
-fn retained_near_ai_session(shared: &DaemonShared) -> Result<NearAiSession, &'static str> {
-    let locks = session::coordination(shared.store.dir()).map_err(|e| near_ai_label(&e))?;
-    let commit = locks.commit.lock().map_err(|e| near_ai_label(&e))?;
-    let settings = session::runtime_snapshot(shared, &commit).map_err(|e| near_ai_label(&e))?;
-    settings.near_ai_session.ok_or(ERR_NEAR_AI_SIGN_IN_REQUIRED)
+fn retained_near_ai_session(shared: &DaemonShared) -> anyhow::Result<NearAiSession> {
+    let locks = session::coordination(shared.store.dir())?;
+    let commit = locks
+        .commit
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    let settings = session::runtime_snapshot(shared, &commit)?;
+    settings
+        .near_ai_session
+        .ok_or_else(|| anyhow::anyhow!("near_ai_credential_session_missing"))
 }
 
 /// Exchange the retained session for a fresh access token and read the
@@ -322,19 +326,23 @@ async fn owned_orgs_with_fresh_token(
     shared: &DaemonShared,
     api: &CloudApi,
 ) -> Result<(Vec<OwnedOrganization>, String), &'static str> {
-    let retained = retained_near_ai_session(shared)?;
-    let access = super::nearai_credential::exchange(shared, api, &retained)
-        .await
-        .map_err(|e| near_ai_label(&e))?;
-    let tokens = SessionTokens {
-        access_token: access.access_token,
-        refresh_token: String::new(),
-    };
-    let orgs = api
-        .owned_organizations(&tokens)
-        .await
-        .map_err(|e| near_ai_label(&e))?;
-    Ok((orgs, tokens.access_token))
+    super::nearai_credential::balance::with_fresh_management_session(
+        shared,
+        api,
+        |tokens, retained| async move {
+            // The coordinator refreshed while holding the same lock as balance
+            // and spending-org reads. Bind this response to that exact login;
+            // forgetting or replacing it during the HTTP read must not publish
+            // the prior account's organizations.
+            let orgs = api.owned_organizations(&tokens).await?;
+            if retained_near_ai_session(shared)? != retained {
+                anyhow::bail!("near_ai_credential_session_changed");
+            }
+            Ok((orgs, tokens.access_token))
+        },
+    )
+    .await
+    .map_err(|error| near_ai_label(&error))
 }
 
 /// The account session and enrolled config every method needs, or the

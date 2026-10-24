@@ -621,6 +621,37 @@ where
     F: FnMut(SessionTokens) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    management_session(shared, api, false, |tokens, _retained| op(tokens)).await
+}
+
+/// A payout org read needs a newly exchanged token for its one-use proof.
+/// It still owns the same coordinator as balance and spending-org reads, so
+/// the fresh exchange cannot invalidate another management read in flight.
+/// The callback receives the retained session paired with that exact token,
+/// so its post-read guard never binds an old token to a replacement login.
+/// The proof token is dropped after the operation, never kept in the cache.
+pub(in crate::daemon) async fn with_fresh_management_session<T, F, Fut>(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    op: F,
+) -> Result<T>
+where
+    F: FnMut(SessionTokens, NearAiSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    management_session(shared, api, true, op).await
+}
+
+async fn management_session<T, F, Fut>(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    fresh: bool,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut(SessionTokens, NearAiSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
     let dir = shared.store.dir().to_path_buf();
     let mut map = cache().lock().await;
     let mut connection = stored_connection(shared)?
@@ -633,7 +664,7 @@ where
         entry.access_token.take()
     };
     let mut access_token = match cached {
-        Some((token, at)) if at.elapsed() < ACCESS_TOKEN_REUSE => token,
+        Some((token, at)) if !fresh && at.elapsed() < ACCESS_TOKEN_REUSE => token,
         _ => {
             let rotated =
                 crate::daemon::nearai_credential::exchange(shared, api, &connection.session)
@@ -648,13 +679,13 @@ where
             access_token: access_token.clone(),
             refresh_token: String::new(),
         };
-        match op(tokens).await {
+        match op(tokens, connection.session.clone()).await {
             Ok(value) => {
                 let entry = map.entry(dir.clone()).or_default();
                 match stored_connection(shared) {
                     Ok(Some(current)) if current == connection => {
                         entry.connection = Some(current);
-                        entry.access_token = Some((access_token, Instant::now()));
+                        entry.access_token = (!fresh).then_some((access_token, Instant::now()));
                     }
                     // The operation replaced the stored credential (or the
                     // running daemon has not taken it up yet). The session
@@ -663,7 +694,7 @@ where
                     Ok(Some(current)) if current.session == connection.session => {
                         *entry = Cached::default();
                         entry.connection = Some(current);
-                        entry.access_token = Some((access_token, Instant::now()));
+                        entry.access_token = (!fresh).then_some((access_token, Instant::now()));
                     }
                     _ => *entry = Cached::default(),
                 }
