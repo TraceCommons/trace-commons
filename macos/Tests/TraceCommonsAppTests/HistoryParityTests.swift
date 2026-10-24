@@ -494,8 +494,8 @@ final class HistoryParityTests: XCTestCase {
         for needle in [
             "case .signIn: if let words { HistorySignInControl(words: words) }",
             "case .checkingAccount: if let words { Text(words.checkingAccount)",
-            "Button(model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw) "
-                + "{ Task { await model.signInToWithdraw() } }",
+            "Button(label) { Task { await model.signInToWithdraw() } }",
+            "model.canRestartNearAiBrowserSignIn",
             "if model.accountSigningIn { Text(words.completeSignIn)",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")

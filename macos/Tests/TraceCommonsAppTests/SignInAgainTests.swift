@@ -23,6 +23,17 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     /// The browser sign-in ends without a login (closed, timed out).
     var attemptFails = false
     private var attempt = "absent"
+    var cancelFails = false
+    var startFails = false
+    var cancelDelay: TimeInterval = 0
+    private var attemptNumber = 0
+    private var holdStatus = false
+    private var _statusHeld = false
+    var statusHeld: Bool { lock.withLock { _statusHeld } }
+    let releaseStatus = DispatchSemaphore(value: 0)
+    func holdNextSuccessfulStatus() { lock.withLock { holdStatus = true } }
+    private var _cancelledIDs: [String] = []
+    var cancelledIDs: [String] { lock.withLock { _cancelledIDs } }
 
     func call(_ method: String, params: String) -> String {
         lock.withLock { _calls.append(method) }
@@ -45,16 +56,36 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
                 return Self.ok(["signed_in": true, "expires_at": NSNull()])
             }
         case "near_ai_credential_start":
-            lock.withLock { attempt = attemptFails ? "failed" : "waiting_for_browser" }
-            return Self.ok(["attempt_id": "synthetic-attempt",
-                            "browser_url": "https://cloud.example.invalid/native-login",
-                            "status": "waiting_for_browser"])
+            if startFails { return #"{"error":{"code":"unavailable","message":"start-failed"}}"# }
+            return lock.withLock {
+                attemptNumber += 1
+                attempt = attemptFails ? "failed" : "waiting_for_browser"
+                return Self.ok(["attempt_id": "synthetic-attempt-\(attemptNumber)",
+                                "browser_url": "https://cloud.example.invalid/native-login/\(attemptNumber)",
+                                "status": "waiting_for_browser"])
+            }
+        case "near_ai_credential_cancel":
+            if cancelDelay > 0 { Thread.sleep(forTimeInterval: cancelDelay) }
+            return lock.withLock {
+                let object = try? JSONSerialization.jsonObject(with: Data(params.utf8)) as? [String: Any]
+                _cancelledIDs.append(object?["attempt_id"] as? String ?? "unnamed")
+                if cancelFails { return #"{"error":{"code":"unavailable","message":"cancel-failed"}}"# }
+                if object?["attempt_id"] as? String == "synthetic-attempt-\(attemptNumber)" {
+                    attempt = "cancelled"
+                }
+                return Self.ok([:])
+            }
         case "near_ai_credential_status":
             // The old session is still kept while the browser sign-in runs:
             // a poll that trusted it would end the wait at once.
-            let word = lock.withLock { attempt }
+            let snapshot = lock.withLock { () -> (String, Int, Bool) in
+                let held = holdStatus && params.contains("attempt_id")
+                if held { holdStatus = false; _statusHeld = true }
+                return (held ? "complete" : attempt, attemptNumber, held)
+            }
+            if snapshot.2 { releaseStatus.wait() }
             return Self.ok(["state": "present", "session_state": "present",
-                            "attempt_id": "synthetic-attempt", "attempt_status": word])
+                            "attempt_id": "synthetic-attempt-\(snapshot.1)", "attempt_status": snapshot.0])
         case "account_sign_in":
             return #"{"error":{"code":"unavailable","message":"passkey-not-for-this-account"}}"#
         default:

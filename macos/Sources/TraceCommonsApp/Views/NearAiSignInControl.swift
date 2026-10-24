@@ -54,7 +54,7 @@ struct NearAiSignInControl: View {
                     Task { await model.signInToNearAI() }
                 }
                 .buttonStyle(GlassButtonStyle(.primary))
-                .disabled(model.nearAiSigningIn || model.credentialBusy)
+                .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
                 if let line = NearAiSignInOffer.progressLine(
                     copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
                 {

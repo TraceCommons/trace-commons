@@ -250,7 +250,7 @@ final class InferenceParityTests: XCTestCase {
                        "NearAiSignInOffer.billingOffers(state: status?.state)", "model.signInToNearAI()", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
                        ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
-                       ".disabled(model.credentialBusy || model.nearAiSigningIn || (!signIn && request != nil))",
+                       ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
                        ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {
             XCTAssertTrue(funding.contains(needle), "FundingRow.swift lacks \(needle)")

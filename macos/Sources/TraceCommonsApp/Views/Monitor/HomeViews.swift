@@ -1189,10 +1189,13 @@ private struct HistorySignInControl: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Button(model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw) { Task { await model.signInToWithdraw() } }
+        let label = model.canRestartNearAiBrowserSignIn
+            ? HomeFormat.creditSignInLine ?? words.signInToWithdraw
+            : model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw
+        Button(label) { Task { await model.signInToWithdraw() } }
             .buttonStyle(GlassButtonStyle(.glass, small: true))
             .frame(minHeight: 44)
-            .disabled(model.accountSigningIn)
+            .disabled(model.accountSigningIn && !model.canRestartNearAiBrowserSignIn)
     }
 }
 
