@@ -131,7 +131,7 @@ queue entries, daily, and on manual dispatch. All three Cargo workspaces
 
 ```bash
 RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0 cargo install cargo-audit --version 0.22.1 --locked
-RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0 cargo install cargo-deny --locked
+RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0 cargo install cargo-deny --version 0.20.2 --locked
 ```
 
 Run the same advisory policy locally (Python 3.11+):
@@ -141,9 +141,9 @@ python3 scripts/ci/cargo-audit.py --file Cargo.lock
 python3 scripts/ci/cargo-audit.py --file crates/trace-commons-contributor-gtk/Cargo.lock
 python3 scripts/ci/cargo-audit.py --file tauri-desktop/Cargo.lock
 cargo deny --all-features --locked check licenses sources advisories
-cargo deny --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --all-features --locked check --config deny.toml licenses sources advisories
+cargo deny --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --all-features --locked --config deny.toml check licenses sources advisories
 python3 scripts/ci/dependency_policy.py --output target/deny-tauri.toml
-cargo deny --manifest-path tauri-desktop/Cargo.toml --all-features --locked check --config target/deny-tauri.toml licenses sources advisories
+cargo deny --manifest-path tauri-desktop/Cargo.toml --all-features --locked --config target/deny-tauri.toml check licenses sources advisories
 ```
 
 The audit helper reads the documented advisory exceptions from `deny.toml`;

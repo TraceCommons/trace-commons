@@ -130,8 +130,8 @@ jobs:
         with:
           log-level: info
           manifest-path: ${{ matrix.workspace }}/Cargo.toml
-          arguments: --all-features --locked
-          command-arguments: --config ${{ matrix.workspace == 'tauri-desktop' && 'target/deny-tauri.toml' || 'deny.toml' }} ${{ matrix.checks }}
+          arguments: --all-features --locked --config ${{ matrix.workspace == 'tauri-desktop' && 'target/deny-tauri.toml' || 'deny.toml' }}
+          command-arguments: ${{ matrix.checks }}
 
   cargo-audit:
     name: cargo audit (${{ matrix.lockfile }})
