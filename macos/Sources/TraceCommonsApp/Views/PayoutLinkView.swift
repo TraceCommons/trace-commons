@@ -3,7 +3,8 @@ import TCDesign
 import TCShellCore
 
 /// The NEAR AI credit section: which organization the commons sends NEAR AI
-/// credit to. Hidden unless the commons lists `near_ai` as enabled. Every
+/// credit to. Hidden unless the commons lists `near_ai` as enabled, or this
+/// device has no account session, which the section says. Every
 /// sentence is the core's draft copy (`PayoutLinkCopy`); this only lays them
 /// out. There is no passkey step: the person's click on Choose, after the
 /// consent for the selected organization is on screen, is the confirmation.
@@ -19,6 +20,12 @@ struct PayoutLinkView: View {
             if let surface = model.surface, let rail = model.rail {
                 GlassEyebrowCard(surface.copy.title) {
                     content(surface, rail)
+                }
+            } else if let surface = model.surface, let refusal = model.statusRefusal {
+                GlassEyebrowCard(surface.copy.title) {
+                    Text(surface.refusalLine(refusal))
+                        .glassType(GlassTokens.TypeScale.body)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

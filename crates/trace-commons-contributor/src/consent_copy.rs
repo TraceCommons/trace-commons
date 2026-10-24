@@ -2519,6 +2519,11 @@ pub const PAYOUT_LINK_STATUS_MISMATCH: &str =
     "Credit may be going to an organization you didn't choose. Choose again.";
 /// DRAFT, NEEDS APPROVAL. No NEAR AI session on this device.
 pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organization.";
+/// DRAFT, NEEDS APPROVAL. Shown in place of the section when this device
+/// holds no usable Trace Commons account session and could not renew one
+/// (`account-session-required` from `payout_rails_status`). Before this the
+/// section hid itself, so a contributor could not tell it existed.
+pub const PAYOUT_LINK_SESSION_ENDED: &str = "Sign in again to choose where credit goes.";
 /// DRAFT, NEEDS APPROVAL. The NEAR AI user owns no active organization.
 pub const PAYOUT_LINK_NO_ORGANIZATION: &str = "You don't own an active NEAR AI organization.";
 /// DRAFT, NEEDS APPROVAL. The org list changed after it was shown
@@ -2548,6 +2553,7 @@ pub struct PayoutLinkCopy {
     pub status_unavailable: &'static str,
     pub status_mismatch: &'static str,
     pub sign_in: &'static str,
+    pub session_ended: &'static str,
     pub no_organization: &'static str,
     pub changed: &'static str,
     pub failed: &'static str,
@@ -2574,6 +2580,7 @@ pub fn payout_link_copy() -> PayoutLinkCopy {
         status_unavailable: PAYOUT_LINK_STATUS_UNAVAILABLE,
         status_mismatch: PAYOUT_LINK_STATUS_MISMATCH,
         sign_in: PAYOUT_LINK_SIGN_IN,
+        session_ended: PAYOUT_LINK_SESSION_ENDED,
         no_organization: PAYOUT_LINK_NO_ORGANIZATION,
         changed: PAYOUT_LINK_CHANGED,
         failed: PAYOUT_LINK_FAILED,
@@ -4055,6 +4062,15 @@ mod payout_link_copy_tests {
         let distinct: std::collections::BTreeSet<_> = statuses.iter().collect();
         assert_eq!(distinct.len(), statuses.len());
         assert_eq!(PAYOUT_COPY_PLACEHOLDERS, &["org_name"]);
+        // The section's line when the account session is gone, instead of
+        // hiding: a sentence on its own, naming no org, distinct from the
+        // NEAR AI sign-in line.
+        assert_eq!(
+            copy.session_ended,
+            "Sign in again to choose where credit goes."
+        );
+        assert_ne!(copy.session_ended, copy.sign_in);
+        assert!(!copy.session_ended.contains("{org_name}"));
     }
 
     /// D7 and the recipient's debt: the consent says other members can
