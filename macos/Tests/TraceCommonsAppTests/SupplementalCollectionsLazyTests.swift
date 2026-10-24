@@ -1,0 +1,144 @@
+import AppKit
+import SwiftUI
+import TCBridge
+@testable import TCShellCore
+import XCTest
+@testable import TraceCommonsApp
+
+/// Selectability makes realized text observable as native views in this
+/// harness. These checks measure construction, not production focus latency.
+@MainActor
+final class SupplementalCollectionsLazyTests: XCTestCase {
+    func testCertificateRowsAreViewportBounded() throws {
+        func view(_ count: Int) throws -> some View {
+            let entries = try (0..<count).map { index in
+                try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: [
+                    "entry_id": "e-\(index)", "session_hash": "h-\(index)", "source": "claude-code",
+                    "project_id": "p", "project_label": "Certificate \(index)", "size_bytes": 100,
+                    "discovered_at": 0, "state": "pending", "attempts": 0, "holds_certificate": true
+                ]))
+            }
+            return ScrollView { CertificateSection(entries: entries) }.environmentObject(AppModel())
+        }
+        let small = measure(try view(10))
+        let large = measure(try view(500), last: "Certificate 499")
+        XCTAssertLessThanOrEqual(large, small + 100)
+    }
+
+    func testHistoryRowsInOneGroupAreViewportBounded() async throws { try await history(manyGroups: false) }
+    func testHistoryGroupsAreViewportBounded() async throws { try await history(manyGroups: true) }
+
+    private func history(manyGroups: Bool) async throws {
+        func view(_ count: Int) async throws -> some View {
+            let rows: [[String: Any]] = (0..<count).map { index in
+                ["submission_id": "row-\(index)", "project_id": manyGroups ? "p-\(index)" : "p",
+                 "project_label": "History \(index)", "status": "accepted", "source": "claude-code"]
+            }
+            let transport = SupplementalCollectionTransport(replies: ["list_history": try json(["history": rows])])
+            let store = HomeStore(client: LiveDaemonClient(transport: transport))
+            await store.load()
+            XCTAssertEqual(store.history?.count, count)
+            return TracesHistoryPage(store: store, statusLabel: { _ in "Accepted" }, selection: .constant(""), back: {})
+                .environmentObject(AppModel())
+        }
+        let small = measure(try await view(10))
+        let large = measure(try await view(100), last: "History 99")
+        XCTAssertLessThanOrEqual(large, small + 150)
+    }
+
+    func testInferenceCallsAreViewportBounded() async throws {
+        func view(_ count: Int) async throws -> some View {
+            let calls: [[String: Any]] = (0..<count).map { index in
+                ["id": index, "at": "2026-09-30T09:00:00Z", "tool": "claude-code", "family": "anthropic",
+                 "model": "Call \(index)", "route": "routed", "proof": "verified",
+                 "cost": ["known": true, "priced_micros": 1000]]
+            }
+            let transport = SupplementalCollectionTransport(replies: ["inference_calls": try json([
+                "readable": true, "window_hours": 24, "calls": calls, "next_cursor": NSNull()
+            ])])
+            let store = InferenceStore(client: LiveDaemonClient(transport: transport))
+            await store.load()
+            XCTAssertEqual(store.calls?.calls.count, count)
+            let model = AppModel()
+            model.setStartupForTesting(.running)
+            return InferenceTabView(store: store).environmentObject(model)
+        }
+        // Saturate the viewport and SwiftUI prefetch region before comparing.
+        let small = measure(try await view(25))
+        let large = measure(try await view(50), last: "Call 49")
+        XCTAssertLessThanOrEqual(large, small + 100)
+    }
+
+    func testOverviewModelLabelsAreViewportBounded() throws {
+        func view(_ count: Int) throws -> some View {
+            var object = InsightsSampleWeek.overview
+            object["sources"] = [[String: Any]]()
+            object["by_model"] = (0..<count).map { ["label": "Model \($0)", "tokens": 100] as [String: Any] }
+            let week = try JSONDecoder().decode(InsightsWeekOverview.self, from: JSONSerialization.data(withJSONObject: object))
+            let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
+            model.showCounter(week)
+            let comparisons = InsightsComparisonsModel(service: { _ in throw InsightsError.invalidResponse })
+            return InsightsOverviewTab(model: model, comparisons: comparisons,
+                                       copy: try InsightsSessionRouteTests.coreCopy(), snapshots: [])
+        }
+        // Short model rows need more than ten rows to fill the prefetch region.
+        let small = measure(try view(50))
+        let large = measure(try view(500), last: "Model 499")
+        XCTAssertLessThanOrEqual(large, small + 100)
+    }
+
+    private func json(_ object: Any) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+
+    private func measure(_ content: some View, last: String? = nil) -> Int {
+        _ = NSApplication.shared
+        let previous = NSApp.value(forKey: "accessibilityEnhancedUserInterface")
+        NSApp.setValue(true, forKey: "accessibilityEnhancedUserInterface")
+        defer { NSApp.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
+        let bounds = NSRect(x: 0, y: 0, width: 408, height: 760)
+        let hosting = NSHostingView(rootView: content.textSelection(.enabled).frame(width: 408, height: 760))
+        hosting.frame = bounds
+        let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        hosting.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        _ = hosting.accessibilityChildren()
+        hosting.layoutSubtreeIfNeeded()
+        let views = descendants(hosting)
+        let count = views.count
+        print("SUPPLEMENTAL_COLLECTION views=\(count)")
+        XCTAssertGreaterThan(count, 1)
+        if let last {
+            let scroll = views.compactMap { $0 as? NSScrollView }.first
+            XCTAssertNotNil(scroll)
+            func found() -> Bool { descendants(hosting).contains { ($0.accessibilityValue() as? String) == last } }
+            let deadline = Date().addingTimeInterval(3)
+            repeat {
+                if let scroll, let document = scroll.documentView {
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.bounds.height - scroll.contentView.bounds.height)))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+                hosting.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+            } while !found() && Date() < deadline
+            XCTAssertTrue(found(), "The final row must remain reachable: \(last)")
+        }
+        return count
+    }
+}
+
+private final class SupplementalCollectionTransport: DaemonTransport, @unchecked Sendable {
+    let replies: [String: String]
+    init(replies: [String: String]) { self.replies = replies }
+    func call(_ method: String, params paramsJSON: String) -> String {
+        if let reply = replies[method] ?? SampleDaemonData.reply(method, in: .normalDay) {
+            return "{\"id\":0,\"result\":\(reply)}"
+        }
+        return #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#
+    }
+}

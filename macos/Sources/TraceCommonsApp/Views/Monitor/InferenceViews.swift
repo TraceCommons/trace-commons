@@ -225,7 +225,7 @@ struct InferenceTabView: View {
 
     private func calls(_ page: DaemonData.InferenceCallPage) -> some View {
         GlassEyebrowCard(MonitorWords.calls) {
-            VStack(spacing: 0) {
+            LazyVStack(spacing: 0) {
                 ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
                     GlassTableRow(first: index == 0) { callRow(call) }
                 }

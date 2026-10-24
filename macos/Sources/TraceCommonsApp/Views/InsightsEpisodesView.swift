@@ -22,7 +22,7 @@ struct InsightsEpisodesView: View {
                     detailView(detail)
                 } else {
                     createView
-                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                         InsightsGroupHeading(model.text("episode_saved"))
                         if model.episodes.isEmpty { Text(model.text("episode_empty")).insightsNote() }
                         ForEach(model.episodes) { entry in
@@ -83,7 +83,7 @@ struct InsightsEpisodesView: View {
     }
 
     private func detailView(_ detail: EpisodeDetail) -> some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             HStack {
                 Button(model.text("episode_saved")) { model.closeEpisode() }
                 Spacer()
@@ -168,7 +168,7 @@ struct InsightsEpisodesView: View {
     }
 
     private func snapshotChooser(selection: Binding<Set<String>>) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        LazyVStack(alignment: .leading, spacing: 5) {
             ForEach(model.snapshots) { snapshot in
                 Toggle(isOn: Binding(
                     get: { selection.wrappedValue.contains(snapshot.id) },

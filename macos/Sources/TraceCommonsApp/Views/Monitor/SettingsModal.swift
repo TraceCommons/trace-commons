@@ -104,7 +104,7 @@ struct SettingsModal: View {
                 .accessibilityLabel(words?.settingsSections ?? "")
                 rule(.vertical)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Self.sections) { item in
                             VStack(alignment: .leading, spacing: 0) {
                                 if let name = item.navName(words?.settingsNav) {

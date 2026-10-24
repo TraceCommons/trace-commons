@@ -443,7 +443,7 @@ struct InsightsOverviewTab: View {
                 ])
                 InsightsInfo(text("analytics_card_by_model"), [text("analytics_model_labels_note")])
             }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 switch breakdown {
                 case .model:
                     let rows = InsightsOverviewWords.modelRows(overview, copy: copy)

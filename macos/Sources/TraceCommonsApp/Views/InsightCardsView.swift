@@ -30,7 +30,7 @@ struct InsightCardsView: View {
 
     private var selection: some View {
         InsightsDisclosure(model.text("card_choose_evidence")) {
-            VStack(alignment: .leading, spacing: 6) {
+            LazyVStack(alignment: .leading, spacing: 6) {
                 Text(model.text("saved")).insightsHeading()
                 ForEach(model.snapshots) { snapshot in
                     Toggle(isOn: Binding(
@@ -52,7 +52,7 @@ struct InsightCardsView: View {
     }
 
     private func cardView(_ card: InsightQuestionCard) -> some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+        LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             // What the card cannot say, behind its heading's "i".
             HStack {
                 InsightsGroupHeading(model.text(card.question.copyKey),
@@ -86,7 +86,7 @@ struct InsightCardsView: View {
     @ViewBuilder private func evidence(_ card: InsightQuestionCard) -> some View {
         if !card.evidence_ids.isEmpty {
             Text(model.text("card_evidence")).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
-            VStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(card.evidence_ids, id: \.self) { id in
                     Button(id) { model.explain(id) }.buttonStyle(GlassButtonStyle(.link)).insightsMono().lineLimit(1)
                 }
@@ -94,7 +94,7 @@ struct InsightCardsView: View {
         }
         if !card.episode_ids.isEmpty {
             Text(model.text("card_episodes")).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
-            VStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(card.episode_ids, id: \.self) { id in
                     Button(id) { model.openEpisode(id) }.buttonStyle(GlassButtonStyle(.link)).insightsMono().lineLimit(1)
                 }

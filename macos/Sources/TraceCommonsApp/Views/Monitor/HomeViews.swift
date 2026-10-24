@@ -756,7 +756,7 @@ private struct HistoryPage: View {
                     // Ron's groups: 24 apart, each after the first under a
                     // hairline, a PROJECT eyebrow over the folder, its
                     // record count, then its rows.
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s10) {
+                    LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s10) {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                             projectGroup(group, first: index == 0)
                         }
@@ -798,7 +798,7 @@ private struct HistoryPage: View {
                     .fixedSize()
             }
             .accessibilityElement(children: .combine)
-            VStack(alignment: .leading, spacing: 1) {
+            LazyVStack(alignment: .leading, spacing: 1) {
                 ForEach(group.entries) { row in
                     HistoryListRow(
                         row: row, statusLabel: statusLabel,

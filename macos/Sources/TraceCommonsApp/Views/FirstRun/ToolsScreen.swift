@@ -895,7 +895,7 @@ private struct ToolRepoList: View {
     @State private var armingCandidate: ProjectRow?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             Text(FirstRunCopy.fill(copy.rules.reposFound, ["tools": kind.displayName]))
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textTertiary)
@@ -969,6 +969,9 @@ private struct ToolRepoList: View {
     }
 
     @ViewBuilder private func repoRow(_ project: ProjectRow) -> some View {
+        #if DEBUG
+        let _ = OtherCollectionRowBodies.record("repos", project.id)
+        #endif
         let id = project.projectId
         let name = project.displayLabel
         let rows = repos.sessions[id] ?? []
@@ -1066,7 +1069,7 @@ private struct ToolRepoList: View {
             let tickable = rows.filter(RulesScreenLayout.isTickable)
             // The canvas's rows (Ron, 2026-10-22): the switch first, then
             // the words; a trace's date, then the rest in the quieter ink.
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 Toggle(isOn: Binding(
                     get: { RulesScreenLayout.groupState(runner.state, projectID: id, sessions: rows) == .all },
                     set: { RulesScreenLayout.includeEvery(&runner.state, projectID: id, sessions: rows, on: $0) })
@@ -1078,6 +1081,9 @@ private struct ToolRepoList: View {
                 .disabled(never || tickable.isEmpty)
                 .frame(height: 28)
                 ForEach(rows) { session in
+                    #if DEBUG
+                    let _ = OtherCollectionRowBodies.record("pastSessions", session.id)
+                    #endif
                     let parts = RulesScreenLayout.labelParts(session, copy: copy.rules)
                     Toggle(isOn: Binding(
                         get: { runner.state.pastSelections[id]?.contains(session.id) == true },

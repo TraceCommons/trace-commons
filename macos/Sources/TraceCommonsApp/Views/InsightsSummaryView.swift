@@ -37,10 +37,13 @@ struct InsightsSummaryView: View {
                         metricView(metric)
                     }
                 }
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                     InsightsGroupHeading(text("summary_evidence"))
                     if summary.snapshots.isEmpty { Text(text("summary_no_evidence")).insightsNote() }
                     ForEach(summary.snapshots) { snapshot in
+                        #if DEBUG
+                        let _ = OtherCollectionRowBodies.record("insightsSummarySnapshots", snapshot.id)
+                        #endif
                         Button { openSnapshot(snapshot.id) } label: {
                             VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
                                 Text("\(text("summary_open_snapshot")) · \(text(snapshot.source_format))")
@@ -99,12 +102,14 @@ struct InsightsSummaryView: View {
     private func evidenceLinks(_ ids: [String]) -> some View {
         if !ids.isEmpty {
             InsightsDisclosure(text("summary_evidence")) {
-                ForEach(ids, id: \.self) { id in
-                    Button { openSnapshot(id) } label: {
-                        Text(id).insightsMono().lineLimit(2)
+                LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(ids, id: \.self) { id in
+                        Button { openSnapshot(id) } label: {
+                            Text(id).insightsMono().lineLimit(2)
+                        }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .accessibilityLabel("\(text("summary_open_snapshot")) \(id)")
                     }
-                    .buttonStyle(GlassButtonStyle(.link))
-                    .accessibilityLabel("\(text("summary_open_snapshot")) \(id)")
                 }
             }.glassType(GlassTokens.TypeScale.caption)
         }

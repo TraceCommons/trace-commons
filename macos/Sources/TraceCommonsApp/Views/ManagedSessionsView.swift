@@ -212,7 +212,7 @@ struct ManagedSessionsSection: View {
                 content: {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                         if !snapshot.sessions.isEmpty {
-                            VStack(spacing: 0) {
+                            LazyVStack(spacing: 0) {
                                 ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
                                     GlassTableRow(first: index == 0) { sessionRow(session) }
                                 }
@@ -225,6 +225,9 @@ struct ManagedSessionsSection: View {
     }
 
     private func sessionRow(_ session: ManagedSession) -> some View {
+        #if DEBUG
+        OtherCollectionRowBodies.record("managed", session.id)
+        #endif
         var meta = [
             ManagedWords.tool(session.tool, model: model),
             session.accountLabel,
