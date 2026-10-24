@@ -120,7 +120,7 @@ struct PrivateAISettingsPanels: View {
 /// The card at the foot of the Private AI tab that opens the Private AI
 /// section of Settings, where the standard settings, the local tools and
 /// the connection are (owner, 2026-10-10): a medium gear on the left, the
-/// title over its sentence, and a chevron on the right, centred on the
+/// title and a chevron on the right, centred on the
 /// card's height. The whole card opens the section, as Home's cards do
 /// (owner, 2026-10-10: a chevron, no Open button); VoiceOver hears the
 /// core's name for where it goes. Every word is the core's.
@@ -131,7 +131,7 @@ struct PrivateAISettingsLinkCard: View {
     var body: some View {
         Button(action: onOpen) {
             GlassIconCard(
-                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
+                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [],
                 interactive: true,
                 trailing: {
                     // Home's chevron (`HomeChevron`), drawn here too.
@@ -146,8 +146,7 @@ struct PrivateAISettingsLinkCard: View {
     }
 }
 
-/// A Private AI panel's header, as #1146's panels draw it: an eyebrow over
-/// the panel's heading, and a re-read icon on the right (owner,
+/// A Private AI panel's single heading and a re-read icon beside it (owner,
 /// 2026-10-10: an icon, not a link), named for assistive tech in the
 /// core's words for that panel ("Refresh your tools") so the panels' icons
 /// are told apart.
@@ -160,19 +159,12 @@ struct PrivateAIPanelHeader: View {
     let onRefresh: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(eyebrow)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
-                if let title {
-                    Text(title)
-                        .glassType(GlassTokens.TypeScale.title)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                }
-            }
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(title ?? eyebrow)
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: GlassTokens.Space.s4)
             GlassRefreshButton(refresh, action: onRefresh)
                 .disabled(disabled)
