@@ -125,5 +125,38 @@ all three, and `check advisories` under `--all-features` as well, on every
 push and pull request -- so this local run is a pre-flight rather than the only
 enforcement.
 
+Dependency security checks run on pull requests, pushes to `main`, merge
+queue entries, daily, and on manual dispatch. All three Cargo workspaces
+(root, GTK, and Tauri) are covered. Install the local tools with:
+
+```bash
+RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0 cargo install cargo-audit --version 0.22.1 --locked
+RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0 cargo install cargo-deny --version 0.20.2 --locked
+```
+
+Run the same advisory policy locally (Python 3.11+):
+
+```bash
+python3 scripts/ci/cargo-audit.py --file Cargo.lock
+python3 scripts/ci/cargo-audit.py --file crates/trace-commons-contributor-gtk/Cargo.lock
+python3 scripts/ci/cargo-audit.py --file tauri-desktop/Cargo.lock
+cargo deny --all-features --locked check licenses sources advisories
+cargo deny --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml --all-features --locked --config deny.toml check licenses sources advisories
+python3 scripts/ci/dependency_policy.py --output target/deny-tauri.toml
+cargo deny --manifest-path tauri-desktop/Cargo.toml --all-features --locked --config target/deny-tauri.toml check licenses sources advisories
+```
+
+The audit helper reads the documented advisory exceptions from `deny.toml`;
+there is no second general ignore list to maintain. Unsoundness findings also
+fail the audit. Tauri uses a backport for GLib 0.18.5: the helper verifies its
+complete source digest, patch declaration, and lockfile before allowing that
+one advisory. The generated Tauri deny policy applies the same guarded
+exception. A changed or removed backport fails closed; see
+`tauri-desktop/vendor/glib/TRACE_COMMONS_BACKPORT.md` for maintenance details. Plain `cargo audit` gives an
+unfiltered report, including accepted exceptions. Cargo-audit scans the
+entire committed lockfile, including unused optional dependencies; cargo-deny
+checks the resolved graph with all features. New findings fail CI and require
+review; do not add exceptions just to make a check pass.
+
 Commit style: short imperative subjects, no `feat:` / `fix:` prefixes, no
 emojis.

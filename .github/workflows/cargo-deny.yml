@@ -62,6 +62,13 @@ on:
   # main, which is exactly when a failure is most expensive to unwind. A PR
   # should be tested against the branch it will actually merge into.
   pull_request:
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * *"
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -77,7 +84,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: info
-          arguments: --all-features
+          arguments: --all-features --locked
           command-arguments: licenses sources
 
   cargo-deny-advisories:
@@ -89,5 +96,65 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: info
-          arguments: --all-features
+          arguments: --all-features --locked
           command-arguments: advisories
+
+  cargo-deny-clients:
+    name: cargo deny (${{ matrix.workspace }}, ${{ matrix.checks }}, all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [crates/trace-commons-contributor-gtk, tauri-desktop]
+        checks: ["licenses sources", "advisories"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.workspace == 'tauri-desktop' && matrix.checks == 'advisories'
+      - name: Install GLib regression prerequisites
+        if: matrix.workspace == 'tauri-desktop' && matrix.checks == 'advisories'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config
+      - name: Test GLib backport with optimizations
+        if: matrix.workspace == 'tauri-desktop' && matrix.checks == 'advisories'
+        env:
+          RUSTFLAGS: "-D warnings"
+          CARGO_INCREMENTAL: "0"
+        run: python3 scripts/ci/test-glib-backport.py
+      - name: Verify GLib backport and prepare Tauri policy
+        if: matrix.workspace == 'tauri-desktop'
+        run: python3 scripts/ci/dependency_policy.py --output target/deny-tauri.toml
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          manifest-path: ${{ matrix.workspace }}/Cargo.toml
+          arguments: --all-features --locked --config ${{ matrix.workspace == 'tauri-desktop' && 'target/deny-tauri.toml' || 'deny.toml' }}
+          command-arguments: ${{ matrix.checks }}
+
+  cargo-audit:
+    name: cargo audit (${{ matrix.lockfile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: "-D warnings"
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        lockfile:
+          - Cargo.lock
+          - crates/trace-commons-contributor-gtk/Cargo.lock
+          - tauri-desktop/Cargo.lock
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Test security policy guards
+        run: python3 -m unittest discover -s scripts/ci/tests -p 'test_dependency_policy.py'
+      - name: Audit committed lockfile with shared advisory policy
+        env:
+          AUDIT_LOCKFILE: ${{ matrix.lockfile }}
+        run: python3 scripts/ci/cargo-audit.py --file "$AUDIT_LOCKFILE"
