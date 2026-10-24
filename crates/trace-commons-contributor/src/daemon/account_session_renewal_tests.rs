@@ -414,3 +414,33 @@ async fn without_a_renewal_route_an_expired_session_is_still_required() {
     assert!(account_session(&fx.shared, None).await.unwrap().is_none());
     assert_eq!(fx.ceremonies(), (0, 0));
 }
+
+#[tokio::test]
+async fn a_new_near_ai_sign_in_lifts_the_wait_after_a_refused_renewal() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+
+    // The person signs in to NEAR AI again: a new login, not the one the
+    // refused attempt spent.
+    {
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let mut settings = fx.shared.settings.lock().unwrap();
+        settings.near_ai_session = Some(NearAiSession {
+            refresh_token: "rt-synthetic-signed-in-again".into(),
+            refresh_token_expires_at: Some(now + chrono::Duration::hours(1)),
+            stored_at: now,
+            user_agent: "Mozilla/5.0 Test".into(),
+        });
+        settings.save_for_test(&fx.shared.store).unwrap();
+    }
+    *fx.stub.state.refuse.lock().unwrap() = false;
+
+    let response = fx.payout_status().await;
+
+    assert_eq!(refusal(&response), None);
+    assert_eq!(fx.ceremonies(), (2, 2));
+}

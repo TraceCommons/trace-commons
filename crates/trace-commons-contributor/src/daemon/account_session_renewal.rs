@@ -20,9 +20,10 @@
 //!
 //! Renewals run one at a time, so the app's status read and org list, which
 //! arrive together, renew once and both get the session. A renewal that
-//! fails is not tried again for the same stored record for
-//! [`RETRY_AFTER`]: each attempt rotates the NEAR AI refresh token and
-//! counts against the commons' provisioning rate limit.
+//! fails is not tried again for the same stored session and NEAR AI login
+//! for [`RETRY_AFTER`]: each attempt rotates the NEAR AI refresh token and
+//! counts against the commons' provisioning rate limit. Signing in to NEAR
+//! AI again lifts the wait.
 //!
 //! # Not renewed
 //!
@@ -50,8 +51,8 @@ pub(super) const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// One renewal at a time, across every store this process serves.
 static RENEWING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Per state directory: the digest of the stored session a renewal last
-/// failed for, and when.
+/// Per state directory: the [`attempt_key`] a renewal last failed for, and
+/// when.
 static FAILED: Mutex<Option<HashMap<PathBuf, (String, Instant)>>> = Mutex::new(None);
 
 /// Where a renewal's calls go: NEAR AI for the token exchange and the
@@ -136,9 +137,9 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
         // Absent: signed out, never renewed.
         return false;
     };
-    // The stored session, by digest: a renewal stores a new one.
-    let record = digest(&raw);
-    if recently_failed(store.dir(), &record) {
+    // The stored session and the NEAR AI login, by digest: a renewal
+    // stores a new session, and a new NEAR AI sign-in is a new login.
+    if recently_failed(store.dir(), &attempt_key(shared, &raw)) {
         return false;
     }
     let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&raw) else {
@@ -172,14 +173,30 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
         Err(_) => {
             // Label only: the errors underneath can quote a remote body.
             tracing::warn!(target: "account_session", "account_session_renewal_failed");
-            failed(store.dir(), record);
+            // Keyed after the attempt, so the NEAR AI rotation it made is
+            // the login a retry would present.
+            failed(store.dir(), attempt_key(shared, &raw));
             false
         }
     }
 }
 
-fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+/// The stored session and the retained NEAR AI login an attempt ran with,
+/// by digest. The login is named by when it was stored, never its token.
+fn attempt_key(shared: &DaemonShared, raw: &[u8]) -> String {
+    let near_ai = shared
+        .settings
+        .lock()
+        .ok()
+        .and_then(|settings| settings.near_ai_session.as_ref().map(|s| s.stored_at))
+        .map(|at| at.to_rfc3339())
+        .unwrap_or_default();
+    let mut hash = Sha256::new();
+    hash.update(b"trace-commons/account-session-renewal/v1");
+    hash.update((raw.len() as u64).to_be_bytes());
+    hash.update(raw);
+    hash.update(near_ai.as_bytes());
+    format!("sha256:{}", hex::encode(hash.finalize()))
 }
 
 fn recently_failed(dir: &std::path::Path, record: &str) -> bool {
