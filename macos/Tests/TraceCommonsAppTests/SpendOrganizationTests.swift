@@ -131,6 +131,53 @@ final class SpendOrganizationTests: XCTestCase {
         XCTAssertNil(model.spendOrganizationFailure)
     }
 
+    /// "Not now" records the organization already in use, so nothing is
+    /// minted or switched, and ends the prompt at once even if the re-read
+    /// still says otherwise.
+    func testNotNowKeepsTheCurrentOrganizationAndEndsThePromptImmediately() async {
+        let daemon = Daemon(
+            listing: Self.listing([("org-a", true), ("org-b", false)]),
+            selectReply: #"{"id":1,"result":{"switched":false,"revoke_pending":false}}"#)
+        let model = model(daemon)
+        model.refreshSpendOrganizations()
+        await settle(model) { model.spendOrganizations.state == "listed" }
+        XCTAssertTrue(model.spendOrganizations.showsPrompt)
+        XCTAssertEqual(model.spendOrganizations.words?.promptDismiss, "PROMPT-DISMISS")
+        await model.dismissSpendOrganizationPrompt()
+        let selects = daemon.calls.filter { $0.method == "near_ai_spend_organization_select" }
+        XCTAssertEqual(selects.map(\.params), [#"{"organization_id":"org-a"}"#])
+        XCTAssertFalse(model.spendOrganizations.showsPrompt)
+        XCTAssertTrue(model.spendOrganizations.showsPicker)
+        XCTAssertEqual(model.spendOrganizations.currentOrganizationID, "org-a")
+        XCTAssertEqual(model.spendOrganizations.organizations.map(\.current), [true, false])
+        XCTAssertNil(model.spendOrganizationFailure)
+        XCTAssertFalse(model.spendOrganizationSwitching)
+    }
+
+    /// A failed record keeps the prompt and says nothing: the next re-read
+    /// shows the truth, and the Settings card's failure line is for switches.
+    func testNotNowFailingKeepsThePromptAndSaysNothing() async {
+        let daemon = Daemon(
+            listing: Self.listing([("org-a", true), ("org-b", false)]),
+            selectReply: #"{"id":1,"error":{"code":"unavailable","message":"near_ai_spend_org_refused"}}"#)
+        let model = model(daemon)
+        model.refreshSpendOrganizations()
+        await settle(model) { model.spendOrganizations.state == "listed" }
+        await model.dismissSpendOrganizationPrompt()
+        XCTAssertTrue(model.spendOrganizations.showsPrompt)
+        XCTAssertNil(model.spendOrganizationFailure)
+        XCTAssertNil(model.lastActionError)
+        XCTAssertEqual(model.spendOrganizations.currentOrganizationID, "org-a")
+    }
+
+    /// With no current organization there is nothing to keep: no call.
+    func testNotNowWithoutACurrentOrganizationCallsNothing() async {
+        let daemon = Daemon(listing: Self.listing([("org-a", false), ("org-b", false)]))
+        let model = model(daemon)
+        await model.dismissSpendOrganizationPrompt()
+        XCTAssertTrue(daemon.calls.filter { $0.method == "near_ai_spend_organization_select" }.isEmpty)
+    }
+
     func testARefusedSwitchSaysSoInTheDaemonsWords() async {
         let daemon = Daemon(
             listing: Self.listing([("org-a", true), ("org-b", false)]),
@@ -164,6 +211,7 @@ enum SpendOrganizationSurfaceFixture {
         "session_expired": "EXPIRED", "refused": "REFUSED", "revoke_pending": "PENDING",
         "prompt_title": "PROMPT-TITLE", "prompt_line": "PROMPT-LINE",
         "prompt_action": "PROMPT-ACTION", "prompt_action_accessibility": "PROMPT-ACTION-AX",
+        "prompt_dismiss": "PROMPT-DISMISS", "prompt_dismiss_accessibility": "PROMPT-DISMISS-AX",
     ]
 
     static func payload(
