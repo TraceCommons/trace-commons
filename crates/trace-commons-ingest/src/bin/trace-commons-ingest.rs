@@ -530,12 +530,30 @@ const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA";
 const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE";
+/// RFC 3339 cut-over for the gate's scoring award: settlement counts a
+/// `NoveltyUtility` event only when it was written at or after this instant
+/// (`trace_credit_event_counts_toward_settlement`). Unset, no scoring award
+/// settles; a delta above 0 refuses to start without it
+/// (`validate_novelty_utility_credit_config`).
+const TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM: &str = "TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM";
+/// Startup refusal: a delta above 0 with the production gate not required,
+/// so a test gate (`in_memory`, `enclave_mock`, `legacy_deterministic`) could
+/// mint credit that settles and is paid.
+const NOVELTY_UTILITY_CREDIT_REQUIRES_PRODUCTION_GATE_LABEL: &str =
+    "novelty_utility_credit_requires_production_gate";
+/// Startup refusal: a delta above 0 with no
+/// `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over.
+const NOVELTY_UTILITY_SETTLE_FROM_MISSING_LABEL: &str = "novelty_utility_settle_from_missing";
+/// Startup refusal: `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` is not an
+/// RFC 3339 timestamp. The value itself is never echoed.
+const NOVELTY_UTILITY_SETTLE_FROM_INVALID_LABEL: &str = "novelty_utility_settle_from_invalid";
 /// Zero by default. Emission pays this flat delta without consulting
 /// the `credit_quality` and `contributor_cap` signals that are computed
 /// and stored on every gate decision, so a non-zero default issues
-/// value that the quality signals never gated. Operators can set
-/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` explicitly once
-/// emission consults those signals.
+/// value that the quality signals never gated. The award is
+/// settlement-eligible (`trace_credit_event_type_is_settlement_eligible`),
+/// so a non-zero `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` is
+/// value that settles and is paid out; at zero nothing new settles.
 const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 0.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
@@ -2092,6 +2110,16 @@ struct AppState {
     /// `credit_withheld_reason = "non_production_gate"`. Toggle via
     /// `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`.
     novelty_utility_require_production_gate: bool,
+    /// The scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`): a `NoveltyUtility`
+    /// event written before it never settles, and with `None` none does.
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+    /// The principal the scoring driver issues the scoring award as
+    /// (`scoring_driver_credit_issuer`):
+    /// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, the issuer the
+    /// pipeline credits as. `None` falls back to a label no central-issuer
+    /// allowlist can hold.
+    scoring_driver_credit_issuer_principal_ref: Option<String>,
     /// Slice 2 passkeys: the WebAuthn relying party, present only when
     /// `WebauthnConfig` is fully configured. `None` makes the passkey surface
     /// fail closed (its accessor 503s). Wired into ceremony handlers in later
@@ -4197,12 +4225,15 @@ impl AppState {
         ) || pipeline_default_routing_config.is_some();
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
+        // The server's credit issuer: the pipeline's, and the scoring
+        // driver's for the awards it emits.
+        let credit_issuer_principal_ref = parse_pipeline_credit_issuer_principal_ref_from_env()?;
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
         // checks, for a compatibility run's Trace Credit leg, and (Zaki
         // review 1, item 2) `main`'s settlement controls, for the paid leg.
         let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
             central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
-            issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
+            issuer_principal_ref: credit_issuer_principal_ref.clone(),
             require_production_gate: novelty_utility_require_production_gate,
             settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
@@ -4225,6 +4256,14 @@ impl AppState {
         // bundle must hold.
         let novelty_utility_credit_points_delta =
             parse_novelty_utility_credit_points_delta_from_env()?;
+        let novelty_utility_settle_from = parse_novelty_utility_settle_from(
+            optional_trimmed_env(TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM)?.as_deref(),
+        )?;
+        validate_novelty_utility_credit_config(
+            novelty_utility_credit_points_delta,
+            novelty_utility_require_production_gate,
+            novelty_utility_settle_from,
+        )?;
         let pipeline_main_gate = pipeline_main_gate_config_from_env(
             pipeline_runtime_assembler.is_some(),
             novelty_utility_credit_points_delta,
@@ -5083,6 +5122,8 @@ impl AppState {
                 parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta,
             novelty_utility_require_production_gate,
+            novelty_utility_settle_from,
+            scoring_driver_credit_issuer_principal_ref: credit_issuer_principal_ref,
             account_webauthn,
             account_ceremony_store,
             account_unbound_ceiling,
@@ -12751,7 +12792,9 @@ fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
 
 /// Parse and validate the `novelty_utility` per-pass credit-points delta from
 /// the environment. Defaulted to `DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
-/// (1.0) when unset. The value must be finite and within the existing
+/// (0.0) when unset. A non-zero value settles (see
+/// `trace_credit_event_type_is_settlement_eligible`). The value must be
+/// finite and within the existing
 /// `MAX_DELAYED_CREDIT_POINTS_DELTA` envelope; we validate here so startup
 /// fails fast rather than every gate-evaluate call. Negative values are
 /// rejected — novelty credit is purely positive issuance.
@@ -12775,6 +12818,43 @@ fn parse_novelty_utility_credit_points_delta_from_env() -> anyhow::Result<f32> {
         "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} exceeds the delayed credit policy limit"
     );
     Ok(parsed)
+}
+
+/// Parse `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` (already trimmed; `None`
+/// when unset) as an RFC 3339 timestamp. A value that does not parse refuses
+/// the start with a fixed label, never the value.
+fn parse_novelty_utility_settle_from(raw: Option<&str>) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(raw)
+        .map_err(|_| anyhow::anyhow!(NOVELTY_UTILITY_SETTLE_FROM_INVALID_LABEL))?;
+    Ok(Some(parsed.with_timezone(&Utc)))
+}
+
+/// The scoring award settles and is paid, so a delta above 0 refuses to start
+/// unless (1) only a production gate may mint it
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`): otherwise a
+/// test gate's decisions would mint payable credit; and (2) a cut-over
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`) says which awards are
+/// payable: otherwise every past award with a positive delta, from whatever
+/// gate wrote it, would settle at the next run. At the default delta (0)
+/// nothing new is minted with value, and neither control is required.
+fn validate_novelty_utility_credit_config(
+    credit_points_delta: f32,
+    require_production_gate: bool,
+    settle_from: Option<DateTime<Utc>>,
+) -> anyhow::Result<()> {
+    if credit_points_delta <= 0.0 {
+        return Ok(());
+    }
+    if !require_production_gate {
+        anyhow::bail!(NOVELTY_UTILITY_CREDIT_REQUIRES_PRODUCTION_GATE_LABEL);
+    }
+    if settle_from.is_none() {
+        anyhow::bail!(NOVELTY_UTILITY_SETTLE_FROM_MISSING_LABEL);
+    }
+    Ok(())
 }
 
 /// Parse the revocation-propagation per-item retry cap from the environment
@@ -20826,7 +20906,12 @@ async fn account_trace_withdraw_handler(
 
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
-        withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+        withdrawal_retains_all_credit(
+            *affected_id,
+            &credit_events,
+            &finalized_credit_event_ids,
+            state.novelty_utility_settle_from,
+        )
     });
 
     let response = finish_account_trace_withdrawal(
@@ -21009,7 +21094,12 @@ async fn pipeline_account_trace_withdrawal(
     };
     let credit_retained = !outcome.trace_credit_forfeited
         && outcome.affected_submission_ids.iter().all(|affected_id| {
-            withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+            withdrawal_retains_all_credit(
+                *affected_id,
+                &credit_events,
+                &finalized_credit_event_ids,
+                state.novelty_utility_settle_from,
+            )
         });
     let response = finish_account_trace_withdrawal(
         state,
@@ -28634,6 +28724,16 @@ async fn append_credit_event_handler(
 ) -> ApiResult<Json<TraceCommonsCreditLedgerRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
+    // The gate's scoring award settles
+    // (`trace_credit_event_type_is_settlement_eligible`), so only the gate
+    // worker route mints it (`attempt_emit_novelty_utility_credit`), after
+    // its production-gate, issuer, tenant-policy and allowed-use checks.
+    if body.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "novelty_utility credit is emitted by the gate only",
+        ));
+    }
     if !body.credit_points_delta.is_finite() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -30548,7 +30648,9 @@ async fn run_credit_settlement_unlocked(
         .map_err(internal_error)?;
     let candidate_events = credit_events
         .into_iter()
-        .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
+        .filter(|event| {
+            trace_credit_event_counts_toward_settlement(event, state.novelty_utility_settle_from)
+        })
         .filter(|event| event.credit_points_delta > 0.0)
         .filter(|event| !already_settled_event_ids.contains(&event.event_id))
         .filter(|event| {
@@ -31976,7 +32078,7 @@ async fn build_credit_risk_summary(
         .map_err(internal_error)?;
     let mut account_summaries = BTreeMap::<String, TraceCreditRiskAccountAccumulator>::new();
     for event in credit_events {
-        if !trace_credit_event_type_is_settlement_eligible(event.event_type)
+        if !trace_credit_event_counts_toward_settlement(&event, state.novelty_utility_settle_from)
             || event.credit_points_delta <= 0.0
             || settled_credit_event_ids.contains(&event.event_id)
             || !delayed_credit_eligible_submission_ids.contains(&event.submission_id)
@@ -42595,16 +42697,21 @@ fn average_i128(sum: i128, count: usize) -> Option<i64> {
     Some((sum / count as i128) as i64)
 }
 
-/// Event types whose credit may reach on-chain settlement.
+/// Event types whose credit may reach settlement.
 ///
-/// `NoveltyUtility` is deliberately excluded. The graded-credit design
-/// records that novelty and perplexity are cheaply fabricated, and
-/// requires dedup, per-contributor caps, reputation and delayed
-/// settlement before novelty can carry settlement-eligible value.
-/// Those signals (`credit_quality`, `contributor_cap`) are computed and
-/// stored on every gate decision but are still shadow-mode: emission
-/// pays a flat delta without consulting them. Novelty credit therefore
-/// keeps accruing as a signal, but cannot settle.
+/// `NoveltyUtility`, the gate's scoring award, is eligible by the owner's
+/// decision of 2026-10-23: a scored trace's credit counts toward settlement,
+/// or real traces never settle. Its amount is the operator-configured
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, which defaults to 0,
+/// and every consumer skips an event whose delta is not positive, so a
+/// deployment that never set the delta settles nothing new. The award is
+/// still a flat delta that does not consult the shadow-mode `credit_quality`
+/// and `contributor_cap` signals; an operator who sets the delta pays that
+/// flat amount, bounded by the settlement controls (per-account cap, credit
+/// holds, issuer approval, allowed policy versions).
+///
+/// The consumers call `trace_credit_event_counts_toward_settlement`, which
+/// adds the scoring award's provenance rule.
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
     matches!(
         event_type,
@@ -42612,7 +42719,57 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
+            | TraceCreditLedgerEventType::NoveltyUtility
     )
+}
+
+/// The `external_ref` prefix of a `NoveltyUtility` event the legacy gate path
+/// writes (`attempt_emit_novelty_utility_credit`):
+/// `novelty_utility:<gate_version_hash>:<submission_id>`.
+const NOVELTY_UTILITY_EXTERNAL_REF_PREFIX: &str = "novelty_utility:";
+
+/// Whether the legacy settlement path owes `event`'s type and provenance:
+/// what `run_credit_settlement`, the credit risk summary and
+/// `withdrawal_retains_all_credit` select, before each applies its own delta,
+/// status, hold and finalized-batch filters.
+///
+/// A `NoveltyUtility` event counts only when the legacy gate path wrote it,
+/// at or after the `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over
+/// (`novelty_utility_settle_from`; with none configured, never).
+/// A compatibility pipeline run writes the same event type into the same
+/// ledger under its own ledger source key, and the pipeline never batches
+/// that leg (Ruling S10); `main` paying it would pay what the pipeline chose
+/// not to. An award with no gate provenance fails closed. The legacy drain
+/// count (`delayed_credit_unsettled` in `versioned_pipeline_activation.rs`)
+/// applies the same rule in SQL.
+fn trace_credit_event_counts_toward_settlement(
+    event: &TraceCommonsCreditLedgerRecord,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+) -> bool {
+    if !trace_credit_event_type_is_settlement_eligible(event.event_type) {
+        return false;
+    }
+    if event.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        let gate_written = is_gate_scoring_award(event);
+        // The cut-over: an award written before it (by a stub gate, or at a
+        // delta nobody meant to pay) never settles, and with no cut-over
+        // configured no award does.
+        let after_cut_over =
+            novelty_utility_settle_from.is_some_and(|settle_from| event.created_at >= settle_from);
+        return gate_written && after_cut_over;
+    }
+    true
+}
+
+/// Whether `event` is a scoring award the legacy gate path wrote
+/// (`attempt_emit_novelty_utility_credit`): a `NoveltyUtility` event with
+/// the gate's `external_ref` prefix. A compatibility pipeline run's
+/// `NoveltyUtility` leg carries its ledger source key instead.
+fn is_gate_scoring_award(event: &TraceCommonsCreditLedgerRecord) -> bool {
+    event.event_type == TraceCreditLedgerEventType::NoveltyUtility
+        && event.external_ref.as_deref().is_some_and(|external_ref| {
+            external_ref.starts_with(NOVELTY_UTILITY_EXTERNAL_REF_PREFIX)
+        })
 }
 
 /// Credit event ids already carried by a finalized settlement batch.
@@ -42637,10 +42794,11 @@ fn withdrawal_retains_all_credit(
     submission_id: Uuid,
     events: &[TraceCommonsCreditLedgerRecord],
     finalized_event_ids: &BTreeSet<Uuid>,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
 ) -> bool {
     !events.iter().any(|event| {
         event.submission_id == submission_id
-            && trace_credit_event_type_is_settlement_eligible(event.event_type)
+            && trace_credit_event_counts_toward_settlement(event, novelty_utility_settle_from)
             && event.credit_points_delta > 0.0
             && !finalized_event_ids.contains(&event.event_id)
     })
@@ -43764,6 +43922,20 @@ async fn append_automatic_utility_credit_events_once_with_counts(
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
 ) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
+    append_automatic_utility_credit_events_once_with_counts_at(state, tenant, config, sources, None)
+        .await
+}
+
+/// `append_automatic_utility_credit_events_once_with_counts`, with each
+/// event's `created_at` fixed to `created_at` when given (otherwise the time
+/// of its append).
+async fn append_automatic_utility_credit_events_once_with_counts_at(
+    state: &AppState,
+    tenant: &TenantAuth,
+    config: AutomaticUtilityCreditConfig,
+    sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
+    created_at: Option<DateTime<Utc>>,
+) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
     require_positive_credit_issuance_principal_if_configured(
         state,
         tenant,
@@ -43807,7 +43979,7 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             external_ref: Some(config.external_ref.clone()),
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
-            created_at: Utc::now(),
+            created_at: created_at.unwrap_or_else(Utc::now),
             witness_provenance_class: credit_witness_provenance_class(
                 state,
                 tenant,
@@ -60250,7 +60422,57 @@ async fn score_one_submission(
 
     // Branch 3: delegate to the real scorer.
     match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // A scored trace earns its scoring award here, through the same
+            // path as the gate worker route. Only this branch earns:
+            // `Cached` copies a decision scored for a different submission,
+            // and `SkippedDuplicate` never ran the gate. The enumeration
+            // (`list_submissions_needing_gate_decision`) already leaves out a
+            // submission a pipeline run owns, which the route refuses with
+            // `refuse_a_pipeline_submission`.
+            if let GateOutcome::Scored {
+                decision_id,
+                perplexity_passed,
+                novelty_passed,
+                vector_entry_id,
+                gate_policy_version,
+                gate_version_hash,
+                chunks_capped,
+                ..
+            } = &outcome
+            {
+                let issuer = scoring_driver_credit_issuer(state, &item.tenant_id);
+                let award = emit_scoring_award_for_scored_decision(
+                    state,
+                    &issuer,
+                    item.submission_id,
+                    ScoredGateDecision {
+                        decision_id: *decision_id,
+                        perplexity_passed: *perplexity_passed,
+                        novelty_passed: *novelty_passed,
+                        vector_entry_id: *vector_entry_id,
+                        gate_policy_version,
+                        gate_version_hash,
+                        chunks_capped: *chunks_capped,
+                    },
+                )
+                .await;
+                // The trace scored; a failed credit check is the award's, not
+                // the trace's. The decision row already says
+                // `CREDIT_CHECK_ERROR_LABEL`, the attempt counter is left
+                // alone, and the outcome stays `Scored`.
+                if let Err((status, _)) = award {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+                        tenant_hash = %sha256_prefixed(&item.tenant_id),
+                        "Trace Commons scoring driver could not check the scoring award; \
+                         decision recorded, credit withheld"
+                    );
+                }
+            }
+            outcome
+        }
         Err(err) => {
             // `{err:#}` records the full anyhow chain (outer context + inner
             // cause), so a scorer failure surfaces the specific hash-safe label
@@ -60381,21 +60603,129 @@ async fn gate_evaluate_worker_handler(
         }
     };
 
-    // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
-    // credit-ledger event through the same pipeline that the operator-facing
-    // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
-    // overall — the decision row still lands so the operator can audit; we
-    // only annotate `credit_withheld_reason` with a stable label-only string.
+    // Phase A5: if the gate passed, mint the `novelty_utility` scoring award
+    // (`emit_scoring_award_for_scored_decision`, the one path the scoring
+    // driver takes too). ABAC failures do NOT fail gate evaluation overall —
+    // the decision row still lands so the operator can audit; only
+    // `credit_withheld_reason` carries a stable label-only string.
+    let (credit_emitted, credit_withheld_reason) = emit_scoring_award_for_scored_decision(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        ScoredGateDecision {
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version: &gate_policy_version,
+            gate_version_hash: &gate_version_hash,
+            chunks_capped,
+        },
+    )
+    .await?;
+
+    Ok(Json(TraceGateEvaluateWorkerResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        submission_id: body.submission_id,
+        decision_id,
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        credit_emitted,
+        credit_withheld_reason,
+        coverage_explanation: coverage_explanation(
+            ScoreAttestationCoverage::from_decision_columns(
+                Some(chunk_count as i32),
+                Some(total_chunk_count as i32),
+                Some(chunks_capped),
+            ),
+        ),
+    }))
+}
+
+/// The fallback actor of the scoring driver's awards when
+/// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is unset. It is not a
+/// canonical principal ref, so it can never be on the central-issuer
+/// allowlist: with that list set and no issuer configured, every driver
+/// award is withheld as `central_issuer_denied`.
+const SCORING_DRIVER_CREDIT_ACTOR_REF: &str = "trace-commons-perplexity-score-driver";
+
+/// The identity the in-process scoring driver issues the scoring award as.
+/// The gate worker route issues it as its authenticated vector worker; the
+/// driver has no credential, so it issues as the server's credit issuer, the
+/// principal the versioned pipeline issues its credit as
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), with the route's
+/// role (`main`'s readers parse a gate award's actor role). It carries no
+/// scoped uses or consent scopes, as a static worker token does not, so the
+/// tenant policy and the submission's own uses decide.
+fn scoring_driver_credit_issuer(state: &AppState, tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::VectorWorker,
+        principal_ref: state
+            .scoring_driver_credit_issuer_principal_ref
+            .clone()
+            .unwrap_or_else(|| SCORING_DRIVER_CREDIT_ACTOR_REF.to_string()),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// The fields of a `GateOutcome::Scored` that the scoring award reads.
+struct ScoredGateDecision<'a> {
+    decision_id: Uuid,
+    perplexity_passed: bool,
+    novelty_passed: bool,
+    vector_entry_id: Option<Uuid>,
+    gate_policy_version: &'a str,
+    gate_version_hash: &'a str,
+    chunks_capped: bool,
+}
+
+/// The scoring award for one decision `evaluate_and_record_gate` just scored
+/// and recorded: the single path by which a scored trace earns its
+/// `NoveltyUtility` award, for the gate worker route
+/// (`gate_evaluate_worker_handler`) and the scoring driver
+/// (`score_one_submission`) alike. With both floors passed it runs
+/// `attempt_emit_novelty_utility_credit` (production gate, central issuer,
+/// tenant policy, accepted status, allowed uses, one award per submission)
+/// and records a withheld reason on the decision row; with a floor failed it
+/// says why credit is withheld (#444). Returns `(credit_emitted,
+/// credit_withheld_reason)`. On a hard error from the credit checks it
+/// patches the row to `CREDIT_CHECK_ERROR_LABEL` and returns the error.
+async fn emit_scoring_award_for_scored_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    scored: ScoredGateDecision<'_>,
+) -> ApiResult<(bool, Option<String>)> {
     let db = state.db_mirror.as_ref().ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace gate worker requires a configured DB mirror",
         )
     })?;
-    let (credit_emitted, credit_withheld_reason) = if perplexity_passed && novelty_passed {
+    let ScoredGateDecision {
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+        chunks_capped,
+    } = scored;
+    let outcome = if perplexity_passed && novelty_passed {
         let decision = GateDecision {
-            gate_policy_version: gate_policy_version.clone(),
-            gate_version_hash: gate_version_hash.clone(),
+            gate_policy_version: gate_policy_version.to_string(),
+            gate_version_hash: gate_version_hash.to_string(),
             perplexity_micros: 0,
             tail_fraction_micros: 0,
             perplexity_passed,
@@ -60439,13 +60769,8 @@ async fn gate_evaluate_worker_handler(
             vector_index_snapshot_id: None,
             index_cardinality_at_scoring: None,
         };
-        let emit_result = attempt_emit_novelty_utility_credit(
-            state.as_ref(),
-            &tenant,
-            &decision,
-            body.submission_id,
-        )
-        .await;
+        let emit_result =
+            attempt_emit_novelty_utility_credit(state, tenant, &decision, submission_id).await;
         let (emitted, withheld_reason) = match emit_result {
             Ok((emitted, withheld_reason)) => (emitted, withheld_reason),
             Err(err) => {
@@ -60494,37 +60819,22 @@ async fn gate_evaluate_worker_handler(
         // the audit row and to the contributor.
         (false, gate_failure_withheld_reason(Some(chunks_capped)))
     };
-
-    Ok(Json(TraceGateEvaluateWorkerResponse {
-        tenant_id: tenant.tenant_id.clone(),
-        submission_id: body.submission_id,
-        decision_id,
-        gate_policy_version,
-        gate_version_hash,
-        perplexity_passed,
-        novelty_passed,
-        vector_entry_id,
-        credit_emitted,
-        credit_withheld_reason,
-        coverage_explanation: coverage_explanation(
-            ScoreAttestationCoverage::from_decision_columns(
-                Some(chunk_count as i32),
-                Some(total_chunk_count as i32),
-                Some(chunks_capped),
-            ),
-        ),
-    }))
+    Ok(outcome)
 }
 
-/// Phase A5: helper called from `gate_evaluate_worker_handler` when both
+/// Phase A5: helper called from `emit_scoring_award_for_scored_decision` when both
 /// gate floors pass. Routes through the same central-issuer ABAC,
 /// tenant-policy allowed-uses, and idempotent-emit pipeline that
 /// `utility_credit_handler` uses for the operator-facing utility-credit
 /// kinds. Returns `(credit_emitted, credit_withheld_reason)`:
 /// - `(true, None)` — credit minted via
 ///   `append_automatic_utility_credit_events_once_with_counts` (`appended > 0`)
-/// - `(false, None)` — idempotent hit (`skipped_existing > 0`); no new credit
-///   minted, but the prior emission is the audit trail
+/// - `(false, None)` — idempotent hit: the submission already has a paid
+///   scoring award, under this gate version or any other (the ledger check),
+///   or already holds the award this write would key on
+///   (`skipped_existing > 0`); no new credit minted, but the prior emission
+///   is the audit trail. A submission earns at most one paid award; a $0 or
+///   pre-cut-over award does not stand in the way of it.
 /// - `(false, Some(label))` — credit withheld; the decision row records the
 ///   stable label-only reason
 ///
@@ -60535,7 +60845,9 @@ async fn gate_evaluate_worker_handler(
 /// library has no `AppState` or `TenantAuth`), so it holds its own copy. A
 /// change to the production-gate, central-issuer, tenant-policy or
 /// allowed-use rule here must be made there too, or the two paths credit
-/// differently.
+/// differently. The one-award-per-submission check (7) has no copy there:
+/// a pipeline run's leg is keyed on its run and never settles (Ruling S10),
+/// and the gate route refuses a submission a pipeline run owns.
 async fn attempt_emit_novelty_utility_credit(
     state: &AppState,
     tenant: &TenantAuth,
@@ -60606,25 +60918,59 @@ async fn attempt_emit_novelty_utility_credit(
         return Ok((false, Some("policy_mismatch".to_string())));
     }
 
-    // (7) Emit. `external_ref` binds the gate version to the submission id —
-    // NOT the decision id, which is freshly minted on every gate-worker call.
-    // Keying on `(gate_version_hash, submission_id)` makes route retries
-    // idempotent at the ledger level (per the spec's open-question
-    // resolution: "allow duplicate decision rows on retry; ledger idempotency
-    // on external_ref handles the credit side"). The `decision_id` itself is
-    // not lost — the trace_gate_decisions row carries it and the audit log
-    // links the two via the `reason` and the row's `decided_at` ordering.
+    // (7) One paid scoring award per submission. The award settles, and
+    // `gate_version_hash` moves with the model, the floors, the chunking and
+    // the render version, so a submission re-scored under a new gate version
+    // must not be paid again. The ledger is the record: a paid award for this
+    // submission (`is_paid_scoring_award`: a positive delta at or after the
+    // cut-over), under any gate version or idempotency key (including the
+    // `(gate_version_hash, submission_id)` key used before), means this
+    // submission has had its award. That is an idempotent hit, not a
+    // withheld reason. A $0 award, or one from before the cut-over, never
+    // settles and does not block (owner decision 2026-10-23). The lock holds
+    // from this check through the append, so racing evaluations in this
+    // process see each other's award.
+    let award_lock = novelty_utility_award_lock(&state.root, &tenant.tenant_id);
+    let _award_guard = award_lock.lock().await;
+    let settle_from = state.novelty_utility_settle_from;
+    let already_paid = read_all_credit_events(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?
+        .iter()
+        .any(|event| {
+            event.submission_id == submission_id && is_paid_scoring_award(event, settle_from)
+        });
+    if already_paid {
+        return Ok((false, None));
+    }
+
+    // (8) Emit. A paid award (a positive delta, written at or after the
+    // cut-over; `created_at` is fixed here so the key and the timestamp the
+    // settlement reads agree) is keyed on the submission and
+    // `NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF`, so two paid awards for
+    // one submission collide on one event id whatever gate version each ran
+    // under (one database row per id, whichever process writes). Any other
+    // award is keyed on the submission alone, so a submission holds at most
+    // one of those too, and it never takes the paid id. `external_ref` still records the gate
+    // version that scored it:
+    // `novelty_utility:<gate_version_hash>:<submission_id>`. The
+    // `decision_id` is not in it -- it is freshly minted on every
+    // gate-worker call -- but the trace_gate_decisions row carries it, and
+    // the audit log links the two via the `reason` and the row's
+    // `decided_at` ordering.
     let external_ref = format!(
-        "novelty_utility:{}:{}",
+        "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}{}:{}",
         decision.gate_version_hash, submission_id,
     );
     let reason = format!("novelty_utility:{}", decision.gate_policy_version);
-    let counts = append_automatic_utility_credit_events_once_with_counts(
+    let created_at = Utc::now();
+    let pays = state.novelty_utility_credit_points_delta > 0.0
+        && settle_from.is_some_and(|settle_from| created_at >= settle_from);
+    let counts = append_automatic_utility_credit_events_once_with_counts_at(
         state,
         tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: event_type.utility_idempotency_label(),
-            idempotency_ref: Some(external_ref.clone()),
+            idempotency_ref: pays.then(|| NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF.to_string()),
             event_type,
             credit_points_delta: state.novelty_utility_credit_points_delta,
             reason,
@@ -60635,6 +60981,7 @@ async fn attempt_emit_novelty_utility_credit(
             trace_id: submission_record.trace_id,
             auth_principal_ref: submission_record.auth_principal_ref.clone(),
         }],
+        Some(created_at),
     )
     .await?;
 
@@ -60642,13 +60989,56 @@ async fn attempt_emit_novelty_utility_credit(
 }
 
 /// Returns true when `kind` (as returned by `TraceGateService::safe_status()`)
-/// names a production trust boundary. Mirrors the spec's enumeration: the only
-/// production-trust kinds today are `enclave_local_gpu` (Phase A2 real local
-/// GPU) and `dstack` (Phase A2/A3 enclave deployment). Stubs
-/// (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) are
-/// explicitly non-production.
+/// names a production trust boundary: `enclave_local_gpu` (real local GPU),
+/// `dstack` (enclave deployment) and `enclave_near_ai` (attested NEAR AI TEE
+/// scoring, what the pilot and staging run; owner decision 2026-10-23). The
+/// test gates (`in_memory`, `enclave_mock`, `legacy_deterministic`,
+/// `dstack_stub`) are non-production, so they can never create payable
+/// credit.
 fn is_production_gate_service_kind(kind: &str) -> bool {
-    matches!(kind, "enclave_local_gpu" | "dstack")
+    matches!(kind, "enclave_local_gpu" | "dstack" | "enclave_near_ai")
+}
+
+/// Whether `event` is a scoring award that pays: written by the legacy gate
+/// path, with a positive delta, at or after the
+/// `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over. Only such an award
+/// blocks a later one (owner decision 2026-10-23); a $0 award, or one from
+/// before the cut-over, never settles and does not count.
+fn is_paid_scoring_award(
+    event: &TraceCommonsCreditLedgerRecord,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+) -> bool {
+    is_gate_scoring_award(event)
+        && event.credit_points_delta > 0.0
+        && novelty_utility_settle_from.is_some_and(|settle_from| event.created_at >= settle_from)
+}
+
+/// The `idempotency_ref` of a paid scoring award. A paid award's event id is
+/// keyed on the submission and this constant, apart from the
+/// submission-only id a $0 or pre-cut-over award takes, so a submission has
+/// exactly one id a paid award can be written under, whatever the gate
+/// version or cut-over: two paid awards for one submission collide on it.
+const NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF: &str = "paid";
+
+/// Serialises the one-award check and the append of a scoring award within
+/// this process, per tenant ledger, so two evaluations of one submission
+/// cannot both pass the check before either appends. The lock is per
+/// process, and the file ledger lives on one host's disk; the shared event
+/// id is what reaches further: the database mirror's primary key admits one
+/// row under it, so a second ingest process's write of the same paid award
+/// fails there when mirror writes are required.
+fn novelty_utility_award_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(credit_ledger_path(root, tenant_id))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 async fn vector_index_handler(

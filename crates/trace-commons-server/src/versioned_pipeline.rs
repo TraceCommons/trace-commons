@@ -7286,7 +7286,8 @@ impl PgPipelineStore {
     /// carries its settlement batch, and has a payout still to make
     /// (`pending`) or to confirm (`submitted`), least recently updated
     /// first. A leg without a batch -- a compatibility run's
-    /// `NoveltyUtility` event, which `main` never pays -- is never listed
+    /// `NoveltyUtility` event, which the pipeline never batches and `main`
+    /// leaves to the pipeline -- is never listed
     /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout, nor
     /// a `pending` one whose bundle's Settle policy is not runnable
     /// (`list_payout_work_on`).
@@ -15770,9 +15771,12 @@ impl PipelineService {
         let external_ref = pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key);
         // Ruling S10: only the stored event type varies by bundle family.
         // `PipelineScore` keeps PR 2's ledger event (`Accepted`); a
-        // compatibility run's `NoveltyUtility` leg is main's gate-emitted,
-        // never-settled event, which `trace_credit_event_type_is_settlement_eligible`
-        // in `trace-commons-ingest.rs` excludes. Rulings T15-1 and T15-2:
+        // compatibility run's `NoveltyUtility` leg is main's gate-emitted
+        // event type, which the pipeline never settles (below), and which
+        // `main`'s settlement leaves to the pipeline:
+        // `trace_credit_event_counts_toward_settlement` in
+        // `trace-commons-ingest.rs` takes only the `external_ref` its own gate
+        // writes, never this run's ledger source key. Rulings T15-1 and T15-2:
         // the rest of the row goes with the event type. A `NoveltyUtility`
         // row is written as `main`'s gate path writes that event: the gate
         // caller's actor role (which `main`'s readers can parse), `final`

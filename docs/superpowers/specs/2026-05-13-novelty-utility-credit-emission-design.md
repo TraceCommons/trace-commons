@@ -8,6 +8,51 @@ Predecessors:
 - `2026-05-12-perplexity-scorer-design.md` (A2)
 - Migration V23 (schema additions for `gate_version_hash`, `gate_policy_version`, `trace_gate_decisions`)
 
+> **Amendment, 2026-10-23 (owner decision).** The implementation kept
+> `novelty_utility` out of `trace_credit_event_type_is_settlement_eligible`,
+> so the award accrued but never settled, and real traces never settled.
+> The owner decided that a scored trace's credit counts toward settlement:
+> the gate's `novelty_utility` award is now settlement-eligible on the
+> legacy settlement path. Its amount is still
+> `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, default `0`, and
+> every consumer skips a non-positive delta, so nothing new settles until
+> an operator sets a value. Only the events this gate writes (`external_ref`
+> `novelty_utility:<gate_version_hash>:<submission_id>`) count, and the
+> reviewer credit route now refuses a `novelty_utility` event, so only the
+> gate mints it. A compatibility pipeline run's `NoveltyUtility` leg is
+> unchanged: the pipeline never batches it, and the legacy settlement
+> leaves it alone.
+>
+> **Review fixes, 2026-10-23.** Because the award now pays: (1) a
+> submission earns at most one award. The event id is keyed on the
+> submission alone, and the emitter skips a submission the ledger already
+> credits under any gate version, so re-scoring under a new
+> `gate_version_hash` does not pay again. (2) A delta above `0` refuses to
+> start unless `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` is
+> true, so a test gate cannot mint payable credit. (3) A delta above `0`
+> also requires `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` (RFC 3339).
+> Settlement, the risk summary, withdrawal and the legacy drain report
+> count an award only at or after it, and none with it unset. (4) The
+> perplexity driver earns the award for the traces it scores through the
+> same path as the worker route (`emit_scoring_award_for_scored_decision`),
+> issuing as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`.
+>
+> **Owner decisions, 2026-10-23.** (5) `enclave_near_ai` joins
+> `enclave_local_gpu` and `dstack` as a production gate: NEAR AI TEE scoring
+> is attested and is what the pilot and staging run. The test gates
+> (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) stay
+> out. (6) Only a paid award blocks a later one, superseding (1): an earlier
+> award blocks only when its delta is positive and it was written at or
+> after `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`. A paid award's event id
+> is keyed on the submission and the constant `paid`; every other award
+> keeps the submission-only id. So a submission holds at most one paid
+> award under any gate version or cut-over, a $0 or pre-cut-over award
+> never takes the paid id, and the emitter holds a per-tenant lock from the
+> ledger check through the append, so racing evaluations in one process
+> write one award. The lock is per process; across processes the shared id
+> is the guard, and the database mirror's primary key admits one row under
+> it (the write fails when mirror writes are required).
+
 ## Goal
 
 When the gate worker route (`POST /v1/workers/gate/evaluate`, shipped in PR

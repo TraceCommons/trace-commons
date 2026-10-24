@@ -6543,6 +6543,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        novelty_utility_settle_from: None,
+        scoring_driver_credit_issuer_principal_ref: None,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_unbound_ceiling: Arc::new(
@@ -30684,6 +30686,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         revocation_propagation_max_attempts: DEFAULT_REVOCATION_PROPAGATION_MAX_ATTEMPTS,
         novelty_utility_credit_points_delta: DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA,
         novelty_utility_require_production_gate: false,
+        novelty_utility_settle_from: None,
+        scoring_driver_credit_issuer_principal_ref: None,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_unbound_ceiling: Arc::new(
@@ -44311,6 +44315,44 @@ async fn delayed_credit_requires_reason_artifact_ref_and_bounded_delta() {
     .await
     .expect_err("delayed credit delta is bounded");
     assert_eq!(excessive_delta.0, StatusCode::BAD_REQUEST);
+}
+
+/// The scoring award settles, so only the gate may mint it: a reviewer who
+/// could append a `novelty_utility` event with the gate's `external_ref`
+/// shape would mint settling credit that no gate scored.
+#[tokio::test]
+async fn reviewer_route_refuses_the_gate_scoring_award() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let submission_id = submit_consented_metadata_fixture(
+        state.clone(),
+        "token-a",
+        ConsentScope::ModelTraining,
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+
+    let refused = append_credit_event_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceCreditLedgerAppendRequest {
+            event_type: TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta: 1.0,
+            reason: Some("novelty_utility:gate-policy-v1".to_string()),
+            external_ref: Some(format!(
+                "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-a:{submission_id}"
+            )),
+        }),
+    )
+    .await
+    .expect_err("the scoring award is gate-emitted only");
+    assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+    assert!(
+        read_all_credit_events(temp.path(), "tenant-a")
+            .expect("ledger reads")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -60650,13 +60692,13 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
 }
 
 #[test]
-fn novelty_utility_credit_is_not_settlement_eligible() {
-    // Novelty is cheaply fabricated. The graded-credit design requires
-    // dedup, caps, reputation and delayed settlement before novelty can
-    // carry settlement-eligible value; none of those gate emission yet.
-    // Until they do, novelty credit accrues as a signal but must never
-    // reach on-chain issuance.
-    assert!(!trace_credit_event_type_is_settlement_eligible(
+fn novelty_utility_credit_is_settlement_eligible() {
+    // Owner decision 2026-10-23: the gate's scoring award counts toward
+    // settlement, so a scored trace's credit can settle. Its amount is the
+    // operator-configured `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
+    // (default 0), and every consumer skips a non-positive delta, so a
+    // deployment that never set the delta settles nothing new.
+    assert!(trace_credit_event_type_is_settlement_eligible(
         TraceCreditLedgerEventType::NoveltyUtility
     ));
 }
@@ -60670,6 +60712,7 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
         TraceCreditLedgerEventType::RegressionCatch,
         TraceCreditLedgerEventType::TrainingUtility,
         TraceCreditLedgerEventType::RankingUtility,
+        TraceCreditLedgerEventType::NoveltyUtility,
     ] {
         assert!(
             trace_credit_event_type_is_settlement_eligible(event_type),
@@ -60677,7 +60720,6 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
         );
     }
     for event_type in [
-        TraceCreditLedgerEventType::NoveltyUtility,
         TraceCreditLedgerEventType::ReviewerBonus,
         TraceCreditLedgerEventType::AbusePenalty,
     ] {
@@ -60686,6 +60728,339 @@ fn settlement_eligible_event_types_are_the_reviewed_set() {
             "{event_type:?} should not be settlement-eligible"
         );
     }
+}
+
+/// A `NoveltyUtility` event as `attempt_emit_novelty_utility_credit` writes it.
+fn legacy_scoring_award_event(
+    submission_id: Uuid,
+    gate_version_hash: &str,
+    credit_points_delta: f32,
+) -> TraceCommonsCreditLedgerRecord {
+    TraceCommonsCreditLedgerRecord {
+        reason: Some("novelty_utility:gate-policy-v1".to_string()),
+        external_ref: Some(format!(
+            "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}{gate_version_hash}:{submission_id}"
+        )),
+        ..withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta,
+        )
+    }
+}
+
+/// A `NoveltyUtility` event as a compatibility pipeline run writes it
+/// (`settle_internal_credit`): the pipeline's ledger source key as its
+/// `external_ref`. The pipeline never batches that leg (Ruling S10).
+fn pipeline_scoring_award_event(
+    submission_id: Uuid,
+    credit_points_delta: f32,
+) -> TraceCommonsCreditLedgerRecord {
+    TraceCommonsCreditLedgerRecord {
+        reason: Some(
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(),
+        ),
+        external_ref: Some(
+            trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+                "tenant-a",
+                "synthetic-idempotency-key",
+            ),
+        ),
+        ..withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            credit_points_delta,
+        )
+    }
+}
+
+#[test]
+fn only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement() {
+    let submission_id = Uuid::new_v4();
+    let settle_from = Some(Utc::now() - chrono::Duration::hours(1));
+    assert!(trace_credit_event_counts_toward_settlement(
+        &legacy_scoring_award_event(submission_id, "sha256:gate-a", 1.0),
+        settle_from
+    ));
+    // The pipeline's own `NoveltyUtility` leg is the pipeline's to settle;
+    // `main` paying it would pay what the pipeline chose not to.
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &pipeline_scoring_award_event(submission_id, 1.0),
+        settle_from
+    ));
+    // Fail closed on a scoring award with no gate provenance.
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::NoveltyUtility,
+            1.0
+        ),
+        settle_from
+    ));
+    // The provenance rule is the scoring award's alone: reviewed types keep
+    // whatever `external_ref` an operator gave them.
+    assert!(trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::TrainingUtility,
+            1.0
+        ),
+        settle_from
+    ));
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::ReviewerBonus,
+            1.0
+        ),
+        settle_from
+    ));
+}
+
+/// Finding 3 of the #1591 review: a scoring award counts toward settlement
+/// only when it was written at or after the configured cut-over
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`). Awards written before it --
+/// by a stub gate, or at a delta nobody meant to pay -- never settle, and
+/// with no cut-over configured no scoring award settles at all.
+#[test]
+fn the_scoring_award_counts_only_from_the_settle_from_cut_over() {
+    let submission_id = Uuid::new_v4();
+    let cut_over = Utc::now() - chrono::Duration::hours(1);
+    let at = |created_at: DateTime<Utc>| TraceCommonsCreditLedgerRecord {
+        created_at,
+        ..legacy_scoring_award_event(submission_id, "sha256:gate-a", 1.0)
+    };
+    let before = at(cut_over - chrono::Duration::seconds(1));
+    let exactly = at(cut_over);
+    let after = at(cut_over + chrono::Duration::seconds(1));
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &before,
+        Some(cut_over)
+    ));
+    assert!(trace_credit_event_counts_toward_settlement(
+        &exactly,
+        Some(cut_over)
+    ));
+    assert!(trace_credit_event_counts_toward_settlement(
+        &after,
+        Some(cut_over)
+    ));
+    // No cut-over configured: no scoring award settles.
+    assert!(!trace_credit_event_counts_toward_settlement(&after, None));
+    // The cut-over is the scoring award's alone: a reviewed type written
+    // before it still counts, with or without one.
+    let reviewed = TraceCommonsCreditLedgerRecord {
+        created_at: cut_over - chrono::Duration::days(30),
+        ..withdrawal_credit_event(
+            submission_id,
+            TraceCreditLedgerEventType::TrainingUtility,
+            1.0,
+        )
+    };
+    assert!(trace_credit_event_counts_toward_settlement(
+        &reviewed,
+        Some(cut_over)
+    ));
+    assert!(trace_credit_event_counts_toward_settlement(&reviewed, None));
+    // Withdrawal forfeits only what settlement would batch.
+    assert!(withdrawal_retains_all_credit(
+        submission_id,
+        std::slice::from_ref(&before),
+        &BTreeSet::new(),
+        Some(cut_over),
+    ));
+    assert!(!withdrawal_retains_all_credit(
+        submission_id,
+        &[before, after],
+        &BTreeSet::new(),
+        Some(cut_over),
+    ));
+}
+
+/// Findings 2 and 3 of the #1591 review: a non-zero scoring award settles
+/// and is paid, so the process refuses to start when it could mint one from
+/// a test gate (the production gate not required) or when no cut-over says
+/// which past awards are payable. At the default delta (0) neither is needed.
+#[test]
+fn a_paying_novelty_delta_requires_the_production_gate_and_a_cut_over() {
+    let cut_over = Some(Utc::now());
+    validate_novelty_utility_credit_config(0.0, false, None)
+        .expect("the default delta needs neither control");
+    validate_novelty_utility_credit_config(1.0, true, cut_over)
+        .expect("a paying delta with both controls starts");
+    let no_production_gate = validate_novelty_utility_credit_config(1.0, false, cut_over)
+        .expect_err("a paying delta without the production gate refuses to start");
+    assert_eq!(
+        no_production_gate.to_string(),
+        NOVELTY_UTILITY_CREDIT_REQUIRES_PRODUCTION_GATE_LABEL
+    );
+    let no_cut_over = validate_novelty_utility_credit_config(1.0, true, None)
+        .expect_err("a paying delta without a cut-over refuses to start");
+    assert_eq!(
+        no_cut_over.to_string(),
+        NOVELTY_UTILITY_SETTLE_FROM_MISSING_LABEL
+    );
+}
+
+#[test]
+fn the_novelty_settle_from_cut_over_parses_rfc_3339_only() {
+    assert_eq!(
+        parse_novelty_utility_settle_from(None).expect("unset"),
+        None
+    );
+    assert_eq!(
+        parse_novelty_utility_settle_from(Some("2026-10-23T12:00:00+02:00"))
+            .expect("rfc 3339 parses"),
+        Some(
+            DateTime::parse_from_rfc3339("2026-10-23T10:00:00Z")
+                .expect("literal parses")
+                .with_timezone(&Utc)
+        )
+    );
+    for bad in ["2026-10-23", "yesterday", "1729680000"] {
+        let error = parse_novelty_utility_settle_from(Some(bad))
+            .expect_err("a value that is not RFC 3339 refuses to start");
+        assert_eq!(error.to_string(), NOVELTY_UTILITY_SETTLE_FROM_INVALID_LABEL);
+        assert!(!error.to_string().contains(bad));
+    }
+}
+
+#[test]
+fn the_pipeline_ledger_source_key_never_reads_as_a_gate_scoring_award() {
+    let key = trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+        "tenant-a",
+        "synthetic-idempotency-key",
+    );
+    assert!(!key.starts_with(NOVELTY_UTILITY_EXTERNAL_REF_PREFIX));
+}
+
+#[tokio::test]
+async fn admin_credit_settlement_settles_the_gate_scoring_award() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    // The cut-over (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`): awards
+    // written before it never settle.
+    let cut_over = Utc::now() - chrono::Duration::hours(1);
+    Arc::make_mut(&mut state).novelty_utility_settle_from = Some(cut_over);
+    let submission_id = submit_consented_metadata_fixture(
+        state.clone(),
+        "token-a",
+        ConsentScope::ModelTraining,
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let shaped = |event: TraceCommonsCreditLedgerRecord| TraceCommonsCreditLedgerRecord {
+        trace_id: record.trace_id,
+        auth_principal_ref: record.auth_principal_ref.clone(),
+        ..event
+    };
+    let scored = shaped(legacy_scoring_award_event(
+        submission_id,
+        "sha256:gate-a",
+        1.25,
+    ));
+    // At the default delta (0) the award is written with no value: it
+    // settles nothing, whatever its type.
+    let zero = shaped(legacy_scoring_award_event(
+        submission_id,
+        "sha256:gate-b",
+        0.0,
+    ));
+    let pipeline = shaped(pipeline_scoring_award_event(submission_id, 2.0));
+    // Written before the cut-over: never owed, whatever its value.
+    let before_cut_over = TraceCommonsCreditLedgerRecord {
+        created_at: cut_over - chrono::Duration::seconds(1),
+        ..shaped(legacy_scoring_award_event(
+            submission_id,
+            "sha256:gate-c",
+            3.0,
+        ))
+    };
+    for event in [&scored, &zero, &pipeline, &before_cut_over] {
+        append_credit_event(temp.path(), "tenant-a", event).expect("credit event appends");
+    }
+
+    // The risk summary owes the same events settlement would batch.
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/admin/credit-risk-summary")
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("admin response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
+    assert_eq!(value["pending_credit_micros"], serde_json::json!(1_250_000));
+    assert_eq!(
+        value["accounts"][0]["pending_source_event_count"],
+        serde_json::json!(1)
+    );
+
+    // Withdrawal would forfeit the unsettled award.
+    let events = read_all_credit_events(temp.path(), "tenant-a").expect("credit events read");
+    assert!(!withdrawal_retains_all_credit(
+        submission_id,
+        &events,
+        &BTreeSet::new(),
+        state.novelty_utility_settle_from,
+    ));
+
+    let Json(dry_run) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: true,
+            ..test_settlement_request("preview scoring award settlement".to_string())
+        }),
+    )
+    .await
+    .expect("admin can dry-run settlement");
+    assert_eq!(dry_run.settled_source_event_count, 1);
+    assert_eq!(dry_run.settled_credit_points, 1.25);
+
+    let Json(finalized) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(test_settlement_request(
+            "finalize scoring award settlement".to_string(),
+        )),
+    )
+    .await
+    .expect("admin can finalize settlement");
+    assert_eq!(finalized.settled_source_event_count, 1);
+    assert_eq!(finalized.settled_credit_points, 1.25);
+    let batches =
+        read_all_credit_settlement_batches(temp.path(), "tenant-a").expect("settlement reads");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].source_credit_event_ids, vec![scored.event_id]);
+
+    // Settled: withdrawal now keeps everything, and the contributor's credit
+    // summary moves the award from pending to settled.
+    let finalized_ids = finalized_settlement_credit_event_ids(&batches);
+    assert!(withdrawal_retains_all_credit(
+        submission_id,
+        &events,
+        &finalized_ids,
+        state.novelty_utility_settle_from,
+    ));
+    let Json(credit) = credit_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("credit summary succeeds");
+    assert_eq!(credit.credit_points_settled, 1.25);
 }
 
 #[test]
@@ -72005,11 +72380,14 @@ macro_rules! impl_ingest_test_corpus_store {
             ) -> Result<u64, DatabaseError> {
                 todo!("stub")
             }
+            // The scoring driver mirrors the award it writes (the file
+            // ledger is what these tests read), so a mirror write is accepted
+            // and dropped rather than a stub that panics.
             async fn append_trace_credit_event(
                 &self,
                 _: StorageTraceCreditEventWrite,
             ) -> Result<(), DatabaseError> {
-                todo!("stub")
+                Ok(())
             }
             async fn upsert_trace_utility_attestation(
                 &self,
@@ -72353,12 +72731,14 @@ impl_ingest_test_corpus_store! {
         ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
             Ok(Vec::new())
         }
+        /// The scoring award's credit-mutation audit event looks up no prior
+        /// event by id here: none is held.
         async fn get_trace_audit_event_by_id(
             &self,
             _: &str,
             _: Uuid,
         ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
-            todo!("stub")
+            Ok(None)
         }
 
         async fn upsert_trace_revocation_propagation_item(
@@ -73289,6 +73669,72 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
         (0, 0, 0, 0),
         "second tick must find the backlog already drained: {second:?}"
     );
+}
+
+/// Finding 4 of the #1591 review: the production scoring driver earns the
+/// scoring award through the same path as the gate worker route. A trace the
+/// driver scores (and that allows model training) gets one `NoveltyUtility`
+/// award, written as the gate writes it; a trace whose uses do not allow it
+/// gets none; and the next tick, with nothing left to score, writes none.
+#[tokio::test]
+async fn perplexity_score_driver_tick_earns_the_scoring_award() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 2);
+    let (training, evaluation_only) = {
+        let mut submissions = db.submissions.write().unwrap();
+        let mut ids = submissions.keys().map(|(_, id)| *id).collect::<Vec<_>>();
+        ids.sort();
+        let training = submissions
+            .get_mut(&("tenant-a".to_string(), ids[0]))
+            .expect("seeded submission");
+        training.consent_scopes = vec!["model_training".to_string()];
+        training.allowed_uses = vec!["model_training".to_string()];
+        (ids[0], ids[1])
+    };
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state =
+        test_gate_driver_state(temp.path().to_path_buf(), db_mirror, Some(artifact_store));
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
+
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 5,
+        },
+        backoff_base_seconds: 30,
+    };
+    let first = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("first tick succeeds");
+    assert_eq!((first.scored, first.failed), (2, 0), "{first:?}");
+
+    let awards = || {
+        read_all_credit_events(temp.path(), "tenant-a")
+            .expect("credit ledger reads")
+            .into_iter()
+            .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            .collect::<Vec<_>>()
+    };
+    let earned = awards();
+    assert_eq!(earned.len(), 1, "one award, for the training trace");
+    assert_eq!(earned[0].submission_id, training);
+    assert_ne!(earned[0].submission_id, evaluation_only);
+    assert_eq!(earned[0].credit_points_delta, 1.0);
+    assert!(is_gate_scoring_award(&earned[0]));
+    assert_eq!(earned[0].actor_role, TokenRole::VectorWorker);
+
+    let second = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("second tick succeeds");
+    assert_eq!(second.scored, 0, "{second:?}");
+    assert_eq!(awards().len(), 1);
 }
 
 /// Test-only gate service whose scoring failure is TRANSIENT: the upstream
@@ -77627,16 +78073,12 @@ impl TraceGateService for FailingGateService {
     }
 }
 
-/// Test-only gate service that mimics a production trust boundary by
-/// reporting `safe_status().kind = "dstack"`. Decisions reuse the
-/// deterministic in-memory builder so the gate passes. Used by the
-/// production-gate-guard happy-path inverse: with the guard enabled, this
-/// service is allowed to mint credit while `InMemoryGateService` is not.
-/// Currently only `non_production_gate_guard_withholds_credit` tests the
-/// negative direction (in_memory + guard enabled → withheld), which is the
-/// case the spec calls out.
-#[allow(dead_code)]
-struct ProductionLikeGateService;
+/// Test-only gate service that reports `safe_status().kind = kind`, so the
+/// production-gate guard can be driven with any backend's kind. Decisions
+/// reuse the deterministic in-memory builder so the gate passes.
+struct ProductionLikeGateService {
+    kind: &'static str,
+}
 
 impl TraceGateService for ProductionLikeGateService {
     fn evaluate_trace(
@@ -77663,7 +78105,7 @@ impl TraceGateService for ProductionLikeGateService {
 
     fn safe_status(&self) -> GateServiceStatus {
         GateServiceStatus {
-            kind: "dstack".into(),
+            kind: self.kind.into(),
             gate_policy_version: "production_like_for_tests".into(),
             gate_version_hash: "sha256:production_like_for_tests".into(),
             attestation_verifier_configured: true,
@@ -77963,10 +78405,10 @@ async fn novelty_credit_emission_idempotent_on_retry() {
     )
     .await
     .expect("second gate evaluation succeeds");
-    // The external_ref is keyed on (gate_version_hash, submission_id) so
-    // it is stable across retries even though `decision_id` is freshly
-    // minted per call. The helper detects the duplicate external_ref and
-    // reports `skipped_existing` instead of appending. The second
+    // The award is keyed on the submission alone, so it is stable across
+    // retries (and gate versions) even though `decision_id` is freshly
+    // minted per call. The emitter finds the submission's award in the
+    // ledger and appends nothing. The second
     // response surfaces `credit_emitted: false` because no NEW credit was
     // minted — the first call's audit row remains the canonical record.
     assert!(second.perplexity_passed && second.novelty_passed);
@@ -77990,6 +78432,128 @@ async fn novelty_credit_emission_idempotent_on_retry() {
         "exactly one novelty_utility ledger row across two route calls",
     );
     assert_eq!(refs[0], expected_external_ref);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Finding 1 of the #1591 review: the scoring award settles, so re-scoring a
+/// submission under a changed gate version (model, floors, chunking or
+/// render version all move `gate_version_hash`) must not pay it again. A
+/// submission earns at most one scoring award.
+#[tokio::test]
+async fn novelty_credit_emission_pays_once_across_gate_versions() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
+    Arc::make_mut(&mut state).novelty_utility_settle_from =
+        Some(Utc::now() - chrono::Duration::hours(1));
+
+    let Json(first) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("first gate evaluation succeeds");
+    assert!(first.credit_emitted, "first call must mint credit");
+
+    Arc::make_mut(&mut state).gate_service = Arc::new(InMemoryGateService::new(
+        "novelty_credit_test_v2",
+        "sha256:novelty_credit_test_v2",
+    ));
+    let Json(second) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("re-evaluation under a new gate version succeeds");
+    assert_ne!(first.gate_version_hash, second.gate_version_hash);
+    assert!(second.perplexity_passed && second.novelty_passed);
+    assert!(
+        !second.credit_emitted,
+        "a re-scored submission must not earn a second award"
+    );
+    assert!(second.credit_withheld_reason.is_none());
+
+    let awards: Vec<_> = read_all_credit_events(temp.path(), "tenant-a")
+        .expect("credit ledger reads")
+        .into_iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .collect();
+    assert_eq!(awards.len(), 1, "one scoring award per submission");
+    assert_eq!(awards[0].credit_points_delta, 1.0);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The same rule holds against an award written before this fix, under the
+/// old `(gate_version_hash, submission_id)` idempotency key, whose event id
+/// the new key cannot reproduce: the ledger already holds the submission's
+/// scoring award, so the gate writes none.
+#[tokio::test]
+async fn novelty_credit_emission_skips_a_submission_with_an_earlier_award() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
+    Arc::make_mut(&mut state).novelty_utility_settle_from =
+        Some(Utc::now() - chrono::Duration::hours(1));
+    let record = read_utility_submission_record(
+        state.as_ref(),
+        &system_audit_tenant("tenant-a", "test-seed"),
+        submission_id,
+    )
+    .await
+    .expect("record reads")
+    .expect("record exists");
+    let earlier = TraceCommonsCreditLedgerRecord {
+        trace_id: record.trace_id,
+        auth_principal_ref: record.auth_principal_ref.clone(),
+        ..legacy_scoring_award_event(submission_id, "sha256:an_earlier_gate", 1.0)
+    };
+    append_credit_event(temp.path(), "tenant-a", &earlier).expect("earlier award appends");
+
+    let Json(response) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("gate evaluation succeeds");
+    assert!(response.perplexity_passed && response.novelty_passed);
+    assert!(!response.credit_emitted);
+    assert!(response.credit_withheld_reason.is_none());
+    let awards: Vec<_> = read_all_credit_events(temp.path(), "tenant-a")
+        .expect("credit ledger reads")
+        .into_iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .map(|event| event.event_id)
+        .collect();
+    assert_eq!(awards, vec![earlier.event_id]);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -78042,6 +78606,329 @@ async fn novelty_credit_emission_withheld_on_non_production_gate() {
     assert!(!is_production_gate_service_kind("dstack_stub"));
     assert!(is_production_gate_service_kind("enclave_local_gpu"));
     assert!(is_production_gate_service_kind("dstack"));
+    assert!(is_production_gate_service_kind("enclave_near_ai"));
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The scoring awards in `root`'s ledger that pay: gate-written, a positive
+/// delta, and at or after the cut-over.
+fn paid_scoring_awards_for_test(
+    root: &Path,
+    tenant_id: &str,
+    settle_from: DateTime<Utc>,
+) -> Vec<TraceCommonsCreditLedgerRecord> {
+    read_all_credit_events(root, tenant_id)
+        .expect("credit ledger reads")
+        .into_iter()
+        .filter(|event| {
+            trace_credit_event_counts_toward_settlement(event, Some(settle_from))
+                && event.event_type == TraceCreditLedgerEventType::NoveltyUtility
+                && event.credit_points_delta > 0.0
+        })
+        .collect()
+}
+
+fn scoring_awards_for_test(root: &Path, tenant_id: &str) -> Vec<TraceCommonsCreditLedgerRecord> {
+    read_all_credit_events(root, tenant_id)
+        .expect("credit ledger reads")
+        .into_iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .collect()
+}
+
+/// Owner decision 2026-10-23: NEAR AI TEE scoring (`enclave_near_ai`) is a
+/// production gate, so under the production-gate guard a paying delta earns
+/// it an award that settles.
+#[tokio::test]
+async fn novelty_credit_emission_pays_on_the_near_ai_gate_under_the_production_guard() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    let settle_from = Utc::now() - chrono::Duration::hours(1);
+    {
+        let state = Arc::make_mut(&mut state);
+        state.novelty_utility_require_production_gate = true;
+        state.novelty_utility_credit_points_delta = 1.0;
+        state.novelty_utility_settle_from = Some(settle_from);
+        state.gate_service = Arc::new(ProductionLikeGateService {
+            kind: "enclave_near_ai",
+        });
+    }
+
+    let Json(response) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("gate evaluation succeeds");
+    assert!(response.perplexity_passed && response.novelty_passed);
+    assert!(response.credit_emitted, "the NEAR AI gate earns the award");
+    assert!(response.credit_withheld_reason.is_none());
+    let paid = paid_scoring_awards_for_test(temp.path(), "tenant-a", settle_from);
+    assert_eq!(paid.len(), 1);
+    assert_eq!(paid[0].submission_id, submission_id);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The test gates stay out of the production set: under the guard, each one's
+/// decision lands with `non_production_gate` and no award is written.
+#[tokio::test]
+async fn novelty_credit_emission_withholds_every_test_gate_under_the_production_guard() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for kind in [
+        "in_memory",
+        "enclave_mock",
+        "legacy_deterministic",
+        "dstack_stub",
+    ] {
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (mut state, submission_id) = novelty_credit_test_fixture(
+            backend.clone(),
+            temp.path(),
+            artifact_temp.path(),
+            "tenant-a",
+            vec!["model_training".to_string()],
+        )
+        .await;
+        {
+            let state = Arc::make_mut(&mut state);
+            state.novelty_utility_require_production_gate = true;
+            state.novelty_utility_credit_points_delta = 1.0;
+            state.novelty_utility_settle_from = Some(Utc::now() - chrono::Duration::hours(1));
+            state.gate_service = Arc::new(ProductionLikeGateService { kind });
+        }
+        let Json(response) = gate_evaluate_worker_handler(
+            State(state.clone()),
+            auth_headers("vector-worker-token-a"),
+            Json(TraceGateEvaluateWorkerRequest { submission_id }),
+        )
+        .await
+        .expect("gate evaluation succeeds");
+        assert!(!response.credit_emitted, "{kind} must not earn an award");
+        assert_eq!(
+            response.credit_withheld_reason.as_deref(),
+            Some("non_production_gate"),
+            "{kind}"
+        );
+        assert!(
+            scoring_awards_for_test(temp.path(), "tenant-a").is_empty(),
+            "{kind} writes no award"
+        );
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Owner decision 2026-10-23, "only paid awards block": a $0 award does not
+/// count, so the trace can still earn one paid award once the delta pays.
+#[tokio::test]
+async fn novelty_credit_emission_pays_after_a_zero_award() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    let settle_from = Utc::now() - chrono::Duration::hours(1);
+    {
+        let state = Arc::make_mut(&mut state);
+        state.novelty_utility_credit_points_delta = 0.0;
+        state.novelty_utility_settle_from = Some(settle_from);
+    }
+    let Json(zero) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("calibration evaluation succeeds");
+    assert!(zero.credit_emitted, "the $0 award is written");
+
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
+    let Json(paid) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("paying evaluation succeeds");
+    assert!(paid.credit_emitted, "a $0 award does not block a paid one");
+    assert!(paid.credit_withheld_reason.is_none());
+
+    let awards = scoring_awards_for_test(temp.path(), "tenant-a");
+    assert_eq!(awards.len(), 2, "the $0 award and the paid award");
+    let paid_awards = paid_scoring_awards_for_test(temp.path(), "tenant-a", settle_from);
+    assert_eq!(paid_awards.len(), 1, "exactly one paid award");
+    assert_eq!(paid_awards[0].credit_points_delta, 1.0);
+
+    // A third evaluation finds the paid award and writes nothing.
+    let Json(third) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("third evaluation succeeds");
+    assert!(!third.credit_emitted);
+    assert!(third.credit_withheld_reason.is_none());
+    assert_eq!(scoring_awards_for_test(temp.path(), "tenant-a").len(), 2);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An award written before the cut-over does not count and never settles,
+/// so once the cut-over passes the trace earns its one paid award.
+#[tokio::test]
+async fn novelty_credit_emission_pays_after_a_pre_cut_over_award() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    {
+        let state = Arc::make_mut(&mut state);
+        state.novelty_utility_credit_points_delta = 1.0;
+        // The cut-over is still ahead when the first award is written.
+        state.novelty_utility_settle_from = Some(Utc::now() + chrono::Duration::hours(1));
+    }
+    let Json(early) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("pre-cut-over evaluation succeeds");
+    assert!(early.credit_emitted, "the pre-cut-over award is written");
+    let earlier = scoring_awards_for_test(temp.path(), "tenant-a");
+    assert_eq!(earlier.len(), 1);
+    let earlier = earlier[0].clone();
+    assert!(earlier.credit_points_delta > 0.0);
+
+    // The cut-over arrives: it now lies after the first award.
+    let settle_from = earlier.created_at + chrono::Duration::milliseconds(1);
+    while Utc::now() <= settle_from {
+        std::thread::yield_now();
+    }
+    Arc::make_mut(&mut state).novelty_utility_settle_from = Some(settle_from);
+    let Json(paid) = gate_evaluate_worker_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceGateEvaluateWorkerRequest { submission_id }),
+    )
+    .await
+    .expect("post-cut-over evaluation succeeds");
+    assert!(paid.credit_emitted, "a pre-cut-over award does not block");
+    assert!(paid.credit_withheld_reason.is_none());
+
+    assert!(
+        !trace_credit_event_counts_toward_settlement(&earlier, Some(settle_from)),
+        "the pre-cut-over award never settles"
+    );
+    let paid_awards = paid_scoring_awards_for_test(temp.path(), "tenant-a", settle_from);
+    assert_eq!(paid_awards.len(), 1, "exactly one paid award");
+    assert_ne!(paid_awards[0].event_id, earlier.event_id);
+    assert!(paid_awards[0].created_at >= settle_from);
+    assert_eq!(scoring_awards_for_test(temp.path(), "tenant-a").len(), 2);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Evaluations of one submission racing each other, under different gate
+/// versions, write one paid award between them, and none fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn novelty_credit_emission_concurrent_evaluations_write_one_paid_award() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (mut state, submission_id) = novelty_credit_test_fixture(
+        backend.clone(),
+        temp.path(),
+        artifact_temp.path(),
+        "tenant-a",
+        vec!["model_training".to_string()],
+    )
+    .await;
+    let settle_from = Utc::now() - chrono::Duration::hours(1);
+    {
+        let state = Arc::make_mut(&mut state);
+        state.novelty_utility_credit_points_delta = 1.0;
+        state.novelty_utility_settle_from = Some(settle_from);
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let mut contender = state.clone();
+        Arc::make_mut(&mut contender).gate_service = Arc::new(InMemoryGateService::new(
+            "novelty_credit_test_race",
+            format!("sha256:novelty_credit_test_race_{index}"),
+        ));
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            gate_evaluate_worker_handler(
+                State(contender),
+                auth_headers("vector-worker-token-a"),
+                Json(TraceGateEvaluateWorkerRequest { submission_id }),
+            )
+            .await
+            .map(|Json(response)| response.credit_emitted)
+            .map_err(|(status, _)| status)
+        }));
+    }
+    let mut emitted = 0;
+    for task in tasks {
+        if task
+            .await
+            .expect("task joins")
+            .expect("every evaluation succeeds")
+        {
+            emitted += 1;
+        }
+    }
+    assert_eq!(emitted, 1, "exactly one evaluation writes the award");
+    let awards = scoring_awards_for_test(temp.path(), "tenant-a");
+    assert_eq!(awards.len(), 1, "one ledger line between them");
+    assert_eq!(
+        paid_scoring_awards_for_test(temp.path(), "tenant-a", settle_from).len(),
+        1
+    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -99000,6 +99887,7 @@ fn withdrawal_credit_retained_is_false_when_eligible_credit_is_unsettled() {
         submission_id,
         &[pending],
         &BTreeSet::new(),
+        None,
     ));
 }
 
@@ -99017,6 +99905,7 @@ fn withdrawal_credit_retained_is_true_when_eligible_credit_has_settled() {
         submission_id,
         &[settled],
         &finalized,
+        None,
     ));
 }
 
@@ -99058,6 +99947,7 @@ fn withdrawal_credit_retained_ignores_events_settlement_would_never_batch() {
         submission_id,
         &events,
         &BTreeSet::new(),
+        None,
     ));
 }
 
@@ -99408,7 +100298,7 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
 
 /// Zaki review 1, minor item M-b: a Trace Credit leg that will never be paid
 /// reports no pending points, as a forfeited or failed one does: a
-/// `NoveltyUtility` leg `main` never settles (`NotSettlementEligible`) and
+/// compatibility `NoveltyUtility` leg nothing settles (`NotSettlementEligible`) and
 /// one `main`'s credit checks withheld (`Withheld`).
 #[test]
 fn a_withheld_or_never_settled_leg_reports_no_pending_points() {

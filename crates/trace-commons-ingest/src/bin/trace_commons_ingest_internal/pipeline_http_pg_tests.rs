@@ -8703,8 +8703,9 @@ fn credit_presentation(
     })
 }
 
-/// Brief section 3C acceptance: receipt, status, withdrawal, and credit and
-/// dedup behaviour match `main` under equivalent configuration. Tenant L
+/// Brief section 3C acceptance: under equivalent configuration, receipt,
+/// status, withdrawal, and credit and dedup behaviour match `main` except
+/// where a difference is pinned, per side, with its ruling. Tenant L
 /// takes `main`'s path; tenant P is routed to a pipeline whose compatibility
 /// bundle pins `novelty_utility_microcredits` equal to L's
 /// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` in microcredits. Both
@@ -8719,10 +8720,12 @@ fn credit_presentation(
 /// (`attempt_emit_novelty_utility_credit`). P's comes from the live worker.
 ///
 /// Differences by design are pinned per side with their ruling (T15-2,
-/// T15-3); everything else must be equal. The status document is also read
+/// T15-3, and the owner's 2026-10-23 decision that `main`'s gate scoring
+/// award settles while the pipeline's compatibility leg still does not);
+/// everything else must be equal. The status document is also read
 /// with contributor reads from files (Ruling T15-7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
+async fn legacy_and_pipeline_tenants_match_except_pinned_differences() {
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
@@ -8790,6 +8793,10 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
         "sha256:parity_gate_v1",
     ));
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
+    // A deployment that pays the scoring award has a cut-over
+    // (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`; a delta above 0 refuses
+    // to start without one). Before this test's awards, so they are owed.
+    state_mut.novelty_utility_settle_from = Some(Utc::now() - chrono::Duration::hours(1));
     state_mut.pipeline_service = Some(service.clone());
     state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
@@ -9182,8 +9189,25 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
             serde_json::json!(legacy_code.as_u16()),
             serde_json::json!(pipeline_code.as_u16()),
         );
+        // Owner decision 2026-10-23: `main`'s gate scoring award
+        // (`NoveltyUtility`) is settlement-eligible, so with model training
+        // allowed `main` holds an unsettled award that the withdrawal
+        // forfeits. The pipeline's compatibility leg still never settles
+        // (Ruling S10, unchanged), so it has nothing to forfeit. Without
+        // model training no award is written on either side.
+        parity.pin(
+            &format!("{case}: withdrawal credit_retained"),
+            "scoring award settles on main only",
+            (
+                legacy_withdrawal["credit_retained"].clone(),
+                serde_json::json!(!model_training),
+            ),
+            (
+                pipeline_withdrawal["credit_retained"].clone(),
+                serde_json::json!(true),
+            ),
+        );
         for field in [
-            "credit_retained",
             "prior_status",
             "distribution_reach",
             "already_distributed",

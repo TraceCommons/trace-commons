@@ -490,6 +490,10 @@ enum DrainParams {
     Tenant,
     TenantAndGateCeiling,
     TenantAndHeldRetentionPolicies,
+    /// The tenant and the scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`, `NULL` when unset) as
+    /// `$2`.
+    TenantAndNoveltySettleFrom,
 }
 
 /// Where a count's number goes in the report, and in which mode of the gate
@@ -713,10 +717,19 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
         counted: DrainCounted::Blocking,
     },
     // `run_credit_settlement_unlocked` (trace-commons-ingest.rs) settles the
-    // events of the four types `trace_credit_event_type_is_settlement_eligible`
-    // names (`NoveltyUtility` and the immediate events never settle) with a
-    // positive delta, on an accepted submission, that no finalized batch
-    // names in `source_credit_event_ids`. The settled ids are unnested once
+    // events of the five types `trace_credit_event_type_is_settlement_eligible`
+    // names (the immediate events never settle) with a positive delta, on an
+    // accepted submission, that no finalized batch names in
+    // `source_credit_event_ids`. A `NoveltyUtility` event counts only with the
+    // legacy gate's `external_ref` prefix `novelty_utility:`
+    // (`trace_credit_event_counts_toward_settlement`): a pipeline run's
+    // `NoveltyUtility` leg is the pipeline's, which never batches it. It also
+    // counts only at or after the cut-over `$2`
+    // (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`), and never with none. The
+    // ledger row's `occurred_at` is the mirror's insert time, at or after
+    // the event's own `created_at` that the worker compares, so an award
+    // written just before the cut-over can be counted here and not settled:
+    // more, never less. The settled ids are unnested once
     // and anti-joined, not searched for each event. The worker also skips an
     // event of an account with an active credit hold, a ranking event its
     // calibration gate excludes, and what the per-account cap holds back;
@@ -734,8 +747,12 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
                WHERE l.tenant_id = $1
                  AND l.event_type IN (
                      'benchmark_conversion', 'regression_catch',
-                     'training_utility', 'ranking_utility'
+                     'training_utility', 'ranking_utility', 'novelty_utility'
                  )
+                 AND (l.event_type <> 'novelty_utility'
+                      OR (l.external_ref LIKE 'novelty\\_utility:%'
+                          AND $2::timestamptz IS NOT NULL
+                          AND l.occurred_at >= $2::timestamptz))
                  AND l.points_delta::numeric > 0
                  AND s.status = 'accepted'
                  AND NOT EXISTS (
@@ -745,7 +762,7 @@ const LEGACY_DRAIN_COUNTS: [LegacyDrainCount; 11] = [
                      SELECT 1 FROM pipeline_runs r
                       WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
                  )",
-        params: DrainParams::Tenant,
+        params: DrainParams::TenantAndNoveltySettleFrom,
         counted: DrainCounted::Blocking,
     },
     // `list_due_trace_revocation_propagation_items` (db/trace_corpus_pg.rs)
@@ -1898,8 +1915,9 @@ impl PipelineActivationStore {
     /// - `vector_index_pending`: the current precheck records of accepted
     ///   submissions that have no active vector entry
     ///   (`index_vector_metadata_from_db`).
-    /// - `delayed_credit_unsettled`: positive credit events of the four
-    ///   settlement-eligible types on accepted submissions that no finalized
+    /// - `delayed_credit_unsettled`: positive credit events of the five
+    ///   settlement-eligible types (a `NoveltyUtility` event only as the
+    ///   legacy gate writes it) on accepted submissions that no finalized
     ///   settlement batch names (`run_credit_settlement`).
     /// - `revocation_propagation_pending`: revocation propagation items
     ///   `pending`, `in_progress`, or `failed`
@@ -2033,7 +2051,11 @@ impl PipelineActivationStore {
     /// policies a legal hold keeps (`legal_hold_retention_policy_ids`), as the
     /// withdrawal worker receives them: a withdrawn submission's token
     /// attachment under one of them is not owed deletion, so it is not
-    /// counted. An empty list holds nothing.
+    /// counted. An empty list holds nothing. `novelty_utility_settle_from` is
+    /// the scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`) as the settlement worker
+    /// holds it: a `NoveltyUtility` award is owed only at or after it, and
+    /// none is owed with `None`.
     ///
     /// The report runs as the ingest runtime role in one tenant transaction:
     /// a read-only, single-snapshot transaction (`REPEATABLE READ`), so all
@@ -2054,6 +2076,7 @@ impl PipelineActivationStore {
         tenant_id: &str,
         gate_driver_max_attempts: Option<i32>,
         held_retention_policy_ids: &[String],
+        novelty_utility_settle_from: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<LegacyDrainReport, DatabaseError> {
         let gate_driver_enabled = gate_driver_max_attempts.is_some();
         let mut client = self.backend.trace_pool().get().await?;
@@ -2089,6 +2112,9 @@ impl PipelineActivationStore {
                     }
                     (DrainParams::TenantAndHeldRetentionPolicies, _) => {
                         &[&tenant_id, &held_retention_policy_ids]
+                    }
+                    (DrainParams::TenantAndNoveltySettleFrom, _) => {
+                        &[&tenant_id, &novelty_utility_settle_from]
                     }
                 };
                 let counted: i64 = tx
