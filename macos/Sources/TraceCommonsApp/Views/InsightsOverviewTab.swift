@@ -524,7 +524,9 @@ struct InsightsCounterSessionsView: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(text("analytics_drill_title")).insightsTitle()
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                VStack(spacing: 0) {
+                // A week can contain thousands of sessions. Keep selectable
+                // text hosts off the responder tree until their rows are visible.
+                LazyVStack(spacing: 0) {
                     ForEach(sessions.rows) { row in
                         InsightsDrillRow(
                             title: InsightsOverviewWords.harness(row.session.source, copy: copy),
@@ -595,7 +597,9 @@ struct InsightsCardInputsView: View {
                         }
                     }
                 }
-                VStack(spacing: 0) {
+                // Saved-session breakdowns share the same viewport-bound
+                // rendering as watched sessions, while retaining text selection.
+                LazyVStack(spacing: 0) {
                     ForEach(inputs.sessions) { session in
                         InsightsDrillRow(
                             title: InsightsOverviewWords.harness(session.source, copy: copy),
