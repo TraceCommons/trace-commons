@@ -86,6 +86,19 @@ set +x
 #                       TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM, and renders
 #                       TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true,
 #                       as the ingest refuses to boot without both.
+#   TC_SCORER_PRODUCTION_HOST, TC_SCORER_MODEL
+#                       optional, both or neither: score against a NEAR AI
+#                       production direct-completions host (staging design
+#                       3.9, owner exception 2026-10-24). The host is
+#                       https://<model>.completions.near.ai/v1 exactly, the
+#                       model its id (Qwen/Qwen3.8-27B). Written as
+#                       TRACE_COMMONS_NEAR_AI_BASE_URL and _MODEL, with
+#                       TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST=true and
+#                       TRACE_COMMONS_NEAR_AI_SCORER_API_KEY from the secret
+#                       tc-staging-scorer-production-nearai-key (a production
+#                       NEAR AI API key; its account pays for scoring). Every
+#                       other NEAR AI setting stays staging. Unset, nothing is
+#                       rendered and the secret is not read.
 #   TC_RENDER_OUT_DIR   default /etc/tracecommons.
 #   TC_SITE_ROOT        default /var/lib/tracecommons-site.
 #   TC_DEPLOY_DIR       default ~/deploy of the user who ran sudo.
@@ -303,6 +316,32 @@ case "${TC_SCORING_DRIVER:-}" in
     ;;
   *) refuse "TC_SCORING_DRIVER must be 1 or unset" ;;
 esac
+# The scorer on a NEAR AI production direct-completions host (staging design
+# 3.9, owner exception 2026-10-24). NEAR AI staging serves no endpoint that
+# scores with echo and logprobs, so with both TC_SCORER_PRODUCTION_HOST and
+# TC_SCORER_MODEL set the scorer calls the production host, with the
+# production key from tc-staging-scorer-production-nearai-key and only that
+# key. Every other NEAR AI setting stays staging, and the ingest checks so at
+# boot. Unset, nothing is rendered and the secret is not read.
+scorer_host="${TC_SCORER_PRODUCTION_HOST:-}"
+scorer_model="${TC_SCORER_MODEL:-}"
+if [ -n "$scorer_host" ] || [ -n "$scorer_model" ]; then
+  [ -n "$scorer_host" ] || refuse "TC_SCORER_PRODUCTION_HOST is not set (TC_SCORER_MODEL is)"
+  [ -n "$scorer_model" ] || refuse "TC_SCORER_MODEL is not set (TC_SCORER_PRODUCTION_HOST is)"
+  # The shape the ingest admits: https, one DNS label, then
+  # .completions.near.ai, then /v1 and nothing else.
+  [[ "$scorer_host" =~ ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.completions\.near\.ai/v1$ ]] \
+    || refuse "TC_SCORER_PRODUCTION_HOST is not https://<model>.completions.near.ai/v1"
+  [[ "$scorer_model" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || refuse "TC_SCORER_MODEL is not a model id (letters, digits and ._/-)"
+  scorer_key="$(secret tc-staging-scorer-production-nearai-key)"
+  shaped tc-staging-scorer-production-nearai-key "$scorer_key" \
+    '^[A-Za-z0-9._~+/=:-]+$' "one token of letters, digits and ._~+/=:-"
+  extra+="TRACE_COMMONS_NEAR_AI_BASE_URL=$scorer_host"$'\n'
+  extra+="TRACE_COMMONS_NEAR_AI_MODEL=$scorer_model"$'\n'
+  extra+="TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST=true"$'\n'
+  extra+="TRACE_COMMONS_NEAR_AI_SCORER_API_KEY=$scorer_key"$'\n'
+fi
 # The gate's scoring award. The pilot template sets the delta to 0 and staging
 # inherits it; a delta above 0 replaces that line, and then, as the ingest
 # refuses to boot otherwise, the production-gate requirement is rendered and a

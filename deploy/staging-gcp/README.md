@@ -81,6 +81,7 @@ nothing else.
 | `tc-staging-db-app-password` | yes | yes | the `app` role's password in `DATABASE_URL` (ingest and issuer) | already set on the role. 16 or more letters and digits; any other character refuses (see below) |
 | `tc-staging-db-login-resolver-password` | yes | yes | `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` | set on `tc_login_resolver_login` at bring-up step 6. 16 or more letters and digits |
 | `tc-staging-db-gate-driver-password` | yes | yes, read only when `TC_SCORING_DRIVER=1` | the password in `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | set on `tc_gate_driver_login` (see [Scoring driver and scoring award](#scoring-driver-and-scoring-award)). 16 or more letters and digits |
+| `tc-staging-scorer-production-nearai-key` | **no** | yes, read only when `TC_SCORER_PRODUCTION_HOST` is set | `TRACE_COMMONS_NEAR_AI_SCORER_API_KEY` | a NEAR AI **production** API key that can call the scorer's direct-completions host. Its account pays for staging's scoring (see [Scoring on a production completions host](#scoring-on-a-production-completions-host)). One token of letters, digits and `._~+/=:-` |
 | `tc-staging-nearai-reseller-key` | yes | yes, read only when payout is on | `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` | the reseller org's credential on NEAR AI staging |
 | `tc-staging-payout-control-token` | **no** | yes, read only when payout is `live` | `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | `openssl rand -hex 32` (32 or more characters of letters, digits and `._~+/=-`, one line). The operator's token for payout halt, resume and holds; a `live` rail refuses to render, and the ingest to boot, without it |
 | `tc-staging-gate-master-key` | **no** | yes | `TRACE_COMMONS_GATE_SERVICE_MASTER_KEY` | `openssl rand -hex 32` (exactly 64 hex characters) |
@@ -438,6 +439,54 @@ Then rerun step 4 with, for example, `TC_SCORING_DRIVER=1`,
 issues its award as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`; with
 `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` set and that
 issuer unset or unlisted, every award is withheld as `central_issuer_denied`.
+
+## Scoring on a production completions host
+
+NEAR AI staging serves no endpoint the scorer can use: its gateway refuses
+`echo` on `/v1/completions`, and it has no per-model direct-completions
+host. By the owner's exception of 2026-10-24 (design 3.9), staging may score
+against a NEAR AI **production** direct-completions host with a production
+key. A render without these settings is unchanged.
+
+| Render variable | Writes | Notes |
+|---|---|---|
+| `TC_SCORER_PRODUCTION_HOST` | `TRACE_COMMONS_NEAR_AI_BASE_URL`, `TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST=true`, and `TRACE_COMMONS_NEAR_AI_SCORER_API_KEY` from `tc-staging-scorer-production-nearai-key` | Exactly `https://<model>.completions.near.ai/v1`: https, one DNS label, no port, no userinfo, no trailing slash. Anything else refuses. The secret must exist, or the render refuses. |
+| `TC_SCORER_MODEL` | `TRACE_COMMONS_NEAR_AI_MODEL` | The host's model id, such as `Qwen/Qwen3.8-27B`. Required with the host, and the host with it. |
+
+For example, with the owner's secret in place, rerun step 4 with
+`TC_SCORER_PRODUCTION_HOST=https://qwen3-8-27b.completions.near.ai/v1` and
+`TC_SCORER_MODEL=Qwen/Qwen3.8-27B`, and restart the ingest. It logs one line
+naming the control `near_ai_scorer_production_host` at boot, and no host or
+key.
+
+What this changes, and what it does not:
+
+- **Cost.** Every scoring request is billed to the production NEAR AI
+  account that owns the key in `tc-staging-scorer-production-nearai-key`.
+  So is every operator-run attestation drill, which sends one paid chat
+  completion to the scorer's host.
+- **Data.** Staging traces are sent to the production TEE-hosted model on
+  that host for scoring. They leave the staging channel for that one call.
+- **Keys.** The production key is sent only to the scorer's host: scoring,
+  and the attestation drill's report, completion and receipt there. The
+  staging key (`tc-staging-nearai-inference-key`) stays the key for every
+  staging host: the attestation registry, the privacy filter, login and
+  payout. The ingest refuses to boot with the exception and no scorer key.
+- **Hosts.** Only the scorer's base is exempt. The ingest still refuses to
+  boot when any other NEAR AI host it calls is not the staging host
+  (`near_ai_staging_host_coherence`), and refuses the exception on a host
+  that is not a production direct-completions host. A production build
+  refuses `TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST` at any value.
+- **Attestation.** Scoring itself checks no attestation, on staging or in
+  production. The scorer's host is attested by the operator-run drill
+  (`POST /v1/admin/near-attestation-drill`), which, as in production, asks
+  that host for its own `/attestation/report`, verifies the TDX quote with
+  Intel collateral, checks the nonce, and compares the measurements with
+  `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS`. That one pin set is also
+  what the key-drift probe checks the staging gateway's registry against,
+  and what the ingest publishes to the staging app. If the production host's
+  measurements differ from staging's, one of the two drills reports a
+  mismatch; neither check is relaxed to hide it.
 
 ## Not here yet
 

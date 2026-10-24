@@ -248,7 +248,13 @@ pub struct HttpAttestationClient {
     /// the `model_attestations` array the key readers need.
     attestation_base_url: String,
     model: String,
+    /// The key for every call to `base_url`.
     api_key: SecretString,
+    /// The key for the registry fetch from `attestation_base_url`, when it is
+    /// not `api_key`. A staging ingest scoring against a production
+    /// completions host holds two keys, one per channel, and must send each
+    /// only to its own host (staging design 3.9).
+    registry_api_key: Option<SecretString>,
     #[cfg_attr(
         not(feature = "near-attestation-collateral"),
         expect(
@@ -329,8 +335,16 @@ impl HttpAttestationClient {
                 .to_string(),
             model: model.into(),
             api_key,
+            registry_api_key: None,
             pccs_url: pccs_url.into(),
         })
+    }
+
+    /// Send `key`, not the endpoint key, on the registry fetch from the
+    /// attestation gateway. Every call to `base_url` keeps the endpoint key.
+    pub fn with_registry_api_key(mut self, key: SecretString) -> Self {
+        self.registry_api_key = Some(key);
+        self
     }
 }
 
@@ -569,10 +583,13 @@ impl AttestedKeyReportClient for HttpAttestationClient {
         // `attestation_base_url`, never `base_url`: the registry is a gateway
         // service and the completions host does not publish it. See #802.
         let url = ed25519_report_url(&self.attestation_base_url, &self.model, nonce)?;
+        // The gateway's own key when one is set: the endpoint key belongs to
+        // `base_url`, which may be in the other channel.
+        let key = self.registry_api_key.as_ref().unwrap_or(&self.api_key);
         let response = self
             .http
             .get(url)
-            .bearer_auth(self.api_key.expose_secret())
+            .bearer_auth(key.expose_secret())
             .send()
             .await
             .map_err(|e| AttestationClientError::Transport {
@@ -821,5 +838,116 @@ mod tests {
             .expect("the gateway answered");
         assert_eq!(body, "{}");
         // Both expectations are verified on drop.
+    }
+
+    /// With a registry key, the registry fetch carries it and only it, and
+    /// every call to the completions host carries the endpoint key: a
+    /// staging ingest scoring against a production completions host sends
+    /// its production key only there, and its staging key only to the
+    /// staging gateway (staging design 3.9). `expect(1)` on each pairing and
+    /// the wrong pairings matched with `expect(0)` are verified on drop.
+    #[tokio::test]
+    async fn each_host_receives_only_its_own_key() {
+        use wiremock::matchers::{header, method, path, path_regex, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/attestation/report"))
+            .and(query_param("signing_algo", "ed25519"))
+            .and(header("authorization", "Bearer sk-gateway"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&gateway)
+            .await;
+        Mock::given(header("authorization", "Bearer sk-endpoint"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&gateway)
+            .await;
+
+        let completions = MockServer::start().await;
+        Mock::given(header("authorization", "Bearer sk-gateway"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .with_priority(1)
+            .mount(&completions)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer sk-endpoint"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"chatcmpl-1"}"#))
+            .expect(1)
+            .mount(&completions)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/v1/signature/"))
+            .and(header("authorization", "Bearer sk-endpoint"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"text":"t","signature":"s","signing_address":"a"}"#),
+            )
+            .expect(1)
+            .mount(&completions)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/attestation/report"))
+            .and(query_param("signing_algo", "ecdsa"))
+            .and(header("authorization", "Bearer sk-endpoint"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not a report"))
+            .expect(1)
+            .mount(&completions)
+            .await;
+
+        let client = HttpAttestationClient::new(
+            format!("{}/v1", completions.uri()),
+            "Qwen/Qwen3.8-27B",
+            SecretString::from("sk-endpoint".to_string()),
+            INTEL_PCS_URL,
+            Duration::from_secs(5),
+            Some(format!("{}/v1", gateway.uri())),
+        )
+        .expect("the client builds")
+        .with_registry_api_key(SecretString::from("sk-gateway".to_string()));
+
+        client
+            .fetch_ed25519_report_json(&"cd".repeat(32))
+            .await
+            .expect("the gateway answered");
+        // The body is not a report; only the key it was sent with matters.
+        let _ = client.fetch_report(&"ab".repeat(32)).await;
+        client
+            .complete(br#"{"model":"Qwen/Qwen3.8-27B"}"#)
+            .await
+            .expect("the completion answered");
+        client
+            .fetch_receipt("chatcmpl-1")
+            .await
+            .expect("the receipt answered");
+    }
+
+    /// Without a registry key the registry fetch carries the one key, as it
+    /// always has.
+    #[tokio::test]
+    async fn without_a_registry_key_the_registry_fetch_carries_the_endpoint_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/attestation/report"))
+            .and(header("authorization", "Bearer sk-not-a-real-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&gateway)
+            .await;
+        let client = test_client(
+            "https://qwen3-8-27b.completions.near.ai/v1",
+            Some(format!("{}/v1", gateway.uri())),
+        );
+        client
+            .fetch_ed25519_report_json(&"cd".repeat(32))
+            .await
+            .expect("the gateway answered");
     }
 }

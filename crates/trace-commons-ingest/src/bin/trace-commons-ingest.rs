@@ -1436,7 +1436,17 @@ pub async fn run_ingest(
     let _ = tracing_subscriber::fmt::try_init();
     // Before any database or network is opened: a NEAR AI host from the
     // other channel stops the boot (staging design, section 3.9).
-    near_ai_host_coherence_from_lookup(&|name: &str| std::env::var(name).ok())?;
+    let scorer_host = near_ai_host_coherence_from_lookup(&|name: &str| std::env::var(name).ok())?;
+    if scorer_host == NearAiScorerHostChannel::ProductionCompletionsException {
+        // A label, never the host or the key.
+        tracing::info!(
+            control = NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL,
+            setting = TRACE_COMMONS_NEAR_AI_BASE_URL,
+            "NEAR AI scorer production-host exception active: the scorer calls a NEAR AI \
+             production direct-completions host with its own key; every other NEAR AI host \
+             is staging"
+        );
+    }
     tracing::info!(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
@@ -84360,8 +84370,8 @@ fn trace_revocation_propagation_summary_from_audit_event(
 fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAttestationClient>>> {
     let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
     let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
-    let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
-    let (Some(base_url), Some(model), Some(api_key)) = (base_url, model, api_key) else {
+    let keys = near_attestation_keys_from_lookup(&|name: &str| std::env::var(name).ok());
+    let (Some(base_url), Some(model), Some(keys)) = (base_url, model, keys) else {
         return Ok(None);
     };
     let pccs_url =
@@ -84376,16 +84386,59 @@ fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAtt
         timeout_seconds > 0,
         "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
     );
-    let client = HttpAttestationClient::new(
+    let mut client = HttpAttestationClient::new(
         base_url,
         model,
-        SecretString::from(api_key),
+        SecretString::from(keys.endpoint),
         pccs_url,
         StdDuration::from_secs(timeout_seconds),
         trimmed_env(TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL),
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
+    if let Some(registry) = keys.registry {
+        client = client.with_registry_api_key(SecretString::from(registry));
+    }
     Ok(Some(Arc::new(client)))
+}
+
+/// The keys the NEAR AI attestation client sends.
+#[derive(Debug)]
+struct NearAttestationKeys {
+    /// For every call to the scorer's host, `TRACE_COMMONS_NEAR_AI_BASE_URL`:
+    /// the ECDSA report, the completion and its receipt.
+    endpoint: String,
+    /// For the registry fetch from the attestation gateway, when it is not
+    /// `endpoint`.
+    registry: Option<String>,
+}
+
+/// The attestation client's keys, or `None` when the shared key is not set.
+///
+/// With the scorer's own key ([`TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`]) the
+/// drill reaches the scorer's host with it, the same key the scorer scores
+/// with, and the gateway with the shared key. A staging ingest scoring
+/// against a production completions host (staging design 3.9) so sends its
+/// production key only to that host and its staging key only to the staging
+/// gateway. Without one, both get the shared key, as before.
+fn near_attestation_keys_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<NearAttestationKeys> {
+    let get = |name: &str| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let shared = get(TRACE_COMMONS_NEAR_AI_API_KEY)?;
+    Some(match get(TRACE_COMMONS_NEAR_AI_SCORER_API_KEY) {
+        Some(scorer) => NearAttestationKeys {
+            endpoint: scorer,
+            registry: Some(shared),
+        },
+        None => NearAttestationKeys {
+            endpoint: shared,
+            registry: None,
+        },
+    })
 }
 
 /// The boot refusal's control name (staging design, section 3.9).
@@ -84436,15 +84489,99 @@ fn near_ai_host_settings_from_lookup(
     settings
 }
 
+/// The opt-in that lets a `near-ai-staging` ingest score against a NEAR AI
+/// production direct-completions host (staging design 3.9, owner exception
+/// 2026-10-24). `true` turns it on; a staging build reads `false` or unset
+/// as off. A default build refuses the setting at any value.
+const TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST: &str =
+    "TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST";
+
+/// The boot refusal's control name for the scorer production-host exception.
+const NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL: &str = "near_ai_scorer_production_host";
+
+/// Where the boot guard found the scorer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NearAiScorerHostChannel {
+    /// Every NEAR AI host, the scorer's included, is this build's channel.
+    ThisChannel,
+    /// A staging build whose scorer is a NEAR AI production
+    /// direct-completions host, by the operator's opt-in. Every other NEAR
+    /// AI host was checked as staging.
+    ProductionCompletionsException,
+}
+
+/// Whether the scorer production-host exception is asked for, refusing a
+/// value that is neither `true` nor `false` and any value on a default
+/// build. The refusal names the setting, never the value.
+fn near_ai_scorer_production_host_requested(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<bool> {
+    let Some(value) = lookup(TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        trace_commons_server::near_ai_api::near_ai_staging(),
+        "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+         {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is honoured only on a near-ai-staging \
+         build; remove it"
+    );
+    match value.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => anyhow::bail!(
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} must be true or false"
+        ),
+    }
+}
+
 /// Refuse to boot when a NEAR AI host this ingest will call or publish
 /// belongs to the other channel: a `near-ai-staging` build must name only
 /// the NEAR AI staging host, and a default build must never name it
 /// (staging design, section 3.9). The refusal names the control and the
 /// setting, never the value.
+///
+/// One exception, on a staging build only and only when
+/// [`TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST`] is `true`: the scorer's
+/// base may be a NEAR AI production direct-completions host
+/// (`https://<model>.completions.near.ai`), because NEAR AI staging serves
+/// no endpoint that scores with `echo` and logprobs. The scorer must then
+/// carry its own key, [`TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`], so the staging
+/// key never reaches the production host and the production key reaches
+/// nothing else. Every other NEAR AI setting is checked as without it.
 fn near_ai_host_coherence_from_lookup(
     lookup: &dyn Fn(&str) -> Option<String>,
-) -> anyhow::Result<()> {
-    let settings = near_ai_host_settings_from_lookup(lookup);
+) -> anyhow::Result<NearAiScorerHostChannel> {
+    let exception = near_ai_scorer_production_host_requested(lookup)?;
+    let mut settings = near_ai_host_settings_from_lookup(lookup);
+    if exception {
+        let scorer = settings
+            .iter()
+            .position(|(setting, _)| *setting == TRACE_COMMONS_NEAR_AI_BASE_URL)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+                     {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is true but \
+                     {TRACE_COMMONS_NEAR_AI_BASE_URL} is not set"
+                )
+            })?;
+        anyhow::ensure!(
+            trace_commons_server::near_ai_api::is_production_completions_host(&settings[scorer].1),
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_BASE_URL} is not a NEAR AI production direct-completions \
+             host (https, one model label, no port or userinfo)"
+        );
+        anyhow::ensure!(
+            lookup(TRACE_COMMONS_NEAR_AI_SCORER_API_KEY).is_some_and(|key| !key.trim().is_empty()),
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is true but \
+             {TRACE_COMMONS_NEAR_AI_SCORER_API_KEY} is not set"
+        );
+        settings.remove(scorer);
+    }
     let pairs = settings
         .iter()
         .map(|(setting, url)| (*setting, url.as_str()))
@@ -84455,6 +84592,11 @@ fn near_ai_host_coherence_from_lookup(
              NEAR AI host outside this build's channel (near_ai_staging={})",
             trace_commons_server::near_ai_api::near_ai_staging()
         )
+    })?;
+    Ok(if exception {
+        NearAiScorerHostChannel::ProductionCompletionsException
+    } else {
+        NearAiScorerHostChannel::ThisChannel
     })
 }
 
