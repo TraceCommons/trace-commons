@@ -7684,8 +7684,24 @@ key, tenant identity or secret-store reference.
 | `account_binding` | none | `{binding_state}` |
 | `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
-| `account_session_status` | none | `{state,signed_in,expires_at}` |
+| `account_session_status` | none | `{state,signed_in,expires_at,renewal,renewal_failure,sign_in}` |
 | `account_sign_out` | none | `{signed_out:true}` |
+| `near_ai_account_sign_in` | none | `{signed_in:true,expires_at}` |
+
+`account_session_status` never waits long for an account-session renewal on a
+NEAR AI account: past a two-second wait it answers `renewal:"renewing"` and the
+renewal finishes in the background. `renewal:"failed"` carries the class in
+`renewal_failure` (see the staging tester guide's renewal log table) while the
+10-minute retry wait holds; otherwise both are null. `sign_in` is `"near_ai"`
+for a device enrolled in a `nearai-` tenant, whose Sign in again is
+`near_ai_account_sign_in`, and null otherwise. `near_ai_account_sign_in` runs
+the provisioning ceremony again with the retained NEAR AI login, ignoring the
+retry wait and signing in a NEAR AI account whose session record was removed
+by sign-out; it refuses `near_ai_sign_in_required` when NEAR AI no longer
+accepts that login (the shell then signs in to NEAR AI and calls it again),
+`near_ai_sign_in_not_near_ai_account`, `near_ai_sign_in_not_enrolled`,
+`commons_credential_storage_unavailable`, or
+`near_ai_sign_in_unavailable`.
 
 `label` is optional, at most 64 characters. A no-config create/login may name
 an `ingest_url` only when its canonical origin equals the compiled production

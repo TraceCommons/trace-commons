@@ -442,6 +442,7 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // through the synchronous IPC path would be spawned onto the
         // throwaway runtime that path builds, and would die with it.
         shared.adopt_runtime();
+        shared.adopt_self();
         // The two transports are the same protocol over different plumbing: a
         // unix socket guarded by its 0700 state directory, or a Windows named
         // pipe guarded by its DACL. See `win_pipe` for why the Windows side

@@ -3370,6 +3370,10 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var accountSession: AccountSessionRead = .unread
+    /// The last status read's `sign_in`: `near_ai` when Sign in again is the
+    /// NEAR AI path (`near_ai_account_sign_in`), nil for a passkey account
+    /// or before a read.
+    @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
     @Published private(set) var accountSignInFailure: AccountSignInFailure?
     @Published private(set) var historyRefresh: HistoryRefreshState = .idle
@@ -3380,6 +3384,7 @@ final class AppModel: ObservableObject {
         if accountSession == .unread { accountSession = .checking }
         Task {
             let read = await firstRunCall { try $0.accountSessionStatus() }
+            if case .success(let session) = read { accountSignInPath = session.signIn }
             if case .success(let session) = read, session.signedIn == true {
                 accountSession = .signedIn
             } else {
@@ -3388,10 +3393,76 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Opens a URL in the person's browser. A seam so a test can sign in
+    /// without a browser.
+    var openBrowser: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
+    /// Sign in again on a NEAR AI account: the daemon runs the ceremony
+    /// with the NEAR AI login it holds (`near_ai_account_sign_in`). When
+    /// NEAR AI no longer accepts that login (`near_ai_sign_in_required`),
+    /// this signs in to NEAR AI in the browser first and asks once more.
+    /// The session is then read again, and only that read is trusted.
+    func signInAgain() async {
+        guard !accountSigningIn else { return }
+        accountSigningIn = true
+        accountSignInFailure = nil
+        defer { accountSigningIn = false }
+        var answer = await firstRunCall { try $0.nearAiAccountSignIn() }
+        if case .failure(let failure as DaemonClient.Failure) = answer,
+           failure.message == "near_ai_sign_in_required" {
+            guard await nearAILogin(fresh: true) else {
+                accountSignInFailure = .failed
+                return
+            }
+            answer = await firstRunCall { try $0.nearAiAccountSignIn() }
+        }
+        guard case .success = answer else {
+            accountSignInFailure = .failed
+            return
+        }
+        await rereadAccountSessionAfterSignIn()
+    }
+
+    /// After a sign-in: the session read again, and only that read trusted.
+    private func rereadAccountSessionAfterSignIn() async {
+        switch await firstRunCall({ try $0.accountSessionStatus() }) {
+        case .success(let session) where session.signedIn == true:
+            accountSession = .signedIn
+            accountSignInPath = session.signIn
+            // The refusals sign-in answers are forgotten: those rows offer
+            // Withdraw again, which asks first.
+            withdrawals = withdrawals.filter { $0.value != .noAccountSession }
+            accountSessionGeneration &+= 1
+        case .success:
+            accountSession = .signedOut
+            accountSignInFailure = .inactive
+        case .failure, nil:
+            accountSession = .signedOut
+            accountSignInFailure = .unverified
+        }
+    }
+
+    /// Moves each time a sign-in lands, so a section that read "Sign in
+    /// again" (the payout section, Home's Credit tile) reads again.
+    @Published private(set) var accountSessionGeneration = 0
+
+    /// Sign in again by whichever path this account has: the NEAR AI one
+    /// for a NEAR AI account, the passkey one otherwise. The path comes
+    /// from a status read, taken first when none has been.
+    func signInToAccount() async {
+        if accountSignInPath == nil,
+           case .success(let session) = await firstRunCall({ try $0.accountSessionStatus() }) {
+            accountSignInPath = session.signIn
+        }
+        await signInToWithdraw()
+    }
+
     /// Signs in through the native identity path (`account_sign_in`, which
     /// opens the browser), then reads the session again and trusts only
     /// that read, as Ron's History does.
     func signInToWithdraw() async {
+        // A NEAR AI account has no passkey to sign in with.
+        if accountSignInPath == "near_ai" { return await signInAgain() }
         guard !accountSigningIn else { return }
         accountSigningIn = true
         accountSignInFailure = nil
@@ -3400,19 +3471,7 @@ final class AppModel: ObservableObject {
             accountSignInFailure = .failed
             return
         }
-        switch await firstRunCall({ try $0.accountSessionStatus() }) {
-        case .success(let session) where session.signedIn == true:
-            accountSession = .signedIn
-            // The refusals sign-in answers are forgotten: those rows offer
-            // Withdraw again, which asks first.
-            withdrawals = withdrawals.filter { $0.value != .noAccountSession }
-        case .success:
-            accountSession = .signedOut
-            accountSignInFailure = .inactive
-        case .failure, nil:
-            accountSession = .signedOut
-            accountSignInFailure = .unverified
-        }
+        await rereadAccountSessionAfterSignIn()
     }
 
     /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon's poller to check
@@ -3928,10 +3987,16 @@ extension AppModel: FirstRunDaemon {
     /// until it ends (`NearAILoginPoll`). Called directly rather than
     /// through `startNearAiCredential`, whose failure writes the Settings
     /// notice; the first run says its own (`folders.sign_in_failed`).
-    func nearAILogin() async -> Bool {
+    func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }
+
+    /// `fresh`: sign in even when a NEAR AI login is stored, because NEAR AI
+    /// refused it (Sign in again's `near_ai_sign_in_required`).
+    func nearAILogin(fresh: Bool) async -> Bool {
         guard let client else { return false }
-        let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
-        if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        if !fresh {
+            let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
+            if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        }
         // A Cancel before the browser opens: no attempt is begun, and none
         // that began meanwhile opens the browser.
         if Task.isCancelled { return false }
@@ -3943,7 +4008,7 @@ extension AppModel: FirstRunDaemon {
         }
         firstRunLoginAttemptID = attempt.attemptID
         defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
-        NSWorkspace.shared.open(url)
+        openBrowser(url)
         let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
         while Date() < deadline, !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))
@@ -3952,7 +4017,7 @@ extension AppModel: FirstRunDaemon {
             if Task.isCancelled { return false }
             guard self.client === client else { return false }
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
-            switch NearAILoginPoll.verdict(status) {
+            switch fresh ? NearAILoginPoll.freshVerdict(status) : NearAILoginPoll.verdict(status) {
             case .signedIn:
                 refreshNearAiCredential()
                 return true
@@ -4132,6 +4197,9 @@ extension AppModel: FirstRunDaemon {
     /// One blocking client call off the main actor. Nil without a daemon.
     private func firstRunCall<T>(_ work: @escaping (DaemonClient) throws -> T) async -> Result<T, Error>? {
         guard let client else { return nil }
-        return await Task.detached(priority: .userInitiated) { Result { try work(client) } }.value
+        // On the daemon-call queue, not the cooperative pool: a call that
+        // waits on the network (a renewal, a ceremony) must not hold one of
+        // the few threads every other task in the app runs on.
+        return await DaemonWork.run { Result { try work(client) } }
     }
 }

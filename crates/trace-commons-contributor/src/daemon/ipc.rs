@@ -409,6 +409,7 @@ pub const METHODS: &[&str] = &[
     "native_wallet_flow",
     "near_account_start",
     "near_ai_account_enroll",
+    "near_ai_account_sign_in",
     "near_account_status",
     "near_account_cancel",
     "near_ai_credential_start",
@@ -1064,6 +1065,12 @@ pub struct DaemonShared {
     /// started a daemon has none, and falls back to the ambient runtime --
     /// which for those callers is the only one there is.
     proxy_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// This daemon's own `Arc`, weakly, recorded by [`Self::adopt_self`]
+    /// beside [`Self::adopt_runtime`]. With the runtime it lets a request
+    /// start work that outlives the request (an account-session renewal a
+    /// status read must not wait for) without the work keeping the daemon
+    /// alive. Unset for a test or one-shot command that started no daemon.
+    this: std::sync::OnceLock<std::sync::Weak<DaemonShared>>,
     /// The NEAR AI measurement pins in force: in a default build the
     /// operator override when `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS`
     /// was set at daemon start, else what ingest publishes; in a staging
@@ -1519,6 +1526,7 @@ impl DaemonShared {
             upload_due_changed: tokio::sync::Notify::new(),
             private_inference_stop_task: Mutex::new(None),
             proxy_runtime: std::sync::OnceLock::new(),
+            this: std::sync::OnceLock::new(),
             near_ai_pins: Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
                 // Tests never reach ingest or the staging pin URL from here;
                 // a test that needs pins installs its own provider.
@@ -1562,6 +1570,27 @@ impl DaemonShared {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let _ = self.proxy_runtime.set(handle);
         }
+    }
+
+    /// Record this daemon's own `Arc` (weakly), so [`Self::spawn_detached`]
+    /// can hand a task one. Called beside [`Self::adopt_runtime`].
+    pub(crate) fn adopt_self(self: &Arc<Self>) {
+        let _ = self.this.set(Arc::downgrade(self));
+    }
+
+    /// Run `work` on the daemon's own runtime, detached from the request
+    /// that asked: the request's throwaway runtime (see `proxy_runtime`)
+    /// may end, and the request may stop waiting, while `work` carries on.
+    /// `None` when this `DaemonShared` has no runtime or `Arc` recorded (a
+    /// test or a one-shot command): the caller then does the work inline.
+    pub(crate) fn spawn_detached<F, Fut>(&self, work: F) -> Option<tokio::task::JoinHandle<()>>
+    where
+        F: FnOnce(Arc<DaemonShared>) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let runtime = self.proxy_runtime.get()?;
+        let this = self.this.get()?.upgrade()?;
+        Some(runtime.spawn(work(this)))
     }
 
     /// Whether a runtime has been claimed for hosted proxies.
@@ -3625,6 +3654,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ),
     ("near_account_start", "near-signup-requires-async"),
     ("near_ai_account_enroll", "near-signup-requires-async"),
+    ("near_ai_account_sign_in", "near-signup-requires-async"),
     ("legacy_invite_migrate", "legacy-migration-requires-async"),
     ("near_account_capabilities", "near-signup-requires-async"),
     (
@@ -6601,6 +6631,15 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
         "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
+        "near_ai_account_sign_in" => {
+            match super::account_session_renewal::sign_in_live(shared).await {
+                Ok(loaded) => Response::ok(
+                    req.id,
+                    serde_json::json!({"signed_in": true, "expires_at": loaded.session.expires_at}),
+                ),
+                Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+            }
+        }
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
@@ -17804,7 +17843,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 69);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 70);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18292,7 +18331,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 91, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 75, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

@@ -106,6 +106,14 @@ final class DaemonClient {
         try call("near_ai_account_enroll", as: NearAiEnrollment.self)
     }
 
+    /// Sign in again on a NEAR AI account (`near_ai_account_sign_in`): the
+    /// daemon runs the provisioning ceremony again with the NEAR AI login it
+    /// holds. Refused with `near_ai_sign_in_required` when NEAR AI no longer
+    /// accepts that login; the caller then signs in to NEAR AI first.
+    func nearAiAccountSignIn() throws -> NativeAccountSession {
+        try call("near_ai_account_sign_in", as: NativeAccountSession.self)
+    }
+
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
     }

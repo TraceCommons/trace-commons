@@ -172,6 +172,9 @@ fn label(error: &anyhow::Error) -> &'static str {
         "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
         "near_ai_enroll_endpoint_refused" => "near_ai_enroll_endpoint_refused",
         "near_ai_enroll_token_unavailable" => "near_ai_enroll_token_unavailable",
+        // Enrollment's shells already say "sign in to NEAR AI again" for
+        // this one; the finer class is the renewal's (`account_session_renewal`).
+        "near_ai_enroll_near_ai_sign_in_required" => "near_ai_enroll_token_unavailable",
         "near_ai_enroll_start_failed" => "near_ai_enroll_start_failed",
         "near_ai_enroll_commons_unreachable" => "near_ai_enroll_commons_unreachable",
         "near_ai_enroll_commons_unsupported" => "near_ai_enroll_commons_unsupported",
@@ -464,9 +467,20 @@ async fn ceremony(
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
+    //
+    // NEAR AI refusing the login itself (a spent, revoked or agent-mismatched
+    // refresh token, or none stored) is told apart from NEAR AI being
+    // unreachable: no retry fixes the first, and the person has to sign in
+    // to NEAR AI again. Before this, both were `token_unavailable`, and a
+    // renewal that stopped here left only a start in the commons's log.
     let access_token = exchange_following_rotation(shared, api, session, login)
         .await
-        .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+        .map_err(|error| match error.to_string().as_str() {
+            "near_ai_credential_session_expired" | "near_ai_credential_session_missing" => {
+                anyhow!("near_ai_enroll_near_ai_sign_in_required")
+            }
+            _ => anyhow!("near_ai_enroll_token_unavailable"),
+        })?;
 
     commons
         .call_json(
@@ -602,7 +616,9 @@ fn random() -> Result<String> {
 }
 
 /// Mint a fresh account session for a device this commons already enrolled
-/// through a NEAR AI login, and store it in place of `expected`'s expired one.
+/// through a NEAR AI login, and store it in place of `expected`'s expired one
+/// -- or, with no `previous` record (Sign in again after a sign-out), as the
+/// device's account session.
 ///
 /// # Why this exists
 ///
@@ -637,15 +653,24 @@ pub(super) async fn renew_account_session(
     commons: &trace_commons_operator_client::Client,
     cfg: &ContributorConfig,
     identity: &DeviceIdentity,
-    previous: serde_json::Value,
+    previous: Option<serde_json::Value>,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<()> {
-    let account_id = previous
-        .get("account_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("near_ai_enroll_invalid"))?;
+    // The stored record's account, which the answer must name. Without a
+    // record, the enrolled tenant is the binding: the commons resolves the
+    // NEAR AI login to its account, and an answer for another tenant is
+    // refused below.
+    let account_id = match &previous {
+        Some(previous) => Some(
+            previous
+                .get("account_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("near_ai_enroll_invalid"))?,
+        ),
+        None => None,
+    };
     if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
@@ -664,12 +689,18 @@ pub(super) async fn renew_account_session(
     };
     let finished = ceremony(shared, api, commons, &session, login.as_ref(), identity).await?;
     validate_finished(&finished, identity)?;
-    if finished.tenant_id != cfg.tenant_id || finished.account_id != account_id {
+    if finished.tenant_id != cfg.tenant_id
+        || account_id
+            .as_ref()
+            .is_some_and(|account_id| finished.account_id != *account_id)
+    {
         bail!("account-enrollment-mismatch")
     }
+    let account_id = account_id.unwrap_or_else(|| finished.account_id.clone());
     let mut payload = match previous {
-        serde_json::Value::Object(map) => serde_json::Value::Object(map),
-        _ => bail!("near_ai_enroll_invalid"),
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        None => serde_json::json!({}),
+        Some(_) => bail!("near_ai_enroll_invalid"),
     };
     payload["access_token"] = serde_json::Value::String(finished.access_token);
     payload["expires_at"] =

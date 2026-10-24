@@ -1524,6 +1524,10 @@ struct HomeAccountTiles: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+        // A sign-in landed: read the Credit tile again.
+        .onChange(of: model.accountSessionGeneration) {
+            Task { await store.load() }
+        }
     }
 }
 

@@ -547,9 +547,12 @@ pub(crate) async fn verified_near_ai_recipient(
 
 /// `payout_rails_status`, against the live NEAR AI service.
 pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
-    let api = CloudApi::live().ok();
-    let via = api.as_ref().map(RenewVia::live);
-    status(shared, req, via.as_ref()).await
+    // A status read: an expired session is renewed in the background and
+    // waited for briefly, never for the whole ceremony
+    // (`account_session_renewal`, "Never waited for by a read").
+    // `status` then reads whatever session that left, renewing nothing.
+    let _ = super::account_session_renewal::account_session_for_read(shared).await;
+    status(shared, req, None).await
 }
 
 /// `payout_rails_status`.

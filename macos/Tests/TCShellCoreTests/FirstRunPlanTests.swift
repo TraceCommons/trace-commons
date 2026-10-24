@@ -576,3 +576,21 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(NearAILoginPoll.verdict(nil), .waiting)
     }
 }
+
+/// Sign in again after NEAR AI refused the kept session: the kept session
+/// says nothing about the new attempt.
+final class NearAILoginFreshVerdictTests: XCTestCase {
+    func test_onlyTheAttemptsOwnWordEndsAFreshSignIn() {
+        func status(_ attempt: String?) -> CredentialStatus {
+            CredentialStatus(state: "present", attemptID: "a", attemptStatus: attempt, sessionState: "present")
+        }
+        XCTAssertEqual(NearAILoginPoll.verdict(status("waiting_for_browser")), .signedIn,
+                       "the ordinary poll trusts the kept session")
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("waiting_for_browser")), .waiting)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status(nil)), .waiting)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(nil), .waiting)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("complete")), .signedIn)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("failed")), .ended)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("cancelled")), .ended)
+    }
+}
