@@ -4062,6 +4062,12 @@ extension AppModel: FirstRunDaemon {
         return outcome
     }
 
+    func setAskEachTime() async -> Bool {
+        guard case .success = await firstRunCall({ try $0.setAskEachTime() }) else { return false }
+        refreshStatus()
+        return true
+    }
+
     func saveConsentScopes(_ scopes: [String]) async -> Bool {
         let outcome = await setConsentScopes(scopes)
         if case .succeeded = outcome { return true }

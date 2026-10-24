@@ -77,6 +77,7 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
         log.append(.enrollNearAI)
         return nearAIEnrolment
     }
+    func setAskEachTime() async -> Bool { record(.setAskEachTime) }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { record(.setConsentScopes(scopes)) }
 
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {
@@ -120,6 +121,7 @@ private func expectedFailure(for call: FirstRunCall) -> FirstRunFailure? {
     case .enroll: return .enrollFailed
     case .signInNearAI, .nearAILogin: return .signInFailed
     case .enrollNearAI: return .nearAIEnrollFailed(label: "near_ai_enroll_unavailable")
+    case .setAskEachTime: return .sharingFailed
     case .setConsentScopes: return .scopesFailed
     case .setProjectMode, .includePastSessions: return .rulesFailed
     case .setPrivateAI: return .privateAIFailed
@@ -842,10 +844,22 @@ final class FirstRunRunnerTests: XCTestCase {
 
         await runner.commit(.start)
 
-        XCTAssertEqual(daemon.log.suffix(2), [.grantAutomatic(witness: "witness-1"), .markComplete],
+        XCTAssertEqual(daemon.log.suffix(3), [.grantAutomatic(witness: "witness-1"), .setAskEachTime, .markComplete],
             "setup still finishes")
         XCTAssertEqual(runner.state.sharing, .askMe, "never reported as automatic")
         XCTAssertEqual(runner.failure, .grantRefused(label: "automatic-grant-witness-changed"))
+    }
+
+    func test_unconfirmedAskCannotFinishSetupOrSaveBroaderScopes() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { $0 == .setAskEachTime }
+        var state = onUses()
+        state.sharing = .askMe
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.start)
+        XCTAssertEqual(daemon.log, [.setAskEachTime])
+        XCTAssertEqual(runner.failure, .sharingFailed)
+        XCTAssertFalse(runner.completed)
     }
 
     /// Every way Start can end with a failure gives the Uses screen a
@@ -1099,7 +1113,7 @@ final class FirstRunRunnerTests: XCTestCase {
 
         runner.finishPasskey(.created(name: "Laptop"), copy: copy)
         await runner.commit(.start)
-        XCTAssertEqual(daemon.log, [.setConsentScopes(["required"]), .markComplete])
+        XCTAssertEqual(daemon.log, [.setAskEachTime, .setConsentScopes(["required"]), .markComplete])
         XCTAssertTrue(runner.completed)
     }
 }

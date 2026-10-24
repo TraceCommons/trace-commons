@@ -733,14 +733,15 @@ final class HistoryParityTests: XCTestCase {
         // Ron's headings and project groups, in the core's words.
         let flat = Self.flat(home)
         for needle in [
-            "Text(words.historyDescription)", "Text(words?.submissions ?? MonitorWords.history)",
-            "Text(words.contributionHistory)", "Text(words.project)",
+            "Text(words?.submissions ?? MonitorWords.history)", "Text(words.project)",
             "Text(words?.records(group.count) ?? \"\\(group.count)\")", "Text(words.readingHistory)",
             ".accessibilityLabel(words?.filterLabel ?? MonitorWords.history)",
             "Text(words.status(word))", "Text(words.credit(figure))", "Text(HomeFormat.rowMeta(row))",
         ] {
             XCTAssertTrue(flat.contains(needle), "HomeViews.swift lacks \(needle)")
         }
+        XCTAssertFalse(home.contains("Text(words.historyDescription)"))
+        XCTAssertFalse(home.contains("Text(words.contributionHistory)"))
         // The filter wraps; it is no longer a strip that scrolls sideways.
         XCTAssertFalse(home.contains("ScrollView(.horizontal)"))
         XCTAssertTrue(home.contains("HistoryFilterFlow(spacing: GlassTokens.Space.s2)"))

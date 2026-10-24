@@ -106,6 +106,13 @@ final class ProjectRowTests: XCTestCase {
         XCTAssertTrue(decoded[1].isUnresolvedBucket)
     }
 
+    func testDaemonOfferableModesExcludeAskUnderBroadAutomatic() throws {
+        let decoded = try rows(#"{"projects":[{"project_id":"p_a","project_label":"repo","mode":"auto_upload","offerable_modes":["auto_upload","ignore"]}]}"#)
+        XCTAssertEqual(decoded[0].offerableModes, [.autoUpload, .ignore])
+        let unresolved = try rows(#"{"projects":[{"project_id":"p_b","project_label":"unknown","mode":"notify_only","is_unresolved_bucket":true,"offerable_modes":["auto_upload","ignore"]}]}"#)
+        XCTAssertFalse(unresolved[0].offerableModes.contains(.autoUpload))
+    }
+
     /// The bucket can never be armed, and that is the daemon's rule rather
     /// than a preference: `auto_upload` is refused for its key in two
     /// independent places. Any future mode control must consult this instead

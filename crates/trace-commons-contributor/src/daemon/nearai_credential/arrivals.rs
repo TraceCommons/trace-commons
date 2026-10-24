@@ -1,4 +1,4 @@
-//! NEAR AI credit arriving in the organization Private AI spends from, and the
+//! NEAR AI credit arriving in the verified payout organization, and the
 //! NEAR AI balance's change over the last 24 hours.
 //!
 //! **Arrivals are read, never inferred.** A contributor's balance goes up when
@@ -21,7 +21,8 @@
 //! the running total received, the total as of the last notification, and the
 //! ids and times of recent transfers so none is counted twice. No names, no
 //! memo, no sender. It is forgotten with the NEAR AI sign-in, and reset when
-//! Private AI moves to another organization.
+//! the linked payout recipient changes. Private AI balance samples are kept
+//! separately, so reading a different spending organization cannot reset arrivals.
 //!
 //! **Sessions.** Every read here goes through the balance module's lock
 //! ([`balance::with_management_session`] and [`balance::read`]), so a poll can
@@ -110,6 +111,10 @@ pub(crate) struct ArrivalsRecord {
     /// The organization every figure below belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) organization_id: Option<String>,
+    /// The confirmed link generation whose ledger produced this record.
+    /// Absent on old records until a fresh verified poll binds them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recipient_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) samples: Vec<BalanceSample>,
     /// Every transfer counted so far, added up, in nano-dollars.
@@ -274,11 +279,33 @@ fn records() -> &'static Mutex<HashMap<PathBuf, ArrivalsRecord>> {
     RECORDS.get_or_init(Default::default)
 }
 
+/// Spending-balance samples are independent of the payout recipient. The
+/// two organizations may differ and neither read may reset the other's data.
+const BALANCE_SAMPLES_FILE: &str = "near-ai-balance-samples.json";
+
+fn balance_records() -> &'static Mutex<HashMap<PathBuf, ArrivalsRecord>> {
+    static RECORDS: OnceLock<Mutex<HashMap<PathBuf, ArrivalsRecord>>> = OnceLock::new();
+    RECORDS.get_or_init(Default::default)
+}
+
+fn balance_snapshot(store: &ConfigStore) -> ArrivalsRecord {
+    balance_records()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(store.dir().to_path_buf())
+        .or_insert_with(|| load_file(store, BALANCE_SAMPLES_FILE))
+        .clone()
+}
+
 /// The record on disk. Missing, oversized or unreadable reads as empty: it
 /// holds nothing that cannot be read again from the service, and the cost of
 /// starting over is at most one notification for credit already announced.
 fn load(store: &ConfigStore) -> ArrivalsRecord {
-    match store.read_daemon_file(ARRIVALS_FILE) {
+    load_file(store, ARRIVALS_FILE)
+}
+
+fn load_file(store: &ConfigStore, file: &str) -> ArrivalsRecord {
+    match store.read_daemon_file(file) {
         Ok(Some(bytes)) if bytes.len() <= MAX_FILE_BYTES => {
             serde_json::from_slice(&bytes).unwrap_or_default()
         }
@@ -300,7 +327,22 @@ pub(crate) fn snapshot(store: &ConfigStore) -> ArrivalsRecord {
 /// sign-in is kept: under the credential commit lock, so a forget cannot
 /// land between the check and the write and have a poll bring the record
 /// back.
-fn update<R>(shared: &DaemonShared, change: impl FnOnce(&mut ArrivalsRecord) -> R) -> Option<R> {
+fn update_record<R>(
+    shared: &DaemonShared,
+    records: &Mutex<HashMap<PathBuf, ArrivalsRecord>>,
+    file: &str,
+    change: impl FnOnce(&mut ArrivalsRecord) -> R,
+) -> Option<R> {
+    update_record_checked(shared, records, file, None, change)
+}
+
+fn update_record_checked<R>(
+    shared: &DaemonShared,
+    records: &Mutex<HashMap<PathBuf, ArrivalsRecord>>,
+    file: &str,
+    expected_recipient: Option<Option<&str>>,
+    change: impl FnOnce(&mut ArrivalsRecord) -> R,
+) -> Option<R> {
     let store = &shared.store;
     let locks = super::session::coordination(store.dir()).ok()?;
     let _commit = locks.commit.lock().ok()?;
@@ -310,31 +352,44 @@ fn update<R>(shared: &DaemonShared, change: impl FnOnce(&mut ArrivalsRecord) -> 
         .unwrap_or_else(|e| e.into_inner())
         .near_ai_session
         .as_ref()?;
-    let mut map = records().lock().unwrap_or_else(|e| e.into_inner());
-    let record = map
-        .entry(store.dir().to_path_buf())
-        .or_insert_with(|| load(store));
-    let out = change(record);
-    let written = serde_json::to_vec(record)
-        .ok()
-        .is_some_and(|bytes| store.write_daemon_file(ARRIVALS_FILE, &bytes).is_ok());
-    if !written {
-        tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_written");
+    let apply = || {
+        let mut map = records.lock().unwrap_or_else(|e| e.into_inner());
+        let record = map
+            .entry(store.dir().to_path_buf())
+            .or_insert_with(|| load_file(store, file));
+        let out = change(record);
+        let written = serde_json::to_vec(record)
+            .ok()
+            .is_some_and(|bytes| store.write_daemon_file(file, &bytes).is_ok());
+        if !written {
+            tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_written");
+        }
+        out
+    };
+    match expected_recipient {
+        Some(expected) => {
+            crate::daemon::payout_link::with_near_ai_recipient_ref(shared, expected, apply)
+        }
+        None => Some(apply()),
     }
-    Some(out)
 }
 
 /// Forget the record. The caller holds the credential commit lock: this is
 /// the forget path's. Best effort, like the spending organization's record.
 pub(crate) fn clear_locked(store: &ConfigStore) {
-    records()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(store.dir());
-    match std::fs::remove_file(store.daemon_path(ARRIVALS_FILE)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_cleared"),
+    for (records, file) in [
+        (records(), ARRIVALS_FILE),
+        (balance_records(), BALANCE_SAMPLES_FILE),
+    ] {
+        records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(store.dir());
+        match std::fs::remove_file(store.daemon_path(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => tracing::warn!(target: "near_ai_credit", "near_ai_credit_record_not_cleared"),
+        }
     }
 }
 
@@ -348,30 +403,62 @@ pub(crate) fn note_balance(
     let Some(organization_id) = organization_id else {
         return;
     };
-    update(shared, |record| {
+    update_record(shared, balance_records(), BALANCE_SAMPLES_FILE, |record| {
         record.adopt(organization_id);
         record.record_sample(reading.observed_at, reading.remaining_nanos);
     });
 }
 
-/// What a credit notification would announce now: `(amount, received
-/// total)`, or `None`. From memory after the first read.
-pub(crate) fn pending_notification(store: &ConfigStore) -> Option<(i64, i64)> {
-    let record = snapshot(store);
-    record
-        .candidacy()
-        .map(|amount| (amount, record.received_total_nanos))
+/// A notification candidate tied to the exact payout-link generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingCredit {
+    pub amount: i64,
+    pub received_total: i64,
+    recipient_ref: String,
 }
 
-/// A credit notification announcing everything up to `received_total` was
-/// posted: that total is the next one's baseline. A record that has since
-/// moved to another organization keeps its own.
-pub(crate) fn mark_notified(shared: &DaemonShared, received_total: i64) {
-    update(shared, |record| {
-        if record.scanned && record.received_total_nanos >= received_total {
-            record.notified_received_total_nanos = Some(received_total);
-        }
-    });
+pub(crate) fn pending_notification(shared: &DaemonShared) -> Option<PendingCredit> {
+    let record = snapshot(&shared.store);
+    let recipient_ref = record.recipient_ref.clone()?;
+    crate::daemon::payout_link::with_near_ai_recipient_ref(shared, Some(&recipient_ref), || {
+        record.candidacy().map(|amount| PendingCredit {
+            amount,
+            received_total: record.received_total_nanos,
+            recipient_ref: recipient_ref.clone(),
+        })
+    })
+    .flatten()
+}
+
+/// Recheck identity and publish while holding the same local link lock used
+/// by confirm/unlink. A stale candidate neither publishes nor moves the
+/// notification baseline on the newly linked organization.
+pub(crate) fn publish_notification(
+    shared: &DaemonShared,
+    credit: &PendingCredit,
+    publish: impl FnOnce(),
+) -> bool {
+    update_record_checked(
+        shared,
+        records(),
+        ARRIVALS_FILE,
+        Some(Some(&credit.recipient_ref)),
+        |record| {
+            if record.recipient_ref.as_deref() != Some(credit.recipient_ref.as_str())
+                || !record.scanned
+                || record.received_total_nanos < credit.received_total
+                || record
+                    .notified_received_total_nanos
+                    .is_some_and(|total| total >= credit.received_total)
+            {
+                return false;
+            }
+            publish();
+            record.notified_received_total_nanos = Some(credit.received_total);
+            true
+        },
+    )
+    .unwrap_or(false)
 }
 
 /// The organization Private AI spends from, when a NEAR AI sign-in is kept.
@@ -402,11 +489,11 @@ pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> ser
     let Some(organization_id) = spending_organization(shared) else {
         return value;
     };
+    let samples = balance_snapshot(&shared.store);
     let record = snapshot(&shared.store);
-    if record.organization_id.as_deref() != Some(organization_id.as_str()) {
-        return value;
-    }
-    let change = record.change_24h(reading.observed_at, reading.remaining_nanos);
+    let change = (samples.organization_id.as_deref() == Some(organization_id.as_str()))
+        .then(|| samples.change_24h(reading.observed_at, reading.remaining_nanos))
+        .flatten();
     if let Some(object) = value.as_object_mut() {
         if let Some(change) = change {
             object.insert("change_24h_nanos".into(), change.into());
@@ -415,7 +502,17 @@ pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> ser
                 object.insert("change_24h_text".into(), text.into());
             }
         }
-        if record.scanned {
+        if record.scanned
+            && record.organization_id.as_deref() == Some(organization_id.as_str())
+            && record.recipient_ref.as_deref().is_some_and(|reference| {
+                crate::daemon::payout_link::with_near_ai_recipient_ref(
+                    shared,
+                    Some(reference),
+                    || (),
+                )
+                .is_some()
+            })
+        {
             object.insert(
                 "received_total_nanos".into(),
                 record.received_total_nanos.into(),
@@ -450,10 +547,18 @@ fn take_poll_due(store: &ConfigStore, now: DateTime<Utc>) -> bool {
 }
 
 /// One supervisor tick: read the balance and the transfer ledger when a
-/// poll is due and a NEAR AI sign-in with a spending organization is kept.
+/// poll is due and a NEAR AI sign-in is kept. The payout recipient must be
+/// verified against the commons before any incoming transfers are read.
 /// Cheap otherwise. Logs labels only.
 pub async fn poll(shared: &DaemonShared, now: DateTime<Utc>) {
-    if spending_organization(shared).is_none() || !take_poll_due(&shared.store, now) {
+    if shared
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .near_ai_session
+        .is_none()
+        || !take_poll_due(&shared.store, now)
+    {
         return;
     }
     let Ok(api) = CloudApi::live() else {
@@ -467,12 +572,34 @@ pub async fn poll(shared: &DaemonShared, now: DateTime<Utc>) {
 /// [`poll`] against an explicit client, without the schedule. Answers the
 /// credit newly counted.
 pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i64> {
-    let Some(organization_id) = spending_organization(shared) else {
-        return Ok(0);
+    // Spending balance sampling remains independent of payout linkage.
+    if spending_organization(shared).is_some() {
+        let _ = balance::read_via(shared, api).await;
+    }
+    let expected_recipient = crate::daemon::payout_link::near_ai_recipient_ref_snapshot(shared)
+        .map_err(|_| anyhow::anyhow!("near_ai_credit_recipient_unavailable"))?;
+    let verified = crate::daemon::payout_link::verified_near_ai_recipient(shared, api).await;
+    let organization_id = match verified {
+        Ok(Some(organization_id)) => organization_id,
+        result => {
+            // Preserve seen transfer IDs, but suppress notifications while
+            // this generation no longer has a verified active recipient.
+            update_record_checked(
+                shared,
+                records(),
+                ARRIVALS_FILE,
+                Some(expected_recipient.as_deref()),
+                |record| {
+                    record.recipient_ref = None;
+                },
+            );
+            return match result {
+                Ok(None) => Ok(0),
+                Err(()) => Err(anyhow::anyhow!("near_ai_credit_recipient_unavailable")),
+                Ok(Some(_)) => unreachable!(),
+            };
+        }
     };
-    // A sample for the 24-hour change, through the balance's own read and
-    // its cache, so a poll right after the app read one costs no call.
-    let _ = balance::read_via(shared, api).await;
     let cutoff = {
         let record = snapshot(&shared.store);
         (record.organization_id.as_deref() == Some(organization_id.as_str()))
@@ -483,19 +610,26 @@ pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i
         fetch_incoming(api, tokens, organization_id.clone(), cutoff)
     })
     .await?;
-    let added = update(shared, |record| {
-        record.adopt(&organization_id);
-        let first_read = !record.scanned;
-        let added = record.apply_transfers(&rows);
-        // Credit already in the ledger at the first read is history -- an
-        // upgrade, or a new organization -- not an arrival. It becomes the
-        // baseline without a notification, so "the first credit ever" is
-        // the first to land after an empty first read. DRAFT, owner review.
-        if first_read && added > 0 {
-            record.notified_received_total_nanos = Some(record.received_total_nanos);
-        }
-        added
-    })
+    let added = update_record_checked(
+        shared,
+        records(),
+        ARRIVALS_FILE,
+        Some(expected_recipient.as_deref()),
+        |record| {
+            record.adopt(&organization_id);
+            record.recipient_ref = expected_recipient.clone();
+            let first_read = !record.scanned;
+            let added = record.apply_transfers(&rows);
+            // Credit already in the ledger at the first read is history -- an
+            // upgrade, or a new organization -- not an arrival. It becomes the
+            // baseline without a notification, so "the first credit ever" is
+            // the first to land after an empty first read. DRAFT, owner review.
+            if first_read && added > 0 {
+                record.notified_received_total_nanos = Some(record.received_total_nanos);
+            }
+            added
+        },
+    )
     .unwrap_or(0);
     if added > 0 {
         shared.publish(
@@ -538,7 +672,27 @@ async fn fetch_incoming(
 /// Put `record` in place for `store`, in memory and on disk, as if earlier
 /// polls had left it.
 #[cfg(test)]
-pub(crate) fn set_for_test(store: &ConfigStore, record: ArrivalsRecord) {
+pub(crate) fn set_for_test(store: &ConfigStore, mut record: ArrivalsRecord) {
+    if let Some(organization) = &record.organization_id {
+        let key = uuid::Uuid::new_v4();
+        let org = uuid::Uuid::parse_str(organization).unwrap_or_else(|_| uuid::Uuid::new_v4());
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_PAYOUT_LINK_FILE,
+                &serde_json::to_vec(&serde_json::json!({"rails": {"near_ai": {
+                    "idempotency_key": key, "organization_id": org
+                }}}))
+                .unwrap(),
+            )
+            .unwrap();
+        record.recipient_ref = Some(trace_commons_protocol::payout_link::near_ai_recipient_ref(
+            key, org,
+        ));
+    }
+    balance_records()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(store.dir().to_path_buf(), record.clone());
     if let Ok(bytes) = serde_json::to_vec(&record) {
         let _ = store.write_daemon_file(ARRIVALS_FILE, &bytes);
     }

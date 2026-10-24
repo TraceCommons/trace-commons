@@ -74,7 +74,7 @@ struct Prepared {
     settlement_adopt_pricing: Option<Option<String>>,
     /// NEAR AI credit an announcement would carry: the amount since the last
     /// one, and the received total it brings the baseline to.
-    credit: Option<(i64, i64)>,
+    credit: Option<super::nearai_credential::arrivals::PendingCredit>,
     settings: NotifySettings,
     log: Vec<AttentionEntry>,
 }
@@ -112,7 +112,8 @@ impl Prepared {
             }),
             Kind::NearAiCredit => self
                 .credit
-                .map(|(amount, _)| nudge_render::near_ai_credit_notification(amount)),
+                .as_ref()
+                .map(|credit| nudge_render::near_ai_credit_notification(credit.amount)),
             Kind::InsightsTip | Kind::WeeklyRecap => None,
         }
     }
@@ -194,7 +195,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         && shown_estimate.is_some();
     // N6: read from memory, and only while it could be announced.
     let credit = (settings.master && settings.near_ai_credit)
-        .then(|| super::nearai_credential::arrivals::pending_notification(&shared.store))
+        .then(|| super::nearai_credential::arrivals::pending_notification(shared))
         .flatten();
     let wants_credit = credit.is_some();
     let closed = !(wants_idle || wants_verdicts || wants_settlement || wants_credit)
@@ -344,7 +345,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // N6: NEAR AI credit received, past the 25%-and-$1 rule. Not held by the
     // settlement estimate's switches or health gate: it is about money that
     // already arrived, not an estimate.
-    if let Some((amount, total)) = credit {
+    if let Some(credit) = credit {
         prepared.candidates.push(Candidate {
             kind: Kind::NearAiCredit,
             foldable: false,
@@ -353,7 +354,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             ttl: None,
             caps: Kind::NearAiCredit.default_caps(Duration::zero()),
         });
-        prepared.credit = Some((amount, total));
+        prepared.credit = Some(credit);
     }
     prepared
 }
@@ -442,26 +443,28 @@ fn apply(
     }
     let standalone = outcome.standalone.and_then(|kind| {
         let text = prepared.notification(kind)?;
-        shared.publish(
-            ipc::EVENT_REENGAGE_DUE,
-            serde_json::json!({
-                "kind": kind.label(),
-                "title": text.title,
-                "body": text.body,
-                "actions": text.actions,
-            }),
-        );
+        let publish = || {
+            shared.publish(
+                ipc::EVENT_REENGAGE_DUE,
+                serde_json::json!({
+                    "kind": kind.label(),
+                    "title": text.title,
+                    "body": text.body,
+                    "actions": text.actions,
+                }),
+            );
+        };
+        if kind == Kind::NearAiCredit {
+            let credit = prepared.credit.as_ref()?;
+            if !super::nearai_credential::arrivals::publish_notification(shared, credit, publish) {
+                return None;
+            }
+        } else {
+            publish();
+        }
         announced.push((kind, Route::Standalone));
         Some(kind)
     });
-
-    // The credit baseline moves before any other lock is taken: it takes the
-    // credential commit lock, which is never taken under the state lock.
-    if standalone == Some(Kind::NearAiCredit) {
-        if let Some((_, total)) = prepared.credit {
-            super::nearai_credential::arrivals::mark_notified(shared, total);
-        }
-    }
 
     // What is still pending, for pruning the announced set: read under the
     // queue lock and released before the state lock.

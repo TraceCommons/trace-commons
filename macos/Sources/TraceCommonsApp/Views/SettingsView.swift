@@ -98,6 +98,7 @@ enum SettingsLegacyWords {
     static var alwaysIncluded: String { words?.alwaysIncluded ?? "" }
     /// #1146's group name ("Optional data use").
     static var optionalEachOne: String { words?.optionalDataUse ?? "" }
+    static var rewardOpportunities: String { words?.rewardOpportunities ?? "" }
     static var credit: String { words?.credit ?? "" }
     /// The always-on scope's tag (#1146's "required").
     static var alwaysOn: String { words?.required ?? "" }

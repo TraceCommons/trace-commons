@@ -394,6 +394,9 @@ pub struct UsesCopy {
     pub eyebrow: &'static str,
     pub required: &'static str,
     pub all_optional: &'static str,
+    pub reward_opportunities: &'static str,
+    pub automatic_scope: &'static str,
+    pub ask_each_time: &'static str,
     /// `{count}` optional uses, every one on.
     pub optional_all_on: &'static str,
     pub optional_all_off: &'static str,
@@ -409,6 +412,7 @@ pub struct UsesCopy {
     pub start: &'static str,
     /// Start finished on Ask because the Automatic grant was refused.
     pub sharing_refused: &'static str,
+    pub sharing_save_failed: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
     pub scopes_failed: &'static str,
     /// Start stopped on a folder rule or a past-session include; the data
@@ -651,12 +655,15 @@ pub fn first_run_copy() -> FirstRunCopy {
             duration_hours: "{hours} h {minutes} min",
         },
         uses: UsesCopy {
-            title_light: "How your data is ",
+            title_light: "Data ",
             // Titles under the animated graphics carry no period.
-            title_bold: "used & permissioned",
-            eyebrow: "How your traces may be used",
+            title_bold: "uses",
+            eyebrow: "Data uses",
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
+            reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
+            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Ignore a folder to exclude it.",
+            ask_each_time: "Ask each time",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",
             optional_some_on: "{count} optional uses · {selected} on",
@@ -666,6 +673,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             more_about: "More about {title}",
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
+            sharing_save_failed: "Sharing couldn't be saved. Setup hasn't finished; try Start sharing again.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -673,7 +681,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             this_mac: "This Mac",
             you_review: "You review",
             the_commons: "The commons",
-            automatic_after_sign_in: "Turns on once you sign in.",
+            automatic_after_sign_in: "Starts when setup finishes after sign-in.",
         },
         traces: TracesCopy {
             title_light: "What your traces ",

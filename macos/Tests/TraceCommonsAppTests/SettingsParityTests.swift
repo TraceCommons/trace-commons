@@ -61,13 +61,12 @@ final class SettingsParityTests: XCTestCase {
                            // (`AppModel.toggleConsentScope`), so a section switch
                            // cannot drop them; `SettingsSectionStateTests` pins it.
                            "model.toggleConsentScope(", "model.consentWriteRefused",
-                           "ConsentScopeRows.isOn(scope: scope, granted: granted, unavailable: unavailable)",
+                           "ConsentScopeRows.isOn(scope: scope, granted: Set(model.status.consentScopes), unavailable: unavailable)",
                            "ConsentScopeRows.isEnabled(scope: scope, busy: model.consentWriteBusy, unavailable: unavailable)"],
                 copySources: ["scope.title", "scope.description", "settingsCopy()?.consentSaveFailed",
                               "ConsentScopeRows.refusalLine(", "MonitorScreensCopy.decode(",
                               "SettingsLegacyWords.consentHeading", "SettingsLegacyWords.appliesFromNow",
-                              "SettingsLegacyWords.alwaysIncluded", "SettingsLegacyWords.optionalEachOne",
-                              "SettingsLegacyWords.credit", "SettingsLegacyWords.nothingPreselected"],
+                              "SettingsLegacyWords.rewardOpportunities"],
                 confirmations: [],
                 accessibility: ["GlassCheckboxStyle()", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/WatchingSection.swift",

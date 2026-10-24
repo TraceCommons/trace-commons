@@ -179,6 +179,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let eyebrow: String
         public let required: String
         public let allOptional: String
+        public let rewardOpportunities: String?
+        public let automaticScope: String?
+        public let askEachTime: String?
         /// `{count}`, and `{selected}` in the third.
         public let optionalAllOn: String
         public let optionalAllOff: String
@@ -192,6 +195,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// Start's failures, one per call that can stop it, and the refused
         /// grant, which finishes on Ask.
         public let sharingRefused: String
+        public let sharingSaveFailed: String?
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String

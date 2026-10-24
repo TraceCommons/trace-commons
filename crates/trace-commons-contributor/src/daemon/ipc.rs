@@ -381,6 +381,7 @@ pub const METHODS: &[&str] = &[
     "approve",
     "automatic_grant",
     "grant_automatic",
+    "grant_automatic_including_existing",
     "withdraw_automatic_grant",
     "certificate_detail",
     "route_disclosure",
@@ -3901,6 +3902,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
+        "grant_automatic_including_existing" => handle_grant_automatic(shared, req),
         "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
         "acknowledge_legacy_invite_migration" => {
             super::legacy_migration::handle_acknowledge(shared, req)
@@ -4775,6 +4777,17 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         let project_seen = seen.get(key);
         let session_count = project_seen.map_or(0, |s| s.count);
         let last_session_at = project_seen.and_then(|s| s.last_modified_at);
+        row["offerable_modes"] = serde_json::json!(if key == UNKNOWN_PROJECT_KEY {
+            vec![ProjectMode::NotifyOnly, ProjectMode::Ignore]
+        } else if policy.includes_existing_automatically() {
+            vec![ProjectMode::AutoUpload, ProjectMode::Ignore]
+        } else {
+            vec![
+                ProjectMode::NotifyOnly,
+                ProjectMode::AutoUpload,
+                ProjectMode::Ignore,
+            ]
+        });
         row["session_count"] = serde_json::Value::from(session_count);
         row["last_session_at"] = serde_json::json!(last_session_at);
         // K11: which tool each of this project's sessions came from, with a
@@ -4954,6 +4967,7 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
             // A source recorded, not every source: each is recorded on its
             // own first successful discovery under the grant.
             "on_disk_recorded": !grant.recorded_sources.is_empty(),
+            "include_existing": grant.include_existing,
         }),
         None => serde_json::json!({ "granted": false }),
     }
@@ -5009,13 +5023,27 @@ fn grant_automatic_refusal(
     None
 }
 
-// Give the Flow 1 grant: arm projects discovered from now on (K3), never
-// anything already on disk (K4). Refused without terms to grant under, like
+// Give the Flow 1 grant: legacy callers arm new projects only; onboarding
+// can explicitly include existing eligible sessions with include_existing.
+// Refused without terms to grant under, like
 // arming one project, and recorded before it takes effect. Refused, too,
 // unless the caller states the contributor confirmed (`confirmed: true`),
 // the contributor chose a non-empty scope list (R7), and the witness
 // configured now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
+    // This scope expansion is opt-in. Old callers omit it and keep their
+    // from-now semantics; malformed values must not replace a valid grant.
+    let include_existing = match req.params.get("include_existing") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-existing-invalid"),
+    };
+    if req.method == "grant_automatic_including_existing" && !include_existing {
+        return Response::err(req.id, ERR_BAD_PARAMS, "include-existing-required");
+    }
+    if req.method == "grant_automatic" && include_existing {
+        return Response::err(req.id, ERR_BAD_PARAMS, "include-existing-method-required");
+    }
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
     };
@@ -5032,7 +5060,7 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
             at: now,
             action: "automatic-granted".to_string(),
             project_label: None,
-            detail: None,
+            detail: include_existing.then(|| "include-existing".to_string()),
         },
     )
     .is_err()
@@ -5041,10 +5069,13 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     }
     {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let previous = policy.automatic_grant.clone();
+        let previous = policy.clone();
         policy.grant_automatic(now, terms);
+        if include_existing {
+            policy.include_existing_under_grant();
+        }
         if policy.save(&shared.store).is_err() {
-            policy.automatic_grant = previous;
+            *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
     }
@@ -5337,6 +5368,17 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let label = disambiguated_label(&key, shown.as_deref(), &known);
         (key, label)
     };
+    let broad_automatic = policy.includes_existing_automatically();
+    if broad_automatic && key != UNKNOWN_PROJECT_KEY && mode == ProjectMode::NotifyOnly {
+        return Response::err(req.id, ERR_BAD_PARAMS, "automatic-sharing-requires-ignore");
+    }
+    if broad_automatic && mode == ProjectMode::AutoUpload && include_backlog == Some(false) {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "automatic-sharing-includes-existing",
+        );
+    }
     // Whether this arming holds back what is already in the folder.
     //
     // An explicit `include_backlog` decides it. With none, it depends on
@@ -5373,7 +5415,8 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // answer for its detail. The append drops the lock; a change made in
     // that window is the interleaving described there, and the re-read of
     // the prior record after it only ever lands on a fresh hold.
-    let from_now = mode == ProjectMode::AutoUpload
+    let from_now = !broad_automatic
+        && mode == ProjectMode::AutoUpload
         && match include_backlog {
             Some(include) => !include,
             None => {
@@ -5457,6 +5500,18 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // re-sending the same setting must neither release that backlog nor
     // start holding sessions that arrived since. That is also what an
     // omitted `include_backlog` resolves to for a folder armed from now.
+    // The grant may have expanded while the audit append held no lock.
+    if policy.includes_existing_automatically()
+        && mode == ProjectMode::AutoUpload
+        && include_backlog == Some(false)
+    {
+        return Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            "automatic-sharing-includes-existing",
+        );
+    }
+    let from_now = from_now && !policy.includes_existing_automatically();
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
     let was_never = policy.resolve(&key) == ProjectMode::Ignore;
@@ -18275,7 +18330,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 90, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 91, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
