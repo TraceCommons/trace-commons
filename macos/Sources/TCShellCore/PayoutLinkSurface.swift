@@ -4,7 +4,7 @@ import Foundation
 /// (`tc_payout_link_copy_json`).
 ///
 /// The owner approved this wording as written on 2026-10-23; the Change
-/// button's two strings, added after, are a draft. None is written in
+/// button's two strings and `sessionEnded`, added after, are a draft. None is written in
 /// Swift: a payload with a missing or empty field is refused whole, so a
 /// blank never stands where a consent sentence belongs. Templates carry the
 /// one placeholder `{org_name}`, filled by `render(_:orgName:)` with the name
@@ -28,6 +28,7 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
     public let statusUnavailable: String
     public let statusMismatch: String
     public let signIn: String
+    public let sessionEnded: String
     public let noOrganization: String
     public let changed: String
     public let failed: String
@@ -46,6 +47,7 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
         case statusUnavailable = "status_unavailable"
         case statusMismatch = "status_mismatch"
         case signIn = "sign_in"
+        case sessionEnded = "session_ended"
         case noOrganization = "no_organization"
         case changed, failed
     }
@@ -56,7 +58,7 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
         "title", "body", "scope", "button", "secondary", "accessibility_name",
         "unlink_button", "unlink_accessibility_name", "unlink_body",
         "change_button", "change_accessibility_name", "status_linked", "status_none", "status_waiting", "status_unavailable",
-        "status_mismatch", "sign_in", "no_organization", "changed", "failed",
+        "status_mismatch", "sign_in", "session_ended", "no_organization", "changed", "failed",
     ]
 
     public var sentences: [String] {
@@ -64,7 +66,7 @@ public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
             title, body, scope, button, secondary, accessibilityName, unlinkButton,
             unlinkAccessibilityName, unlinkBody, changeButton, changeAccessibilityName,
             statusLinked, statusNone, statusWaiting,
-            statusUnavailable, statusMismatch, signIn, noOrganization, changed, failed,
+            statusUnavailable, statusMismatch, signIn, sessionEnded, noOrganization, changed, failed,
         ]
     }
 
@@ -179,6 +181,9 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
 public enum PayoutLinkRefusal: Equatable, Sendable {
     /// No NEAR AI session, or it ended: the sign-in line.
     case signIn
+    /// No Trace Commons account session, and the daemon could not renew
+    /// one: the session-ended line.
+    case sessionEnded
     /// The org list or the account's link changed after it was shown: list
     /// again.
     case changed
@@ -190,8 +195,10 @@ public enum PayoutLinkRefusal: Equatable, Sendable {
     public static func from(code label: String) -> PayoutLinkRefusal {
         switch label {
         case "payout-link-near-ai-sign-in-required", "payout-link-near-ai-session-expired",
-            "payout-link-near-ai-session-changed", "account-session-required":
+            "payout-link-near-ai-session-changed":
             return .signIn
+        case "account-session-required":
+            return .sessionEnded
         case "payout-link-orgs-changed", "payout-link-changed", "version_conflict",
             "org_not_owned", "payout_link_change_pending":
             return .changed
@@ -216,6 +223,15 @@ public struct PayoutLinkSurface: Equatable, Sendable {
     /// the section hides itself unless the commons lists `near_ai`.
     public static func nearAiRail(in rails: [PayoutRailStatus]) -> PayoutRailStatus? {
         rails.first { $0.railId == nearAiRailId && ($0.mode == "live" || $0.mode == "dry_run") }
+    }
+
+    /// The refusal of a status read the section stays on screen for, with
+    /// its line: only a missing account session, which the person can act
+    /// on. Any other failure hides the section, so no stale link state is
+    /// shown.
+    public static func shownStatusRefusal(_ error: any Error) -> PayoutLinkRefusal? {
+        let refusal = (error as? PayoutLinkClient.Failure)?.refusal
+        return refusal == .sessionEnded ? refusal : nil
     }
 
     /// The status line, or nil when the line needs an org name this daemon
@@ -298,6 +314,7 @@ public struct PayoutLinkSurface: Equatable, Sendable {
     public func refusalLine(_ refusal: PayoutLinkRefusal) -> String {
         switch refusal {
         case .signIn: return copy.signIn
+        case .sessionEnded: return copy.sessionEnded
         case .changed: return copy.changed
         case .failed: return copy.failed
         }

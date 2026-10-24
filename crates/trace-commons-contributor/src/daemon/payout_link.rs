@@ -73,13 +73,14 @@ use trace_commons_protocol::payout_link::{
     NEAR_AI_PAYOUT_RAIL_ID, PayoutLinkAction, PayoutLinkOutcome, near_ai_recipient_ref,
 };
 
+use super::account_session_renewal::{RenewVia, account_session};
 use super::audit::{self, AuditEntry};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::nearai_credential::api::{CloudApi, OwnedOrganization};
 use super::nearai_credential::loopback::SessionTokens;
 use super::nearai_credential::session;
 use super::settings::NearAiSession;
-use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, account_session, keep_rotated_token};
+use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, keep_rotated_token};
 use crate::account_auth::LoadedAccountSession;
 use crate::config::{
     ConfigStore, ContributorConfig, DAEMON_PAYOUT_LINK_FILE, DAEMON_PAYOUT_ORG_NAMES_FILE,
@@ -339,11 +340,15 @@ async fn owned_orgs_with_fresh_token(
 /// The account session and enrolled config every method needs, or the
 /// refusal. The session is checked first, so a shell that has not signed in
 /// is routed to sign-in whatever else is missing.
-fn session_and_config(
+///
+/// An expired session on a NEAR AI-provisioned account is renewed through
+/// `via` first ([`super::account_session_renewal`]); `None` renews nothing.
+async fn session_and_config(
     shared: &DaemonShared,
     req: &Request,
+    via: Option<&RenewVia<'_>>,
 ) -> Result<(LoadedAccountSession, ContributorConfig), Box<Response>> {
-    let session = match account_session(shared) {
+    let session = match account_session(shared, via).await {
         Ok(Some(session)) => session,
         Ok(None) => {
             return Err(Box::new(Response::err(
@@ -450,9 +455,20 @@ fn confirmed(req: &Request) -> bool {
         == Some(true)
 }
 
-/// `payout_rails_status`.
+/// `payout_rails_status`, against the live NEAR AI service.
 pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let api = CloudApi::live().ok();
+    let via = api.as_ref().map(RenewVia::live);
+    status(shared, req, via.as_ref()).await
+}
+
+/// `payout_rails_status`.
+pub(super) async fn status(
+    shared: &DaemonShared,
+    req: &Request,
+    via: Option<&RenewVia<'_>>,
+) -> Response {
+    let (mut session, cfg) = match session_and_config(shared, req, via).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -549,7 +565,7 @@ pub(super) async fn handle_start(shared: &DaemonShared, req: &Request) -> Respon
 /// List the orgs the person may choose. Nothing is preselected, and the
 /// commons is not asked anything.
 pub(super) async fn orgs(shared: &DaemonShared, req: &Request, api: &CloudApi) -> Response {
-    if let Err(response) = session_and_config(shared, req) {
+    if let Err(response) = session_and_config(shared, req, Some(&RenewVia::live(api))).await {
         return *response;
     }
     let (orgs, token) = match owned_orgs_with_fresh_token(shared, api).await {
@@ -594,7 +610,8 @@ pub(super) async fn start(shared: &DaemonShared, req: &Request, api: &CloudApi) 
         Ok(parsed) => parsed,
         Err(response) => return *response,
     };
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let (mut session, cfg) = match session_and_config(shared, req, Some(&RenewVia::live(api))).await
+    {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -663,7 +680,9 @@ pub(super) async fn handle_unlink(shared: &DaemonShared, req: &Request) -> Respo
         Ok(parsed) => parsed,
         Err(response) => return *response,
     };
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let api = CloudApi::live().ok();
+    let via = api.as_ref().map(RenewVia::live);
+    let (mut session, cfg) = match session_and_config(shared, req, via.as_ref()).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -719,7 +738,9 @@ pub(super) async fn handle_confirm(shared: &DaemonShared, req: &Request) -> Resp
         Ok(parsed) => parsed,
         Err(response) => return *response,
     };
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let api = CloudApi::live().ok();
+    let via = api.as_ref().map(RenewVia::live);
+    let (mut session, cfg) = match session_and_config(shared, req, via.as_ref()).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };

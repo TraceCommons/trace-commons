@@ -269,9 +269,35 @@ final class PayoutLinkSurfaceTests: XCTestCase {
         }
         XCTAssertEqual(PayoutLinkRefusal.from(code: "subject_mismatch"), .failed)
         XCTAssertEqual(PayoutLinkRefusal.from(code: "anything-new"), .failed)
+        // No Trace Commons account session (the daemon could not renew
+        // one): its own line, not the NEAR AI sign-in line.
+        XCTAssertEqual(PayoutLinkRefusal.from(code: "account-session-required"), .sessionEnded)
+        XCTAssertEqual(surface.refusalLine(.sessionEnded), "T:session_ended {org_name}")
         XCTAssertEqual(surface.refusalLine(.signIn), "T:sign_in {org_name}")
         XCTAssertEqual(surface.refusalLine(.changed), "T:changed {org_name}")
         XCTAssertEqual(surface.refusalLine(.failed), "T:failed {org_name}")
+    }
+}
+
+/// What the section draws when the status read itself is refused.
+final class PayoutLinkStatusRefusalTests: XCTestCase {
+    /// A missing account session keeps the section on screen with its line,
+    /// rather than hiding it; every other refusal still hides it, so no
+    /// stale link state is shown.
+    func testOnlyAMissingAccountSessionKeepsTheSectionShown() {
+        XCTAssertEqual(
+            PayoutLinkSurface.shownStatusRefusal(
+                PayoutLinkClient.Failure(label: "account-session-required")),
+            .sessionEnded)
+        for label in [
+            "commons_credential_storage_unavailable", "not-logged-in", "payout_unavailable",
+            "unparseable-response", "payout-link-near-ai-sign-in-required", "anything-new",
+        ] {
+            XCTAssertNil(
+                PayoutLinkSurface.shownStatusRefusal(PayoutLinkClient.Failure(label: label)), label)
+        }
+        struct Other: Error {}
+        XCTAssertNil(PayoutLinkSurface.shownStatusRefusal(Other()))
     }
 }
 

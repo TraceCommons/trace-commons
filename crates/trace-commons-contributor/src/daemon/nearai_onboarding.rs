@@ -417,6 +417,28 @@ pub(super) async fn provision(
         witness,
         receipt_endpoint,
     } = prepared;
+    let finished = ceremony(shared, api, &commons, &session, login.as_ref(), identity).await?;
+    Ok(Provisioned {
+        issuer_url,
+        audience,
+        witness,
+        receipt_endpoint,
+        finished,
+    })
+}
+
+/// The ceremony itself, against `commons`: start, device proof, token
+/// exchange, finish. Shared by [`provision`] and by
+/// [`renew_account_session`], which runs it again for a device already
+/// enrolled. Not validated: each caller checks the answer.
+async fn ceremony(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    commons: &trace_commons_operator_client::Client,
+    session: &super::settings::NearAiSession,
+    login: Option<&Login>,
+    identity: &DeviceIdentity,
+) -> Result<Finished> {
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -442,11 +464,11 @@ pub(super) async fn provision(
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
-    let access_token = exchange_following_rotation(shared, api, &session, login.as_ref())
+    let access_token = exchange_following_rotation(shared, api, session, login)
         .await
         .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
 
-    let finished: Finished = commons
+    commons
         .call_json(
             reqwest::Method::POST,
             PROVISION_FINISH_PATH,
@@ -463,14 +485,7 @@ pub(super) async fn provision(
             })),
         )
         .await
-        .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))?;
-    Ok(Provisioned {
-        issuer_url,
-        audience,
-        witness,
-        receipt_endpoint,
-        finished,
-    })
+        .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))
 }
 
 /// Which sign-in a retained session belongs to: the inference key that
@@ -584,6 +599,89 @@ fn random() -> Result<String> {
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| anyhow!("near_ai_enroll_unavailable"))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Mint a fresh account session for a device this commons already enrolled
+/// through a NEAR AI login, and store it in place of `expected`'s expired one.
+///
+/// # Why this exists
+///
+/// Provisioning hands back a native account session that lives
+/// `NATIVE_SESSION_TTL_HOURS` (12 hours) and is never extended: the server
+/// rotates its secret on use but keeps `expires_at`. A passkey account signs
+/// in again through the browser; a NEAR AI-provisioned account has no other
+/// sign-in, and `enroll` refuses once a config exists. Without this, every
+/// `/v1/account/*` call (payout rails, withdrawal, credit) on such an account
+/// answers `account-session-required` from the thirteenth hour on, for good.
+///
+/// # What authorizes it
+///
+/// The same proof the first sign-in gave, and nothing weaker: the retained
+/// NEAR AI login, exchanged for a JWT the commons introspects itself, and
+/// this device's signature over the ceremony. The commons resolves the
+/// login's anchor to the account it already holds and, for the same device,
+/// issues a new session (`provision_near_ai_login` is idempotent for the
+/// same device and login). No account id is sent; the answer must name the
+/// enrolled tenant, the stored session's account and this device, or
+/// nothing is written.
+///
+/// # What it writes
+///
+/// Only the session, through the Commons credential lifecycle against
+/// `expected`: a sign-out or an enrollment change since `expected` was read
+/// wins, and the config is never rewritten. Fields beyond the session (the
+/// record's origin and binding metadata) are kept.
+pub(super) async fn renew_account_session(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    commons: &trace_commons_operator_client::Client,
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: serde_json::Value,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<()> {
+    let account_id = previous
+        .get("account_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("near_ai_enroll_invalid"))?;
+    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+        bail!("near_ai_enroll_invalid")
+    }
+    let (session, login) = {
+        let settings = shared
+            .settings
+            .lock()
+            .map_err(|_| anyhow!("near_ai_enroll_unavailable"))?;
+        (
+            settings
+                .near_ai_session
+                .clone()
+                .ok_or_else(|| anyhow!("near_ai_enroll_no_session"))?,
+            Login::of(&settings),
+        )
+    };
+    let finished = ceremony(shared, api, commons, &session, login.as_ref(), identity).await?;
+    validate_finished(&finished, identity)?;
+    if finished.tenant_id != cfg.tenant_id || finished.account_id != account_id {
+        bail!("account-enrollment-mismatch")
+    }
+    let mut payload = match previous {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map),
+        _ => bail!("near_ai_enroll_invalid"),
+    };
+    payload["access_token"] = serde_json::Value::String(finished.access_token);
+    payload["expires_at"] =
+        serde_json::to_value(Utc::now() + chrono::Duration::seconds(finished.expires_in_secs))?;
+    payload["account_id"] = serde_json::Value::String(account_id);
+    let body = serde_json::to_vec(&payload)?;
+    let store = shared.store.clone();
+    tokio::task::spawn_blocking(move || {
+        super::commons_credentials::replace(&store, &expected, &body, None)
+    })
+    .await
+    .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
 }
 
 /// Validate the server's answer and publish the enrollment, or publish

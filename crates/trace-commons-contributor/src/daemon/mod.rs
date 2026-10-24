@@ -22,6 +22,7 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
+mod account_session_renewal;
 pub mod activity_missions;
 pub mod admission_setup;
 pub mod approved_envelope;

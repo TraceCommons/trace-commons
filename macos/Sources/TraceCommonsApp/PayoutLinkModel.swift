@@ -19,6 +19,9 @@ final class PayoutLinkModel: ObservableObject {
     @Published private(set) var picker = PayoutPicker()
     @Published private(set) var busy = false
     @Published private(set) var refusal: PayoutLinkRefusal?
+    /// Why the status read was refused, when the section shows that instead
+    /// of hiding (`PayoutLinkSurface.shownStatusRefusal`).
+    @Published private(set) var statusRefusal: PayoutLinkRefusal?
 
     private var client: DaemonClient?
 
@@ -27,10 +30,12 @@ final class PayoutLinkModel: ObservableObject {
     }
 
     /// Reads the rail's status. A failed read keeps nothing stale on screen:
-    /// the section hides rather than show an old link state.
+    /// the section hides rather than show an old link state, except for a
+    /// missing account session, which it says.
     func refresh() async {
         guard surface != nil, let client else {
             rail = nil
+            statusRefusal = nil
             return
         }
         let result = await Task.detached(priority: .userInitiated) {
@@ -39,8 +44,10 @@ final class PayoutLinkModel: ObservableObject {
         switch result {
         case .success(let rails):
             rail = PayoutLinkSurface.nearAiRail(in: rails)
-        case .failure:
+            statusRefusal = nil
+        case .failure(let error):
             rail = nil
+            statusRefusal = PayoutLinkSurface.shownStatusRefusal(error)
         }
         if let rail, let surface, !picker.changing {
             // The daemon has no name for the link (neither listed nor
