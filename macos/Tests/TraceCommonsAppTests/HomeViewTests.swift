@@ -76,7 +76,8 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
                 + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
-                + "detail: delta?.text, detailInk: delta?.ink, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+                + "detail: signIn ?? delta?.text, detailInk: signIn == nil ? delta?.ink : nil, "
+                + "systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
         // columns, under Waiting and Contributed (owner, 2026-10-19), and
         // the NEAR AI balance sits beside Credit.
@@ -128,6 +129,41 @@ final class HomeViewTests: XCTestCase {
             DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertEqual(HomeFormat.pendingFigure(3, credit: known), HomeFormat.points(3))
         XCTAssertEqual(HomeFormat.pendingFigure(nil, credit: known), "—")
+    }
+
+    private func creditSummary(reason: String?, pointsState: String = "unknown") throws -> DaemonData.CommonsCreditSummary {
+        let reply = try XCTUnwrap(SampleDaemonData.reply("commons_credit_summary", in: .normalDay))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        object["points_state"] = pointsState
+        object["points_unknown_reason"] = reason as Any? ?? NSNull()
+        return try DaemonDataDecoding.decoder().decode(
+            DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    /// A summary whose points are unknown because no account session could
+    /// be used or renewed says "Sign in again" (the payout link's own
+    /// constant, from the core) in place of the silent dash. Any other
+    /// unknown, a known figure, and a core that sends no reason keep the dash.
+    func test_creditTileSaysSignInAgainOnlyWhenTheSessionIsMissing() throws {
+        let line = "Sign in again"
+        XCTAssertEqual(
+            HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: line), line)
+        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: nil), line: line))
+        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "something-else"), line: line))
+        XCTAssertNil(HomeFormat.creditSignIn(
+            try creditSummary(reason: "account-session-required", pointsState: "known"), line: line))
+        XCTAssertNil(HomeFormat.creditSignIn(nil, line: line))
+        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: nil))
+        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: ""))
+    }
+
+    /// The tile reads the line from the core's payout-link export, not a
+    /// string of this shell's.
+    func test_creditSignInLineIsThePayoutLinkConstant() throws {
+        XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
+        let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("detail: signIn ?? delta?.text"))
+        XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }
 #endif
