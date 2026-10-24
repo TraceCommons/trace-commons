@@ -136,20 +136,21 @@ public struct GlassListRow: View {
         HStack(spacing: GlassTokens.Space.s4) {
             Group {
                 if let expanded, let onToggleExpand {
-                    Button(action: onToggleExpand) {
-                        Image(systemName: "chevron.right")
-                            .glassGlyph(10, weight: .semibold)
-                            .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                            .glassPressedFill()
-                            // The target is the row's height and reaches into
-                            // the row's leading inset and the gap before the
-                            // tile (owner, 2026-10-19: the 10pt glyph alone was
-                            // hard to hit). The glyph stays where it was drawn.
-                            .frame(width: Self.chevronTarget.width, height: Self.chevronTarget.height)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(GlassPressStyle())
+                    // A tap, not a `Button` (`GlassTapControl`): one on every
+                    // row put a focus walk of the whole window behind each
+                    // row drawn. The arrow keys open and close a row.
+                    Image(systemName: "chevron.right")
+                        .glassGlyph(10, weight: .semibold)
+                        .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .glassPressedFill()
+                        // The target is the row's height and reaches into
+                        // the row's leading inset and the gap before the
+                        // tile (owner, 2026-10-19: the 10pt glyph alone was
+                        // hard to hit). The glyph stays where it was drawn.
+                        .frame(width: Self.chevronTarget.width, height: Self.chevronTarget.height)
+                        .contentShape(Rectangle())
+                        .glassTapControl(action: onToggleExpand)
                     // A native disclosure for assistive tech, so the system
                     // says expanded or collapsed in the person's language.
                     .accessibilityRepresentation {
@@ -220,7 +221,7 @@ public struct GlassListRow: View {
                 // The kebab needs its own name: falling back to the row title
                 // gave it the same VoiceOver name as the row it sits in.
                 if let onMenu, !menuLabel.isEmpty {
-                    GlassKebab(menuLabel, open: menuOpen, action: onMenu)
+                    GlassKebab(menuLabel, open: menuOpen, control: .tap, action: onMenu)
                 } else {
                     Color.clear
                 }

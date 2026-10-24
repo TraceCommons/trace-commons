@@ -509,16 +509,27 @@ public struct GlassFolderButton: View {
 public struct GlassKebab: View {
     private let label: String
     private let open: Bool
+    private let control: Control
     private let action: () -> Void
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.glassGround) private var ground
 
+    /// What the kebab is made of. A `Button` everywhere it stands alone; a
+    /// tap (`GlassTapControl`) on a list row, where one on every row put a
+    /// focus walk of the whole window behind each row drawn. Both read as
+    /// a button to VoiceOver, with the same name and press.
+    public enum Control: Sendable {
+        case button
+        case tap
+    }
+
     /// `label` names the button for VoiceOver and the help tag, from the
     /// core's copy.
-    public init(_ label: String, open: Bool = false, action: @escaping () -> Void) {
+    public init(_ label: String, open: Bool = false, control: Control = .button, action: @escaping () -> Void) {
         self.label = label
         self.open = open
+        self.control = control
         self.action = action
     }
 
@@ -542,23 +553,37 @@ public struct GlassKebab: View {
     }
 
     public var body: some View {
-        let lit = Self.lit(open: open, hovering: hovering && isEnabled)
-        Button(action: action) {
-            // #1146's three 1.6pt dots in a 4×14 box.
-            GlassGlyphView(.kebab)
-                .foregroundStyle(Self.ink(lit: lit, ground: ground).color)
-                .frame(width: 22, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(lit ? Self.litFill(ground: ground) : .clear)
-                )
-                .glassPressedFill()
-                .contentShape(Rectangle())
+        switch control {
+        case .button:
+            Button(action: action) { dots }
+                .buttonStyle(GlassPressStyle())
+                .onHover { hovering = $0 }
+                .accessibilityLabel(label)
+                .help(label)
+        case .tap:
+            dots
+                .glassTapControl(action: action)
+                .onHover { hovering = $0 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { if isEnabled { action() } }
+                .help(label)
         }
-        .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
-        .accessibilityLabel(label)
-        .help(label)
+    }
+
+    private var dots: some View {
+        let lit = Self.lit(open: open, hovering: hovering && isEnabled)
+        // #1146's three 1.6pt dots in a 4×14 box.
+        return GlassGlyphView(.kebab)
+            .foregroundStyle(Self.ink(lit: lit, ground: ground).color)
+            .frame(width: 22, height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(lit ? Self.litFill(ground: ground) : .clear)
+            )
+            .glassPressedFill()
+            .contentShape(Rectangle())
     }
 }
 
