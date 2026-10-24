@@ -758,6 +758,9 @@ private struct HistoryPage: View {
                     // record count, then its rows.
                     LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s10) {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                            #if DEBUG
+                            let _ = OtherCollectionRowBodies.record("supplementalHistoryGroups", group.id)
+                            #endif
                             projectGroup(group, first: index == 0)
                         }
                     }
@@ -800,6 +803,9 @@ private struct HistoryPage: View {
             .accessibilityElement(children: .combine)
             LazyVStack(alignment: .leading, spacing: 1) {
                 ForEach(group.entries) { row in
+                    #if DEBUG
+                    let _ = OtherCollectionRowBodies.record("supplementalHistoryRows", row.submissionId)
+                    #endif
                     HistoryListRow(
                         row: row, statusLabel: statusLabel,
                         selected: selection == row.submissionId,

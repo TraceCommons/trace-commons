@@ -10,9 +10,11 @@ import TCBridge
 final class InsightsCollectionsLazyTests: XCTestCase {
     func testPatternSessionRowsStayBoundedAndRemainReachable() throws {
         let copy = try InsightsSessionRouteTests.coreCopy()
-        let small = measure(InsightsPatternSessionsView(found: try patterns(20), copy: copy), first: "101")
-        let large = measure(InsightsPatternSessionsView(found: try patterns(200), copy: copy), first: "101",
-                            targets: [(0.5, "202"), (1, "303"), (0, "101")])
+        let small = measure(InsightsPatternSessionsView(found: try patterns(20), copy: copy), first: "session-0",
+                            collection: "insightsPatternSessions")
+        let large = measure(InsightsPatternSessionsView(found: try patterns(200), copy: copy), first: "session-0",
+                            targets: [(0.5, "session-100"), (1, "session-199"), (0, "session-0")],
+                            collection: "insightsPatternSessions")
         XCTAssertGreaterThan(small, 0)
         XCTAssertLessThanOrEqual(large, small + 100, "Offscreen pattern sessions must not grow the responder tree")
     }
@@ -108,7 +110,7 @@ final class InsightsCollectionsLazyTests: XCTestCase {
         try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    private func measure(_ content: some View, first: String, targets: [(CGFloat, String)] = [], scanFor: String? = nil, collection: String? = nil) -> Int {
+    private func measure(_ content: some View, first: String, targets: [(CGFloat, String)] = [], scanFor: String? = nil, collection: String) -> Int {
         OtherCollectionRowBodies.startRecording()
         defer { OtherCollectionRowBodies.stopRecording() }
         _ = NSApplication.shared
@@ -127,25 +129,21 @@ final class InsightsCollectionsLazyTests: XCTestCase {
         _ = hosting.accessibilityChildren()
         hosting.layoutSubtreeIfNeeded()
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-        func readableValues() -> [String] {
-            descendants(hosting).flatMap { view in
-                [view.accessibilityValue() as? String, view.accessibilityLabel(), (view as? NSButton)?.title].compactMap { $0 }
-            }
-        }
+        // Native text backing differs between macOS releases. Row-body
+        // construction proves laziness even when AX creates no NSText views.
         func contains(_ expected: String) -> Bool {
-            if let collection, OtherCollectionRowBodies.built[collection]?.contains(expected) == true { return true }
-            return readableValues().contains { $0.contains(expected) }
+            OtherCollectionRowBodies.built[collection]?.contains(expected) == true
         }
-        XCTAssertTrue(contains(first), "The first row must be materialized: \(readableValues().prefix(20))")
-        if let collection {
-            let offscreen = scanFor ?? targets.first(where: { $0.0 == 1 })?.1
-            if let offscreen {
-                XCTAssertFalse(OtherCollectionRowBodies.built[collection]?.contains(offscreen) == true,
-                               "The last row must stay unbuilt before scrolling")
-            }
+        let initialRows = OtherCollectionRowBodies.built[collection]?.count ?? 0
+        XCTAssertGreaterThan(initialRows, 0, "The viewport must construct rows")
+        XCTAssertLessThan(initialRows, 80, "Offscreen rows must not be constructed with the whole dataset")
+        XCTAssertTrue(contains(first), "The first row must be materialized")
+        let offscreen = scanFor ?? targets.first(where: { $0.0 == 1 })?.1
+        if let offscreen {
+            XCTAssertFalse(contains(offscreen), "The last row must stay unbuilt before scrolling")
         }
         let initialCount = descendants(hosting).count
-        print("INSIGHTS_COLLECTION views=\(initialCount)")
+        print("INSIGHTS_COLLECTION collection=\(collection) rows=\(initialRows) views=\(initialCount)")
         let scroll = descendants(hosting).compactMap { $0 as? NSScrollView }.first
         XCTAssertNotNil(scroll)
         for (fraction, expected) in targets {
@@ -161,6 +159,9 @@ final class InsightsCollectionsLazyTests: XCTestCase {
                 window.displayIfNeeded()
             } while !contains(expected) && Date() < deadline
             XCTAssertTrue(contains(expected), "Row at scroll fraction \(fraction) must remain reachable and materialize")
+            if fraction == 0, let scroll {
+                XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1, "Returning to the first row must restore the scroll position")
+            }
         }
         if let scanFor {
             // The form follows the frozen evidence, so the last member is

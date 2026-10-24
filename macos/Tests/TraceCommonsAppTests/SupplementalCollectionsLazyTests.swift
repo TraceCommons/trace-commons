@@ -5,8 +5,10 @@ import TCBridge
 import XCTest
 @testable import TraceCommonsApp
 
-/// Selectability makes realized text observable as native views in this
-/// harness. These checks measure construction, not production focus latency.
+/// Opt-in row probes measure viewport-bounded construction and final-row
+/// reachability independently of OS-specific accessibility text hosts.
+/// Native view bounds remain a separate regression check; this does not
+/// measure focus latency or depend on accessibility text values.
 @MainActor
 final class SupplementalCollectionsLazyTests: XCTestCase {
     func testCertificateRowsAreViewportBounded() throws {
@@ -20,9 +22,11 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
             }
             return ScrollView { CertificateSection(entries: entries) }.environmentObject(AppModel())
         }
-        let small = measure(try view(10))
-        let large = measure(try view(500), last: "Certificate 499")
-        XCTAssertLessThanOrEqual(large, small + 100)
+        // Fill the viewport and prefetch region before comparing scales.
+        let small = measure(try view(50), collection: "supplementalCertificates")
+        let large = measure(try view(500), collection: "supplementalCertificates", last: "e-499")
+        XCTAssertLessThanOrEqual(large.rows, small.rows + 25)
+        XCTAssertLessThanOrEqual(large.views, small.views + 100)
     }
 
     func testHistoryRowsInOneGroupAreViewportBounded() async throws { try await history(manyGroups: false) }
@@ -41,9 +45,11 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
             return TracesHistoryPage(store: store, statusLabel: { _ in "Accepted" }, selection: .constant(""), back: {})
                 .environmentObject(AppModel())
         }
-        let small = measure(try await view(10))
-        let large = measure(try await view(100), last: "History 99")
-        XCTAssertLessThanOrEqual(large, small + 150)
+        let collection = manyGroups ? "supplementalHistoryGroups" : "supplementalHistoryRows"
+        let small = measure(try await view(10), collection: collection)
+        let large = measure(try await view(100), collection: collection, last: manyGroups ? "p-99" : "row-99")
+        XCTAssertLessThanOrEqual(large.rows, small.rows + 25)
+        XCTAssertLessThanOrEqual(large.views, small.views + 150)
     }
 
     func testInferenceCallsAreViewportBounded() async throws {
@@ -64,9 +70,10 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
             return InferenceTabView(store: store).environmentObject(model)
         }
         // Saturate the viewport and SwiftUI prefetch region before comparing.
-        let small = measure(try await view(25))
-        let large = measure(try await view(50), last: "Call 49")
-        XCTAssertLessThanOrEqual(large, small + 100)
+        let small = measure(try await view(25), collection: "supplementalCalls")
+        let large = measure(try await view(50), collection: "supplementalCalls", last: "49")
+        XCTAssertLessThanOrEqual(large.rows, small.rows + 25)
+        XCTAssertLessThanOrEqual(large.views, small.views + 100)
     }
 
     func testOverviewModelLabelsAreViewportBounded() throws {
@@ -82,16 +89,19 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
                                        copy: try InsightsSessionRouteTests.coreCopy(), snapshots: [])
         }
         // Short model rows need more than ten rows to fill the prefetch region.
-        let small = measure(try view(50))
-        let large = measure(try view(500), last: "Model 499")
-        XCTAssertLessThanOrEqual(large, small + 100)
+        let small = measure(try view(50), collection: "supplementalModels")
+        let large = measure(try view(500), collection: "supplementalModels", last: "499")
+        XCTAssertLessThanOrEqual(large.rows, small.rows + 25)
+        XCTAssertLessThanOrEqual(large.views, small.views + 100)
     }
 
     private func json(_ object: Any) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 
-    private func measure(_ content: some View, last: String? = nil) -> Int {
+    private func measure(_ content: some View, collection: String, last: String? = nil) -> (rows: Int, views: Int) {
+        OtherCollectionRowBodies.startRecording()
+        defer { OtherCollectionRowBodies.stopRecording() }
         _ = NSApplication.shared
         let previous = NSApp.value(forKey: "accessibilityEnhancedUserInterface")
         NSApp.setValue(true, forKey: "accessibilityEnhancedUserInterface")
@@ -109,13 +119,14 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
         _ = hosting.accessibilityChildren()
         hosting.layoutSubtreeIfNeeded()
         let views = descendants(hosting)
-        let count = views.count
-        print("SUPPLEMENTAL_COLLECTION views=\(count)")
-        XCTAssertGreaterThan(count, 1)
+        let initial = OtherCollectionRowBodies.built[collection] ?? []
+        print("SUPPLEMENTAL_COLLECTION \(collection) rows=\(initial.count) views=\(views.count)")
+        XCTAssertFalse(initial.isEmpty, "The collection probe must observe materialized rows")
         if let last {
+            XCTAssertFalse(initial.contains(last), "The final offscreen row must not be constructed before scrolling")
             let scroll = views.compactMap { $0 as? NSScrollView }.first
             XCTAssertNotNil(scroll)
-            func found() -> Bool { descendants(hosting).contains { ($0.accessibilityValue() as? String) == last } }
+            func found() -> Bool { OtherCollectionRowBodies.built[collection]?.contains(last) == true }
             let deadline = Date().addingTimeInterval(3)
             repeat {
                 if let scroll, let document = scroll.documentView {
@@ -128,7 +139,7 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
             } while !found() && Date() < deadline
             XCTAssertTrue(found(), "The final row must remain reachable: \(last)")
         }
-        return count
+        return (initial.count, views.count)
     }
 }
 

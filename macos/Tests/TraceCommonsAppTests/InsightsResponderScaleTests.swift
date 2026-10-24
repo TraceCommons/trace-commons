@@ -10,9 +10,9 @@ import TCBridge
 final class InsightsResponderScaleTests: XCTestCase {
     func testSavedSessionsKeepPlatformViewsBounded() throws {
         let copy = try InsightsSessionRouteTests.coreCopy()
-        let a = measure(InsightsCardInputsView(inputs: try savedSessions(20), snapshots: [], copy: copy))
-        let b = measure(InsightsCardInputsView(inputs: try savedSessions(1061), snapshots: [], copy: copy),
-                        scrollTargets: [(0.5, "202"), (1, "303"), (0, "101")])
+        let a = measure(InsightsCardInputsView(inputs: try savedSessions(20), snapshots: [], copy: copy), collection: "insightsSavedSessions", first: "session-0")
+        let b = measure(InsightsCardInputsView(inputs: try savedSessions(1061), snapshots: [], copy: copy), collection: "insightsSavedSessions", first: "session-0",
+                        scrollTargets: [(0.5, "session-530"), (1, "session-1060"), (0, "session-0")])
         print("INSIGHTS_RESPONDERS saved small=\(a) large=\(b)")
         XCTAssertGreaterThan(a, 0)
         XCTAssertLessThanOrEqual(b, a + 100, "Offscreen saved sessions must not grow the platform responder tree with the dataset")
@@ -22,9 +22,9 @@ final class InsightsResponderScaleTests: XCTestCase {
         let copy = try InsightsSessionRouteTests.coreCopy()
         let small = try counterSessions(20)
         let large = try counterSessions(1061)
-        let a = measure(InsightsCounterSessionsView(sessions: small, copy: copy))
-        let b = measure(InsightsCounterSessionsView(sessions: large, copy: copy),
-                        scrollTargets: [(0.5, "202"), (1, "303"), (0, "101")])
+        let a = measure(InsightsCounterSessionsView(sessions: small, copy: copy), collection: "insightsCounterSessions", first: "0")
+        let b = measure(InsightsCounterSessionsView(sessions: large, copy: copy), collection: "insightsCounterSessions", first: "0",
+                        scrollTargets: [(0.5, "530"), (1, "1060"), (0, "0")])
         print("INSIGHTS_RESPONDERS counter small=\(a) large=\(b)")
         XCTAssertGreaterThan(a, 0)
         XCTAssertLessThanOrEqual(b, a + 100, "Offscreen sessions must not grow the platform responder tree with the dataset")
@@ -57,7 +57,9 @@ final class InsightsResponderScaleTests: XCTestCase {
         return try JSONDecoder().decode(InsightsCardInputs.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    private func measure(_ content: some View, scrollTargets: [(CGFloat, String)] = []) -> Int {
+    private func measure(_ content: some View, collection: String, first: String, scrollTargets: [(CGFloat, String)] = []) -> Int {
+        OtherCollectionRowBodies.startRecording()
+        defer { OtherCollectionRowBodies.stopRecording() }
         _ = NSApplication.shared
         let previous = NSApp.value(forKey: "accessibilityEnhancedUserInterface")
         NSApp.setValue(true, forKey: "accessibilityEnhancedUserInterface")
@@ -78,10 +80,16 @@ final class InsightsResponderScaleTests: XCTestCase {
             [view] + view.subviews.flatMap(descendants)
         }
         let views = descendants(hosting)
-        func textValues() -> [String] {
-            descendants(hosting).compactMap { $0.accessibilityValue() as? String }
+        // SwiftUI text is not backed by an NSView accessibilityValue on
+        // every macOS version. Measure construction independently of that
+        // platform detail, while retaining native-view bounds as well.
+        func built(_ id: String) -> Bool { OtherCollectionRowBodies.built[collection]?.contains(id) == true }
+        XCTAssertTrue(built(first), "The first session must be constructed")
+        let realized = OtherCollectionRowBodies.built[collection]?.count ?? 0
+        XCTAssertLessThan(realized, 80, "The viewport must not construct the whole week")
+        if let last = scrollTargets.first(where: { $0.0 == 1 })?.1 {
+            XCTAssertFalse(built(last), "The last session must stay unbuilt until scrolling")
         }
-        XCTAssertTrue(textValues().contains("101"), "The first session's token count must be materialized and readable")
         let count = views.count
         print("INSIGHTS_LAYOUT views=\(count) seconds=\(Date().timeIntervalSince(start))")
         // Read only the materialized native views, not the entire AX tree:
@@ -99,8 +107,11 @@ final class InsightsResponderScaleTests: XCTestCase {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.01))
                 hosting.layoutSubtreeIfNeeded()
                 window.displayIfNeeded()
-            } while !textValues().contains(expected) && Date() < deadline
-            XCTAssertTrue(textValues().contains(expected), "Session at scroll fraction \(fraction) must remain reachable and readable after lazy scrolling")
+            } while !built(expected) && Date() < deadline
+            XCTAssertTrue(built(expected), "Session at scroll fraction \(fraction) must remain reachable and construct its row")
+            if fraction == 0, let scroll {
+                XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1, "Returning to the first row must restore the scroll position")
+            }
         }
         return count
     }
