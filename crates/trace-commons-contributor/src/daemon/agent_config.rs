@@ -10,16 +10,17 @@ pub(crate) fn schema() -> Value {
     let ranges =
         serde_json::to_value(settings::settings_ranges()).expect("settings ranges serialize");
     for (key, bounds) in ranges.as_object().expect("settings ranges object") {
+        let daily_cap = matches!(key.as_str(), "max_uploads_per_day" | "max_bytes_per_day");
         properties.insert(key.clone(), json!({
-            "type":"integer", "minimum":bounds["min"], "maximum":bounds["max"],
+            "type":if daily_cap {json!(["integer","null"])} else {json!("integer")}, "minimum":bounds["min"], "maximum":bounds["max"],
             "description": match key.as_str() {
                 "quiescence_secs" => "Seconds without writes before a trace is considered finished.",
                 "approval_hold_secs" => "Seconds before an approved upload can start; zero removes the undo hold.",
                 "digest_interval_secs" => "Seconds between interval notifications.",
-                "max_uploads_per_day" => "Local daily upload count limit; does not grant upload permission.",
-                _ => "Local daily upload byte limit; does not grant upload permission.",
+                "max_uploads_per_day" => "Local daily upload count limit. A number pins this cap, even at the default; null resets the shared default and follows server allowances. Does not grant upload permission.",
+                _ => "Local daily upload byte limit. A number pins this cap, even at the default; null resets the shared default and follows server allowances. Does not grant upload permission.",
             },
-            "examples":[bounds["min"]]
+            "examples":if daily_cap {json!([bounds["min"],null])} else {json!([bounds["min"]])}
         }));
     }
     for (key, description) in [
@@ -170,7 +171,7 @@ pub(crate) fn schema() -> Value {
         },
         "semantics":{
             "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, which merges supplied kind switches.",
-            "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction.",
+            "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction. Daily-cap changes include uses_server_allowance before/after metadata when choosing a local cap or resetting to follow server allowances, even if the saved number is unchanged.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",
             "inspection":"The settings response includes read-only and redacted fields; do not copy it wholesale into a patch."
@@ -208,14 +209,39 @@ pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value,
         .collect();
     let mut changes = Vec::new();
     for key in keys {
-        if before.get(key) == after.get(key) {
+        // Persisted provenance is not a public setting. Report its real
+        // behavioral effect on the corresponding cap instead, including
+        // choosing a numeric cap equal to today's default or resetting it.
+        if matches!(
+            key.as_str(),
+            "max_uploads_per_day_explicit" | "max_bytes_per_day_explicit"
+        ) {
+            continue;
+        }
+        let modes = match key.as_str() {
+            "max_uploads_per_day" => Some((
+                !settings.upload_count_is_explicit(),
+                !candidate.upload_count_is_explicit(),
+            )),
+            "max_bytes_per_day" => Some((
+                !settings.upload_bytes_is_explicit(),
+                !candidate.upload_bytes_is_explicit(),
+            )),
+            _ => None,
+        };
+        let mode_changed = modes.is_some_and(|(old, new)| old != new);
+        if before.get(key) == after.get(key) && !mode_changed {
             continue;
         }
         let old = shown_before.get(key).cloned().unwrap_or(Value::Null);
         let new = shown_after.get(key).cloned().unwrap_or(Value::Null);
         let redacted = before.get(key).is_some_and(|raw| raw != &old)
             || after.get(key).is_some_and(|raw| raw != &new);
-        changes.push(json!({"key":key,"before":old,"after":new,"redacted":redacted}));
+        let mut change = json!({"key":key,"before":old,"after":new,"redacted":redacted});
+        if let Some((old, new)) = modes.filter(|_| mode_changed) {
+            change["uses_server_allowance"] = json!({"before":old,"after":new});
+        }
+        changes.push(change);
     }
     Ok(
         json!({"schema_version":"trace_commons.settings_preview.v1","applied":false,"changes":changes}),
@@ -313,9 +339,17 @@ mod tests {
                     .any(|c| c["key"] == "verdicts_offer_pending" && c["after"] == false)
             );
         }
+        let mut pinned = settings.clone();
+        settings::apply_settings_object(
+            &mut pinned,
+            &json!({
+                "max_uploads_per_day":settings.max_uploads_per_day
+            }),
+        )
+        .unwrap();
         assert_eq!(
             preview(
-                &settings,
+                &pinned,
                 &json!({"max_uploads_per_day":settings.max_uploads_per_day})
             )
             .unwrap()["changes"],
@@ -344,6 +378,83 @@ mod tests {
             "sk-sensitive-sentinel"
         );
         assert!(preview(&settings, &json!({"near_ai_inference":null})).is_err());
+    }
+
+    #[test]
+    fn agent_config_daily_caps_discover_null_reset_and_report_same_value_mode_changes() {
+        let schema = schema();
+        let properties = &schema["patch_schema"]["properties"];
+        for key in ["max_uploads_per_day", "max_bytes_per_day"] {
+            assert_eq!(properties[key]["type"], json!(["integer", "null"]));
+            assert!(
+                properties[key]["examples"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&Value::Null)
+            );
+            assert!(properties.get(format!("{key}_explicit")).is_none());
+        }
+        let mut settings = DaemonSettings::default();
+        let original = serde_json::to_value(&settings).unwrap();
+        let previewed = preview(&settings, &json!({"max_uploads_per_day":50})).unwrap();
+        assert_eq!(
+            previewed["changes"],
+            json!([{
+                "key":"max_uploads_per_day", "before":50,"after":50,"redacted":false,
+                "uses_server_allowance":{"before":true,"after":false}
+            }])
+        );
+        assert!(!previewed.to_string().contains("_explicit"));
+        assert_eq!(serde_json::to_value(&settings).unwrap(), original);
+        settings::apply_settings_object(&mut settings, &json!({"max_uploads_per_day":50})).unwrap();
+        assert_eq!(
+            preview(&settings, &json!({"max_uploads_per_day":50})).unwrap()["changes"],
+            json!([])
+        );
+        let reset = preview(&settings, &json!({"max_uploads_per_day":null})).unwrap();
+        assert_eq!(
+            reset["changes"],
+            json!([{
+                "key":"max_uploads_per_day", "before":50,"after":50,"redacted":false,
+                "uses_server_allowance":{"before":false,"after":true}
+            }])
+        );
+    }
+
+    #[test]
+    fn agent_config_daily_cap_reset_preserves_other_cap_and_legacy_provenance_is_not_a_change() {
+        let mut settings = DaemonSettings::default();
+        settings::apply_settings_object(
+            &mut settings,
+            &json!({
+                "max_uploads_per_day":7,"max_bytes_per_day":1024
+            }),
+        )
+        .unwrap();
+        let original = serde_json::to_value(&settings).unwrap();
+        let reset = preview(&settings, &json!({"max_bytes_per_day":null})).unwrap();
+        assert_eq!(
+            reset["changes"],
+            json!([{
+                "key":"max_bytes_per_day", "before":1024,"after":209715200,"redacted":false,
+                "uses_server_allowance":{"before":false,"after":true}
+            }])
+        );
+        assert_eq!(serde_json::to_value(&settings).unwrap(), original);
+        settings.max_uploads_per_day_explicit = None;
+        assert_eq!(
+            preview(&settings, &json!({"max_uploads_per_day":7})).unwrap()["changes"],
+            json!([])
+        );
+        let defaults = DaemonSettings::default();
+        assert_eq!(
+            preview(
+                &defaults,
+                &json!({"max_uploads_per_day":null,"max_bytes_per_day":null})
+            )
+            .unwrap()["changes"],
+            json!([])
+        );
     }
 
     #[test]

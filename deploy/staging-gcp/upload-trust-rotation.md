@@ -35,7 +35,7 @@ The exact approved staging VM/project/service-account identity is checked on
 every configured run. The feature environment must be the root-owned reviewed
 nine-setting file `/etc/tracecommons/client-upload-trust.env`, produced by the
 activation procedure. The deployed ingest already refuses startup unless both
-trust readiness contracts pass. Staging's tenant-access-grant gate also requires
+trust readiness contracts pass. When tenant-access-grant enforcement is enabled, provision
 a legitimate service-principal grant with role `account_trust_worker`, matching
 the configured worker tenant, issuer, audience and subject. Token minting does
 not create that grant. Do not disable the grant gate or substitute a contributor
