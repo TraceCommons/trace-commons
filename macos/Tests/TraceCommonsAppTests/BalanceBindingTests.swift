@@ -141,3 +141,141 @@ final class BalanceBindingTests: XCTestCase {
         XCTAssertTrue(daemon.methods.contains(CredentialSurface.statusMethod))
     }
 }
+
+
+private final class DelayedBalanceDaemon: DaemonCalling {
+    private let lock = NSLock()
+    private var countValue = 0
+    private var freshValues: [Bool] = []
+    let releaseFirst = DispatchSemaphore(value: 0)
+    let firstReply: String
+    let laterReply: String
+    var count: Int { lock.withLock { countValue } }
+    var requestedFresh: [Bool] { lock.withLock { freshValues } }
+
+    init(first: String, later: String) { firstReply = first; laterReply = later }
+    func call(_ method: String, params: String) -> String {
+        guard method == BalanceSurface.statusMethod else { return #"{"id":1,"result":{}}"# }
+        let payload = (try? JSONSerialization.jsonObject(with: Data(params.utf8))) as? [String: Any]
+        let index = lock.withLock {
+            freshValues.append(payload?["fresh"] as? Bool ?? false)
+            countValue += 1
+            return countValue
+        }
+        if index == 1 {
+            _ = releaseFirst.wait(timeout: .now() + 5)
+            return firstReply
+        }
+        return laterReply
+    }
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
+}
+
+extension BalanceBindingTests {
+    private static let oldBalance = #"{"id":1,"result":{"state":"known","remaining_nanos":1000000000,"scale":9}}"#
+    private static let newBalance = #"{"id":1,"result":{"state":"known","remaining_nanos":2000000000,"scale":9}}"#
+
+    @MainActor
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(3)
+        while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(condition())
+    }
+
+    @MainActor
+    func testAnOlderAutomaticReadCannotOverwriteAManualRefresh() async throws {
+        let daemon = DelayedBalanceDaemon(first: Self.oldBalance, later: Self.newBalance)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.refreshNearAiBalance()
+        try await waitUntil { daemon.count == 1 }
+        model.refreshNearAiBalanceFromButton()
+        try await waitUntil { model.balanceStatus.remainingNanos == 2_000_000_000 }
+        daemon.releaseFirst.signal()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(model.balanceStatus.remainingNanos, 2_000_000_000)
+    }
+
+    @MainActor
+    func testRepeatedManualRefreshUsesOneRequest() async throws {
+        let daemon = DelayedBalanceDaemon(first: Self.newBalance, later: Self.oldBalance)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.refreshNearAiBalanceFromButton()
+        XCTAssertTrue(model.balanceRefreshing, "the click must show activity before the daemon starts")
+        model.refreshNearAiBalanceFromButton()
+        try await waitUntil { daemon.count >= 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(daemon.count, 1)
+        XCTAssertEqual(daemon.requestedFresh, [true], "the button must bypass the ordinary cache")
+        daemon.releaseFirst.signal()
+        try await waitUntil { model.balanceStatus.remainingNanos == 2_000_000_000 }
+        XCTAssertFalse(model.balanceRefreshing)
+    }
+
+    @MainActor
+    func testTransportFailureReplacesTheBalanceWithItsUnavailableState() async throws {
+        let daemon = DelayedBalanceDaemon(first: Self.oldBalance,
+            later: #"{"id":1,"error":{"code":-1,"message":"unavailable"}}"#)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.refreshNearAiBalance()
+        daemon.releaseFirst.signal()
+        try await waitUntil { model.balanceStatus.state == "known" }
+        model.refreshNearAiBalanceFromButton()
+        try await waitUntil { daemon.count == 2 && !model.balanceRefreshing }
+        XCTAssertEqual(model.balanceStatus.state, "unavailable")
+        XCTAssertNil(model.balanceStatus.remainingNanos)
+    }
+}
+
+
+extension BalanceBindingTests {
+    @MainActor
+    func testCredentialAndFreshRereadsSupersedePendingManualRefresh() async throws {
+        let daemon = DelayedBalanceDaemon(first: Self.oldBalance, later: Self.newBalance)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.refreshNearAiBalanceFromButton()
+        try await waitUntil { daemon.count == 1 }
+        model.refreshNearAiCredential()
+        XCTAssertTrue(model.balanceRefreshing)
+        try await waitUntil { model.balanceStatus.remainingNanos == 2_000_000_000 }
+        model.refreshNearAiBalance(fresh: true)
+        try await waitUntil { daemon.count == 3 }
+        try await waitUntil { model.balanceStatus.remainingNanos == 2_000_000_000 }
+        XCTAssertFalse(model.balanceRefreshing)
+        XCTAssertEqual(daemon.requestedFresh, [true, true, true])
+        daemon.releaseFirst.signal()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(model.balanceStatus.remainingNanos, 2_000_000_000)
+    }
+
+    @MainActor
+    func testMissingClientShowsUnavailableWithoutLeavingRefreshBusy() {
+        let model = AppModel()
+        model.refreshNearAiBalanceFromButton()
+        XCTAssertEqual(model.balanceStatus.state, "unavailable")
+        XCTAssertFalse(model.balanceRefreshing)
+    }
+
+    @MainActor
+    func testAReplacedClientCannotPublishButUnlocksRefreshWhenItReturns() async throws {
+        let old = DelayedBalanceDaemon(first: Self.oldBalance, later: Self.oldBalance)
+        let replacement = DelayedBalanceDaemon(first: Self.newBalance, later: Self.newBalance)
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: old))
+        model.refreshNearAiBalanceFromButton()
+        XCTAssertTrue(model.balanceRefreshing)
+        try await waitUntil { old.count == 1 }
+        model.setClientForTesting(DaemonClient(daemon: replacement))
+        old.releaseFirst.signal()
+        try await waitUntil { !model.balanceRefreshing }
+        XCTAssertEqual(model.balanceStatus, .unreported)
+        replacement.releaseFirst.signal()
+        model.refreshNearAiBalanceFromButton()
+        try await waitUntil { !model.balanceRefreshing }
+        XCTAssertEqual(model.balanceStatus.remainingNanos, 2_000_000_000)
+    }
+}

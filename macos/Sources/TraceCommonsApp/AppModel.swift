@@ -661,6 +661,8 @@ final class AppModel: ObservableObject {
     /// more here: every other seed value would be a claim about somebody's
     /// money made before anything was read.
     @Published private(set) var balanceStatus: BalanceStatus = .unreported
+    @Published private(set) var balanceRefreshing = false
+    private var balanceReadGeneration = 0
 
     /// The ceremony this shell started, while it is still going.
     ///
@@ -788,15 +790,41 @@ final class AppModel: ObservableObject {
     /// row, and a card whose two halves disagreed about whether a session
     /// exists would be worse than either half alone.
     ///
-    /// `fresh` is for the card's refresh button. Every other re-read may be
-    /// served the daemon's figure from the last minute; the button may not,
-    /// or pressing it changes nothing.
+    /// Lifecycle reads supersede earlier reads, including a pending button
+    /// refresh: the credential or spending organization may have changed.
     func refreshNearAiBalance(fresh: Bool = false) {
-        perform(
-            BalanceSurface.statusMethod,
-            work: { try $0.nearAiBalance(fresh: fresh) }
-        ) { status in
-            self.publishIfChanged(\.balanceStatus, status)
+        readNearAiBalance(fresh: fresh || balanceRefreshing, showingProgress: balanceRefreshing)
+    }
+
+    /// Coalesce repeated clicks, while keeping lifecycle reads independent.
+    func refreshNearAiBalanceFromButton() {
+        guard !balanceRefreshing else { return }
+        readNearAiBalance(fresh: true, showingProgress: true)
+    }
+
+    private func readNearAiBalance(fresh: Bool, showingProgress: Bool) {
+        balanceReadGeneration &+= 1
+        let generation = balanceReadGeneration
+        guard let client else {
+            balanceRefreshing = false
+            if showingProgress { publishIfChanged(\.balanceStatus, BalanceStatus(state: "unavailable")) }
+            return
+        }
+        balanceRefreshing = showingProgress
+        Task {
+            let outcome = await DaemonWork.run { Result { try client.nearAiBalance(fresh: fresh) } }
+            guard generation == self.balanceReadGeneration else { return }
+            self.balanceRefreshing = false
+            guard self.client === client else { return }
+            switch outcome {
+            case .success(let status):
+                self.recordRead(BalanceSurface.statusMethod, answered: true)
+                self.publishIfChanged(\.balanceStatus, status)
+            case .failure:
+                self.recordRead(BalanceSurface.statusMethod, answered: false)
+                // An old amount must not look like a successful refresh.
+                self.publishIfChanged(\.balanceStatus, BalanceStatus(state: "unavailable"))
+            }
         }
     }
 
