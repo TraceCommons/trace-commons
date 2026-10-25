@@ -10,8 +10,9 @@ use crate::{
     source::{self, TraceSource},
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    process::Command,
 };
 use uuid::Uuid;
 
@@ -20,8 +21,9 @@ pub const STAGING: &str = "managed-native-exports";
 pub struct NativeCollection {
     tool: ToolId,
     root: PathBuf,
-    before: BTreeSet<PathBuf>,
+    before: Option<BTreeSet<PathBuf>>,
     id: Uuid,
+    codex: Option<super::session_binding::CodexBinding>,
 }
 
 fn tool_directory(tool: ToolId) -> Result<&'static str, ManagedError> {
@@ -84,18 +86,30 @@ impl NativeCollection {
         let root = NativeProfiles::new(store)
             .profile_root(account)?
             .join(suffix(tool)?);
-        if std::fs::symlink_metadata(&root)
-            .is_ok_and(|meta| !meta.is_dir() || meta.file_type().is_symlink())
-        {
-            return Err(ManagedError::InvalidRequest);
-        }
-        let before = files(&root)?;
+        let usable = !std::fs::symlink_metadata(&root)
+            .is_ok_and(|meta| !meta.is_dir() || meta.file_type().is_symlink());
+        let before = usable.then(|| files(&root).ok()).flatten();
+        let codex = if tool == ToolId::Codex {
+            super::session_binding::prepare(store, id).ok()
+        } else {
+            None
+        };
         Ok(Self {
             tool,
             root,
             before,
             id,
+            codex,
         })
+    }
+
+    /// Installs only this launch's trusted tracker. A configuration that cannot
+    /// preserve the caller's hooks leaves collection unavailable, not blocked.
+    pub fn configure_codex(&mut self, command: &mut Command) -> Result<(), ManagedError> {
+        self.codex
+            .as_ref()
+            .ok_or(ManagedError::InvalidRequest)?
+            .configure(command)
     }
 
     fn source_at(&self, root: PathBuf) -> Result<Box<dyn TraceSource>, ManagedError> {
@@ -106,24 +120,116 @@ impl NativeCollection {
         }
     }
 
-    /// Validate newly created sessions using the ordinary parser, then stage
-    /// their files atomically. A failure preserves all native profile files.
-    pub fn collect(&self, store: &ConfigStore) -> Result<(), ManagedError> {
-        let source = self.source_at(self.root.clone())?;
-        let sessions = source
-            .discover()
-            .map_err(|_| ManagedError::InvalidRequest)?;
-        let mut selected = BTreeSet::new();
-        for session in sessions {
-            let relative = session
-                .path
-                .strip_prefix(&self.root)
-                .map_err(|_| ManagedError::InvalidRequest)?;
-            if !self.before.contains(relative) {
-                selected.insert(session.path);
-            }
+    fn codex_identity(
+        source: &dyn TraceSource,
+        path: &Path,
+        expected: Uuid,
+    ) -> Result<(), ManagedError> {
+        let suffix = format!("-{expected}");
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or(ManagedError::InvalidRequest)?;
+        if !stem.starts_with("rollout-") || !stem.ends_with(&suffix) {
+            return Err(ManagedError::InvalidRequest);
         }
-        if selected.is_empty() {
+        let session = source
+            .session_at(path)
+            .map_err(|_| ManagedError::InvalidRequest)?
+            .ok_or(ManagedError::NotFound)?;
+        let loaded = source
+            .load(&session)
+            .map_err(|_| ManagedError::InvalidRequest)?;
+        if loaded.source_session
+            != source::native_session_identity(source::SOURCE_CODEX, Some(&expected.to_string()))
+        {
+            return Err(ManagedError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    /// Stage only exactly bound, newly created native conversations. Preserve
+    /// their original IDs and filenames: attestation enrichment joins on them.
+    pub fn collect(&self, store: &ConfigStore) -> Result<(), ManagedError> {
+        let before = self
+            .before
+            .as_ref()
+            .ok_or(ManagedError::StorageUnavailable)?;
+        let mut selected = BTreeSet::new();
+        let mut parents = BTreeMap::new();
+        match self.tool {
+            ToolId::Claude => {
+                let owned = source::claude_code::ClaudeCodeSource::new(self.root.clone())
+                    .managed_session_paths(&self.id.to_string())
+                    .map_err(|_| ManagedError::InvalidRequest)?;
+                let parent = owned.first().ok_or(ManagedError::NotFound)?;
+                let relative = parent
+                    .strip_prefix(&self.root)
+                    .map_err(|_| ManagedError::InvalidRequest)?;
+                if before.contains(relative) {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                parents.insert(relative.to_path_buf(), self.id);
+                for path in owned {
+                    let relative = path
+                        .strip_prefix(&self.root)
+                        .map_err(|_| ManagedError::InvalidRequest)?;
+                    if !before.contains(relative) {
+                        selected.insert(relative.to_path_buf());
+                    }
+                }
+            }
+            ToolId::Codex => {
+                let records = self
+                    .codex
+                    .as_ref()
+                    .ok_or(ManagedError::NotFound)?
+                    .records()?;
+                let available = files(&self.root)?;
+                let canonical_root =
+                    std::fs::canonicalize(&self.root).map_err(|_| ManagedError::NotFound)?;
+                let source = self.source_at(self.root.clone())?;
+                for record in records {
+                    let canonical = std::fs::canonicalize(&record.transcript_path)
+                        .map_err(|_| ManagedError::NotFound)?;
+                    if !canonical.starts_with(&canonical_root) {
+                        return Err(ManagedError::InvalidRequest);
+                    }
+                    // Match against the non-symlink inventory; never follow a
+                    // receipt outside the account profile or guess by cwd/time.
+                    let matches = available
+                        .iter()
+                        .filter(|relative| {
+                            std::fs::canonicalize(self.root.join(relative))
+                                .ok()
+                                .as_ref()
+                                == Some(&canonical)
+                        })
+                        .collect::<Vec<_>>();
+                    if matches.len() != 1 {
+                        return Err(ManagedError::InvalidRequest);
+                    }
+                    let relative = matches[0];
+                    if before.contains(relative) {
+                        continue;
+                    }
+                    Self::codex_identity(
+                        source.as_ref(),
+                        &self.root.join(relative),
+                        record.session_id,
+                    )?;
+                    if parents
+                        .insert(relative.clone(), record.session_id)
+                        .is_some()
+                    {
+                        return Err(ManagedError::InvalidRequest);
+                    }
+                    selected.insert(relative.clone());
+                }
+            }
+            ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        }
+        if parents.is_empty() {
             return Err(ManagedError::NotFound);
         }
         let staged_root = store.dir().join(STAGING);
@@ -137,18 +243,11 @@ impl NativeCollection {
         let pending = tool_root.join(format!("{}.pending", self.id));
         private_directory(&pending)?;
         let result = (|| {
-            for relative in files(&self.root)?.difference(&self.before) {
-                let path = self.root.join(relative);
-                if !source
-                    .session_for_path(&path)
-                    .is_some_and(|parent| selected.contains(&parent))
-                {
-                    continue;
-                }
-                let destination = pending.join(relative);
-                let parent = destination.parent().ok_or(ManagedError::InvalidRequest)?;
-                private_directory(parent)?;
-                std::fs::copy(&path, &destination).map_err(|_| ManagedError::StorageUnavailable)?;
+            for relative in selected {
+                let destination = pending.join(&relative);
+                private_directory(destination.parent().ok_or(ManagedError::InvalidRequest)?)?;
+                std::fs::copy(self.root.join(relative), &destination)
+                    .map_err(|_| ManagedError::StorageUnavailable)?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -156,13 +255,25 @@ impl NativeCollection {
                         .map_err(|_| ManagedError::StorageUnavailable)?;
                 }
             }
-            // Validate the bytes actually copied, not a mutable original.
             let staged = self.source_at(pending.clone())?;
             let sessions = staged
                 .discover()
                 .map_err(|_| ManagedError::InvalidRequest)?;
-            if sessions.len() != selected.len() {
+            if sessions.len() != parents.len() {
                 return Err(ManagedError::InvalidRequest);
+            }
+            for (relative, expected) in parents {
+                match self.tool {
+                    ToolId::Claude => {
+                        source::claude_code::ClaudeCodeSource::new(pending.clone())
+                            .managed_session_paths(&expected.to_string())
+                            .map_err(|_| ManagedError::InvalidRequest)?;
+                    }
+                    ToolId::Codex => {
+                        Self::codex_identity(staged.as_ref(), &pending.join(relative), expected)?
+                    }
+                    ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+                }
             }
             for session in sessions {
                 staged

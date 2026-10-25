@@ -182,7 +182,7 @@ fn all_agents_can_remember_collection_without_changing_account_selection() {
 }
 
 #[test]
-fn native_collection_has_exclusive_account_access_in_both_directions() {
+fn native_collection_allows_parallel_account_runs_for_all_collection_choices() {
     use trace_commons_contributor::managed::{
         AccountView, ToolId,
         sessions::{LaunchRequest, SessionRegistry},
@@ -202,7 +202,7 @@ fn native_collection_has_exclusive_account_access_in_both_directions() {
             assert!(
                 sessions
                     .prepare(request(second_collects, &account), &account)
-                    .is_err(),
+                    .is_ok(),
                 "{tool:?} {first_collects} {second_collects}"
             );
             let mut other = account.clone();
@@ -217,7 +217,7 @@ fn native_collection_has_exclusive_account_access_in_both_directions() {
 }
 
 #[test]
-fn native_collection_guard_covers_running_unknown_and_preserves_parallel_optout() {
+fn exact_collection_allows_running_unknown_and_parallel_optout_but_login_stays_locked() {
     use trace_commons_contributor::managed::{
         AccountView, ManagedError, ToolId,
         sessions::{LaunchRequest, LifecycleReport, SessionRegistry},
@@ -244,11 +244,17 @@ fn native_collection_guard_covers_running_unknown_and_preserves_parallel_optout(
     for state in ["running", "unknown"] {
         let report:LifecycleReport=serde_json::from_value(json!({"session_id":first.session_id,"proof":context.proof,"state":state,"process_id":42,"process_identity":"42:1","exit_code":null})).unwrap();
         sessions.report(report).unwrap();
-        assert_eq!(
-            sessions.prepare(request(false), &account).unwrap_err(),
-            ManagedError::CollectionAccountBusy
-        );
+        assert!(sessions.prepare(request(false), &account).is_ok());
+        assert!(sessions.prepare(request(true), &account).is_ok());
     }
+    let login: LaunchRequest = serde_json::from_value(json!({
+        "request_id":uuid::Uuid::new_v4(),"purpose":"login","tool":"codex","connection":"subscription",
+        "account_id":account.id,"cwd":home.path(),"cli_options":"","collect_traces":false,"expected_generation":0
+    })).unwrap();
+    assert_eq!(
+        sessions.prepare(login, &account).unwrap_err(),
+        ManagedError::Conflict
+    );
     let report:LifecycleReport=serde_json::from_value(json!({"session_id":first.session_id,"proof":context.proof,"state":"exited","process_id":42,"process_identity":"42:1","exit_code":0})).unwrap();
     sessions.report(report).unwrap();
     assert!(sessions.prepare(request(false), &account).is_ok());

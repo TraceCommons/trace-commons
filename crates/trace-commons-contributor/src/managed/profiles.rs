@@ -144,7 +144,11 @@ impl NativeProfiles {
         std::fs::remove_dir_all(root).map_err(|_| ManagedError::StorageUnavailable)
     }
 
-    pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+    pub fn native_version(
+        &self,
+        account: &AccountView,
+        native: &Path,
+    ) -> Result<Option<(u32, u32, u32)>, ManagedError> {
         let root = self.profile_root(account.id)?;
         let version =
             bounded_output(self.command(account, native, NativeAction::Version, &root)?)?;
@@ -164,6 +168,11 @@ impl NativeProfiles {
                 None
             }
         });
+        Ok(numeric)
+    }
+
+    pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+        let numeric = self.native_version(account, native)?;
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
             ToolId::Codex => numeric.is_some_and(|v| v.0 == 0 && v >= (0, 160, 0)),

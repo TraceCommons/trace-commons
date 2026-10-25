@@ -163,6 +163,80 @@ impl ClaudeCodeSource {
         }
     }
 
+    /// The exact conversation assigned by the managed launcher, including only
+    /// the delegated transcripts accepted by the ordinary group reader. This
+    /// deliberately never infers ownership from cwd, timestamps or new files.
+    pub fn managed_session_paths(&self, expected_id: &str) -> anyhow::Result<Vec<PathBuf>> {
+        let id = uuid::Uuid::parse_str(expected_id)
+            .map_err(|_| anyhow::anyhow!("managed Claude session identity invalid"))?;
+        anyhow::ensure!(
+            id.to_string() == expected_id,
+            "managed Claude session identity invalid"
+        );
+        let root_metadata = std::fs::symlink_metadata(&self.root)?;
+        anyhow::ensure!(
+            root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+            "managed Claude transcript root invalid"
+        );
+        let name = format!("{expected_id}.jsonl");
+        let mut parent = None;
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let candidate = entry.path().join(&name);
+            let metadata = match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "managed Claude transcript binding invalid"
+            );
+            let candidate = real_file_within_root(&self.root, &candidate)
+                .ok_or_else(|| anyhow::anyhow!("managed Claude transcript binding invalid"))?;
+            anyhow::ensure!(
+                parent.is_none(),
+                "managed Claude transcript binding ambiguous"
+            );
+            parent = Some(candidate);
+        }
+        let parent = parent.ok_or_else(|| anyhow::anyhow!("managed Claude transcript missing"))?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&parent)?
+            .take(self.group_budget.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= self.group_budget,
+            "managed Claude transcript exceeds budget"
+        );
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| anyhow::anyhow!("managed Claude transcript identity unreadable"))?;
+        let mut identified = false;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let record: Value = serde_json::from_str(line)
+                .map_err(|_| anyhow::anyhow!("managed Claude transcript identity unreadable"))?;
+            if let Some(recorded) = record.get("sessionId") {
+                anyhow::ensure!(
+                    recorded.as_str() == Some(expected_id),
+                    "managed Claude transcript identity disagrees"
+                );
+                identified = true;
+            }
+        }
+        anyhow::ensure!(identified, "managed Claude transcript identity missing");
+        let (members, _) = group_members_for(&parent);
+        let mut paths = vec![parent];
+        for member in members {
+            if let Some(path) = real_file_within_root(&self.root, &member.path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
     #[cfg(test)]
     fn with_budget(root: PathBuf, group_budget: u64) -> Self {
         Self { root, group_budget }
@@ -1499,6 +1573,131 @@ mod tests {
     use super::*;
     use crate::source::{SessionEventKind, TraceSource};
     use std::path::PathBuf;
+
+    fn managed_fixture_parent(
+        root: &Path,
+        project: &str,
+        id: &str,
+        recorded_id: Option<&str>,
+    ) -> PathBuf {
+        let project = root.join(project);
+        std::fs::create_dir_all(&project).unwrap();
+        let parent = project.join(format!("{id}.jsonl"));
+        let mut record = json!({"type":"user","cwd":"/same/project","message":{"role":"user","content":"managed prompt"}});
+        if let Some(recorded_id) = recorded_id {
+            record["sessionId"] = recorded_id.into();
+        }
+        std::fs::write(&parent, format!("{record}\n")).unwrap();
+        parent
+    }
+
+    #[test]
+    fn managed_paths_bind_one_concurrent_parent_and_only_its_validated_children() {
+        let root = tempfile::tempdir().unwrap();
+        let own = "11111111-1111-4111-8111-111111111111";
+        let other = "22222222-2222-4222-8222-222222222222";
+        let parent = managed_fixture_parent(root.path(), "same-project", own, Some(own));
+        let unrelated = managed_fixture_parent(root.path(), "same-project", other, Some(other));
+        let members = parent.parent().unwrap().join(own).join("subagents");
+        std::fs::create_dir_all(&members).unwrap();
+        let child = members.join("agent-owned.jsonl");
+        std::fs::write(&child, format!("{{\"type\":\"user\",\"sessionId\":\"{own}\",\"message\":{{\"role\":\"user\",\"content\":\"delegated\"}}}}\n")).unwrap();
+        let foreign = members.join("agent-foreign.jsonl");
+        std::fs::write(&foreign, format!("{{\"sessionId\":\"{other}\"}}\n")).unwrap();
+        let source = ClaudeCodeSource::new(root.path().into());
+        assert_eq!(
+            source.managed_session_paths(own).unwrap(),
+            [parent.clone(), child]
+        );
+        assert_eq!(source.managed_session_paths(other).unwrap(), [unrelated]);
+        assert_eq!(
+            source
+                .load(
+                    &source
+                        .discover()
+                        .unwrap()
+                        .into_iter()
+                        .find(|session| session.path == parent)
+                        .unwrap()
+                )
+                .unwrap()
+                .source_session
+                .unwrap()
+                .native_id,
+            own
+        );
+    }
+
+    #[test]
+    fn managed_paths_refuse_missing_mismatched_and_ambiguous_parent_bindings() {
+        let own = "11111111-1111-4111-8111-111111111111";
+        let other = "22222222-2222-4222-8222-222222222222";
+        let root = tempfile::tempdir().unwrap();
+        let source = ClaudeCodeSource::new(root.path().into());
+        assert!(source.managed_session_paths(own).is_err());
+        assert!(source.managed_session_paths("../not-a-uuid").is_err());
+        let parent = managed_fixture_parent(root.path(), "project-a", own, None);
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(other));
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(own));
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&parent)
+                .unwrap(),
+            "{{\"sessionId\":\"{other}\"}}"
+        )
+        .unwrap();
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(own));
+        managed_fixture_parent(root.path(), "project-b", own, Some(own));
+        assert!(source.managed_session_paths(own).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_paths_refuse_symlinked_root_project_parent_and_children() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("projects");
+        std::fs::create_dir(&root).unwrap();
+        let own = "11111111-1111-4111-8111-111111111111";
+        let parent = managed_fixture_parent(&root, "project", own, Some(own));
+        let source = ClaudeCodeSource::new(root.clone());
+        let linked_root = home.path().join("linked-root");
+        symlink(&root, &linked_root).unwrap();
+        assert!(
+            ClaudeCodeSource::new(linked_root)
+                .managed_session_paths(own)
+                .is_err()
+        );
+        let members = parent.parent().unwrap().join(own).join("subagents");
+        std::fs::create_dir_all(&members).unwrap();
+        symlink(&parent, members.join("agent-link.jsonl")).unwrap();
+        assert_eq!(
+            source.managed_session_paths(own).unwrap().as_slice(),
+            std::slice::from_ref(&parent)
+        );
+        let linked_parent = parent.with_extension("original");
+        std::fs::rename(&parent, &linked_parent).unwrap();
+        symlink(&linked_parent, &parent).unwrap();
+        assert!(source.managed_session_paths(own).is_err());
+        let outside = tempfile::tempdir().unwrap();
+        managed_fixture_parent(outside.path(), "project", own, Some(own));
+        let second_root = tempfile::tempdir().unwrap();
+        symlink(
+            outside.path().join("project"),
+            second_root.path().join("project"),
+        )
+        .unwrap();
+        assert!(
+            ClaudeCodeSource::new(second_root.path().into())
+                .managed_session_paths(own)
+                .is_err()
+        );
+    }
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

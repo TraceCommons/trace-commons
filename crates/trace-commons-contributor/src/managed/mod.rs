@@ -10,6 +10,7 @@ pub mod opencode;
 pub mod options;
 pub mod profiles;
 pub mod secrets;
+pub mod session_binding;
 pub mod sessions;
 pub mod signin;
 pub mod statusline;

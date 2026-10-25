@@ -26,7 +26,7 @@
 - [x] Show Collect trace for review on the folder selection screen for all three agents.
 - [x] Capture only newly created Claude/Codex native transcripts after opted-in exit; preserve original logs and exclude older opted-out files.
 - [x] Route explicit native and OpenCode exports into ordinary review ingestion even when automatic source discovery is off.
-- [x] Protect account-level native profile isolation when collecting; expose a specific busy error without blocking unrelated accounts or both-opt-out concurrency.
+- [x] Protect collection isolation using exact native identities while allowing concurrent runs in the same account profile.
 - [x] Verify temporary-daemon pending-queue admission and fake native launch collection; preserve the existing 500-entry queue bound.
 
 ## Integration
@@ -44,7 +44,7 @@
 - Contributor/source all-targets Clippy with repository allowances, formatting, diff checks, fresh FFI build and four license-boundary tests passed.
 - Recorded samples regenerated through the actual temporary daemon; recorder drift passed.
 - Wipe regression extended and passed: both managed staging directories are deleted while native agent originals are retained.
-- Independent review findings resolved: preference-save failure rolls back an unredeemed preparation; native collection respects account exclusivity and staged-byte validation.
+- Independent review findings resolved: preference-save failure rolls back an unredeemed preparation; native collection respects exact session ownership and staged-byte validation.
 
 ## Live diagnostic boundary
 
@@ -52,3 +52,32 @@ Read-only audit found both production and staging at the 500-entry counted queue
 cap (Pending plus Approved excluding person-included entries). New captured
 exports remain local until capacity is available. No live settings, queues,
 uploads or credentials were changed. No release/deployment was performed.
+
+## Follow-up: exact session identity instead of account serialization
+
+The user requested concurrent managed sessions in the same account profile and
+emphasized attested traces. Replace the native profile exclusivity guard with
+exact ownership. Claude receives the managed UUID via --session-id. Codex 0.164+
+uses its SessionStart hook, trusting only the injected tracking command and
+using Codex's hook-override exclusion to select an invocation-local app server.
+Do not append --no-daemon after user subcommands or force-enable an
+explicitly disabled hook engine or replace custom hook configurations.
+
+- [x] Validate exact Claude parent identity and owned subagent paths.
+- [x] Record bounded, private Codex native ID/path receipts per launch.
+- [x] Require receipt ID, rollout filename UUID and metadata ID agreement.
+- [x] Keep preexisting-file exclusion; missing/ambiguous identity fails only collection.
+- [x] Remove coding-session account serialization; preserve login locks.
+- [x] Preserve original native identifiers for attestation joins and existing body-capture consent.
+- [x] Verify concurrent same-profile/same-folder on/off and on/on collection isolation.
+- [x] Include binding metadata in local wipe cleanup; review and run relevant tests/lint/builds.
+
+### Exact-identity verification
+
+- Full contributor suite: 4,319 passed, 9 ignored, exit 0. After the final small binder flag fix, all 26 affected native launch/folder/collection/binding tests passed (including 7 binding tests).
+- Full source parser suite: 239 passed. Exact Claude ownership helper regressions cover parent and child identity, ambiguity and symlinks.
+- Actual installed Codex 0.164 no-inference probes established distinct IDs/paths for concurrent same-profile/same-folder runs and preservation of existing trusted/untrusted hooks. Native exec/resume/fork help accepts the generated configuration.
+- Codex binding receipts are bounded, private, nonce-checked, atomic and included in local wipe cleanup; preexisting resumed logs are excluded.
+- Final contributor/source all-targets Clippy, license boundary (4 tests), fresh FFI build, formatting and diff checks passed.
+- Independent review confirmed exact ownership and attestation identifier preservation; removed an unnecessary --no-daemon flag after native help exposed its subcommand-positioning incompatibility. Codex's hook overrides themselves select the embedded server.
+- No live settings, queues, uploads or attestation-body consent were changed. OpenCode 2.x qualification remains separate; parser format support is still 1.18.29/1.19.0.

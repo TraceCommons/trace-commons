@@ -414,10 +414,25 @@ upload permission or include older traces from sessions where collection was off
 Explicitly collected managed exports can be ingested even when automatic
 agent-source discovery is off; ordinary watched folders keep their own policies.
 
-Claude Code and Codex use account-level native transcript directories. To avoid
-mixing opted-in and opted-out traces, a collecting session requires exclusive
-use of that account's native profile until it ends. Non-collecting sessions can
-still overlap. OpenCode uses exact per-session identity and permits concurrency.
-A full review queue delays ingestion; a saved local export is retained until
-capacity is available. The collection status reports local preservation, not an
-upload or guaranteed queue admission.
+Concurrent managed sessions may share the same account profile and folder,
+including different collection choices. Claude Code receives an exact session
+UUID at launch; only that initial conversation and its validated subagents are
+collected. Codex uses a private per-launch SessionStart receipt containing its
+native thread ID and transcript path. The receipt, rollout filename and native
+metadata must agree. Original IDs and filenames are preserved for attestation
+joins. OpenCode retains its exact seeded session identity.
+
+Codex exact tracking is qualified on Unix with Codex 0.164+. Its tracking-hook
+configuration selects an invocation-local app server through Codex's native
+configuration-exclusion rules. Only the injected tracking hook is trusted; existing
+user/project hook trust remains intact, and an explicitly disabled hook engine
+is not enabled. Custom CLI hook overrides, unsupported platforms/versions,
+missing or ambiguous receipts, and preexisting resumed logs leave collection
+unavailable for that run while allowing the agent to launch. No collection path
+falls back to guessing ownership from cwd, time windows or other new files.
+
+Attested body capture continues to require the existing
+`ironwire_attested_bodies` consent setting. Collection does not enable it or
+manufacture an attestation. A full review queue delays ingestion; a saved local
+export is retained until capacity is available. Collection status reports local
+preservation, not an upload or guaranteed queue admission.

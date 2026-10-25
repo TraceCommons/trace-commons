@@ -191,6 +191,8 @@ Use an existing absolute folder. Preview and apply this partial settings object
 with the same `config` commands above. Each supplied folder/agent entry replaces
 its choices; other entries are preserved. To forget one, apply an entry with
 `tool`, `cwd` and `"reset": true`. These profiles contain no account selection.
+Concurrent runs can share an account and folder; collection uses exact native
+session identities and never sweeps other sessions from the profile.
 The native folder-selection dialog restores the same choices and shows
 **Collect trace for review** beside the model and CLI options.
 

@@ -87,6 +87,9 @@ async fn run_native(
     if !login && row.tool != super::ToolId::Opencode {
         command.args(&context.cli_options);
     }
+    if !login && row.tool == super::ToolId::Claude {
+        command.arg("--session-id").arg(row.id.to_string());
+    }
     let mut route = None;
     // Removed when this function returns, however it returns.
     let mut codex_catalog: Option<super::codex::CatalogFile> = None;
@@ -231,7 +234,7 @@ async fn run_native(
     let _ = signals;
     #[cfg(unix)]
     let mut shutdown_at: Option<std::time::Instant> = None;
-    let native_collection = if row.collect_traces && !login && opencode.is_none() {
+    let mut native_collection = if row.collect_traces && !login && opencode.is_none() {
         Some(super::native_collection::NativeCollection::snapshot(
             store,
             row.tool,
@@ -241,6 +244,20 @@ async fn run_native(
     } else {
         None
     };
+    if row.tool == super::ToolId::Codex
+        && native_collection.is_some()
+        && profiles
+            .native_version(&account, &native)
+            .ok()
+            .flatten()
+            .is_some_and(|version| version.0 == 0 && version >= (0, 164, 0))
+    {
+        if let Some(capture) = native_collection.as_mut() {
+            // Unavailable tracking must not block the native session or loosen
+            // hook trust. Missing receipts fail only collection after exit.
+            let _ = capture.configure_codex(&mut command);
+        }
+    }
     let mut child = tokio::process::Command::from(command)
         .kill_on_drop(false)
         .spawn()?;

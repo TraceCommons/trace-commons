@@ -576,19 +576,6 @@ impl SessionRegistry {
         if !request.cwd.is_absolute() || !request.cwd.is_dir() {
             return Err(ManagedError::InvalidRequest);
         }
-        // Native transcripts share an account profile. Collection must never
-        // sweep a concurrent opted-out run into another run's staging area.
-        if request.purpose == LaunchPurpose::Coding
-            && matches!(request.tool, ToolId::Claude | ToolId::Codex)
-            && self.data.entries.iter().any(|entry| {
-                entry.view.account_id == account.id
-                    && entry.view.purpose == LaunchPurpose::Coding
-                    && entry.view.state.holds_profile()
-                    && (request.collect_traces || entry.view.collect_traces)
-            })
-        {
-            return Err(ManagedError::CollectionAccountBusy);
-        }
         if self.data.entries.iter().any(|e| {
             e.view.account_id == account.id
                 && e.view.state.holds_profile()

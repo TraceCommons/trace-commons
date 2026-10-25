@@ -1458,6 +1458,7 @@ impl ConfigStore {
         for directory in [
             crate::managed::opencode::STAGING,
             crate::managed::native_collection::STAGING,
+            crate::managed::session_binding::DIRECTORY,
         ] {
             let staged = self.dir.join(directory);
             match std::fs::symlink_metadata(&staged) {

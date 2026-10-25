@@ -154,7 +154,10 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
     }
     assert_eq!(
         std::fs::read_to_string(project.join("received-args")).unwrap(),
-        "--model\ncustom model\n--append-system-prompt\n$(touch injected); literal\n"
+        format!(
+            "--model\ncustom model\n--append-system-prompt\n$(touch injected); literal\n--session-id\n{}\n",
+            running["id"].as_str().unwrap()
+        )
     );
     assert!(!project.join("injected").exists());
     assert!(
