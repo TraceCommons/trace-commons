@@ -3484,15 +3484,9 @@ final class AppModel: ObservableObject {
         await rereadAccountSessionAfterSignIn()
     }
 
-    /// The Private AI tab's Sign in (owner, 2026-10-24): the balance and
-    /// billing cards run this when the NEAR AI login is not usable. It is
-    /// the flow Settings' "Sign in again" runs, not a second one: a NEAR AI
-    /// account goes through `signInAgain` (NEAR AI browser sign-in when NEAR
-    /// AI refused the login, then `near_ai_account_sign_in`); a passkey
-    /// account has no commons session to renew here, so only the NEAR AI
-    /// browser sign-in runs. Then the balance is read again, and the
-    /// sections that read the account (billing, payout) follow
-    /// `accountSessionGeneration`.
+    /// Refresh the NEAR AI login explicitly, even when the separate Commons
+    /// account session is still valid. Once the browser completes, restore or
+    /// reread the Commons session when this account uses NEAR AI sign-in.
     func signInToNearAI() async {
         if nearAiBrowserSignInWaiting {
             await restartNearAIBrowserSignIn()
@@ -3507,13 +3501,15 @@ final class AppModel: ObservableObject {
             accountSignInPath = session.signIn
             accountRenewalFailure = session.renewalFailure
         }
+        guard await nearAILogin(fresh: true) else {
+            nearAiSignInFailed = true
+            return
+        }
         if accountSignInPath == "near_ai" {
             await signInAgain()
             nearAiSignInFailed = accountSignInFailure != nil
-        } else if await nearAILogin(fresh: true) {
-            accountSessionGeneration &+= 1
         } else {
-            nearAiSignInFailed = true
+            accountSessionGeneration &+= 1
         }
         refreshNearAiCredential()
         refreshNearAiBalance(fresh: true)

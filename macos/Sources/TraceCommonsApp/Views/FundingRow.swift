@@ -138,7 +138,8 @@ struct FundingRow: View {
             trailing: {
                 // Signed out, the button is the balance card's Sign in (owner,
                 // 2026-10-24), not Check account: checking cannot help.
-                let signIn = model.nearAiSigningIn || NearAiSignInOffer.billingOffers(state: status?.state)
+                let signIn = model.nearAiSigningIn || NearAiSignInOffer.billingOffers(
+                    state: status?.state, failed: model.nearAiSignInFailed)
                 Button {
                     if signIn {
                         Task { await model.signInToNearAI() }
