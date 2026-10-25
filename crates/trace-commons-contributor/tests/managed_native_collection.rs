@@ -401,6 +401,7 @@ fn codex(root: &std::path::Path, filename_id: Uuid, metadata_id: Uuid) -> std::p
     std::fs::canonicalize(path).unwrap()
 }
 
+#[cfg(unix)]
 fn record_codex_start(capture: &mut NativeCollection, native_id: Uuid, path: &std::path::Path) {
     use std::{
         io::Write,
@@ -434,6 +435,7 @@ fn record_codex_start(capture: &mut NativeCollection, native_id: Uuid, path: &st
     assert!(child.wait().unwrap().success());
 }
 
+#[cfg(unix)]
 #[test]
 fn overlapping_codex_collections_use_start_receipts_and_exclude_foreign_optout() {
     let dir = tempfile::tempdir().unwrap();
@@ -459,6 +461,7 @@ fn overlapping_codex_collections_use_start_receipts_and_exclude_foreign_optout()
     assert!(foreign.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn codex_missing_preexisting_and_mismatched_bindings_fail_collection_without_sweeping_logs() {
     for mode in [
@@ -517,4 +520,36 @@ fn codex_missing_preexisting_and_mismatched_bindings_fail_collection_without_swe
         assert!(path.exists());
         assert!(staged_ids(&store, SOURCE_CODEX).is_empty(), "{mode}");
     }
+}
+
+#[cfg(not(unix))]
+#[test]
+fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments() {
+    use std::process::Command;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let mut capture =
+        NativeCollection::snapshot(&store, ToolId::Codex, account, Uuid::new_v4()).unwrap();
+    let native_id = Uuid::new_v4();
+    let transcript = codex(&root, native_id, native_id);
+    let mut command = Command::new("codex");
+    command
+        .args(["exec", "synthetic prompt"])
+        .env("CODEX_HOME", &root);
+    let before: Vec<_> = command.get_args().map(|a| a.to_owned()).collect();
+    assert!(capture.configure_codex(&mut command).is_err());
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        before.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == "CODEX_HOME" && value == Some(root.as_os_str()))
+    );
+    assert!(capture.collect(&store).is_err());
+    assert!(transcript.exists());
+    assert!(staged_ids(&store, SOURCE_CODEX).is_empty());
 }
