@@ -513,6 +513,10 @@ fn near_ai_route(
                     "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
                     "-c",
                     "model_providers.near_ai_managed.wire_api=\"responses\"",
+                    // The upstream compatibility lane is Chat Completions,
+                    // which cannot execute provider-hosted web search.
+                    "-c",
+                    "web_search=\"disabled\"",
                 ]);
             let catalog = codex_catalog
                 .and_then(|path| path.to_str())
@@ -794,6 +798,7 @@ mod tests {
                 .find(|pair| pair[0] == "-c" && pair[1].starts_with(&format!("{key}=")))
                 .map(|pair| pair[1][key.len() + 1..].to_owned())
         };
+        assert_eq!(value("web_search").as_deref(), Some("\"disabled\""));
         assert_eq!(
             value("model_catalog_json").as_deref(),
             Some("\"/state dir/managed-codex-catalogs/s.json\"")

@@ -128,6 +128,14 @@ tools whose executable availability is not checked.
     from `codex debug models --bundled`; any other model gets basic settings
     with the prompt of Codex's own first listed model. If that list cannot be
     read, every entry is basic, with a one-line prompt.
+    Managed Codex uses IronWire's Responses-to-Chat compatibility route:
+    some NEAR AI hosted models complete native Responses tool turns without
+    returning an executable call. Function tools (including namespaces),
+    streamed calls and tool-result history are preserved through translation.
+    Server-side web search is disabled for these launches because Chat
+    Completions cannot execute that built-in tool. These command-line settings
+    do not change saved Codex settings or non-NEAR sessions. Start a new managed
+    session after updating the app to use the repaired proxy.
   - OpenCode: every chat model is listed under the `trace-managed` provider
     (named by NEAR AI's display name or the id); `model` and `small_model`
     are the default. Its profile is isolated, so the list never reaches the
