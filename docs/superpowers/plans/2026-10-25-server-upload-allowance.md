@@ -47,3 +47,14 @@ Malformed/oversized replies, legacy explicit settings, identity changes during r
 - Independent static review found a transient credential-store failure could clear a valid allowance; reproduced with a failing HTTP/lifecycle regression, repaired, and included in the passing suite. Final review found no remaining important issues.
 
 No dependencies, migrations, deployment or release were added. Operator configuration is opt-in; see docs/operator/client-upload-allowance.md.
+
+
+### Earned-trust refinement
+
+- [x] Surface the validated bounded effective allowance from the account-status transaction, with PostgreSQL coverage for fresh/stale/shadow/generation-invalid evaluations.
+- [x] Scale the daily base caps proportionally in the authenticated endpoint using bounded integer arithmetic; retain invitation, legacy and unconfigured compatibility.
+- [x] Update endpoint/configuration tests and operator documentation; keep private scoring rules and thresholds outside this change.
+- [x] Run one consolidated relevant verification pass and review before committing.
+
+
+Earned-trust refinement verification: 3,961 contributor library tests passed (six ignored); eight client and five server allowance tests passed. Isolated PostgreSQL regressions passed for external evaluation freshness/scope/clamping/spend, live tiered applied-growth fallback, and the real authenticated endpoint's threefold daily caps and stale fallback. Protocol wire tests (two), unchanged license boundary (four), all-target Clippy for protocol/contributor/server/ingest, and formatting passed with warnings denied and incremental compilation disabled. Independent final review found no important issues. No evaluator rules, thresholds, dependency, migration or deployment changes.

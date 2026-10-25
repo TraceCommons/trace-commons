@@ -2886,6 +2886,28 @@ async fn contribution_status_reports_the_accounts_own_growth() {
             .unwrap();
         (code, bytes)
     };
+    let upload_allowance = |state: Arc<AppState>, who: &'static str| async move {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/account/upload-allowance")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .extend(account_session_headers(&state, who).await);
+        let response = app(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+    };
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     let account_id: Uuid = client
         .query_one(
@@ -2940,6 +2962,12 @@ async fn contribution_status_reports_the_accounts_own_growth() {
         serde_json::json!({"units": 2, "active_weeks": 1, "age_seconds": 0, "attested_units": 0})
     );
     assert!(body["next_tier"]["current"].is_null(), "{body}");
+
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "no evaluation leaves the default daily limits unchanged"
+    );
 
     // A fresh applied evaluation at tier 1, and 10 already spent this period.
     client
@@ -3027,6 +3055,22 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     let text = std::str::from_utf8(&bytes).unwrap();
     assert!(!text.contains(&tenant) && !text.contains(&account_id.to_string()));
 
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({
+            "allowance": {"schema_version":1,"max_uploads_per_day":150,"max_bytes_per_day":629145600u64}
+        }),
+        "a validated threefold account allowance raises both daily limits threefold"
+    );
+    let unchanged_spend: i64 = client.query_one(
+        "SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap().get(0);
+    assert_eq!(
+        unchanged_spend, 10,
+        "publishing a larger daily limit does not erase server spend"
+    );
+
     // Stale: older than evaluation_max_age_seconds reads as tier 0, and the
     // 10 already spent leaves nothing at the base allowance.
     client
@@ -3051,6 +3095,12 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     assert!(body["allowance_tier_changed_at"].is_null());
     assert_eq!(body["next_tier"]["tier"], 1);
     assert!(body["next_tier"]["current"].is_null());
+
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "stale earned trust withdraws the daily uplift"
+    );
 
     // A legacy-namespace session is still refused before any read.
     let (code, bytes) = status(state.clone(), legacy_token).await;

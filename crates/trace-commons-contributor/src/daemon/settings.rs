@@ -41,8 +41,10 @@ const DEFAULT_GROWTH_MIN_NEW_BYTES: u64 = 65_536;
 /// repeatedly over the same text and dilute the contributor's own credit
 /// through server-side duplicate clustering.
 const DEFAULT_MAX_REUPLOADS: u32 = 3;
-const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
-const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
+const DEFAULT_MAX_UPLOADS_PER_DAY: u32 =
+    trace_commons_protocol::upload_allowance::DEFAULT_MAX_UPLOADS_PER_DAY;
+const DEFAULT_MAX_BYTES_PER_DAY: u64 =
+    trace_commons_protocol::upload_allowance::DEFAULT_MAX_BYTES_PER_DAY;
 /// The upper bound `set_settings` (and the C ABI's pre-start override) will
 /// accept for `max_uploads_per_day`. The cap exists to bound a runaway
 /// client -- an app that decides to upload everything should not be able

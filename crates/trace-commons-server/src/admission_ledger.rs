@@ -102,6 +102,10 @@ pub struct AccountAdmissionStatus {
     pub policy_version: String,
     pub ready: bool,
     pub retry_after_seconds: Option<i64>,
+    /// The validated effective allowance used to decide `ready`, including
+    /// freshness, policy, generation and ceiling checks. Invited authority
+    /// has a separate bypass and therefore reports no bounded allowance.
+    pub effective_allowance: Option<i64>,
     /// The account's own earned-growth view: present only for `bounded`
     /// authority under a `tiered-v1` policy (spec rule 7). It is advisory and
     /// read from the same transaction as `ready`, which it never changes.
@@ -478,6 +482,7 @@ impl PgBackend {
         }
         let used = account_period_spend(&tx, tenant, account_id, &raw_period_id).await?;
         let mut growth = None;
+        let mut effective_allowance = None;
         let ready = if authority == "invited" {
             true
         } else {
@@ -489,6 +494,7 @@ impl PgBackend {
                 FrontierRead::Advisory,
             )
             .await?;
+            effective_allowance = Some(allowance.limit);
             if policy
                 .external_growth()
                 .is_some_and(|g| g.source == crate::account_trust::GrowthSource::TieredV1)
@@ -516,6 +522,7 @@ impl PgBackend {
             policy_version: policy.version().into(),
             ready,
             retry_after_seconds: if ready { None } else { retry_after_seconds },
+            effective_allowance,
             growth,
         }))
     }

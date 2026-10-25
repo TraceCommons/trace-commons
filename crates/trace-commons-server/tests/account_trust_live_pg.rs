@@ -669,6 +669,16 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
     )
     .unwrap();
 
+    // The client-facing allowance must use the exact validated allowance
+    // that decides ready, including fallbacks, without changing period spend.
+    let status = || async {
+        ingest
+            .account_admission_status(&account, &principal, &admission_policy)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
     // Tier 0: the base allowance of one reservation.
     assert_eq!(
         reserve(admission_policy.clone()).await.0,
@@ -713,6 +723,9 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
         AdmissionDecision::Exhausted,
         "shadow is never read"
     );
+    let shadow_status = status().await;
+    assert_eq!(shadow_status.effective_allowance, Some(base));
+    assert_eq!(shadow_status.growth.unwrap().period_spend, base);
 
     let applied = evaluate_account_trust(
         ingest.as_ref(),
@@ -747,6 +760,15 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
             .await
             .unwrap();
     assert!(explained.reproduced, "{explained:?}");
+
+    let raised_status = status().await;
+    assert!(raised_status.ready);
+    assert_eq!(raised_status.effective_allowance, Some(base * 5));
+    assert_eq!(
+        raised_status.growth.unwrap().period_spend,
+        base,
+        "growth preserves spend"
+    );
 
     // Tier 1: five times the base. The reservation records what it relied on.
     let (decision, submission) = reserve(admission_policy.clone()).await;
@@ -786,6 +808,10 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
         AdmissionDecision::Exhausted,
         "stale falls to the base"
     );
+    let stale_status = status().await;
+    assert!(!stale_status.ready);
+    assert_eq!(stale_status.effective_allowance, Some(base));
+    assert_eq!(stale_status.growth.unwrap().period_spend, base * 2);
     evaluate_account_trust(
         ingest.as_ref(),
         &growth,
@@ -818,6 +844,10 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
         AdmissionDecision::Exhausted,
         "an invalidated evaluation falls to the base"
     );
+    let invalidated_status = status().await;
+    assert!(!invalidated_status.ready);
+    assert_eq!(invalidated_status.effective_allowance, Some(base));
+    assert_eq!(invalidated_status.growth.unwrap().period_spend, base * 3);
     evaluate_account_trust(
         ingest.as_ref(),
         &growth,

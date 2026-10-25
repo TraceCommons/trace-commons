@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
+pub const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
+
 pub const MAX_UPLOADS_PER_DAY: u32 = 1_000;
 pub const MAX_BYTES_PER_DAY: u64 = 5 * 1024 * 1024 * 1024;
 

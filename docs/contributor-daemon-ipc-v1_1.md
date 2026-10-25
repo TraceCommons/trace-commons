@@ -818,13 +818,25 @@ daily volume caps and, crucially, how much already-approved work they are
 holding back.
 
 These are the effective caps used by upload enforcement. A supporting daemon
-refreshes the authenticated server's upload allowance at startup and every
-five minutes, including while capped. The allowance can raise untouched
-count and byte defaults independently; explicit local choices remain in
-force. `get_settings` still returns the saved local values, so its caps can
-differ from `status.daily_budget`. Refreshing an allowance never resets
-`bytes_today` or `uploads_today`. See
-[the operator contract](operator/client-upload-allowance.md).
+refreshes the authenticated account's upload allowance at startup and every
+five minutes, including while capped. The server scales both daily caps by
+the account's validated applied admission `effective_allowance` divided by
+`bounded_allowance`, rounding down and clipping at 1,000 uploads and 5 GiB.
+Operator-configured caps are the base; when absent, earned growth above 1
+uses 50 uploads and 200 MiB. Without a configured base or validated earned
+growth, the server returns null. Existing external and tiered trust modes
+retain their admission validation, freshness, and generation safeguards;
+legacy/invited compatibility paths retain the configured base unchanged.
+
+The allowance can raise untouched count and byte defaults independently;
+explicit local choices remain in force. `get_settings` still returns the
+saved local values, so its caps can differ from `status.daily_budget`.
+Refreshing an allowance never resets `bytes_today` or `uploads_today`.
+A successful null response, including trust fallback with no configured
+base, removes a previous uplift; transient refresh failures retain it for
+the current identity. These daily volume caps do not establish submission
+readiness: server processing-cost admission uses its own period and units.
+See [the operator contract](operator/client-upload-allowance.md).
 
 It is deliberately **not** routed through `health`. The daemon does set
 `daily-cap-reached` when a cap refuses an upload, but that label sits at the
