@@ -1910,9 +1910,19 @@ async fn bind_device_upload_principal_tx(
         .ok_or_else(refused)?;
     aliases.sort();
     let parent = crate::account_trust::device_principal_ref(tenant, device);
-    // Lock against revocation until the provenance binding commits. Account
-    // membership is optional here: unprovisioned registered devices can upload.
+    // Lock against revocation until the provenance binding commits.
     if tx.query_opt("SELECT device_key_id FROM device_keys WHERE tenant_id=trace_current_tenant_id() AND device_key_id=$1 AND revoked_at IS NULL FOR SHARE", &[&device]).await?.is_none() {
+        return Err(refused());
+    }
+    // Legacy registered devices use signed claims as independent login
+    // principals. Only durable server-side NEAR provisioning establishes the
+    // device-principal ownership model. This marker survives parent unlink,
+    // so unlink cannot turn an upload-only alias into a login credential.
+    let provisioned = tx.query_opt("SELECT principal_ref FROM trace_near_provisioned_devices WHERE tenant_id=trace_current_tenant_id() AND device_key_id=$1 FOR SHARE", &[&device]).await?;
+    let Some(provisioned) = provisioned else {
+        return Ok(());
+    };
+    if provisioned.get::<_, String>(0) != parent {
         return Err(refused());
     }
     for alias in aliases {
@@ -3757,7 +3767,16 @@ impl Database for PgBackend {
             &[&new_account_id, &principal_ref],
         )
         .await
-        .map_err(DatabaseError::Postgres)?;
+        .map_err(|error| {
+            if error.as_db_error().is_some_and(|db_error| {
+                db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                    && db_error.message() == "device_upload_principal_namespace_conflict"
+            }) {
+                DatabaseError::UploadPrincipalAuthenticationDenied
+            } else {
+                DatabaseError::Postgres(error)
+            }
+        })?;
 
         // Re-select the authoritative account for this principal. If a
         // concurrent mint inserted the link first, this returns ITS account_id

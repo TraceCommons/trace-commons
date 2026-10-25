@@ -396,9 +396,26 @@ async fn device_upload_features_follow_the_parent_account_membership() {
     let account_id = seed_account(&fx.admin, &tenant, &parent).await;
     fx.admin
         .execute(
-            "INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash)
-         VALUES($1,$2,'fixture-public-key',$2)",
+            "INSERT INTO device_keys(tenant_id,device_key_id,public_key,onboarding_origin)
+         VALUES($1,$2,'fixture-public-key','near')",
             &[&tenant, &device],
+        )
+        .await
+        .unwrap();
+    fx.admin
+        .execute(
+            "INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,
+            sealed_account_name,index_pepper_ref,account_name_key_ref)
+         VALUES($1,$2,$3,'{}',$3,$3)",
+            &[&tenant, &account_id, &device],
+        )
+        .await
+        .unwrap();
+    fx.admin
+        .execute(
+            "INSERT INTO trace_near_provisioned_devices(tenant_id,account_id,principal_ref,
+            device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$4)",
+            &[&tenant, &account_id, &parent, &device],
         )
         .await
         .unwrap();
