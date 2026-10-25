@@ -955,6 +955,17 @@ fn platform_default_dir() -> Result<PathBuf> {
     }
 }
 
+/// Read-only counterpart of Windows enrollment adoption. Keep a running
+/// legacy daemon addressable without moving its socket or account state.
+#[cfg(any(windows, test))]
+fn existing_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
+    if preferred.join(CONFIG_FILE).exists() || !legacy.join(CONFIG_FILE).exists() {
+        preferred.to_path_buf()
+    } else {
+        legacy.to_path_buf()
+    }
+}
+
 /// Pick between the preferred state directory and a legacy one, migrating an
 /// enrollment out of the legacy location when it is safe to do so.
 ///
@@ -1151,6 +1162,34 @@ impl ConfigStore {
             .ok()
             .map(PathBuf::from);
         Self::open(resolve_state_dir(explicit, override_dir)?)
+    }
+
+    /// Locate state for an already-running daemon without creating a directory,
+    /// changing permissions, or migrating a legacy Windows enrollment.
+    /// A missing directory remains missing; the socket client reports it unreachable.
+    pub(crate) fn resolve_existing(explicit: Option<PathBuf>) -> Result<Self> {
+        let override_dir = std::env::var(crate::channel::STATE_DIR_ENV)
+            .ok()
+            .map(PathBuf::from);
+        let dir = if explicit.is_some() || override_dir.is_some() {
+            resolve_state_dir(explicit, override_dir)?
+        } else {
+            #[cfg(windows)]
+            {
+                let preferred = dirs::config_local_dir()
+                    .context("config-state-dir-unavailable")?
+                    .join(STATE_DIR_NAME);
+                let legacy = dirs::config_dir()
+                    .context("config-state-dir-unavailable")?
+                    .join(STATE_DIR_NAME);
+                existing_state_dir(&preferred, &legacy)
+            }
+            #[cfg(not(windows))]
+            {
+                platform_default_dir()?
+            }
+        };
+        Ok(Self { dir })
     }
 
     /// Open (creating if necessary) the given directory as a contributor
@@ -2698,5 +2737,25 @@ mod tests {
         let record = value["witness_origin"].to_string();
         assert!(!record.contains("w.example"), "{record}");
         assert!(!record.contains("0xab"), "{record}");
+    }
+}
+
+#[cfg(test)]
+mod existing_state_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_resolution_never_migrates_legacy_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join(CONFIG_FILE), b"legacy").unwrap();
+        assert_eq!(existing_state_dir(&preferred, &legacy), legacy);
+        assert!(!preferred.exists());
+        assert_eq!(std::fs::read(legacy.join(CONFIG_FILE)).unwrap(), b"legacy");
+        std::fs::create_dir(&preferred).unwrap();
+        std::fs::write(preferred.join(CONFIG_FILE), b"current").unwrap();
+        assert_eq!(existing_state_dir(&preferred, &legacy), preferred);
     }
 }

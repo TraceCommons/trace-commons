@@ -423,6 +423,8 @@ pub const METHODS: &[&str] = &[
     "near_ai_spend_organization_select",
     "get_public_profile",
     "get_settings",
+    "get_config_schema",
+    "preview_settings",
     "token_storage_status",
     "remove_token_local_copies",
     "discard_token_reviews",
@@ -538,6 +540,8 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "resume",
     "cancel",
     "get_settings",
+    "get_config_schema",
+    "preview_settings",
     "set_settings",
     "consent_options",
     "set_consent_scopes",
@@ -4108,6 +4112,23 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "token_storage_status" => handle_token_storage(shared, req),
         "remove_token_local_copies" => handle_token_storage(shared, req),
         "discard_token_reviews" => handle_token_storage(shared, req),
+        "get_config_schema" => {
+            if req
+                .params
+                .as_object()
+                .is_none_or(|params| !params.is_empty())
+            {
+                return Response::err(req.id, ERR_BAD_PARAMS, "config-schema-params-must-be-empty");
+            }
+            Response::ok(req.id, super::agent_config::schema())
+        }
+        "preview_settings" => {
+            let settings = shared.settings.lock().expect("settings lock");
+            match super::agent_config::preview(&settings, &req.params) {
+                Ok(value) => Response::ok(req.id, value),
+                Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+            }
+        }
         "get_settings" => {
             let mut value = {
                 let settings = shared.settings.lock().expect("settings lock");
@@ -8881,7 +8902,7 @@ fn envelope_is_for_enrollment(
 
 /// Settings as returned over IPC: the privacy-filter credential is reported
 /// as present or absent, never echoed.
-fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
+pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
         let configured = s.near_ai.is_some();
@@ -9785,6 +9806,56 @@ mod tests {
         // borrows its path.
         std::mem::forget(_d);
         DaemonShared::load(store).unwrap()
+    }
+
+    #[test]
+    fn agent_config_preview_has_no_disk_or_runtime_side_effects() {
+        let (_dir, store) = temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        shared.settings.lock().unwrap().save(&shared.store).unwrap();
+        let file = shared.store.dir().join(crate::config::DAEMON_SETTINGS_FILE);
+        let bytes = std::fs::read(&file).unwrap();
+        let settings_before = serde_json::to_value(&*shared.settings.lock().unwrap()).unwrap();
+        let generation = shared.private_inference_generation.load(Ordering::Acquire);
+        let response = handle_request(
+            &shared,
+            &req(
+                "preview_settings",
+                serde_json::json!({
+                    "private_inference":true, "scrub_check":"manual", "max_uploads_per_day":13
+                }),
+            ),
+        );
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let preview = response.result.unwrap();
+        assert_eq!(preview["applied"], false);
+        assert!(!preview["changes"].as_array().unwrap().is_empty());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        assert_eq!(
+            serde_json::to_value(&*shared.settings.lock().unwrap()).unwrap(),
+            settings_before
+        );
+        assert_eq!(
+            shared.private_inference_generation.load(Ordering::Acquire),
+            generation
+        );
+        for method in ["get_config_schema", "preview_settings"] {
+            assert!(METHODS.contains(&method));
+            assert!(DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
+        }
+        let schema = handle_request(&shared, &req("get_config_schema", serde_json::json!({})));
+        assert_eq!(
+            schema.result.unwrap()["schema_version"],
+            "trace_commons.config_schema.v1"
+        );
+        assert!(
+            handle_request(
+                &shared,
+                &req("get_config_schema", serde_json::json!({"unexpected":true}))
+            )
+            .error
+            .is_some()
+        );
     }
 
     /// `shared()` with a config saved, for tests that arm a project: arming
@@ -18346,7 +18417,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 91, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 93, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
