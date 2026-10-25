@@ -205,8 +205,8 @@ public struct BalanceCalls: Sendable {
 ///
 /// Holds no words and judges no amount. Every sentence comes back from
 /// `calls` or is a field of `PrivateInferenceCopy`, and the decisions that
-/// matter -- which sentence, which tone, which button, and whether a figure
-/// exists at all -- are all the Rust's.
+/// matter -- state meanings, tone, actions, and whether a figure exists --
+/// come from the Rust. The shell omits the redundant expired-sign-in notice.
 ///
 /// **Nothing here compares an amount to anything.** There is no threshold, no
 /// "low balance", no colour that depends on a number. The ABI judges no
@@ -254,12 +254,17 @@ public enum BalanceSurface {
     /// row is figures, and a sentence above them announcing that the read
     /// succeeded is this app narrating itself.
     ///
+    /// An expired sign-in also draws no sentence: sign-in controls already
+    /// provide recovery. This does not make its unread balance a figure;
+    /// `showsFigures` still checks the original shared state line.
+    ///
     /// A caught panic in the Rust falls back to the payload's unreported
     /// sentence -- the one that says the question was not answered, never one
     /// that claims something about what is kept here or what the service did.
     public static func stateLine(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> String? {
+        guard status.state != "session_expired" else { return nil }
         guard let line = calls.stateLine(status.state) else { return copy.balanceUnreported }
         return line.isEmpty ? nil : line
     }
