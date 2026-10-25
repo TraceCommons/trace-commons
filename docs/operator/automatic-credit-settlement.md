@@ -42,8 +42,8 @@ aggregate counts and hashed tenant identifiers only.
 The stable internal actor is `principal_sha256:69f364e7d457dbb631c61eb20175ef70c9cedc721f511c0f0e532ddebb900ee1`.
 It is derived as `principal_sha256:` followed by the lowercase SHA-256 hex of
 the exact UTF-8 bytes `internal:credit-settlement-scheduler:v1` (no newline).
-When a central-issuer principal allowlist is configured, explicitly admit this
-value. It is an identity identifier, not a bearer credential, and cannot be
+When `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` is configured,
+explicitly admit this value. It is an identity identifier, not a bearer credential, and cannot be
 used to authenticate an HTTP request.
 
 Only accepted, positive, eligible awards are candidates. Gate novelty awards
