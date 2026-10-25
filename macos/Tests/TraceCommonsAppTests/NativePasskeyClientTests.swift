@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -72,20 +73,34 @@ final class NativePasskeyClientTests: XCTestCase {
 }
 
 private final class NativeIdentityWireFixture: DaemonCalling {
-    var methods = ["passkey_create_begin", "passkey_create_complete", "passkey_login_begin", "passkey_login_complete", "passkey_add_begin", "passkey_add_complete", "passkey_cancel", "account_bind", "account_binding", "passkey_state", "account_sign_in", "account_session_status", "account_sign_out"]
-    var calls: [(String, String)] = []
-    var coreDown = false
+    private struct State: Sendable {
+        var methods = ["passkey_create_begin", "passkey_create_complete", "passkey_login_begin", "passkey_login_complete", "passkey_add_begin", "passkey_add_complete", "passkey_cancel", "account_bind", "account_binding", "passkey_state", "account_sign_in", "account_session_status", "account_sign_out"]
+        var calls: [(String, String)] = []
+        var coreDown = false
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    var methods: [String] {
+        get { state.withLock { $0.methods } }
+        set { state.withLock { $0.methods = newValue } }
+    }
+    var calls: [(String, String)] { state.withLock { $0.calls } }
+    var coreDown: Bool {
+        get { state.withLock { $0.coreDown } }
+        set { state.withLock { $0.coreDown = newValue } }
+    }
     func call(_ method: String, params: String) -> String {
-        calls.append((method, params))
-        if coreDown { return #"{"error":{"code":"unavailable","message":"handle-freed"}}"# }
-        let result: [String: Any]
-        switch method {
-        case "hello": result = ["methods": methods]
-        case "account_session_status": result = ["state": "unknown", "signed_in": NSNull(), "expires_at": NSNull()]
-        case "unenroll": result = ["unenrolled": true, "removed": true, "approvals_returned": 0]
-        default: result = ["binding_state": "unbound"]
+        state.withLock { state in
+            state.calls.append((method, params))
+            if state.coreDown { return #"{"error":{"code":"unavailable","message":"handle-freed"}}"# }
+            let result: [String: Any]
+            switch method {
+            case "hello": result = ["methods": state.methods]
+            case "account_session_status": result = ["state": "unknown", "signed_in": NSNull(), "expires_at": NSNull()]
+            case "unenroll": result = ["unenrolled": true, "removed": true, "approvals_returned": 0]
+            default: result = ["binding_state": "unbound"]
+            }
+            return String(decoding: try! JSONSerialization.data(withJSONObject: ["result": result]), as: UTF8.self)
         }
-        return String(decoding: try! JSONSerialization.data(withJSONObject: ["result": result]), as: UTF8.self)
     }
     func openPreview(entryID: String) throws -> TCPreview { fatalError("No preview in identity tests") }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }

@@ -1,6 +1,7 @@
 // INTEGRATION: run with the sessionState onboarding changes and their matching FFI dylib.
 import AppKit
 import Combine
+import os
 import SwiftUI
 import TCBridge
 import TCShellCore
@@ -8,15 +9,17 @@ import XCTest
 @testable import TraceCommonsApp
 
 private final class OnboardingSessionDaemon: DaemonCalling {
-    struct Call {
+    struct Call: Sendable {
         let method: String
         let params: String
     }
 
-    private enum Phase { case legacyKey, waiting, signedIn, storageUnavailable }
-    private let lock = NSLock()
-    private var phase: Phase = .legacyKey
-    private var recorded: [Call] = []
+    private enum Phase: Sendable { case legacyKey, waiting, signedIn, storageUnavailable }
+    private struct State: Sendable {
+        var phase: Phase = .legacyKey
+        var recorded: [Call] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
     private let unexpectedCall: XCTestExpectation
 
     init(unexpectedCall: XCTestExpectation) {
@@ -24,53 +27,47 @@ private final class OnboardingSessionDaemon: DaemonCalling {
     }
 
     var calls: [Call] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     func completeSignIn() {
-        lock.lock()
-        defer { lock.unlock() }
-        phase = .signedIn
+        state.withLock { $0.phase = .signedIn }
     }
 
     func makeStorageUnavailable() {
-        lock.lock()
-        defer { lock.unlock() }
-        phase = .storageUnavailable
+        state.withLock { $0.phase = .storageUnavailable }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append(Call(method: method, params: paramsJSON))
-        switch method {
-        case "near_ai_credential_status":
-            switch phase {
-            case .legacyKey:
-                return #"{"id":1,"result":{"state":"present","session_state":"absent"}}"#
-            case .waiting:
-                return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
-            case .signedIn:
-                return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
-            case .storageUnavailable:
-                return #"{"id":1,"result":{"state":"storage_unavailable","session_state":"storage_unavailable"}}"#
+        state.withLock { state in
+            state.recorded.append(Call(method: method, params: paramsJSON))
+            switch method {
+            case "near_ai_credential_status":
+                switch state.phase {
+                case .legacyKey:
+                    return #"{"id":1,"result":{"state":"present","session_state":"absent"}}"#
+                case .waiting:
+                    return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
+                case .signedIn:
+                    return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
+                case .storageUnavailable:
+                    return #"{"id":1,"result":{"state":"storage_unavailable","session_state":"storage_unavailable"}}"#
+                }
+            case "near_ai_balance":
+                return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
+            case "near_ai_credential_start":
+                state.phase = .waiting
+                return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
+            case "get_settings", "harness_list", "managed_snapshot":
+                // What the key is behind is read again once a sign-in lands.
+                // Reads only; the reply is a refusal, so nothing is published.
+                return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
+            default:
+                // Enrollment, wallet requests and consent writes are forbidden in
+                // these tests. Record and fail them even if the caller ignores errors.
+                unexpectedCall.fulfill()
+                return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
             }
-        case "near_ai_balance":
-            return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
-        case "near_ai_credential_start":
-            phase = .waiting
-            return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
-        case "get_settings", "harness_list", "managed_snapshot":
-            // What the key is behind is read again once a sign-in lands.
-            // Reads only; the reply is a refusal, so nothing is published.
-            return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
-        default:
-            // Enrollment, wallet requests and consent writes are forbidden in
-            // these tests. Record and fail them even if the caller ignores errors.
-            unexpectedCall.fulfill()
-            return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
         }
     }
 
@@ -166,7 +163,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             // binding, so the no-sign-in check below always follows a real
             // change of selection on both render paths.
             for _ in 0..<10 where selection.provider != target {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                try await Task.sleep(for: .milliseconds(20))
                 await Task.yield()
             }
             if selection.provider != target {

@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -7,27 +8,32 @@ import XCTest
 /// so the method name and the parameter object are assertable without a
 /// running daemon. The same shape as the double in `SetSettingsTests`.
 private final class GrantRecordingDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
-    var methodResponses: [String: String] = [:]
-    private var responseValue = #"{"id":1,"result":{}}"#
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var methodResponses: [String: String] = [:]
+        var response = #"{"id":1,"result":{}}"#
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var methodResponses: [String: String] {
+        get { state.withLock { $0.methodResponses } }
+        set { state.withLock { $0.methodResponses = newValue } }
+    }
 
     var calls: [(method: String, params: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var response: String {
-        get { lock.lock(); defer { lock.unlock() }; return responseValue }
-        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+        get { state.withLock { $0.response } }
+        set { state.withLock { $0.response = newValue } }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method: method, params: paramsJSON))
-        return methodResponses[method] ?? responseValue
+        state.withLock {
+            $0.recorded.append((method: method, params: paramsJSON))
+            return $0.methodResponses[method] ?? $0.response
+        }
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }

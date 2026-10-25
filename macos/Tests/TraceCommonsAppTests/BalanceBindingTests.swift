@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -11,34 +12,26 @@ import XCTest
 /// under that corrupts the buffer's refcount and takes the whole test process
 /// down with SIGSEGV after every test has reported passing.
 private final class RecordingDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [String] = []
-    private var responseValue = #"{"id":1,"result":{}}"#
+    private struct State: Sendable {
+        var recorded: [String] = []
+        var response = #"{"id":1,"result":{}}"#
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var methods: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var response: String {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return responseValue
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            responseValue = newValue
-        }
+        get { state.withLock { $0.response } }
+        set { state.withLock { $0.response = newValue } }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append(method)
-        return responseValue
+        state.withLock {
+            $0.recorded.append(method)
+            return $0.response
+        }
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
@@ -144,23 +137,26 @@ final class BalanceBindingTests: XCTestCase {
 
 
 private final class DelayedBalanceDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var countValue = 0
-    private var freshValues: [Bool] = []
+    private struct State: Sendable {
+        var count = 0
+        var freshValues: [Bool] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
     let releaseFirst = DispatchSemaphore(value: 0)
     let firstReply: String
     let laterReply: String
-    var count: Int { lock.withLock { countValue } }
-    var requestedFresh: [Bool] { lock.withLock { freshValues } }
+    var count: Int { state.withLock { $0.count } }
+    var requestedFresh: [Bool] { state.withLock { $0.freshValues } }
 
     init(first: String, later: String) { firstReply = first; laterReply = later }
     func call(_ method: String, params: String) -> String {
         guard method == BalanceSurface.statusMethod else { return #"{"id":1,"result":{}}"# }
         let payload = (try? JSONSerialization.jsonObject(with: Data(params.utf8))) as? [String: Any]
-        let index = lock.withLock {
-            freshValues.append(payload?["fresh"] as? Bool ?? false)
-            countValue += 1
-            return countValue
+        let fresh = payload?["fresh"] as? Bool ?? false
+        let index = state.withLock {
+            $0.freshValues.append(fresh)
+            $0.count += 1
+            return $0.count
         }
         if index == 1 {
             _ = releaseFirst.wait(timeout: .now() + 5)

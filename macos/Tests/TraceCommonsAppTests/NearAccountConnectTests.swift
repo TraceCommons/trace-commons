@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -10,26 +11,26 @@ private final class NearRecordingDaemon: DaemonCalling {
     /// reaches this double today. Routing it through `AppModel` would make
     /// it race exactly as CredentialCancelTests did; the guard is free and
     /// removes the trap rather than leaving it for whoever does that.
-    private let lock = NSLock()
-    private var responseValue = #"{"id":1,"result":{"ready":true}}"#
-    private var recorded: [(String, String)] = []
+    private struct State: Sendable {
+        var response = #"{"id":1,"result":{"ready":true}}"#
+        var recorded: [(String, String)] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var response: String {
-        get { lock.lock(); defer { lock.unlock() }; return responseValue }
-        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+        get { state.withLock { $0.response } }
+        set { state.withLock { $0.response = newValue } }
     }
 
     var calls: [(String, String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     func call(_ method: String, params: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method, params))
-        return responseValue
+        state.withLock {
+            $0.recorded.append((method, params))
+            return $0.response
+        }
     }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }

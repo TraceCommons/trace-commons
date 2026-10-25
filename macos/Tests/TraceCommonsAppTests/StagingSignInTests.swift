@@ -1,22 +1,18 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
 private final class StartRecordingDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [(String, String)] = []
+    private let recorded = OSAllocatedUnfairLock(initialState: [(String, String)]())
 
     var calls: [(String, String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        recorded.withLock { $0 }
     }
 
     func call(_ method: String, params: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method, params))
+        recorded.withLock { $0.append((method, params)) }
         return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/login","status":"waiting_for_browser"}}"#
     }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
