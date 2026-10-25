@@ -778,7 +778,10 @@ keyring-core = "=1.0.0"
 # manifests that changed upstream, and the unicode-normalization 0.1.25
 # vendor entry, whose sha256 matches the lock's checksum. `grep -c bfb5e07`
 # on the file is 0.
-ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
+# Normalize replayed assistant output_text for NEAR AI Responses input.
+# Only content type literals change; other providers and history bytes stay intact.
+# This revision adds no packages or dependencies.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "ba370c2af08c60bd2c35a55382ca18b0552dd664" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -792,8 +795,8 @@ ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aae
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "a2ae5d97aaee005c30dd51b7a873e6eba06940af" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "ba370c2af08c60bd2c35a55382ca18b0552dd664" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "ba370c2af08c60bd2c35a55382ca18b0552dd664" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
