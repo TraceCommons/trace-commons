@@ -111,6 +111,17 @@ async fn upload_ownership_follows_live_device_membership_without_authentication_
         .bind_device_upload_principal(&tenant, &device, &actor)
         .await
         .unwrap();
+    assert_eq!(
+        admin
+            .query_one(
+                "SELECT count(*) FROM trace_device_upload_principals WHERE tenant_id=$1",
+                &[&tenant]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
     assert!(
         runtime
             .resolve_principals_to_accounts(&tenant, std::slice::from_ref(&alias))
@@ -126,6 +137,8 @@ async fn upload_ownership_follows_live_device_membership_without_authentication_
         .await
         .unwrap();
     admin.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account,&parent]).await.unwrap();
+    admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,'{}',$3,$3)", &[&tenant,&account,&device]).await.unwrap();
+    admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,account_id,principal_ref,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$4)", &[&tenant,&account,&parent,&device]).await.unwrap();
     runtime
         .bind_device_upload_principal(&tenant, &device, &actor)
         .await
@@ -169,8 +182,6 @@ async fn upload_ownership_follows_live_device_membership_without_authentication_
     let subject = trace_commons_protocol::onboarding::user_subject_hash(&device);
     let native_actor = device_claim_actor(&tenant, &device, Some(&subject));
     let native_alias = signed_principal(&tenant, &native_actor);
-    admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,'{}',$3,$3)", &[&tenant,&account,&device]).await.unwrap();
-    admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,account_id,principal_ref,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$4)", &[&tenant,&account,&parent,&device]).await.unwrap();
     for principal in [&native_alias, &alias] {
         admin.execute("INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,redaction_pipeline_version,redaction_hash) VALUES($1,$2,$2,$3,'1','test','test','accepted','low','test','test')", &[&tenant,&Uuid::new_v4(),&principal]).await.unwrap();
     }
@@ -430,6 +441,28 @@ async fn upload_ownership_follows_live_device_membership_without_authentication_
             .unwrap()
             .contains(&alias)
     );
+    // Unlinking a provisioned device does not reclassify it as legacy login.
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=now() WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&parent]).await.unwrap();
+    let unlinked_actor = device_claim_actor(&tenant, &device, Some("after-unlink"));
+    let unlinked_alias = signed_principal(&tenant, &unlinked_actor);
+    runtime
+        .bind_device_upload_principal(&tenant, &device, &unlinked_actor)
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .create_or_reuse_account(&tenant, &unlinked_alias)
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .payout_principal_accounts(&tenant, std::slice::from_ref(&unlinked_alias))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=NULL WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&parent]).await.unwrap();
     admin
         .execute(
             "UPDATE device_keys SET revoked_at=now() WHERE device_key_id=$1",

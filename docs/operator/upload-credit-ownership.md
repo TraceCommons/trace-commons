@@ -10,9 +10,15 @@ another.
 
 - Preserve the signed-claim principal on submissions and credit ledger events.
   It remains the provenance and direct authorization identity.
-- After verifying a device signature, record an immutable, tenant-scoped
-  association from the derived upload principal to the device principal before
-  returning an upload claim. A conflicting association fails closed.
+- After verifying a provisioned personal device's signature, record an immutable,
+  tenant-scoped association from the derived upload principal to the device
+  principal before returning an upload claim. A conflicting association fails
+  closed. The durable provisioning record determines this behavior even after
+  account membership is unlinked.
+- Legacy shared-instance devices without a personal provisioning record retain
+  their existing distinct per-user login principals and account ownership. Do
+  not reserve those principals as upload-only aliases or collapse their users
+  into one device account.
 - Account-wide contribution reads, credit summaries, starter-credit plausibility,
   settlement grouping, credit holds, and payout accrual resolution use the same
   ownership relation.

@@ -1386,6 +1386,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// Record the ownership alias of an authenticated device upload claim.
     /// Call only after verifying the device signature and claim scope. This
     /// binds provenance to the device, never grants an account authenticator.
+    /// Registered legacy devices without server-side NEAR provisioning are a
+    /// no-op: their signed principals retain the independent login model.
     async fn bind_device_upload_principal(
         &self,
         _tenant_id: &str,

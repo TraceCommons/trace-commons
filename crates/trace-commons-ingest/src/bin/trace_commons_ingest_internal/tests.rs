@@ -1201,6 +1201,8 @@ async fn upload_ownership_does_not_expand_upload_credential_credit_scope() {
         .await
         .unwrap();
         tx.execute("INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash) VALUES($1,$2,'test',$2)", &[&tenant,&device]).await.unwrap();
+        tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,'{}',$3,$3)", &[&tenant,&account,&device]).await.unwrap();
+        tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,account_id,principal_ref,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$4)", &[&tenant,&account,&parent,&device]).await.unwrap();
         tx.commit().await.unwrap();
     }
     backend
@@ -1237,6 +1239,62 @@ async fn upload_ownership_does_not_expand_upload_credential_credit_scope() {
             .is_none(),
         "upload ownership must not grant visibility of sibling account credits or statuses"
     );
+    // Upload-only aliases must fail login-link minting with a controlled deny,
+    // including a newly issued subject after the personal device is unlinked.
+    let mut signed_state = test_state_with_signed_token_verifier(
+        temp.path().to_path_buf(),
+        "ownership-secret",
+        None,
+        None,
+    );
+    Arc::make_mut(&mut signed_state).db_mirror = Some(backend.clone());
+    for unlink in [false, true] {
+        let claim_actor = if unlink {
+            let mut client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .unwrap();
+            let tx = client.transaction().await.unwrap();
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+            tx.execute("UPDATE trace_account_principals SET unlinked_at=now() WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&parent]).await.unwrap();
+            tx.commit().await.unwrap();
+            let actor = trace_commons_server::account_trust::device_claim_actor(
+                &tenant,
+                &device,
+                Some("new-subject-after-unlink"),
+            );
+            backend
+                .bind_device_upload_principal(&tenant, &device, &actor)
+                .await
+                .unwrap();
+            actor
+        } else {
+            auth.signed_claim_subject.clone().unwrap()
+        };
+        let token = signed_tenant_token(
+            "ownership-secret",
+            serde_json::json!({
+                "tenant_id": tenant, "role": "contributor", "sub": claim_actor,
+                "allowed_consent_scopes": ["debugging_evaluation"],
+                "allowed_uses": ["debugging"],
+                "exp": (Utc::now() + Duration::minutes(5)).timestamp()
+            }),
+        );
+        match mint_login_link_handler(State(signed_state.clone()), auth_headers(&token)).await {
+            Err((status, _)) => assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "upload-only login denial, unlinked={unlink}"
+            ),
+            Ok(_) => panic!("upload ownership must never mint an account login link"),
+        }
+    }
     // Deliberate direct membership retains the pre-existing account-reader contract.
     let (direct, legacy) = signed_claim_principal_refs(&tenant, "explicitly-linked-principal");
     let direct_account = backend
@@ -88635,8 +88693,9 @@ impl Database for PerUserTestDeviceKeyDb {
 /// # Arguments
 /// * `device_kp`      — Ed25519 keypair that signs the claim request body.
 /// * `device_key_id`  — `sha256:…` key-id derived from `device_kp`'s public key.
-/// * `pk_b64`         — base64-standard-encoded public key bytes stored in the
-///   in-memory registry stub so the issuer can verify the signature.
+/// * `pk_b64`         — base64-standard-encoded device public key.
+/// * `shared_registry` — the same PostgreSQL backend used by ingest, so
+///   ownership writes made during issuance affect subsequent login minting.
 async fn mint_login_link_account_for_subject(
     state: &Arc<AppState>,
     tenant_id: &str,
@@ -88644,6 +88703,7 @@ async fn mint_login_link_account_for_subject(
     device_key_id: &str,
     pk_b64: &str,
     subject: Option<&str>,
+    shared_registry: Option<&PgBackend>,
 ) -> Uuid {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
@@ -88669,6 +88729,32 @@ async fn mint_login_link_account_for_subject(
         },
     );
 
+    let registry: Arc<dyn Database> = if let Some(backend) = shared_registry {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap();
+        tx.execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap();
+        tx.execute("INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash) VALUES($1,$2,$3,$2) ON CONFLICT(tenant_id,device_key_id) DO NOTHING", &[&tenant_id,&device_key_id,&pk_b64]).await.unwrap();
+        tx.commit().await.unwrap();
+        state.db_mirror.as_ref().unwrap().clone()
+    } else {
+        stub
+    };
+
     // Build the issuer using the same TEST_EDDSA signing key as the ingest
     // tests; the token verifier in `state` trusts that public key.
     let config = TraceUploadClaimIssuerConfig {
@@ -88690,7 +88776,7 @@ async fn mint_login_link_account_for_subject(
         allowlist_source: None,
         allowlist_refresh_interval_seconds: 60,
         allowlist_max_stale_seconds: 3600,
-        onboarding_device_key_db: Some(stub as Arc<dyn Database>),
+        onboarding_device_key_db: Some(registry),
         onboarding_ingest_url: Some("https://ingest.tracecommons.ai".to_string()),
         onboarding_community_url: None,
         onboarding_profile_url: None,
@@ -88819,6 +88905,7 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
         &device_key_id,
         &pk_b64,
         Some("alice"),
+        Some(backend.as_ref()),
     )
     .await;
     let bob_account = mint_login_link_account_for_subject(
@@ -88828,6 +88915,7 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
         &device_key_id,
         &pk_b64,
         Some("bob"),
+        Some(backend.as_ref()),
     )
     .await;
     let device_account = mint_login_link_account_for_subject(
@@ -88837,6 +88925,7 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
         &device_key_id,
         &pk_b64,
         None,
+        Some(backend.as_ref()),
     )
     .await;
 
@@ -88861,6 +88950,7 @@ async fn per_user_subjects_resolve_to_distinct_accounts() {
         &device_key_id,
         &pk_b64,
         Some("alice"),
+        Some(backend.as_ref()),
     )
     .await;
     assert_eq!(

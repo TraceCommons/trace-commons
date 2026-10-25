@@ -21222,7 +21222,13 @@ async fn mint_login_link_handler(
     let account_id = db
         .create_or_reuse_account(tenant_id, principal_ref)
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| match error {
+            DatabaseError::UploadPrincipalAuthenticationDenied => api_error(
+                StatusCode::FORBIDDEN,
+                "upload-only credentials cannot create account login links",
+            ),
+            other => internal_error(other),
+        })?;
 
     // 3. Mint the single-use code; store ONLY its hash.
     let code = generate_login_code();
