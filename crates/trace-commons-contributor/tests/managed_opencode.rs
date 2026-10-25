@@ -243,7 +243,7 @@ fn declared_and_managed_exports_share_one_source_and_both_load() {
 }
 
 #[test]
-fn turning_opencode_off_stops_managed_discovery() {
+fn automatic_opencode_off_preserves_only_explicitly_collected_exports() {
     use trace_commons_contributor::{
         daemon::settings::{DaemonSettings, SourceDeclaration},
         source::all_sources,
@@ -253,19 +253,56 @@ fn turning_opencode_off_stops_managed_discovery() {
     let root = store
         .dir()
         .join(trace_commons_contributor::managed::opencode::STAGING);
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(
-        root.join("s.json"),
-        include_bytes!("fixtures/opencode/completed-1.19.0.json"),
-    )
-    .unwrap();
-    let settings = DaemonSettings {
-        opencode_source: Some(SourceDeclaration::Off),
+    let ordinary = tmp.path().join("ordinary-opencode");
+    for folder in [&root, &ordinary] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::write(
+            folder.join("session.json"),
+            include_bytes!("fixtures/opencode/completed-1.19.0.json"),
+        )
+        .unwrap();
+    }
+    let mut settings = DaemonSettings {
+        opencode_source: Some(SourceDeclaration::Watch {
+            path: ordinary.clone(),
+        }),
         ..Default::default()
     };
+    let watching = all_sources(&settings.source_roots(&store));
+    assert_eq!(
+        watching
+            .iter()
+            .find(|source| source.name() == "opencode")
+            .unwrap()
+            .discover()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    settings.opencode_source = Some(SourceDeclaration::Off);
     let roots = settings.source_roots(&store);
-    assert!(!roots.source_identities().contains_key("opencode"));
-    assert!(all_sources(&roots).iter().all(|s| s.name() != "opencode"));
+    let identity = &roots.source_identities()["opencode"];
+    assert!(identity.contains(&root.to_string_lossy().to_string()));
+    assert!(!identity.contains(&ordinary.to_string_lossy().to_string()));
+    let sources = all_sources(&roots);
+    let source = sources
+        .iter()
+        .find(|source| source.name() == "opencode")
+        .unwrap();
+    let found = source.discover().unwrap();
+    assert_eq!(found.len(), 1, "automatic discovery must remain off");
+    assert!(found[0].path.starts_with(&root));
+    assert!(
+        source.load(&found[0]).is_ok(),
+        "explicitly collected bytes remain reviewable"
+    );
+    assert!(
+        source
+            .session_at(&ordinary.join("session.json"))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

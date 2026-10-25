@@ -51,6 +51,7 @@
   "menu_bar_mark_enabled": true,
   "managed_terminal": "terminal",
   "managed_cli_options": {},
+  "managed_folder_settings": [],
   "near_ai_configured": false,
   "near_ai_inference_configured": false,
   "trajectory_source_mode": "unset",

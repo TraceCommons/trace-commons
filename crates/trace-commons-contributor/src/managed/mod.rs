@@ -3,7 +3,9 @@
 pub mod accounts;
 pub mod cli;
 pub mod codex;
+pub mod folder;
 pub mod models;
+pub mod native_collection;
 pub mod opencode;
 pub mod options;
 pub mod profiles;
@@ -88,6 +90,8 @@ pub struct Selection {
 pub enum ManagedError {
     #[error("managed selection conflict; refresh and try again")]
     Conflict,
+    #[error("trace collection requires exclusive access to this managed account")]
+    CollectionAccountBusy,
     #[error("managed account or session not found")]
     NotFound,
     #[error("account label is ambiguous; select an account ID")]

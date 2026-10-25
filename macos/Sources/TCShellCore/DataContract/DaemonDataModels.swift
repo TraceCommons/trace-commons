@@ -912,6 +912,7 @@ extension DaemonData {
     public struct Settings: Codable, Equatable, Sendable {
         /// Canonical saved arguments, also projected by managed_snapshot.
         public let managedCLIOptions: [String: String]?
+        public let managedFolderSettings: [ManagedFolderProfile]?
         /// Only returned by a write that changed managed-session options.
         public let managedRevision: UInt64?
         public let quiescenceSecs: Int?
@@ -987,6 +988,7 @@ extension DaemonData {
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case managedCLIOptions = "managed_cli_options"
+            case managedFolderSettings = "managed_folder_settings"
             case managedRevision = "managed_revision"
             case quiescenceSecs = "quiescence_secs"
             case approvalHoldSecs = "approval_hold_secs"

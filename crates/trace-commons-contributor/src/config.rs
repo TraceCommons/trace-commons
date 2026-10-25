@@ -1453,16 +1453,21 @@ impl ConfigStore {
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
         // Collected exports belong to this contributor, while the native
-        // OpenCode profiles remain local session history. Never follow a
+        // agent profiles remain local session history. Never follow a
         // substituted staging symlink into someone else's files.
-        let staged = self.dir.join(crate::managed::opencode::STAGING);
-        match std::fs::symlink_metadata(&staged) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-                std::fs::remove_dir_all(&staged).context("removing managed exports")?
+        for directory in [
+            crate::managed::opencode::STAGING,
+            crate::managed::native_collection::STAGING,
+        ] {
+            let staged = self.dir.join(directory);
+            match std::fs::symlink_metadata(&staged) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                    std::fs::remove_dir_all(&staged).context("removing managed exports")?
+                }
+                Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("reading managed exports"),
             }
-            Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("reading managed exports"),
         }
         let bundles = self.dir.join("token-bundles");
         match std::fs::symlink_metadata(&bundles) {
@@ -2234,11 +2239,15 @@ mod tests {
         let staged = store.dir.join(crate::managed::opencode::STAGING);
         std::fs::create_dir(&staged).unwrap();
         std::fs::write(staged.join("trace.json"), b"private").unwrap();
+        let native_staged = store.dir.join(crate::managed::native_collection::STAGING);
+        std::fs::create_dir(&native_staged).unwrap();
+        std::fs::write(native_staged.join("trace.jsonl"), b"private").unwrap();
         let profile = store.dir.join("managed-profiles");
         std::fs::create_dir(&profile).unwrap();
         std::fs::write(profile.join("native-session"), b"original").unwrap();
         store.wipe().unwrap();
         assert!(!staged.exists());
+        assert!(!native_staged.exists());
         assert_eq!(
             std::fs::read(profile.join("native-session")).unwrap(),
             b"original"

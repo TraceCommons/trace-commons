@@ -60,6 +60,8 @@ impl SessionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_options: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -196,6 +198,8 @@ where
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
+    #[serde(default)]
+    cli_options_text: Option<String>,
     #[serde(default)]
     cli_options: Vec<String>,
     #[serde(default)]
@@ -516,20 +520,20 @@ impl SessionRegistry {
 
     pub fn prepare(
         &mut self,
-        request: LaunchRequest,
+        mut request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
+        request.cwd = super::folder::canonical(&request.cwd)?;
         let named = request
             .model
             .as_deref()
             .is_some_and(super::opencode::valid_model);
         if request.tool == ToolId::Opencode {
-            // On the NEAR AI sign-in the session's proxy names its default
-            // model (`models::default_for`), so the request names none. A
-            // saved key needs a model OpenCode can be told.
+            // The NEAR AI sign-in can choose a model or use its proxy's
+            // default. A saved key needs a model OpenCode can be told.
             let model_ok = match request.connection {
                 ConnectionKind::Subscription => false,
-                ConnectionKind::NearAiSignIn => request.model.is_none(),
+                ConnectionKind::NearAiSignIn => request.model.is_none() || named,
                 ConnectionKind::ApiKey | ConnectionKind::NearAi => named,
             };
             if request.purpose != LaunchPurpose::Coding || !model_ok {
@@ -545,7 +549,7 @@ impl SessionRegistry {
                         request.connection,
                         ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
                     ));
-            if !model_ok || request.collect_traces {
+            if !model_ok || (request.collect_traces && request.purpose != LaunchPurpose::Coding) {
                 return Err(ManagedError::InvalidRequest);
             }
         }
@@ -571,6 +575,19 @@ impl SessionRegistry {
         }
         if !request.cwd.is_absolute() || !request.cwd.is_dir() {
             return Err(ManagedError::InvalidRequest);
+        }
+        // Native transcripts share an account profile. Collection must never
+        // sweep a concurrent opted-out run into another run's staging area.
+        if request.purpose == LaunchPurpose::Coding
+            && matches!(request.tool, ToolId::Claude | ToolId::Codex)
+            && self.data.entries.iter().any(|entry| {
+                entry.view.account_id == account.id
+                    && entry.view.purpose == LaunchPurpose::Coding
+                    && entry.view.state.holds_profile()
+                    && (request.collect_traces || entry.view.collect_traces)
+            })
+        {
+            return Err(ManagedError::CollectionAccountBusy);
         }
         if self.data.entries.iter().any(|e| {
             e.view.account_id == account.id
@@ -611,12 +628,20 @@ impl SessionRegistry {
             can_stop: false,
             can_start_again: false,
         };
-        let cli_options = if request.purpose == LaunchPurpose::Coding {
-            super::options::arguments(&self.store, request.tool)?
+        let cli_options_text = if request.purpose == LaunchPurpose::Coding {
+            Some(match request.cli_options.clone() {
+                Some(text) => text,
+                None => super::folder::lookup(&self.store, request.tool, &request.cwd)?.cli_options,
+            })
         } else {
-            vec![]
+            None
+        };
+        let cli_options = match cli_options_text.as_deref() {
+            Some(text) => super::options::parse(request.tool, text)?,
+            None => vec![],
         };
         let entry = Entry {
+            cli_options_text,
             cli_options,
             dismissed: false,
             launched: false,
@@ -637,6 +662,39 @@ impl SessionRegistry {
         Ok(PreparedLaunch {
             session_id: id,
             ticket: Some(ticket),
+        })
+    }
+
+    /// A failed preference write must not strand a ticket the caller never saw.
+    pub fn rollback_prepared(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|entry| entry.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state != SessionState::Starting
+            || entry.proof_hash.is_some()
+            || entry.launched
+        {
+            return Err(ManagedError::Conflict);
+        }
+        let mut next = self.data.clone();
+        next.entries.retain(|entry| entry.view.id != id);
+        self.commit(next)
+    }
+
+    pub fn folder_settings(&self, id: Uuid) -> Option<super::folder::FolderSettings> {
+        let entry = self.data.entries.iter().find(|entry| entry.view.id == id)?;
+        if entry.request.purpose != LaunchPurpose::Coding {
+            return None;
+        }
+        Some(super::folder::FolderSettings {
+            tool: entry.request.tool,
+            cwd: entry.request.cwd.clone(),
+            model: entry.request.model.clone(),
+            collect_traces: entry.request.collect_traces,
+            cli_options: entry.cli_options_text.clone()?,
         })
     }
 
@@ -925,16 +983,15 @@ mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
 
-    /// OpenCode on the NEAR AI sign-in starts on the session proxy's
-    /// default model, so its request names none; one that names a model is
-    /// refused. A saved key still needs a valid model, and a subscription
-    /// is still refused.
+    /// OpenCode can use the sign-in proxy's default or select a valid model.
+    /// A saved key still needs a model; subscriptions remain unavailable.
     #[test]
-    fn opencode_on_the_sign_in_carries_no_model_and_a_key_still_needs_one() {
+    fn opencode_sign_in_can_choose_a_model_and_a_key_still_needs_one() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = |connection, account_id, model: Option<&str>| LaunchRequest {
+            cli_options: None,
             model: model.map(str::to_owned),
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -950,7 +1007,7 @@ mod tests {
         assert_eq!(
             registry
                 .prepare(
-                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("gpt-5")),
+                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("bad model")),
                     &sign_in
                 )
                 .err(),
@@ -1009,6 +1066,7 @@ mod tests {
         model: Option<&str>,
     ) -> LaunchRequest {
         LaunchRequest {
+            cli_options: None,
             model: model.map(str::to_owned),
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1201,6 +1259,7 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1236,6 +1295,7 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1276,6 +1336,7 @@ mod tests {
 
     fn coding(account: &AccountView, cwd: &std::path::Path) -> LaunchRequest {
         LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,

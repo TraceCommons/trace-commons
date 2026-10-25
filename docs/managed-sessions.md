@@ -159,10 +159,11 @@ tools whose executable availability is not checked.
   Calls and Verified totals include these histories over the same 24-hour
   window as the shared proxy. A source that cannot be read is unknown,
   never a measured zero.
-- Managed Claude Code and Codex profiles join their tool's existing trace
-  source. Turning that source off also excludes its managed profiles.
-  Source identities include these roots so existing automatic-grant checks
-  see the change; project arming, review and upload approval remain in force.
+- Managed Claude Code and Codex sessions collect only when the launch's
+  **Collect trace for review** choice is on. After exit, new transcript files
+  are staged separately from private account profiles. These explicit exports
+  can enter review even when automatic source discovery is off; project arming,
+  review and upload approval remain in force.
 - A trace can carry its actual final model exchange only while
   `ironwire_attested_bodies` is enabled. Its request and response are read
   from the owning proxy's body store and checked against the stored digests;
@@ -275,11 +276,12 @@ the test suite.
 
 ## OpenCode sessions
 
-OpenCode managed launches use an OpenAI API key
-(`api-key`) or NEAR AI key (`near-ai`). OpenCode subscription sign-in is not
-supported. The native macOS Add account dialog includes OpenCode; select an
-account, project, and explicit **Model ID** when launching. Enable **Collect
-this session** to collect the launched session when OpenCode exits.
+OpenCode managed launches use the app's NEAR AI sign-in, an OpenAI API key
+(`api-key`) or a saved NEAR AI key (`near-ai`). OpenCode subscription sign-in is
+not supported. A saved-key launch requires an explicit **Model ID**; the app's
+NEAR AI sign-in offers its model catalogue and default. Enable **Collect trace
+for review** on the folder-selection screen to collect the launched session
+when OpenCode exits.
 
 The launcher requires a successful, bounded startup probe but does not restrict
 OpenCode version numbers. Session preparation checks import/export compatibility
@@ -387,3 +389,35 @@ Invalid options return the fixed `managed-cli-options-invalid` refusal without
 including user input. The `managed_changed` event announces successful saves.
 `managed_launch_redeem` adds `cli_options`, the argv array frozen by the original
 prepare; older contexts and stored entries default to an empty array.
+
+## Remembered folder choices and collection
+
+The launch dialog's folder choice also shows model, CLI options and **Collect
+trace for review**. Choices are remembered separately for each canonical folder
+and agent. Account selection stays in the interface or explicit CLI launch;
+accounts and credentials are never included in a folder profile.
+
+New folders start with global CLI options, the model default and collection off.
+Launching saves the displayed choices; Reset forgets only that folder/agent pair.
+A saved model that is no longer available must be changed before launching.
+Switching folders or accounts cannot apply an older lookup over the new form.
+
+The `managed_folder_settings` configuration field and
+`managed_folder_settings_get/reset` IPC methods share these values with CLI
+configuration. Explicit CLI model, collection and options flags override restored
+choices. Existing sessions retain the arguments captured when they were prepared.
+
+Collection is scoped to the opted-in managed session after it exits, including
+only newly created native transcript files. It preserves the agent's original
+local logs and feeds the normal review/contribution pipeline. It does not grant
+upload permission or include older traces from sessions where collection was off.
+Explicitly collected managed exports can be ingested even when automatic
+agent-source discovery is off; ordinary watched folders keep their own policies.
+
+Claude Code and Codex use account-level native transcript directories. To avoid
+mixing opted-in and opted-out traces, a collecting session requires exclusive
+use of that account's native profile until it ends. Non-collecting sessions can
+still overlap. OpenCode uses exact per-session identity and permits concurrency.
+A full review queue delays ingestion; a saved local export is retained until
+capacity is available. The collection status reports local preservation, not an
+upload or guaranteed queue admission.

@@ -231,6 +231,16 @@ async fn run_native(
     let _ = signals;
     #[cfg(unix)]
     let mut shutdown_at: Option<std::time::Instant> = None;
+    let native_collection = if row.collect_traces && !login && opencode.is_none() {
+        Some(super::native_collection::NativeCollection::snapshot(
+            store,
+            row.tool,
+            row.account_id,
+            row.id,
+        )?)
+    } else {
+        None
+    };
     let mut child = tokio::process::Command::from(command)
         .kill_on_drop(false)
         .spawn()?;
@@ -315,21 +325,22 @@ async fn run_native(
     let code = status.code().unwrap_or(1);
     let mut receipt = report(SessionState::Exited, Some(code));
     if row.collect_traces {
-        receipt.collection = Some(
-            match opencode
+        let collected = match opencode.as_ref() {
+            Some(session) => session.collect(store),
+            None => native_collection
                 .as_ref()
                 .ok_or(ManagedError::InvalidRequest)?
-                .collect(store)
-            {
-                Ok(()) => super::sessions::CollectionState::Collected,
-                Err(_) => {
-                    eprintln!(
-                        "OpenCode exited, but its trace could not be collected. The local session is preserved."
-                    );
-                    super::sessions::CollectionState::Failed
-                }
-            },
-        );
+                .collect(store),
+        };
+        receipt.collection = Some(match collected {
+            Ok(()) => super::sessions::CollectionState::Collected,
+            Err(_) => {
+                eprintln!(
+                    "The session exited, but its trace could not be collected. The local session is preserved."
+                );
+                super::sessions::CollectionState::Failed
+            }
+        });
     }
     let persisted = super::sessions::persist_exit(store, &receipt);
     let final_report: anyhow::Result<Value> = call(store, "managed_session_report", json!(receipt));

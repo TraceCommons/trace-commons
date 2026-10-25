@@ -150,6 +150,21 @@ pub(crate) fn schema() -> Value {
         terminal["enum"] = json!(terminals);
     }
     properties.insert("managed_terminal".into(), terminal);
+    properties.insert("managed_folder_settings".into(), json!({
+        "type":"array", "items":{
+            "type":"object", "required":["tool","cwd"], "additionalProperties":false,
+            "properties":{
+                "tool":{"type":"string","enum":["claude","codex","opencode"]},
+                "cwd":{"type":"string","description":"Existing absolute folder path; canonicalized before lookup or saving."},
+                "model":{"type":["string","null"]},
+                "collect_traces":{"type":"boolean","default":false},
+                "cli_options":{"type":"string","default":"","maxLength":16384},
+                "reset":{"type":"boolean","default":false}
+            }
+        },
+        "examples":[[{"tool":"codex","cwd":std::env::temp_dir(),"cli_options":"--sandbox workspace-write"}]],
+        "description":"Upsert launch choices separately by canonical folder and agent; omitted entries are preserved. Each entry replaces that pair's model, trace-collection and CLI options, never an account. reset:true removes one pair so it inherits global CLI options. Saved choices apply to newly prepared coding sessions."
+    }));
     properties.insert("managed_cli_options".into(), json!({
         "type":"object",
         "properties":{
@@ -180,7 +195,7 @@ pub(crate) fn schema() -> Value {
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties
         },
         "semantics":{
-            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify and managed_cli_options, which merge supplied entries.",
+            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_cli_options and managed_folder_settings, which merge supplied entries.",
             "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",

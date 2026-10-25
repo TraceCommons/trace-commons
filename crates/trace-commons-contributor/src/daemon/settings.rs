@@ -739,6 +739,8 @@ pub struct DaemonSettings {
     /// keep their existing values during partial configuration updates.
     #[serde(default)]
     pub managed_cli_options: BTreeMap<crate::managed::ToolId, String>,
+    #[serde(default)]
+    pub managed_folder_settings: Vec<crate::managed::folder::FolderSettings>,
 
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
@@ -1380,6 +1382,7 @@ impl Default for DaemonSettings {
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
             managed_cli_options: Default::default(),
+            managed_folder_settings: Default::default(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -1674,46 +1677,17 @@ impl DaemonSettings {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
             });
-        // Metadata only: never ask NativeProfiles::profile_root, which creates
-        // profile directories. Registered accounts and the known derived
-        // sign-in identities join their tool's existing collection choice.
-        // Existing sign-in transcripts remain available after sign-out.
-        let registered = crate::managed::accounts::AccountStore::open(store)
-            .map(|accounts| {
-                accounts
-                    .list()
-                    .into_iter()
-                    .map(|account| (account.tool, account.id))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let sign_in = [
-            crate::managed::ToolId::Claude,
-            crate::managed::ToolId::Codex,
-        ]
-        .into_iter()
-        .filter_map(|tool| crate::managed::signin::account_id(tool).map(|id| (tool, id)));
-        for (tool, id) in registered.into_iter().chain(sign_in) {
-            let (source, suffix) = match tool {
-                crate::managed::ToolId::Claude => (crate::source::SOURCE_CLAUDE_CODE, "projects"),
-                crate::managed::ToolId::Codex => (crate::source::SOURCE_CODEX, "sessions"),
-                _ => continue,
-            };
-            if roots.is_off(source) {
-                continue;
-            }
-            let mut path = store.dir().to_path_buf();
-            let components = [
-                "managed-profiles".to_owned(),
-                id.to_string(),
-                suffix.to_owned(),
-            ];
-            let existing_real_directory = components.iter().all(|component| {
-                path.push(component);
-                std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir())
-            });
-            if existing_real_directory {
-                roots = roots.with_additional_native_root(source, path);
+        // Only explicit post-exit exports join discovery. Private account
+        // profiles also contain opted-out sessions and must never be scanned.
+        for (tool, source) in [
+            (
+                crate::managed::ToolId::Claude,
+                crate::source::SOURCE_CLAUDE_CODE,
+            ),
+            (crate::managed::ToolId::Codex, crate::source::SOURCE_CODEX),
+        ] {
+            for path in crate::managed::native_collection::roots(store, tool) {
+                roots = roots.with_managed_native_root(source, path);
             }
         }
         roots
@@ -2110,6 +2084,9 @@ pub fn apply_settings_object(
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+            }
+            "managed_folder_settings" => {
+                crate::managed::folder::apply_patch(settings, value)?;
             }
             "managed_cli_options" => {
                 let options = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -4298,110 +4275,51 @@ mod tests {
     }
 
     #[test]
-    fn managed_native_roots_follow_account_tool_and_source_choice() {
-        use crate::managed::{ConnectionKind, ToolId, accounts::AccountStore};
+    fn private_native_profiles_require_explicit_per_session_collection() {
+        use crate::managed::{ConnectionKind, ToolId, accounts::AccountStore, signin};
         let (_dir, store) = temp_store();
         let mut accounts = AccountStore::open(&store).unwrap();
-        let claude = accounts
+        let saved = accounts
             .add(ToolId::Claude, ConnectionKind::Subscription, "Claude")
             .unwrap();
-        let codex = accounts
-            .add(ToolId::Codex, ConnectionKind::Subscription, "Codex")
-            .unwrap();
-        let opencode = accounts
-            .add(ToolId::Opencode, ConnectionKind::ApiKey, "OpenCode")
-            .unwrap();
-        let mut settings = DaemonSettings {
+        let settings = DaemonSettings {
             claude_source: Some(SourceDeclaration::Watch {
-                path: store.dir().join("conventional-claude"),
+                path: store.dir().join("ordinary-claude"),
             }),
             codex_source: Some(SourceDeclaration::Watch {
-                path: store.dir().join("conventional-codex"),
+                path: store.dir().join("ordinary-codex"),
             }),
             ..Default::default()
         };
         let before = settings.source_roots(&store).source_identities();
-        for id in [claude.id, codex.id, opencode.id] {
-            for suffix in ["projects", "sessions"] {
-                std::fs::create_dir_all(
-                    store
-                        .dir()
-                        .join("managed-profiles")
-                        .join(id.to_string())
-                        .join(suffix),
-                )
-                .unwrap();
-            }
-        }
-        // An orphaned profile is not an account and is never collected.
-        std::fs::create_dir_all(store.dir().join("managed-profiles/orphan/projects")).unwrap();
-        let after = settings.source_roots(&store).source_identities();
-        let claude_identity = &after[crate::source::SOURCE_CLAUDE_CODE];
-        let codex_identity = &after[crate::source::SOURCE_CODEX];
-        assert_ne!(before[crate::source::SOURCE_CLAUDE_CODE], *claude_identity);
-        assert_ne!(before[crate::source::SOURCE_CODEX], *codex_identity);
-        assert!(claude_identity.contains(&claude.id.to_string()));
-        assert!(!claude_identity.contains(&codex.id.to_string()));
-        assert!(codex_identity.contains(&codex.id.to_string()));
-        for identity in [claude_identity, codex_identity] {
-            assert!(!identity.contains(&opencode.id.to_string()));
-            assert!(!identity.contains("orphan"));
-        }
-        settings.claude_source = Some(SourceDeclaration::Off);
-        settings.codex_source = Some(SourceDeclaration::Off);
-        let roots = settings.source_roots(&store);
-        assert!(
-            !roots
-                .source_identities()
-                .contains_key(crate::source::SOURCE_CLAUDE_CODE)
-        );
-        assert!(
-            !roots
-                .source_identities()
-                .contains_key(crate::source::SOURCE_CODEX)
-        );
-    }
-
-    #[test]
-    fn managed_native_roots_include_preserved_sign_in_profiles_without_saved_accounts() {
-        use crate::managed::{ToolId, accounts::AccountStore, signin};
-        let (_dir, store) = temp_store();
-        assert!(AccountStore::open(&store).unwrap().list().is_empty());
-        let mut settings = DaemonSettings::default();
-        assert!(settings.cloud_credentials.is_none());
-        for (tool, source, suffix) in [
+        for (tool, id, suffix) in [
+            (ToolId::Claude, saved.id, "projects"),
             (
                 ToolId::Claude,
-                crate::source::SOURCE_CLAUDE_CODE,
+                signin::account_id(ToolId::Claude).unwrap(),
                 "projects",
             ),
-            (ToolId::Codex, crate::source::SOURCE_CODEX, "sessions"),
+            (
+                ToolId::Codex,
+                signin::account_id(ToolId::Codex).unwrap(),
+                "sessions",
+            ),
         ] {
-            let id = signin::account_id(tool).unwrap();
-            let path = store
-                .dir()
-                .join("managed-profiles")
-                .join(id.to_string())
-                .join(suffix);
-            std::fs::create_dir_all(&path).unwrap();
-            assert!(
-                settings.source_roots(&store).source_identities()[source].contains(&id.to_string())
-            );
+            std::fs::create_dir_all(
+                store
+                    .dir()
+                    .join("managed-profiles")
+                    .join(id.to_string())
+                    .join(suffix),
+            )
+            .unwrap();
+            assert!(crate::managed::native_collection::roots(&store, tool).is_empty());
         }
-        settings.claude_source = Some(SourceDeclaration::Off);
-        settings.codex_source = Some(SourceDeclaration::Off);
-        let roots = settings.source_roots(&store);
-        for source in [
-            crate::source::SOURCE_CLAUDE_CODE,
-            crate::source::SOURCE_CODEX,
-        ] {
-            assert!(!roots.source_identities().contains_key(source));
-            assert!(
-                !crate::source::all_sources(&roots)
-                    .iter()
-                    .any(|adapter| adapter.name() == source)
-            );
-        }
+        assert_eq!(
+            before,
+            settings.source_roots(&store).source_identities(),
+            "account profiles include opted-out sessions and must never join passive discovery"
+        );
     }
 
     #[cfg(unix)]
