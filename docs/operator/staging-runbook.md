@@ -12,17 +12,18 @@ server does not, and the first pin set is not served.
 ## Make a staging build
 
 Dispatch the `staging-macos` workflow from `main`. It is manual, and it has
-no approval gate (S14).
+no approval gate (S14). Choose a new staging release version for each build;
+for example, advance `0.21.0` to `0.22.0` for the next release.
 
 ```bash
-gh workflow run staging-macos.yml --repo TraceCommons/trace-commons --ref main
+gh workflow run staging-macos.yml --repo TraceCommons/trace-commons --ref main -f version=0.21.0
 ```
 
 To build another commit, dispatch from `main` and pass the commit in the
 `ref` input:
 
 ```bash
-gh workflow run staging-macos.yml --repo TraceCommons/trace-commons --ref main -f ref=<branch, tag or commit>
+gh workflow run staging-macos.yml --repo TraceCommons/trace-commons --ref main -f version=0.21.0 -f ref=<branch, tag or commit>
 ```
 
 A dispatch from any other branch is refused in preflight, because the
@@ -38,7 +39,11 @@ The workflow runs three jobs:
 3. `publish` uploads to the staging updates bucket and creates the GitHub
    pre-release.
 
-The version is the next production version with a `-staging.<run>` suffix.
+The version is the requested staging release version with a `-staging.<run>`
+suffix, independent of the crate versions. Preflight refuses a version at or
+below any previously published staging release. Failed, unpublished builds
+can retry the same release version. The numeric build number still increases
+across dispatches and attempts so installed staging apps can update.
 The tag is `staging-<date>-<sha7>-<run>`. The release is a pre-release and
 is never marked latest.
 

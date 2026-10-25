@@ -823,6 +823,14 @@ final class TracesStore {
         /// The core's severity for a label line; budget, witness and
         /// gate-held lines are `.waiting`.
         let severity: HealthCopy.Severity
+        let condition: String?
+
+        init(title: String, body: String?, severity: HealthCopy.Severity, condition: String? = nil) {
+            self.title = title
+            self.body = body
+            self.severity = severity
+            self.condition = condition
+        }
     }
 
     /// What the queue's safeguards say right now: a spent daily budget, a
@@ -845,11 +853,12 @@ final class TracesStore {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
+        if status.dailyBudget?.blocked != nil { said.insert("daily-cap-reached") }
         if let budget = status.dailyBudget, budget.blocked == true {
             out.append(Safeguard(
                 title: DailyBudgetCopy.title,
                 body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
-                severity: .waiting))
+                severity: .waiting, condition: "daily-cap-reached"))
             said.insert("daily-cap-reached")
         }
         if let capacity = status.witnessCapacity {
@@ -858,12 +867,13 @@ final class TracesStore {
             // `QueueStatusPanel`): sessions may be held, so it is said.
             let waiting = capacity.waitingSessions
             if let waiting, waiting == 0 {
-                // None waiting.
+                // An explicit clear outranks a stale single-slot health label.
+                said.insert("witness-saturated")
             } else if let waiting, waiting > 0, let wire = Self.wire(capacity),
                 let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire)
                     .flatMap(WitnessCapacityNotice.decode(fromJSON:))
             {
-                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: "witness-saturated"))
                 said.insert("witness-saturated")
             } else {
                 if let unreadable = capacityUnreadable {
@@ -880,16 +890,17 @@ final class TracesStore {
                 said.insert("witness-saturated")
             }
         }
+        if status.automaticContributionHeld?.heldSessions == 0 { said.insert(GateHeld.label) }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
             let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: GateHeld.label))
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
             let health = HealthCopy.core(label: label, maxQueueEntries: maxQueueEntries)
-            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
+            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity, condition: label), at: 0)
         }
         return out
     }
@@ -899,19 +910,6 @@ final class TracesStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
-    }
-
-    /// Whether something waiting is worth a second look (nothing matched, or
-    /// trimmed to fit), as the main window's queue shield reads it. The
-    /// badge pairs with it, so it never says only a count.
-    var shield: QueueShieldState { Self.shield(tree.allSessions) }
-
-    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
-        let reasons = sessions.map { Set($0.secondLook ?? []) }
-        return QueueShieldState.state(
-            waiting: sessions.count,
-            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
-            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
     }
 
     /// A tool's source declaration, from its switch after the core's

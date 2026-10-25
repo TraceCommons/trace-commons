@@ -199,9 +199,7 @@ struct MonitorWindowView: View {
                     model.daemonSettings?.privateInferenceState?.surfaceState,
                     calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
-                tracesDot: traces.shield == .attention ? .ask : nil,
-                tracesDescription: Self.tracesDescription(
-                    traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
+                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
                 showsGraph: $showsGraph,
                 breadcrumb: Self.breadcrumb(
@@ -454,15 +452,8 @@ struct MonitorWindowView: View {
 
     /// The Traces badge's text equivalent, from the core: "unavailable" for
     /// an unknown count, never zero; nil at zero, where there is no badge.
-    /// When something waiting is worth a second look, the core's words for
-    /// that follow, as the badge's amber dot shows it.
-    static func tracesDescription(
-        _ decisionsOwed: Int?, shield: QueueShieldState = .clear, secondLook: String? = nil
-    ) -> String? {
-        let count = TCCoreCopy.decisionsOwedText(decisionsOwed).flatMap { $0.isEmpty ? nil : $0 }
-        let flagged = shield == .attention ? secondLook : nil
-        let parts = [count, flagged].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    static func tracesDescription(_ decisionsOwed: Int?) -> String? {
+        TCCoreCopy.decisionsOwedText(decisionsOwed).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// The inspector column for the shown tab, unpadded and unscrolled.
@@ -720,8 +711,6 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
-    /// Amber when something waiting is worth a second look.
-    let tracesDot: GlassStatus?
     let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
@@ -832,7 +821,7 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                                 GlassSegment(
                                     item.title, value: item,
                                     badgeValue: item == .traces ? tracesBadge : nil,
-                                    dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
+                                    dot: item == .inference ? inferenceDot : nil,
                                     accessibilityValue: item == .inference
                                         ? inferenceDescription : item == .traces ? tracesDescription : nil)
                             },

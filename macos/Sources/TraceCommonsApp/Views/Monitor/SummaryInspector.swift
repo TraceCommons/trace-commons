@@ -84,7 +84,7 @@ struct SummaryInspector: View {
             })
     }
 
-    /// Waiting, worth a second look, contributed with its pending credit,
+    /// Waiting, contributed with its pending credit,
     /// and today's uploads, in Ron's order.
     @ViewBuilder
     private func decisions(_ words: MonitorTracesCopy) -> some View {
@@ -93,8 +93,6 @@ struct SummaryInspector: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             SummaryDecisionLine(glyph: "rectangle.split.2x1", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
-            SummaryDecisionLine(glyph: "exclamationmark.triangle", tone: .ask, text: fill(
-                words.summaryPanel.worthASecondLook, SummaryFacts.secondLook(loaded: loaded, sessions: sessions)))
             SummaryDecisionLine(glyph: "checkmark", tone: .on, text: fill(
                 words.counts.contributedCount, SummaryFacts.contributed(rollup)))
             pending
@@ -285,13 +283,6 @@ enum SummaryFacts {
     /// Never `queue_depth`.
     static func waiting(_ status: DaemonData.Status?) -> String {
         HomeFormat.count(status?.decisionsOwed)
-    }
-
-    /// Sessions waiting that are worth a second look, as the queue shield
-    /// counts them; a dash before the tree is read.
-    static func secondLook(loaded: Bool, sessions: [DaemonData.QueueEntry]) -> String {
-        guard loaded else { return "—" }
-        return String(sessions.filter { !($0.secondLook ?? []).isEmpty }.count)
     }
 
     /// Sessions waiting in the tree; a dash before it is read.

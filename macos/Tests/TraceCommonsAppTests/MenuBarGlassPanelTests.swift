@@ -183,28 +183,16 @@ final class MenuBarGlassPanelTests: XCTestCase {
             MenuPanelData.steps(shared: [Date()], kept: [], span: MenuPanelData.Span(end: Date(), stepHours: 0)), [])
     }
 
-    // MARK: Flagged and recent
+    // MARK: Recent activity
 
-    /// Flagged counts the queue's attention reasons only.
-    func test_flaggedCountsNothingMatchedAndTrimmed() async throws {
-        // A real sample entry, with only its second-look reasons varied.
-        let pending = try await SampleDaemonClient(.normalDay).listPending(projectId: nil)
-        let sample = try XCTUnwrap(pending.first)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        func entry(_ id: String, _ reasons: [String]) throws -> DaemonData.QueueEntry {
-            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(sample)) as? [String: Any])
-            object["entry_id"] = id
-            object["second_look"] = reasons
-            return try decoder.decode(DaemonData.QueueEntry.self, from: JSONSerialization.data(withJSONObject: object))
-        }
-        let entries = try [
-            entry("a", ["nothing-matched"]), entry("b", ["trimmed-to-fit"]),
-            entry("c", ["looks-unsure"]), entry("d", []),
-        ]
-        XCTAssertEqual(MenuPanelData.flagged(entries), 2)
+    func test_theMenuHasNoSecondLookCategoryOrAggregateCount() throws {
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        let store = try GlassSurfaceRulesTests.text("Views/Monitor/MenuPanelStore.swift")
+        XCTAssertFalse(panel.contains("flaggedRow"))
+        XCTAssertFalse(panel.contains("MenuWords.flagged"))
+        XCTAssertFalse(store.contains("flaggedCount"))
+        XCTAssertFalse(store.contains("static func flagged("))
+        XCTAssertTrue(store.contains("client.listPending(projectId: nil)"), "Kept still reads waiting traces")
     }
 
     /// Recent activity is newest first, at most three, and an outside call
