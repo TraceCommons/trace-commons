@@ -32,6 +32,7 @@ the link.
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
+| Diagnosing upload credits missing from an account or payout | [`./upload-credit-ownership.md`](./upload-credit-ownership.md) |
 | Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |

@@ -1166,6 +1166,97 @@ async fn resolve_principals_to_accounts_maps_active_links_only() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-resolve-batch").await;
 }
 
+/// Financial ownership does not make a scoped upload claim an account reader.
+/// Account-authenticated reads expand the alias, but authenticating with the
+/// alias itself must retain the caller's own-principal credit/status scope.
+#[tokio::test]
+async fn upload_ownership_does_not_expand_upload_credential_credit_scope() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let tenant = format!("upload-credit-scope-{}", Uuid::new_v4());
+    let device = format!("sha256:{}", hex::encode(Sha256::digest(tenant.as_bytes())));
+    let parent = trace_commons_server::account_trust::device_principal_ref(&tenant, &device);
+    let actor = trace_commons_server::account_trust::device_claim_actor(
+        &tenant,
+        &device,
+        Some("subject-a"),
+    );
+    let (upload, legacy) = signed_claim_principal_refs(&tenant, &actor);
+    let account = backend
+        .create_or_reuse_account(&tenant, &parent)
+        .await
+        .unwrap();
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        tx.execute("INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash) VALUES($1,$2,'test',$2)", &[&tenant,&device]).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    backend
+        .bind_device_upload_principal(&tenant, &device, &actor)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .resolve_principals_to_accounts(&tenant, std::slice::from_ref(&upload))
+            .await
+            .unwrap()[&upload],
+        account
+    );
+    assert!(
+        backend
+            .expand_account_principals(&tenant, account)
+            .await
+            .unwrap()
+            .contains(&upload)
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let db: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_db(temp.path().to_path_buf(), db);
+    let mut auth = test_reviewer_auth(&tenant);
+    auth.role = TokenRole::Contributor;
+    auth.auth_method = TraceAuthMethod::SignedClaim;
+    auth.principal_ref = upload.clone();
+    auth.legacy_principal_ref = Some(legacy);
+    auth.signed_claim_subject = Some(actor);
+    assert!(
+        caller_credit_account_scope(&state, &auth)
+            .await
+            .unwrap()
+            .is_none(),
+        "upload ownership must not grant visibility of sibling account credits or statuses"
+    );
+    // Deliberate direct membership retains the pre-existing account-reader contract.
+    let (direct, legacy) = signed_claim_principal_refs(&tenant, "explicitly-linked-principal");
+    let direct_account = backend
+        .create_or_reuse_account(&tenant, &direct)
+        .await
+        .unwrap();
+    auth.principal_ref = direct;
+    auth.legacy_principal_ref = Some(legacy);
+    auth.signed_claim_subject = Some("explicitly-linked-principal".to_owned());
+    assert_eq!(
+        caller_credit_account_scope(&state, &auth)
+            .await
+            .unwrap()
+            .unwrap()
+            .account_id(),
+        direct_account
+    );
+    cleanup_pg_trace_tenant(backend.as_ref(), &tenant).await;
+}
+
 /// Slice 3b: the contributor credit surface is broadened from own-principal to
 /// ACCOUNT scope. A caller whose device principal is linked to an account sees
 /// credit for EVERY principal on that account (active links only); an UNLINKED
@@ -4157,6 +4248,34 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Data-consumer credentials cannot cross into the private identity plane.
+#[tokio::test]
+async fn export_worker_cannot_read_account_identity_or_payout_endpoints() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    for path in [
+        "/v1/account/near-identities",
+        "/v1/account/payout-rails",
+        "/v1/account/binding",
+        "/v1/account/credit-summary",
+    ] {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header(AUTHORIZATION, "Bearer export-worker-token-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
 }
 
 /// Collect the cookie NAME of every `Set-Cookie` header on the response (one per
@@ -88930,6 +89049,21 @@ impl_ingest_test_corpus_store! {
 
 #[async_trait::async_trait]
 impl Database for DeviceGrantScopeTestDb {
+    // This scope-ceiling fixture has no ownership store; production binding is
+    // exercised separately against PostgreSQL by the ownership regression.
+    async fn bind_device_upload_principal(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        self.get_device_key(tenant_id, device_key_id)
+            .await?
+            .filter(|key| key.revoked_at.is_none())
+            .ok_or_else(|| DatabaseError::Pool("unknown or revoked fixture device".into()))?;
+        Ok(())
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         Ok(())
     }

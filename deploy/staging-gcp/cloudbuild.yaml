@@ -4,6 +4,7 @@
 # Builds, on ubuntu:24.04 to match the staging VM:
 #   trace-commons-ingest               the cloud features plus near-ai-staging
 #   trace-commons-upload-claim-issuer  no features, as on the pilot
+#   trace-commons-repair-upload-ownership  explicit historical ownership repair
 #   trace-commons-staging-pins         the pin re-sign tool (near-ai-staging,
 #                                      and the collateral client `observe` needs)
 # and publishes each, with a sha256 sidecar and a latest.txt pointer, to the
@@ -65,12 +66,13 @@ steps:
         cargo build --release -p trace-commons-ingest --bin trace-commons-ingest \
           --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral,near-ai-staging
         cargo build --release --bin trace-commons-upload-claim-issuer
+        cargo build --release -p trace-commons-server --bin trace-commons-repair-upload-ownership
         # As docs/operator/staging-pin-signing.md builds it: without the
         # collateral client, `observe` refuses and prints no set.
         cargo build --release -p trace-commons-server --bin trace-commons-staging-pins \
           --features near-ai-staging,near-attestation-collateral
         mkdir -p /workspace/out
-        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins; do
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins trace-commons-repair-upload-ownership; do
           cp "target/release/$$b" "/workspace/out/$$b"
           ( cd /workspace/out && sha256sum "$$b" > "$$b.sha256" )
         done
@@ -83,7 +85,7 @@ steps:
       - |
         set -euxo pipefail
         TAG="${_TAG}"; [ "$$TAG" = "manual" ] && TAG="${BUILD_ID}"
-        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins; do
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins trace-commons-repair-upload-ownership; do
           DEST="gs://${_BUCKET}/binaries/$$b/$$TAG"
           gcloud storage cp "/workspace/out/$$b"        "$$DEST/$$b"
           gcloud storage cp "/workspace/out/$$b.sha256" "$$DEST/$$b.sha256"

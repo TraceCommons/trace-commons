@@ -22,8 +22,8 @@ mod trace_corpus_common;
 mod trace_corpus_pg;
 
 pub(crate) use trace_corpus_pg::{
-    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
-    record_source_submission_withdrawal_on_tx, withdraw_source_session_on_tx,
+    insert_credit_settlement_batch_on_tx, record_source_submission_withdrawal_on_tx,
+    withdraw_source_session_on_tx,
 };
 
 pub use postgres::InviteRedemption;
@@ -1380,6 +1380,34 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<u64, DatabaseError> {
         Err(DatabaseError::Pool(
             "revoke_all_account_sessions not implemented".to_string(),
+        ))
+    }
+
+    /// Record the ownership alias of an authenticated device upload claim.
+    /// Call only after verifying the device signature and claim scope. This
+    /// binds provenance to the device, never grants an account authenticator.
+    async fn bind_device_upload_principal(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "device_upload_principal_binding_unavailable".to_string(),
+        ))
+    }
+
+    /// Explicit operator repair for the native client's deterministic subject.
+    /// Returns the number of existing submissions whose exact provenance hash
+    /// matches that device. Dry-run never writes; apply records only the alias.
+    async fn repair_native_device_upload_principal(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "device_upload_principal_repair_unavailable".to_string(),
         ))
     }
 
@@ -3384,7 +3412,7 @@ pub trait PayoutStore: Send + Sync {
     ) -> Result<u64, DatabaseError>;
 
     /// The account each of `principals` is actively linked to, for
-    /// accrual. Reads `trace_account_principals` only: unlike
+    /// accrual. Reads the shared ownership view only: unlike
     /// [`Database::resolve_principals_to_accounts`] it never upserts the
     /// tenant row, so accrual writes nothing outside the payout tables.
     async fn payout_principal_accounts(

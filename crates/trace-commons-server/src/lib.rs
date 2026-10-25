@@ -24,6 +24,7 @@ pub mod config;
 pub mod contributor_cap;
 pub mod correction_value;
 pub mod credit_estimate_fit;
+pub mod credit_hold_ownership;
 pub mod credit_numbers;
 pub mod credit_quality;
 pub mod db;

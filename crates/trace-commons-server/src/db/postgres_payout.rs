@@ -313,9 +313,8 @@ impl PayoutStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let rows = tx
             .query(
-                "SELECT principal_ref, account_id FROM trace_account_principals
+                "SELECT principal_ref, account_id FROM trace_account_owned_principals
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND unlinked_at IS NULL
                     AND principal_ref = ANY($1)",
                 &[&principals],
             )
@@ -1697,6 +1696,8 @@ impl PayoutStore for PgBackend {
         // A credit hold names a settlement key (`account:{id}`) or a
         // principal; either, if it is open and points at this account,
         // holds every rail (spec section 4, "Holds").
+        // Use the same UUID parser as settlement, including compact, braced,
+        // URN and uppercase spellings accepted by that boundary.
         let row = tx
             .query_one(
                 "SELECT
@@ -1709,9 +1710,15 @@ impl PayoutStore for PgBackend {
                               WHERE h.tenant_id = $1 AND h.released_at IS NULL
                                 AND (lower(h.credit_account_ref) = 'account:' || $2::UUID::TEXT
                                      OR h.credit_account_ref IN (
-                                         SELECT p.principal_ref FROM trace_account_principals p
-                                          WHERE p.tenant_id = $1 AND p.account_id = $2
-                                            AND p.unlinked_at IS NULL)))",
+                                         SELECT p.principal_ref FROM trace_account_owned_principals p
+                                          WHERE p.tenant_id = $1 AND p.account_id = $2)
+                                     OR EXISTS (
+                                         SELECT 1 FROM trace_payout_accruals accrued
+                                          WHERE accrued.tenant_id = $1 AND accrued.account_id = $2
+                                            AND accrued.credit_account_hash = 'sha256:' ||
+                                                encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex')))),
+                     ARRAY(SELECT credit_account_ref FROM trace_credit_holds
+                            WHERE tenant_id = $1 AND released_at IS NULL)",
                 &[&tenant, &account],
             )
             .await?;
@@ -1719,7 +1726,11 @@ impl PayoutStore for PgBackend {
         Ok(PayoutAccountStanding {
             exists: row.get(0),
             closed: row.get(1),
-            credit_held: row.get(2),
+            credit_held: row.get::<_, bool>(2)
+                || row
+                    .get::<_, Vec<String>>(3)
+                    .iter()
+                    .any(|reference| super::settlement_key_account_id(reference) == Some(account)),
         })
     }
 

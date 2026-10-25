@@ -36,8 +36,8 @@ use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
 use crate::db::{
-    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
-    record_source_submission_withdrawal_on_tx, withdraw_source_session_on_tx,
+    insert_credit_settlement_batch_on_tx, record_source_submission_withdrawal_on_tx,
+    withdraw_source_session_on_tx,
 };
 use crate::error::DatabaseError;
 use crate::trace_artifact_store::{
@@ -15693,12 +15693,21 @@ impl PipelineService {
         tenant_id: &str,
         account_ref: &str,
     ) -> anyhow::Result<bool> {
-        Ok(self
+        let refs = self
             .backend
             .list_trace_credit_holds(tenant_id)
             .await?
-            .iter()
-            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none()))
+            .into_iter()
+            .filter(|hold| hold.released_at.is_none())
+            .map(|hold| hold.credit_account_ref)
+            .collect();
+        Ok(crate::credit_hold_ownership::expand_credit_hold_ownership(
+            self.backend.as_ref(),
+            tenant_id,
+            refs,
+        )
+        .await?
+        .contains(account_ref))
     }
 
     /// Settles the Trace Credit leg into the internal credit ledger (port
@@ -15854,10 +15863,9 @@ impl PipelineService {
         // events). So a hold stops only a leg that settles into a batch
         // (owner ruling on Zaki review 1, round 2, finding 13).
         if trace_credit_event == PipelineTraceCreditEvent::PipelineScore
-            && list_trace_credit_holds_on_tx(&tx, &run.tenant_id)
+            && crate::credit_hold_ownership::active_credit_holds_on_tx(&tx, &run.tenant_id)
                 .await?
-                .iter()
-                .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
+                .contains(account_ref)
         {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Held);

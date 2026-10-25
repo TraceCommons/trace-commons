@@ -246,6 +246,29 @@ pub fn device_claim_actor(tenant_id: &str, device_key_id: &str, subject: Option<
     }
 }
 
+/// The current and legacy provenance identities of a verified device claim.
+/// This does not authenticate an actor: the caller must first verify the
+/// registered device signature. Parsing binds a subject-scoped actor to the
+/// exact device and tenant, avoiding caller-supplied arbitrary principal refs.
+pub fn device_upload_principal_refs(
+    tenant_id: &str,
+    device_key_id: &str,
+    actor_ref: &str,
+) -> Option<[String; 2]> {
+    use sha2::{Digest as _, Sha256};
+    if device_claim_key_id(tenant_id, actor_ref)? != device_key_id {
+        return None;
+    }
+    let material = format!("signed:{tenant_id}:{actor_ref}");
+    let bound = format!("12:signed_claim:{}:{material}", material.len());
+    Some([bound, material].map(|value| {
+        format!(
+            "principal_sha256:{}",
+            hex::encode(Sha256::digest(value.as_bytes()))
+        )
+    }))
+}
+
 /// The device key id inside a device-shaped upload-claim actor for `tenant_id`,
 /// the inverse of [`device_claim_actor`]. `None` for anything else, including
 /// an `instance:` actor naming a different tenant.

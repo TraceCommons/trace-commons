@@ -251,6 +251,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_inference_connection_requests",
     "trace_account_inference_connection_events",
     "trace_account_principals",
+    "trace_device_upload_principals",
     "trace_login_links",
     "trace_sessions",
     "trace_account_audit",
@@ -1889,7 +1890,52 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "payout_link_recipient_ref",
         include_str!("../../../../migrations/V134__payout_link_recipient_ref.sql"),
     ),
+    (
+        135,
+        "device_upload_ownership",
+        include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
+    ),
 ];
+
+/// Shared by verified claim issuance and the explicit historical repair.
+async fn bind_device_upload_principal_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    device: &str,
+    actor: &str,
+    dry_run: bool,
+) -> Result<(), DatabaseError> {
+    let refused = || DatabaseError::Pool("device_upload_principal_binding_refused".to_string());
+    let mut aliases = crate::account_trust::device_upload_principal_refs(tenant, device, actor)
+        .ok_or_else(refused)?;
+    aliases.sort();
+    let parent = crate::account_trust::device_principal_ref(tenant, device);
+    // Lock against revocation until the provenance binding commits. Account
+    // membership is optional here: unprovisioned registered devices can upload.
+    if tx.query_opt("SELECT device_key_id FROM device_keys WHERE tenant_id=trace_current_tenant_id() AND device_key_id=$1 AND revoked_at IS NULL FOR SHARE", &[&device]).await?.is_none() {
+        return Err(refused());
+    }
+    for alias in aliases {
+        // Same lock as both database namespace-guard triggers. This also
+        // makes dry-run check conflicts exactly as apply does.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 135))",
+            &[&tenant, &alias],
+        )
+        .await?;
+        if tx.query_opt("SELECT principal_ref FROM trace_account_principals WHERE tenant_id=trace_current_tenant_id() AND principal_ref=$1", &[&alias]).await?.is_some() {
+            return Err(refused());
+        }
+        if let Some(existing) = tx.query_opt("SELECT device_principal_ref,device_key_id FROM trace_device_upload_principals WHERE tenant_id=trace_current_tenant_id() AND upload_principal_ref=$1", &[&alias]).await? {
+            if existing.get::<_, String>(0) != parent || existing.get::<_, String>(1) != device {
+                return Err(refused());
+            }
+        } else if !dry_run {
+            tx.execute("INSERT INTO trace_device_upload_principals(tenant_id,upload_principal_ref,device_principal_ref,device_key_id) VALUES($1,$2,$3,$4)", &[&tenant,&alias,&parent,&device]).await?;
+        }
+    }
+    Ok(())
+}
 
 /// One account's active strong authenticators (unrevoked passkeys plus
 /// unrevoked NEAR identities), inside a transaction already scoped to its
@@ -3750,9 +3796,8 @@ impl Database for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT principal_ref, account_id FROM trace_account_principals
+                "SELECT principal_ref, account_id FROM trace_account_owned_principals
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND unlinked_at IS NULL
                     AND principal_ref = ANY($1)",
                 &[&principal_refs],
             )
@@ -4395,6 +4440,53 @@ impl Database for PgBackend {
         Ok(revoked)
     }
 
+    async fn bind_device_upload_principal(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        bind_device_upload_principal_tx(&tx, tenant_id, device_key_id, actor_ref, false).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn repair_native_device_upload_principal(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        let refused = || DatabaseError::Pool("device_upload_principal_repair_refused".to_string());
+        let subject = trace_commons_protocol::onboarding::user_subject_hash(device_key_id);
+        let actor =
+            crate::account_trust::device_claim_actor(tenant_id, device_key_id, Some(&subject));
+        let aliases =
+            crate::account_trust::device_upload_principal_refs(tenant_id, device_key_id, &actor)
+                .ok_or_else(refused)?;
+        let parent = crate::account_trust::device_principal_ref(tenant_id, device_key_id);
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        if tx.query_opt("SELECT d.device_key_id FROM device_keys d JOIN trace_near_provisioned_devices n ON n.tenant_id=d.tenant_id AND n.device_key_id=d.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=p.tenant_id AND a.account_id=p.account_id WHERE d.tenant_id=trace_current_tenant_id() AND d.device_key_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND p.unlinked_at IS NULL AND a.closed_at IS NULL FOR SHARE OF d,n,p,a", &[&device_key_id,&parent]).await?.is_none() {
+            return Err(refused());
+        }
+        let aliases = aliases.to_vec();
+        let count: i64 = tx.query_one("SELECT count(*) FROM trace_submissions WHERE tenant_id=trace_current_tenant_id() AND auth_principal_ref=ANY($1)", &[&aliases]).await?.get(0);
+        // Dry-run takes the same proof/conflict checks without inserting aliases.
+        bind_device_upload_principal_tx(
+            &tx,
+            tenant_id,
+            device_key_id,
+            &actor,
+            dry_run || count == 0,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(count as u64)
+    }
+
     async fn resolve_account_for_principal(
         &self,
         tenant_id: &str,
@@ -4432,10 +4524,9 @@ impl Database for PgBackend {
         // memberships only. An `unlinked_at`-set principal is absent from the set.
         let rows = tx
             .query(
-                "SELECT principal_ref FROM trace_account_principals
+                "SELECT principal_ref FROM trace_account_owned_principals
                   WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $1
-                    AND unlinked_at IS NULL",
+                    AND account_id = $1",
                 &[&account_id],
             )
             .await
@@ -8345,6 +8436,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
@@ -8391,6 +8483,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
