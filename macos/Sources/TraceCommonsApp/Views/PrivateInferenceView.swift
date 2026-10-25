@@ -114,7 +114,7 @@ struct PrivateAISwitchCard: View {
                         credential
                     }
                     GlassHairline(GlassColor.hairline)
-                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
+                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: { onSet($0) }))
                         .toggleStyle(GlassToggleStyle(.settings))
                         .disabled(busy || isOn == nil)
                     // A refused switch: the failed request's red line,

@@ -421,7 +421,7 @@ final class PasskeySheetModel: ObservableObject {
         step = next
     }
 
-    private func run(_ call: (any PasskeyAccount) async -> PasskeyCallResult) async -> PasskeyCallResult {
+    private func run(_ call: @MainActor (any PasskeyAccount) async -> PasskeyCallResult) async -> PasskeyCallResult {
         busy = true
         refusal = nil
         defer { busy = false }

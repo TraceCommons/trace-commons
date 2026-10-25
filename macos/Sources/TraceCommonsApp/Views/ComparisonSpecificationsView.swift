@@ -40,7 +40,7 @@ struct ComparisonSpecificationsView: View {
             InsightsGroupHeading(text("comparison_specification_draft"))
             if model.options.isEmpty { Text(text("comparison_specification_need_context")) }
             GlassSelect(text("comparison_specification_stratum"), selection: Binding(
-                get: { model.selectedStratumID }, set: model.selectStratum),
+                get: { model.selectedStratumID }, set: { model.selectStratum($0) }),
                 options: model.options.map { option in
                     GlassPickerOption(
                         "\(option.label) · \(option.taskIDs.count) \(text("comparison_specification_matching_tasks"))",

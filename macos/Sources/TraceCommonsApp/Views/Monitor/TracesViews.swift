@@ -525,7 +525,7 @@ struct TracesTreeView: View, Equatable {
     }
 
     /// The row id a selection scrolls to and VoiceOver focuses.
-    static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
+    nonisolated static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
 
     /// The folder holding a session.
     static func folder(of entryId: String, in tree: TracesTree) -> String? {

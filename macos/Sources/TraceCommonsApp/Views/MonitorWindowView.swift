@@ -675,7 +675,7 @@ struct MonitorWindowView: View {
     /// Ron's `useInspectorDemand`: selecting one shows the inspector its
     /// card lives in. A folder, or nothing, moves the selection only. The
     /// inspector never closes itself.
-    static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
+    nonisolated static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
         selection = wanted
         if case .session = wanted { showsInspector = true }
     }
@@ -698,13 +698,13 @@ struct MonitorWindowView: View {
     /// is drawn as not working, never as on. Only the core's "clear" tone
     /// is on; every other is #1146's outside (red). No report, or an
     /// unreported state, is no dot: unknown is neither on nor off.
-    static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
+    nonisolated static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
         return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
-    static func inferenceDotDescription(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> String? {
+    nonisolated static func inferenceDotDescription(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> String? {
         guard let state, !state.label.isEmpty else { return nil }
         return calls.stateLine(state.label)
     }

@@ -537,7 +537,7 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
     }
 
     private final class Pin: NSView {
-        private var observers: [NSObjectProtocol] = []
+        private var observers: WindowNotificationObservers?
         /// A placement already asked for on the next turn.
         private var scheduled = false
 
@@ -551,20 +551,20 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            observers.forEach(NotificationCenter.default.removeObserver)
-            observers = []
+            observers = nil
             guard let window else { return }
             schedule()
             let center = NotificationCenter.default
-            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
-                         NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
+            let tokens = [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
+                          NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification].map { name in
                 // On the next turn: a notification can arrive inside a
                 // resize of the window, and setting its frame there
                 // re-enters that layout pass.
-                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.schedule() }
-                })
+                }
             }
+            observers = WindowNotificationObservers(center: center, tokens: tokens)
         }
 
         /// Places the window on the next turn of the run loop, once however
@@ -594,9 +594,6 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
             }
         }
 
-        deinit {
-            observers.forEach(NotificationCenter.default.removeObserver)
-        }
     }
 }
 
