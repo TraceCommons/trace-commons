@@ -257,6 +257,7 @@ final class SettingsParityTests: XCTestCase {
     /// always-present container; the token block keeps its hide-and-disable
     /// pair; the four dialogs are system confirmation dialogs; and a refusal
     /// is never drawn as anything but outside.
+    @MainActor
     func test_witnessSectionShape() throws {
         let source = try Self.text("Views/Settings/WitnessSection.swift")
         let unavailable = try XCTUnwrap(source.range(of: "} else {\n"))
@@ -337,6 +338,7 @@ final class SettingsParityTests: XCTestCase {
 
     /// The unreadable state is never a bare dot: with neither of the core's
     /// sentences it reads the core's "unknown" word, and only then a dash.
+    @MainActor
     func test_unreadableLineNeverDrawsEmpty() {
         typealias Line = RouteDisclosureUnreadableGlassLine
         XCTAssertEqual(Line.text(line: "panel", fallback: "title", unknown: "unk"), "panel")
@@ -359,8 +361,9 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(body.contains(".accessibilityElement(children: .contain)"))
     }
 
+    @MainActor
     func test_measurementsRowIsOmittedWhenNothingIsPinned() throws {
-        func items(_ pins: [String]) throws -> [GlassKeyValueList.Item] {
+        @MainActor func items(_ pins: [String]) throws -> [GlassKeyValueList.Item] {
             let pinsJSON = pins.map { "\"\($0)\"" }.joined(separator: ",")
             let facts = try JSONDecoder().decode(RouteDisclosure.WitnessFacts.self, from: Data("""
                 {"state":"on","url":"u","signing_address":"s","pinned_measurements":[\(pinsJSON)],"origin":"o"}

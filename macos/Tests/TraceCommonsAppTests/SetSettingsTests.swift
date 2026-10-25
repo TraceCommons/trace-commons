@@ -330,7 +330,7 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         _ = try? client.probeRouting(RoutingForm(on: true, port: 8463, tokenDir: ""))
         _ = try? client.probeRoutedTools(RoutingForm(on: true, port: 8463, tokenDir: ""))
         _ = try? client.queueOutcomeCounts()
-        try? client.refreshHistory()
+        _ = try? client.refreshHistory()
         try? client.resume()
         _ = try? client.setConsentScopes(["model_training"])
         _ = try? client.setProjectMode(projectID: "p", mode: .ask)

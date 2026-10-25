@@ -921,7 +921,8 @@ final class MonitorNavigationTests: XCTestCase {
     func test_homeReadsTheInsightsCopyOnce() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertEqual(home.components(separatedBy: "TCInsights.copy()").count - 1, 1)
-        XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
+        XCTAssertNotNil(home.range(of: #"\bstatic\s+(?:nonisolated\s+)?let\s+insightsCopy\s*=\s*TCInsights\.copy\(\)"#,
+                                  options: .regularExpression))
     }
 
     /// First run, the Monitor and Settings draw a refused daemon with one

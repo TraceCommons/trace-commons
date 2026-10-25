@@ -74,6 +74,7 @@ final class ComputeSkillsParityTests: XCTestCase {
     /// Neither the failure branch nor the allowance value is ever left
     /// without words when the monitor-screens copy fails to decode: the
     /// same chain `RouteDisclosureUnreadableGlassLine.text` ends in.
+    @MainActor
     func test_computeNeverDrawsALabelOrFailureWithoutWords() {
         XCTAssertEqual(ComputeContent.failureLine("unavailable", unknown: "unknown"), "unavailable")
         XCTAssertEqual(ComputeContent.failureLine(nil, unknown: "unknown"), "unknown")

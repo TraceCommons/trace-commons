@@ -11,6 +11,7 @@ final class FlowMapMotionTests: XCTestCase {
     /// Dashes run at 30 frames a second, as they always have; the library
     /// alone at its own rate; nothing moves under Reduce Motion or when
     /// there is nothing to move.
+    @MainActor
     func test_restingMotion() {
         let dashes = FlowMapView.restingMotion(reduceMotion: false, flows: true, healthy: true, library: false)
         XCTAssertEqual(dashes.interval, 1 / 30)
@@ -36,6 +37,7 @@ final class FlowMapMotionTests: XCTestCase {
 
     /// The still layer compares by its key alone: a new drawing closure
     /// with the same key is the same layer, and SwiftUI keeps its drawing.
+    @MainActor
     func test_stillLayerComparesByKey() {
         let a = FlowMapStillLayer(key: 1) { _ in }
         let b = FlowMapStillLayer(key: 1) { _ in }

@@ -286,12 +286,12 @@ private actor EpisodeFakeService {
         let json = "{\"type\":\"summary\",\"summary\":{\"schema_version\":1,\"scope\":\"all_saved_selected_session_snapshots\",\"limitations\":[\"selected_saved_sessions_are_not_verified_tasks\",\"assessments_are_user_reported\",\"observed_sums_require_both_coverages\",\"analysis_dates_are_not_activity_time\",\"source_formats_are_not_model_identity\",\"no_model_rankings_time_savings_or_cost\"],\"provider\":{\"id\":\"local\",\"version\":\"1\",\"rubric_version\":\"1\",\"execution_mode\":\"local\"},\"saved_snapshots\":0,\"snapshot_analysis_range\":null,\"user_reported\":{\"assessed_snapshots\":0,\"unassessed_snapshots\":0,\"categories\":[],\"outcomes\":[]},\"metrics\":[],\"snapshots\":[]}}"
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
-    private static let snapshot: [String: Any] = [
+    private static var snapshot: [String: Any] { [
         "id": snapshotID, "source_format": "codex", "boundary": "session_proxy",
         "analyzed_at": "2026-01-01T00:00:00Z", "cost_unavailable_reason": "unknown",
         "report": ["schema_version": 1, "provider": ["id": "local", "version": "1", "rubric_version": "1", "execution_mode": "local"],
                    "metrics": [], "evidence": [["id": "session", "source_digest": snapshotID]]]
-    ]
+    ] }
     private static let copy = [
         "episode_title": "Episodes", "episode_scope": "whole snapshots", "episode_saved": "Saved episodes",
         "episode_empty": "empty", "episode_create": "Create", "episode_create_notice": "select whole snapshots",

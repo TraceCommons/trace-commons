@@ -197,6 +197,7 @@ final class WitnessBindingTests: XCTestCase {
     /// A refusal is `.outside` and never `.ask`. Ask is caution rather than
     /// alarm -- the tone of a setup that is degraded but still working -- and
     /// a refusing witness is sending nothing at all.
+    @MainActor
     func testTheRefusedToneMapsToRefusedAndNeverToAttention() throws {
         let bridge = try XCTUnwrap(WitnessCard.toneBridge())
         XCTAssertTrue(

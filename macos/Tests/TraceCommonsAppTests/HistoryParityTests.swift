@@ -750,6 +750,7 @@ final class HistoryParityTests: XCTestCase {
     /// Ron's inspector auto-open: opening a History row selects it and opens
     /// the inspector, which shows the row while History is shown and the
     /// Traces selection's card otherwise. Clearing it closes nothing.
+    @MainActor
     func test_openingAHistoryRowOpensTheInspectorOnIt() throws {
         var selected = ""
         var shows = false

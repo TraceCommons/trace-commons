@@ -14,12 +14,12 @@ final class WindowNotificationObserversTests: XCTestCase {
             }
         }
         var owner: WindowNotificationObservers? = WindowNotificationObservers(center: center, tokens: tokens)
-        weak var lifetime = owner
-        for name in names { center.post(name: name, object: nil) }
+        withExtendedLifetime(owner) {
+            for name in names { center.post(name: name, object: nil) }
+        }
         XCTAssertEqual(calls.withLock { $0 }, names.map(\.rawValue))
 
         owner = nil
-        XCTAssertNil(lifetime)
         for name in names { center.post(name: name, object: nil) }
         XCTAssertEqual(calls.withLock { $0 }, names.map(\.rawValue), "Released window observers must stop receiving notifications")
     }
@@ -34,13 +34,11 @@ final class WindowNotificationObserversTests: XCTestCase {
             }
         }
         var owner: WindowNotificationObservers? = WindowNotificationObservers(center: center, tokens: [registration("old")])
-        weak var previous = owner
-        center.post(name: name, object: nil)
+        withExtendedLifetime(owner) { center.post(name: name, object: nil) }
         XCTAssertEqual(calls.withLock { $0 }, ["old"])
 
         owner = WindowNotificationObservers(center: center, tokens: [registration("new")])
-        XCTAssertNil(previous)
-        center.post(name: name, object: nil)
+        withExtendedLifetime(owner) { center.post(name: name, object: nil) }
         XCTAssertEqual(calls.withLock { $0 }, ["old", "new"])
 
         owner = nil

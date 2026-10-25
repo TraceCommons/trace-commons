@@ -214,13 +214,13 @@ final class SpendOrganizationTests: XCTestCase {
 
 /// The daemon's answer, shaped as `near_ai_spend_organizations` sends it.
 enum SpendOrganizationSurfaceFixture {
-    nonisolated(unsafe) static let view: [String: Any] = [
+    static var view: [String: Any] { [
         "title": "TITLE", "what": "WHAT", "picker": "PICKER", "switching": "SWITCHING", "failed": "FAILED",
         "session_expired": "EXPIRED", "refused": "REFUSED", "revoke_pending": "PENDING",
         "prompt_title": "PROMPT-TITLE", "prompt_line": "PROMPT-LINE",
         "prompt_action": "PROMPT-ACTION", "prompt_action_accessibility": "PROMPT-ACTION-AX",
         "prompt_dismiss": "PROMPT-DISMISS", "prompt_dismiss_accessibility": "PROMPT-DISMISS-AX",
-    ]
+    ] }
 
     static func payload(
         organizations: [(String, Bool)], explicit: Bool = false, revokePending: Bool = false

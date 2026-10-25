@@ -14,6 +14,7 @@ final class ConnectionSourceStatusTests: XCTestCase {
         try XCTUnwrap(TCSourceChecks.settingsCopy(), "the core's source copy did not decode")
     }
 
+    @MainActor
     func test_unsetClaudeAndCodexAreNotDrawnOff() throws {
         let copy = try coreCopy()
         for tool in [TCSourceChecks.claude, TCSourceChecks.codex] {
@@ -23,6 +24,7 @@ final class ConnectionSourceStatusTests: XCTestCase {
         }
     }
 
+    @MainActor
     func test_declinedSourcesAreOff() throws {
         let copy = try coreCopy()
         for tool in [TCSourceChecks.claude, TCSourceChecks.codex, TCSourceChecks.gemini, TCSourceChecks.cline] {
@@ -30,6 +32,7 @@ final class ConnectionSourceStatusTests: XCTestCase {
         }
     }
 
+    @MainActor
     func test_watchedSourcesAreOn() throws {
         let copy = try coreCopy()
         for tool in [TCSourceChecks.claude, TCSourceChecks.codex, TCSourceChecks.gemini, TCSourceChecks.cline] {
@@ -39,6 +42,7 @@ final class ConnectionSourceStatusTests: XCTestCase {
 
     /// Gemini CLI and Cline open nothing while unset: not in use, but not a
     /// decision either, so neither on nor off.
+    @MainActor
     func test_unsetNonScanningSourcesAreNeitherOnNorOff() throws {
         let copy = try coreCopy()
         for tool in [TCSourceChecks.gemini, TCSourceChecks.cline] {
@@ -50,6 +54,7 @@ final class ConnectionSourceStatusTests: XCTestCase {
 
     /// Fail closed: with no core copy, or a mode the shell does not know,
     /// nothing says whether the source is read, so it is neither on nor off.
+    @MainActor
     func test_unbackedAnswersAreNeitherOnNorOff() throws {
         let copy = try coreCopy()
         let cases: [(String, String, SourceSettingsCopy?)] = [

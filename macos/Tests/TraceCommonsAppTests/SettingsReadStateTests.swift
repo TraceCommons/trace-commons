@@ -95,6 +95,7 @@ final class SettingsReadStateTests: XCTestCase {
 
     /// The unavailable line is the core's: request-failed with a retry for
     /// a failed read, core-unreachable with none for a core that is down.
+    @MainActor
     func testTheUnavailableLineIsTheCoresAndOnlyAFailedReadOffersRetry() throws {
         let screens = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
         XCTAssertEqual(SettingsUnavailable.line(.failed, screens: screens), screens.requestFailed)

@@ -177,6 +177,7 @@ final class MissionDraftsModelTests: XCTestCase {
         XCTFail("Mission draft model did not settle")
     }
 
+    @MainActor
     private func waitForHeldImport(_ service: MissionDraftFakeService) async throws {
         for _ in 0..<100 {
             if await service.importIsWaiting { return }

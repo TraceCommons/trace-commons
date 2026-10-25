@@ -110,13 +110,14 @@ final class SessionDetailReadOrderTests: XCTestCase {
             explanations: [], lastRefreshedAt: nil)
     }
 
+    @MainActor
     private func waitUntil(
         timeout: Duration = .seconds(3),
         condition: @escaping @MainActor () -> Bool
     ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while await !condition() {
+        while !condition() {
             if clock.now >= deadline {
                 XCTFail("Timed out waiting for the detail reads")
                 return

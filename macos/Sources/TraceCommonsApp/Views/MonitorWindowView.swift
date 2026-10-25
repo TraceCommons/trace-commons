@@ -60,7 +60,7 @@ struct MonitorWindowView: View {
     /// The main pane's side inset: the inspector's (owner, 2026-10-10), so
     /// the tabs, the notices, the tree and every tab's cards sit as far in
     /// from the pane's sides as the inspector's content does.
-    static let mainInset: CGFloat = GlassTokens.Space.inspectorPaddingHorizontal
+    nonisolated static let mainInset: CGFloat = GlassTokens.Space.inspectorPaddingHorizontal
 
     /// Where the gear asks for Settings, which opens in its own window
     /// (owner, 2026-10-08), and where an outside opener's destination waits

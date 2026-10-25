@@ -128,6 +128,7 @@ final class GlassSourceRowTests: XCTestCase {
 
     /// The row keeps the legacy initialiser so the Folders step and Settings
     /// share it unchanged: a signature change fails to compile here.
+    @MainActor
     func test_theRowKeepsTheLegacySignature() {
         let withMode = GlassSourceRow(
             kind: .codex, candidate: nil, choice: .undecided, reportedMode: "unset",

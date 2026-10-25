@@ -180,6 +180,7 @@ final class InsightsWatchedSessionsTests: XCTestCase {
 
     /// The sparkline spans the box: oldest on the left, 0 at the bottom, the
     /// largest point at the top; one point is a level line mid-row.
+    @MainActor
     func testTheSparklineScalesToItsLargestPoint() {
         let box = CGSize(width: 90, height: 20)
         XCTAssertEqual(InsightsSparkline.positions([], in: box), [])
