@@ -63,6 +63,7 @@ pub mod ipc;
 pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
 pub mod managed;
+pub(crate) mod managed_history;
 pub mod mission_catalogue;
 pub mod mission_matching;
 pub mod native_flow;

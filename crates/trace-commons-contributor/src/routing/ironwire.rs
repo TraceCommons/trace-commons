@@ -124,7 +124,7 @@ impl SummaryTotal {
 }
 
 impl SummaryView {
-    fn valid(&self, since: DateTime<Utc>) -> bool {
+    pub(crate) fn valid(&self, since: DateTime<Utc>) -> bool {
         if self.since != since
             || self.groups.len() > MAX_SUMMARY_GROUPS
             || !self.routed.valid()

@@ -94,9 +94,14 @@ struct InferenceTabView: View {
                 if let failure = store.failures["inference_calls"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
+                if let network = store.networkSummary {
+                    networkTotals(network)
+                }
                 if let page = store.calls {
                     if page.readable {
-                        totals(page, summary: store.summary, destinations: store.destinations)
+                        if store.networkSummary == nil {
+                            totals(page, summary: store.summary, destinations: store.destinations)
+                        }
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
@@ -120,7 +125,8 @@ struct InferenceTabView: View {
         _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?,
         destinations: DaemonData.ToolDestinations?
     ) -> some View {
-        let totals = Self.totals(page, summary: summary, destinations: destinations)
+        let pageTotals = Self.totals(page, summary: summary, destinations: destinations)
+        let totals = (calls: Optional<Int>.none, verified: Optional<Int>.none, priced: pageTotals.priced)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             // What window the counts cover, as the core reported it.
             Text(Self.windowLine(page, destinations: destinations))
@@ -130,6 +136,23 @@ struct InferenceTabView: View {
                 GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
                 GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
                 GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
+            }
+        }
+    }
+
+    private func networkTotals(_ network: DaemonData.NetworkInferenceSummary) -> some View {
+        let totals = HomePrivateAI.networkTotals(network)
+        let priced = store.calls.flatMap { page in
+            page.readable ? Self.pageTotals(page, summary: store.summary).priced : nil
+        } ?? "—"
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(MonitorWords.table?.windowLine(hours: network.windowHours) ?? "—")
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
+                GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
+                GlassLegendCell(MonitorWords.priced, value: priced, status: .kept)
             }
         }
     }

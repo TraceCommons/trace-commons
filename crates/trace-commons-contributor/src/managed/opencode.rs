@@ -164,11 +164,19 @@ impl OpenCodeSession {
                 (m.id.clone(), json!({ "name": name }))
             })
             .collect();
+        let mut options = json!({"baseURL":base_url,"apiKey":"{env:TRACE_COMMONS_OPENCODE_KEY}"});
+        // Only the host-owned loopback route needs a transcript join key.
+        // Direct saved-key providers must not receive the native session id.
+        if reqwest::Url::parse(base_url).is_ok_and(|url| {
+            url.scheme() == "http" && url.host_str() == Some("127.0.0.1") && url.port().is_some()
+        }) {
+            options["headers"] = json!({"x-ironwire-session-id":self.session_id()});
+        }
         let config = json!({
             "model":selected,"small_model":selected,"share":"disabled",
             "enabled_providers":["trace-managed"],
             "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
-                "options":{"baseURL":base_url,"apiKey":"{env:TRACE_COMMONS_OPENCODE_KEY}"},
+                "options":options,
                 "models":listed
             }}
         });
@@ -207,5 +215,68 @@ impl OpenCodeSession {
         staging
             .write_daemon_file(&format!("{}.json", self.id), &bytes)
             .map_err(|_| ManagedError::StorageUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_header_binds_the_exact_seeded_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = OpenCodeSession {
+            root: dir.path().join("profile"),
+            native: dir.path().join("opencode"),
+            cwd: dir.path().into(),
+            id: Uuid::new_v4(),
+        };
+        let command = session
+            .command_with_models(
+                "fixture-model",
+                &[super::super::models::ChatModel {
+                    id: "fixture-model".into(),
+                    name: None,
+                }],
+                "http://127.0.0.1:4321/openai/v1",
+                "fixture-key",
+            )
+            .unwrap();
+        let config = command
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config["provider"]["trace-managed"]["options"]["headers"]["x-ironwire-session-id"],
+            session.session_id()
+        );
+        let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
+        let session_arg = args.windows(2).find(|pair| pair[0] == "--session").unwrap();
+        assert_eq!(session_arg[1], session.session_id());
+        let direct = session
+            .command_with_models(
+                "fixture-model",
+                &[super::super::models::ChatModel {
+                    id: "fixture-model".into(),
+                    name: None,
+                }],
+                "https://api.openai.com/v1",
+                "fixture-key",
+            )
+            .unwrap();
+        let direct_config = direct
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        let direct_config: serde_json::Value =
+            serde_json::from_str(direct_config.to_str().unwrap()).unwrap();
+        assert!(
+            direct_config["provider"]["trace-managed"]["options"]
+                .get("headers")
+                .is_none()
+        );
     }
 }

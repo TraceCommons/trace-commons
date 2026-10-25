@@ -135,17 +135,41 @@ tools whose executable availability is not checked.
 - Each NEAR AI session's proxy has its own IronWire home,
   `managed-routes/<session id>` in the state directory, whichever process
   hosts it (the launcher for a saved key, the daemon for the sign-in). Its
-  call log is on with bodies off: `ledger.sqlite` in that home records each
+  call log and receipt checks are on: `ledger.sqlite` in that home records each
   exchange's timings, facade and path, an opaque conversation hash, the
   client's session header, backend, requested and served model, token counts,
   cost, status and, for a call that failed, IronWire's error text. It stores
-  no request or response body, but the error text is not body-free: for an
-  error from NEAR AI it includes up to 600 characters of the provider's
-  error message, and a provider that rejects a request can quote the request
-  in that message. The status line does not read the log. The home, log
-  included, is private to the person (mode 0700 on Unix) and is removed when
-  the route shuts down. A launcher or daemon that exits without shutting its
-  routes down leaves the home behind.
+  no request or response body unless the separate
+  `ironwire_attested_bodies` setting was enabled at launch. The error text
+  is not body-free: for an error from NEAR AI it includes up to 600
+  characters of the provider's error message, and a provider can quote the
+  request there. These errors remain in the private local history; usage
+  summaries never select them. The status line does not read the log.
+  The home, ledger, proof verdicts and any consented body captures remain
+  private to the person (mode 0700 on Unix) after shutdown. Shutdown stops
+  the listener and removes its control token; it does not delete history.
+  Calls and Verified totals include these histories over the same 24-hour
+  window as the shared proxy. A source that cannot be read is unknown,
+  never a measured zero.
+- Managed Claude Code and Codex profiles join their tool's existing trace
+  source. Turning that source off also excludes its managed profiles.
+  Source identities include these roots so existing automatic-grant checks
+  see the change; project arming, review and upload approval remain in force.
+- A trace can carry its actual final model exchange only while
+  `ironwire_attested_bodies` is enabled. Its request and response are read
+  from the owning proxy's body store and checked against the stored digests;
+  colliding store-local IDs never select another session's bodies. Receipt
+  verification uses the existing enrolled quote verifier and measurement
+  pins, including signed staging pins. Missing pins or invalid evidence
+  cannot produce Verified. OpenCode binds its exact collected session ID
+  to the local proxy; this header is not sent to direct external API routes.
+  Revoking body consent stops body-capturing managed listeners; requests
+  already in flight may drain, and reenabling requires a new launch. A
+  listener that recorded metadata only continues running. Receipt checks
+  still pending at shutdown may remain pending in local history; later
+  witness verification independently checks the final exchange's receipt.
+  Transcript collection, token capture and upload approval are independent
+  choices. Enabling one does not enable the others.
 - Claude Code on a NEAR AI session shows IronWire's status line. It is
   launched with `--settings '{"statusLine":{"type":"command","command":
   "<this executable> statusline --home <route home>"}}'`. Command-line
