@@ -125,6 +125,9 @@
         "reasons": [
           "some_turns_unknown"
         ],
+        "folder": null,
+        "session_ref": "t0",
+        "last_event_at": "2026-09-14T09:08:00+00:00",
         "started_at": "2026-09-14T09:00:00+00:00",
         "routing": {
           "category": "unobserved",
@@ -145,6 +148,9 @@
         "reasons": [
           "codex_baseline_excluded"
         ],
+        "folder": null,
+        "session_ref": "t1",
+        "last_event_at": "2026-09-14T09:01:00+00:00",
         "started_at": "2026-09-14T09:00:00+00:00",
         "routing": {
           "category": "mixed",

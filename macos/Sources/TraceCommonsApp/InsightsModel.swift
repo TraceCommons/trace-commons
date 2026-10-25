@@ -837,8 +837,8 @@ enum InsightsOverviewWords {
 
 /// Feed T's counted sessions for the Sessions card's drill-down: the
 /// daemon's rows in its order, and whether their route column is drawn.
-/// The rows carry no reference to their sessions, so a row is known by its
-/// place.
+/// Local counter references identify the displayed sessions. Row identity
+/// retains its place for compatibility with older daemon payloads.
 struct InsightsCounterSessions: Equatable, Sendable {
     struct Row: Identifiable, Equatable, Sendable {
         let id: Int
@@ -1560,13 +1560,40 @@ enum InsightsSessionsWords {
               timeZone: timeZone)
     }
 
-    /// A counted session's label (feed T), from the daemon's row: its first
-    /// event, harness and transcript tokens. The row carries no reference,
-    /// so this is all that tells two sessions apart.
+    /// The same folder label and opaque short reference used by Sessions.
+    /// Older daemon payloads omit both; do not invent a session identifier.
+    static func counterTitle(_ row: DaemonData.InsightsWeekSession, copy: [String: String]) -> String {
+        let folder = row.folder.flatMap { $0.isEmpty ? nil : $0 }
+            ?? text("analytics_folder_unknown", copy)
+        guard let reference = row.sessionRef, !reference.isEmpty else { return folder }
+        return folder + " · " + reference
+    }
+
+    /// A counted session's label (feed T): its recorded activity range,
+    /// harness and transcript tokens, beneath its folder and reference.
+    /// A missing or invalid last event retains the first-event-only label.
     static func counterLabel(_ row: DaemonData.InsightsWeekSession, copy: [String: String],
-                             timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT())
-                                ?? .current) -> String {
+                             timeZone: TimeZone = .current) -> String {
         let first = row.startedAt.flatMap(parseEvent)
+        if let first, let last = row.lastEventAt.flatMap(parseEvent), last > first,
+           let template = copy["analytics_session_label_range"] {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            let startStyle = Date.FormatStyle(timeZone: timeZone).month(.abbreviated).day().hour().minute()
+            let end: String
+            if calendar.isDate(first, inSameDayAs: last) {
+                end = last.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute())
+            } else if calendar.component(.year, from: first) == calendar.component(.year, from: last) {
+                end = last.formatted(startStyle)
+            } else {
+                end = last.formatted(startStyle.year())
+            }
+            return InsightsOverviewWords.fill(template, [
+                "span": first.formatted(startStyle) + " – " + end,
+                "harness": InsightsOverviewWords.harness(row.source, copy: copy),
+                "t": InsightsOverviewWords.figure(row.tokens.flatMap { UInt64(exactly: $0) }, copy: copy),
+            ])
+        }
         return label(first: first, source: row.source, tokens: row.tokens.flatMap { UInt64(exactly: $0) },
                      copy: copy, timeZone: timeZone)
     }

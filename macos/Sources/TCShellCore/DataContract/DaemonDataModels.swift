@@ -2468,10 +2468,12 @@ extension DaemonData {
         public let tokens: Int64
     }
 
-    /// One counted session. No reference to it crosses: no id, digest or
-    /// path.
+    /// One counted session, with optional local display metadata. The
+    /// reference is the same opaque counter reference used by Sessions.
     public struct InsightsWeekSession: Codable, Equatable, Sendable {
         public let source: String?
+        public let folder: String?
+        public let sessionRef: String?
         /// The transcript's count; `nil` is unknown, never zero.
         public let tokens: Int64?
         public let state: String
@@ -2479,13 +2481,17 @@ extension DaemonData {
         /// The transcript's first recorded event, RFC 3339; `nil` when it
         /// has none, or from a daemon that predates it.
         public let startedAt: String?
+        /// Latest recorded activity, not proof that the session has ended.
+        public let lastEventAt: String?
         /// Where its calls went, from the proxy's record; `nil` while
         /// `routingAvailable` is not true.
         public let routing: InsightsWeekRouting?
 
         public enum CodingKeys: String, CodingKey {
-            case source, tokens, state, reasons, routing
+            case source, tokens, state, reasons, routing, folder
+            case sessionRef = "session_ref"
             case startedAt = "started_at"
+            case lastEventAt = "last_event_at"
         }
     }
 

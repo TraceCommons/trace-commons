@@ -535,7 +535,7 @@ struct InsightsCounterSessionsView: View {
                         let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
                         #endif
                         InsightsDrillRow(
-                            title: InsightsOverviewWords.harness(row.session.source, copy: copy),
+                            title: InsightsSessionsWords.counterTitle(row.session, copy: copy),
                             figure: InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
                                                                 copy: copy),
                             label: InsightsSessionsWords.counterLabel(row.session, copy: copy),
