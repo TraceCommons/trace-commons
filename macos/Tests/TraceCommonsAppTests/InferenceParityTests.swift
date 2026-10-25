@@ -247,7 +247,8 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
         for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
-                       "NearAiSignInOffer.billingOffers(state: status?.state)", "model.signInToNearAI()", "info: copy.fundingWhat,",
+                       "NearAiSignInOffer.billingOffers(",
+                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI()", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
                        ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",
