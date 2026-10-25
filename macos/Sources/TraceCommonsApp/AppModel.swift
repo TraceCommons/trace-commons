@@ -72,8 +72,16 @@ final class AppModel: ObservableObject {
         managedErrorMethod = nil
         let attemptedTool = params["tool"] as? String
             ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
+        // Snapshot the untyped parameters before crossing to the worker.
+        let encodedParams = Result {
+            guard JSONSerialization.isValidJSONObject(params) else { throw CocoaError(.coderInvalidValue) }
+            return try JSONSerialization.data(withJSONObject: params)
+        }
         Task.detached(priority: .userInitiated) {
             let result = Result {
+                guard let params = try JSONSerialization.jsonObject(with: encodedParams.get()) as? [String: Any] else {
+                    throw CocoaError(.coderInvalidValue)
+                }
                 var response = try client.managedAction(method, params: params)
                 if method == "managed_account_add", let accountID = response["id"] as? String {
                     if let key = newAccountKey {
@@ -393,7 +401,7 @@ final class AppModel: ObservableObject {
         submitPrivateInference { try $0.setPrivateInference(on) }
     }
 
-    private func submitPrivateInference(_ work: @escaping (DaemonClient) throws -> DaemonSettingsView) {
+    private func submitPrivateInference(_ work: @escaping @Sendable (DaemonClient) throws -> DaemonSettingsView) {
         guard !privateInferenceBusy else {
             objectWillChange.send()
             return
@@ -1000,7 +1008,7 @@ final class AppModel: ObservableObject {
     /// The busy flag is cleared on BOTH outcomes. `perform` runs its
     /// continuation on success only, which would leave a failed cancel with
     /// the button disabled and no way back.
-    private func submitNearAiCredential(_ work: @escaping (DaemonClient) throws -> Void) {
+    private func submitNearAiCredential(_ work: @escaping @Sendable (DaemonClient) throws -> Void) {
         guard !credentialBusy else { return }
         guard let client else {
             lastActionError = privateInferenceCopy?.writeUnconfirmed
@@ -1939,8 +1947,16 @@ final class AppModel: ObservableObject {
     /// modes are read back; a requested path is never retained.
     func setSettingsDeclaration(_ params: [String: Any]) async -> Bool {
         guard let client else { return false }
+        let encodedParams = Result {
+            try JSONSerialization.data(withJSONObject: DaemonClient.settingsParams(params))
+        }
         let result = await Task.detached(priority: .userInitiated) {
-            Result { try client.setSettings(params) }
+            Result {
+                guard let params = try JSONSerialization.jsonObject(with: encodedParams.get()) as? [String: Any] else {
+                    throw CocoaError(.coderInvalidValue)
+                }
+                return try client.setSettings(params)
+            }
         }.value
         switch result {
         case .success(let settings):
@@ -4010,11 +4026,11 @@ final class AppModel: ObservableObject {
 
     // MARK: - Plumbing
 
-    private func perform<T>(
+    private func perform<T: Sendable>(
         _ label: String,
-        work: @escaping (DaemonClient) throws -> T,
-        onFailure: (() -> Void)? = nil,
-        onSuccess: @escaping (T) -> Void
+        work: @escaping @Sendable (DaemonClient) throws -> T,
+        onFailure: (@MainActor @Sendable () -> Void)? = nil,
+        onSuccess: @escaping @MainActor @Sendable (T) -> Void
     ) {
         guard let client else { return }
         Task.detached(priority: .userInitiated) {

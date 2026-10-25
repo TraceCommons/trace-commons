@@ -20,7 +20,7 @@
 
 ## Tasks
 
-- [ ] Flip the three remaining Swift 5 targets to Swift 6, reset relocated Swift artifacts, rebuild FFI, and capture compiler diagnostics as the failing baseline.
+- [x] Flip the three remaining Swift 5 targets to Swift 6, reset relocated Swift artifacts, rebuild FFI, and capture compiler diagnostics as the failing baseline.
 - [ ] Repair app callback/isolation diagnostics without changing event ordering or UI work placement.
 - [ ] Repair design-library pure geometry and test actor isolation, with focused regressions for meaningful behavior changes.
 - [ ] Repair app-test actor/discovery compatibility and the FFI demo under the stricter mode.
@@ -34,3 +34,11 @@
 - Geometry/alignment callbacks must remain pure and preserve measured layout.
 - XCTest discovery must execute actor-isolated cases without unsafe casts or runtime crashes.
 - Build guards must not raise deployment floors or rely on a newer toolchain than release CI.
+
+## Initial PR checkpoint
+
+Draft PR #1635 contains the language-mode switch, explicit app/bridge concurrency contracts, pure-geometry isolation fixes, initial test actor fixes, and warnings-as-errors CI guards. The migration is not complete. Finish compiler diagnostics, synchronize remaining test doubles without weakening assertions, run test discovery and the suite, verify Debug/Release and FFI teardown stress, and validate the CI-supported toolchain before marking it ready.
+
+Local compiler: Apple Swift 6.4. The only installed Xcode is newer than release CI, so a local pass alone cannot establish CI compatibility. The existing `TCDaemon` condition-variable ownership gate has been independently reviewed to justify its narrow unchecked conformance; `TCPreview` remains non-Sendable.
+
+Latest local checkpoint: the earlier worker-boundary diagnostics are cleared; compilation stops at `MenuBarGlassPanel.Coordinator.deinit`, where nonisolated teardown accesses non-Sendable NotificationCenter observer tokens. Do not silence this with the compiler-suggested `@preconcurrency` import. Test compilation/discovery and the new runtime regressions have not run yet. Local log: `/private/tmp/swift6-pass11.log`.
