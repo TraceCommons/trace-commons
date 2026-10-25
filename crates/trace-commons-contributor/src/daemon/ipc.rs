@@ -342,6 +342,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
     "managed_snapshot",
+    "managed_cli_options_set",
     "managed_account_add",
     "managed_select",
     "managed_launch_prepare",
@@ -3787,6 +3788,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // One arm per method: `every_advertised_method_is_dispatched_and_the_reverse`
         // counts one arm per string literal, and an or-pattern hides all but its last.
         "managed_snapshot" => super::managed::handle(shared, req),
+        "managed_cli_options_set" => handle_set_managed_cli_options(shared, req),
         "managed_account_add" => super::managed::handle(shared, req),
         "managed_select" => super::managed::handle(shared, req),
         "managed_launch_prepare" => super::managed::handle(shared, req),
@@ -6417,6 +6419,41 @@ fn handle_set_managed_terminal(shared: &DaemonShared, req: &Request) -> Response
     Response::ok(req.id, serde_json::json!({ "managed_terminal": app.id() }))
 }
 
+/// Per-agent launch options share the normal settings transaction and validator.
+/// Never take the managed mutex before the settings writer's commit lock.
+fn handle_set_managed_cli_options(shared: &DaemonShared, req: &Request) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        tool: crate::managed::ToolId,
+        options: String,
+    }
+    let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "managed-invalid-request");
+    };
+    if crate::managed::options::parse(params.tool, &params.options).is_err() {
+        return Response::err(
+            req.id,
+            "managed-cli-options-invalid",
+            "managed-cli-options-invalid",
+        );
+    }
+    let tool = serde_json::to_value(params.tool).expect("tool is serializable");
+    let write = Request {
+        id: req.id,
+        method: "set_settings".into(),
+        params: serde_json::json!({"managed_cli_options": {tool.as_str().expect("tool is a string"): params.options}}),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    match super::managed::options_acknowledgment(shared, params.tool) {
+        Ok(value) => Response::ok(req.id, value),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
 /// Nudge A2: `set_notify_kind {kind, on}`: one notification kind's switch,
 /// written as `set_settings {"notify": {kind: on}}`. `kind` is one of
 /// `settings::notify_kind_labels` -- the digest or an arbiter kind label --
@@ -6469,6 +6506,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let mut settings = shared.settings.lock().expect("settings lock");
     // Advance lifecycle consent only after this candidate is persisted.
     // Routing separately retains its warm reader when its endpoint is unchanged.
+    let managed_options_before = settings.managed_cli_options.clone();
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
@@ -6525,6 +6563,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             let attention_after = attention_settings(&settings);
+            let managed_options_changed = settings.managed_cli_options != managed_options_before;
             let settlement_after = settings.settlement_estimate_enabled;
             drop(settings);
             // Off stops a running scan's result, hides the estimate and
@@ -6535,6 +6574,12 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // Released before the queue and policy are touched below; see
             // the top of this function.
             drop(commit);
+            if managed_options_changed {
+                match super::managed::options_changed(shared) {
+                    Ok(revision) => value["managed_revision"] = revision.into(),
+                    Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+                }
+            }
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
             // waiting at once, rather than leaving it reading approved until
@@ -6638,7 +6683,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
     // Managed methods answer as on the synchronous path, except that
     // redeeming a session on the NEAR AI sign-in starts its proxy and an
     // ended session's proxy is shut down.
-    if req.method.starts_with("managed_") && METHODS.contains(&req.method.as_str()) {
+    // Options use the common settings transaction on the synchronous path.
+    if req.method.starts_with("managed_")
+        && req.method != "managed_cli_options_set"
+        && METHODS.contains(&req.method.as_str())
+    {
         return super::managed::handle_async(shared, req).await;
     }
     match req.method.as_str() {
@@ -18434,7 +18483,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 93, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 94, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

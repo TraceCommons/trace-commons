@@ -304,6 +304,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_cli_options_config_commands_update_the_ui_and_launch_store() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let embedded = crate::daemon::start_embedded(store).await.unwrap();
+        let inspect = ConfigStore::resolve_existing(Some(dir.path().into())).unwrap();
+        let file = dir.path().join("options-patch.json");
+        std::fs::write(&file, br#"{"managed_cli_options":{"codex":"-c model_reasoning_effort=high","claude":"--model sonnet"}}"#).unwrap();
+        let before = execute(&inspect, &ConfigCommand::Show).unwrap();
+        let preview = execute(&inspect, &ConfigCommand::Preview { file: file.clone() }).unwrap();
+        assert_eq!(preview["applied"], false);
+        assert_eq!(execute(&inspect, &ConfigCommand::Show).unwrap(), before);
+        execute(&inspect, &ConfigCommand::Apply { file }).unwrap();
+        let shown = execute(&inspect, &ConfigCommand::Show).unwrap();
+        assert_eq!(
+            shown["managed_cli_options"]["codex"],
+            "-c model_reasoning_effort=high"
+        );
+        let response = client::try_call(&inspect, "managed_snapshot", &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response.result.unwrap()["cli_options"]["claude"],
+            "--model sonnet"
+        );
+        assert_eq!(
+            crate::managed::options::arguments(&inspect, crate::managed::ToolId::Codex).unwrap(),
+            ["-c", "model_reasoning_effort=high"]
+        );
+        embedded.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn preview_and_apply_reach_the_live_daemon_without_losing_other_settings() {
         let (dir, store) = crate::config::tests_support::temp_store();
         let mut settings = crate::daemon::settings::DaemonSettings::load(&store).unwrap();

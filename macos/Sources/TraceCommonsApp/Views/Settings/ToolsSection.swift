@@ -33,6 +33,7 @@ struct ToolsSection: View {
         // The container is always present, so `.onAppear` runs even when the
         // core's copy is missing and the card draws nothing.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            ManagedCLIOptionsSection()
             if let copy = model.routingCopy {
                 card(copy, form: model.routingDraft ?? model.routingForm)
             } else {
@@ -46,6 +47,7 @@ struct ToolsSection: View {
             // since. It reads a file, opens no connection, declares nothing.
             model.discoverRouting()
             model.refreshRoutedTools()
+            model.refreshManagedSessions()
         }
     }
 

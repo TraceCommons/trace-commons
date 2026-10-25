@@ -5,6 +5,7 @@ pub mod cli;
 pub mod codex;
 pub mod models;
 pub mod opencode;
+pub mod options;
 pub mod profiles;
 pub mod secrets;
 pub mod sessions;
@@ -107,6 +108,8 @@ pub enum ManagedError {
     LaunchUnknown,
     #[error("invalid managed request")]
     InvalidRequest,
+    #[error("invalid managed CLI options")]
+    InvalidCliOptions,
     #[error("the chosen terminal app was not found")]
     TerminalNotFound,
     #[error("the chosen model is not available on NEAR AI")]

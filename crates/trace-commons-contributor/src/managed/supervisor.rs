@@ -84,6 +84,9 @@ async fn run_native(
         },
         &row.cwd,
     )?;
+    if !login && row.tool != super::ToolId::Opencode {
+        command.args(&context.cli_options);
+    }
     let mut route = None;
     // Removed when this function returns, however it returns.
     let mut codex_catalog: Option<super::codex::CatalogFile> = None;
@@ -131,6 +134,9 @@ async fn run_native(
     } else {
         None
     };
+    if opencode.is_some() && !login {
+        command.args(&context.cli_options);
+    }
     if opencode.is_none() {
         match row.connection {
             ConnectionKind::Subscription => {}

@@ -670,7 +670,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -691,6 +691,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
@@ -5033,7 +5034,7 @@ Takes a JSON object whose top-level keys must come from
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `managed_terminal` --
+`insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -5114,6 +5115,18 @@ snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 this computer; empty under Flatpak) and `terminal_destination` (the
 chosen app's name). A launch whose chosen app was not found is refused
 with `managed-terminal-not-found`.
+
+`managed_cli_options` (object) updates saved CLI options for new managed coding
+sessions. Accepted keys are `claude`, `codex` and `opencode`, with string values.
+Omitted agents retain their current values; an empty string resets one agent.
+Each value is limited to 16384 UTF-8 bytes and validated with the managed launcher’s
+quote parser and reserved-option rules. Arguments are passed directly without
+shell evaluation. Invalid quoting or reserved overrides return the fixed
+`managed-cli-options-invalid` label; unknown agents and non-string values return
+`settings-invalid-value`. Preview uses identical validation without writing.
+The UI and `config schema/show/preview/apply` use this same persisted field.
+Existing sessions and sign-in commands are unaffected. Successful changes advance
+the managed snapshot revision and publish `managed_changed`.
 
 #### Notification settings
 

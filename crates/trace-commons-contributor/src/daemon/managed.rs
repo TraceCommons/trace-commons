@@ -218,7 +218,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -471,6 +471,33 @@ fn terminal_choice(shared: &DaemonShared) -> TerminalSetting {
 /// the snapshot, whose destination and picker follow it.
 pub fn terminal_changed(shared: &DaemonShared) {
     let _ = with_service(shared, |service| service.sessions.changed());
+}
+
+/// Canonical launch options changed through the shared settings writer.
+/// Called only after the settings and commit locks have been released.
+pub fn options_changed(shared: &DaemonShared) -> Result<u64, &'static str> {
+    with_service(shared, |service| {
+        service.sessions.changed()?;
+        Ok(service.sessions.revision())
+    })
+    .map_err(refusal_label)
+}
+
+/// Read acknowledgment state together, so a concurrent later save cannot be
+/// represented by the old value carrying a newer managed revision.
+pub fn options_acknowledgment(shared: &DaemonShared, tool: ToolId) -> Result<Value, &'static str> {
+    with_service(shared, |service| {
+        let store = ConfigStore::open(service.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
+        let options = crate::managed::options::snapshot(&store)?;
+        Ok(json!({"tool":tool,"options":options.get(&tool).cloned().unwrap_or_default(),"revision":service.sessions.revision()}))
+    }).map_err(refusal_label)
+}
+
+fn refusal_label(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Unavailable(value) => value,
+        Refusal::Managed(error) => label(error),
+    }
 }
 
 fn sign_in_present(shared: &DaemonShared) -> bool {
@@ -731,6 +758,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
+        ManagedError::InvalidCliOptions => "managed-cli-options-invalid",
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
         ManagedError::ModelUnavailable => "managed-model-unavailable",
     }

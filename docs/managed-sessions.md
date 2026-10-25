@@ -350,3 +350,40 @@ Neither a running process nor a collected export is evidence of an answered
 model call, contribution, or global routing configuration. Sign-in-only sessions
 are excluded. An unreadable registry remains unknown, and older payloads remain
 readable without the added availability or managed-route fields.
+
+## Agent CLI options
+
+Settings > Tools saves additional CLI options separately for Claude Code, Codex
+and OpenCode. The defaults are empty. A saved change applies to newly prepared
+coding sessions from the app and `near-ai launch`, including a new launch made
+with Start again. Existing sessions and account sign-in commands keep their
+options. A launch ticket captures the options at preparation, so changing
+Settings while a terminal opens cannot change that launch.
+
+Quote values containing spaces with single or double quotes; backslashes escape
+characters. These values become native process arguments directly. Shell
+variables, substitutions, wildcard patterns and operators are passed literally;
+there is no shell evaluation. Clear the field and choose Save to restore the
+agent's defaults. The options use the canonical `managed_cli_options` daemon
+setting in the private local state directory, shared with `near-ai config
+schema`, `show`, `preview` and `apply`; they are not synced to an account.
+Do not put API keys or other credentials in them.
+
+Account routing, isolated profiles and session identity belong to the managed
+launcher. Options that replace those controls are refused. Codex `-c` /
+`--config` supports choices such as `model_reasoning_effort="high"`, while
+provider, profile and credential-store overrides are unavailable. Claude Code
+settings-file and session-resume overrides are unavailable. OpenCode's model
+and session id remain the launcher's; select its model in the launch dialog.
+Unsupported agent flags are reported by the native agent when it starts.
+
+`managed_snapshot.cli_options` is an additive object with `claude`, `codex` and
+`opencode` string values. Older daemons omit it. The
+`managed_cli_options_set` mutation takes `{tool, options}`, validates quoting
+and managed-control overrides, and returns `{tool, options, revision}` after
+saving. The acknowledgment reads the current saved value and managed revision together, so concurrent later
+saves are not mislabeled as an older value at a newer revision.
+Invalid options return the fixed `managed-cli-options-invalid` refusal without
+including user input. The `managed_changed` event announces successful saves.
+`managed_launch_redeem` adds `cli_options`, the argv array frozen by the original
+prepare; older contexts and stored entries default to an empty array.

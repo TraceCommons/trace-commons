@@ -151,6 +151,17 @@ pub(crate) fn schema() -> Value {
         terminal["enum"] = json!(terminals);
     }
     properties.insert("managed_terminal".into(), terminal);
+    properties.insert("managed_cli_options".into(), json!({
+        "type":"object",
+        "properties":{
+            "claude":{"type":"string","maxLength":16384},
+            "codex":{"type":"string","maxLength":16384},
+            "opencode":{"type":"string","maxLength":16384}
+        },
+        "additionalProperties":false,
+        "examples":[{"codex":"-c model_reasoning_effort=high"}],
+        "description":"Partial per-agent CLI options for new managed coding sessions. Omitted agents keep their saved options; an empty string resets one agent. Quote values containing spaces. No shell evaluation. Managed routing, profile and session identity overrides are refused; each value is limited to 16384 UTF-8 bytes."
+    }));
     properties.insert("scrub_check".into(), json!({
         "type":"string","enum":["automatic","manual"],"examples":["manual"],
         "description":"Privacy-review mode. Switching to manual returns unsent unattended approvals to waiting. Does not bypass upload consent."
@@ -170,7 +181,7 @@ pub(crate) fn schema() -> Value {
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties
         },
         "semantics":{
-            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, which merges supplied kind switches.",
+            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify and managed_cli_options, which merge supplied entries.",
             "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction. Daily-cap changes include uses_server_allowance before/after metadata when choosing a local cap or resetting to follow server allowances, even if the saved number is unchanged.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",
@@ -251,6 +262,42 @@ pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_cli_options_config_schema_and_preview_share_validation() {
+        let mut settings = DaemonSettings::default();
+        settings
+            .managed_cli_options
+            .insert(crate::managed::ToolId::Claude, "--model sonnet".into());
+        assert_eq!(
+            schema()["patch_schema"]["properties"]["managed_cli_options"]["type"],
+            "object"
+        );
+        let patch = json!({"managed_cli_options":{"codex":"--model custom -c model_reasoning_effort=high"}});
+        let result = preview(&settings, &patch).unwrap();
+        assert_eq!(result["applied"], false);
+        assert!(
+            result["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["key"] == "managed_cli_options")
+        );
+        assert!(
+            preview(
+                &settings,
+                &json!({"managed_cli_options":{"codex":"-c model_provider=other"}})
+            )
+            .is_err()
+        );
+        assert!(
+            preview(
+                &settings,
+                &json!({"managed_cli_options":{"future":"--flag"}})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn agent_config_schema_covers_every_accepted_setting_and_examples_validate() {
