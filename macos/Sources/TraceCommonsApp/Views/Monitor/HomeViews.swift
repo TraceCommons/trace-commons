@@ -1642,7 +1642,7 @@ enum HomeFormat {
     /// With a figure, the core's line for the change over the last 24 hours
     /// goes under it (owner, 2026-10-23), up in the status green and down in
     /// the status red as the Credit tile's change is drawn. Missing history
-    /// uses the core's explanation; it is never represented as "$0.00".
+    /// hides the change line; it is never represented as "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
@@ -1659,11 +1659,9 @@ enum HomeFormat {
     }
 
     /// The Balance tile's 24-hour change: the core's words, inked by the
-    /// sign of the core's figure. Zero and unavailable history stay neutral.
+    /// sign of the core's figure. Zero stays neutral; unknown history draws no line.
     static func balanceChange(_ status: BalanceStatus) -> (text: String, ink: GlassRGBA?)? {
-        guard let nanos = status.change24hNanos else {
-            return status.change24hUnavailableText.map { ($0, nil) }
-        }
+        guard let nanos = status.change24hNanos else { return nil }
         guard let text = status.change24hText, !text.isEmpty else { return nil }
         let direction = status.change24hDirection ?? (nanos == 0 ? 0 : (nanos > 0 ? 1 : -1))
         let ink: GlassRGBA? = direction == 0 ? nil
@@ -1675,7 +1673,7 @@ enum HomeFormat {
     /// Failed or signed-out reads cannot display even an accidentally retained value.
     static func balanceReceived(_ status: BalanceStatus, calls: BalanceCalls) -> String? {
         guard BalanceSurface.showsFigures(status, calls: calls) else { return nil }
-        guard status.received24hNanos != nil else { return status.received24hUnavailableText }
+        guard status.received24hNanos != nil else { return nil }
         return status.received24hText
     }
 
