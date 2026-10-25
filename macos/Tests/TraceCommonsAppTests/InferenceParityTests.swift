@@ -244,6 +244,7 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }
         XCTAssertFalse(balance.contains("Text(copy.balanceWhat)"))
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         XCTAssertFalse(account.contains("subtitle: [copy.balanceWhat]"))
         XCTAssertFalse(account.contains("FundingRow(copy: copy)"))
         let settings = try Self.text("Views/Settings/PrivateAISection.swift")

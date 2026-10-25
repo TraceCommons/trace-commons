@@ -1722,9 +1722,10 @@ extension DaemonData {
         /// No classification source exists today; this remains nil.
         public let workKind: String?
         public let calls: UInt64
-        public let pricedCalls: UInt64
+        /// Missing on older replies: unknown pricing coverage, never zero.
+        public let pricedCalls: UInt64?
         /// Registry-priced USD over priced calls only, never billed spend.
-        public let costUSD: Double
+        public let costUSD: Double?
         public let proof: InferenceProofCounts
 
         public enum GroupID: Hashable, Sendable {
@@ -1750,8 +1751,8 @@ extension DaemonData {
             route = try values.decode(String.self, forKey: .route)
             workKind = try values.decodeIfPresent(String.self, forKey: .workKind)
             calls = try values.decode(UInt64.self, forKey: .calls)
-            pricedCalls = try values.decode(UInt64.self, forKey: .pricedCalls)
-            costUSD = try values.decode(Double.self, forKey: .costUSD)
+            pricedCalls = try values.decodeIfPresent(UInt64.self, forKey: .pricedCalls)
+            costUSD = try values.decodeIfPresent(Double.self, forKey: .costUSD)
             proof = try values.decode(InferenceProofCounts.self, forKey: .proof)
         }
 
@@ -1766,9 +1767,10 @@ extension DaemonData {
 
     public struct InferenceRouteTotal: Codable, Equatable, Sendable {
         public let calls: UInt64
-        public let pricedCalls: UInt64
+        /// Missing on older replies: unknown pricing coverage, never zero.
+        public let pricedCalls: UInt64?
         /// Registry-priced, not billed. `pricedCalls < calls` is incomplete pricing.
-        public let costUSD: Double
+        public let costUSD: Double?
         public let proof: InferenceProofCounts
 
         public enum CodingKeys: String, CodingKey {

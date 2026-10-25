@@ -3,10 +3,8 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// The Private AI tab's account cards, after the Private AI summary and the
-/// calls: the balance and the funding, then the card that opens the Private
-/// AI section of Settings. The managed cards lead the tab instead (owner,
-/// 2026-10-12: `InferenceTabView`).
+/// The Private AI tab's link to Settings. Balance stays on the tab; billing,
+/// the standard tool settings, and the connection controls live in Settings.
 /// The standard settings, the local tools and the connection (the switch,
 /// then sign-in) are in that section (owner, 2026-10-10:
 /// `PrivateAISettingsPanels`).

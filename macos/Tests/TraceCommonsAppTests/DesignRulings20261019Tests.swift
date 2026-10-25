@@ -103,7 +103,7 @@ final class DesignRulings20261019Tests: XCTestCase {
     }
 
     /// Signed out, the Balance tile's "Sign in required" sits beside its
-    /// dash; a longer sentence, such as an expired sign-in's, goes under it.
+    /// dash; an expired sign-in has no extra notice beside recovery controls.
     func test_theSignedOutBalanceSitsBesideTheDash() throws {
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
@@ -116,7 +116,7 @@ final class DesignRulings20261019Tests: XCTestCase {
             BalanceStatus.parse(fromJSON: #"{"state":"session_expired"}"#), copy: copy, calls: model.balanceCalls)
         XCTAssertEqual(expired.value, "—")
         XCTAssertNil(expired.beside)
-        XCTAssertNotNil(expired.detail)
+        XCTAssertNil(expired.detail)
     }
 
     /// The tabs' own headings share one style (owner, 2026-10-19): the

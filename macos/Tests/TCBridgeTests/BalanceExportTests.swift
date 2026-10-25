@@ -114,12 +114,12 @@ final class BalanceExportTests: XCTestCase {
             TCNearAiBalance.amount(
                 present: 1, nanos: 8_500_000_000, scale: BalanceStatus.unreadableScale),
             "")
-        // And the row falls to the sentence that says so, rather than to the
-        // one about an uncapped account.
+        // The row stays unavailable without a compatibility notice or an
+        // explanation about an uncapped account.
         let row = BalanceSurface.remaining(
             status("known", remaining: 8_500_000_000, scale: BalanceStatus.unreadableScale),
             copy: try payload(), calls: calls())
-        XCTAssertEqual(row, .sentence(try payload().balanceUnknown))
+        XCTAssertEqual(row, .unavailable)
         XCTAssertNotEqual(row, .sentence(try payload().balanceNoRemaining))
     }
 
@@ -138,17 +138,19 @@ final class BalanceExportTests: XCTestCase {
 
     // MARK: - The sentences
 
-    /// Every state gets the payload's own sentence, and `known` gets none.
-    func testEveryStateGetsItsOwnSentenceAndKnownGetsNone() throws {
+    /// The ABI keeps its shared copy while macOS omits redundant notices.
+    func testStateNoticesPreserveTheABIAndQuietStatesHaveNoLine() throws {
         let copy = try payload()
         let expected: [String: String?] = [
-            "": copy.balanceUnreported,
+            "": nil,
             "known": nil,
             "no_session": copy.balanceNoSession,
-            "session_expired": copy.balanceSessionExpired,
+            "session_expired": nil,
             "no_organization": copy.balanceNoOrganization,
             "unavailable": copy.balanceUnavailable,
         ]
+        XCTAssertEqual(TCNearAiBalance.stateLine(state: ""), copy.balanceUnreported)
+        XCTAssertEqual(TCNearAiBalance.stateLine(state: "session_expired"), copy.balanceSessionExpired)
         for (state, sentence) in expected {
             XCTAssertEqual(
                 BalanceSurface.stateLine(status(state), copy: copy, calls: calls()), sentence,
@@ -156,14 +158,15 @@ final class BalanceExportTests: XCTestCase {
         }
     }
 
-    /// **An unrecognised state borrows nobody's sentence.** It gets the one
-    /// written for it, and specifically not the claim that no sign-in is
-    /// kept here, nor the claim that the service failed to answer.
-    func testAnUnrecognisedStateGetsTheUnknownSentenceAndBorrowsNoOthers() throws {
+    /// The ABI retains its unknown-state distinction; macOS keeps that
+    /// compatibility notice quiet without claiming a readable balance.
+    func testAnUnrecognisedStateKeepsItsABIIdentityAndDrawsNoNotice() throws {
         let copy = try payload()
         let line = try XCTUnwrap(
-            BalanceSurface.stateLine(status("a_state_from_2027"), copy: copy, calls: calls()))
+            TCNearAiBalance.stateLine(state: "a_state_from_2027"))
         XCTAssertEqual(line, copy.balanceUnknown)
+        XCTAssertNil(BalanceSurface.stateLine(status("a_state_from_2027"), copy: copy, calls: calls()))
+        XCTAssertFalse(BalanceSurface.showsFigures(status("a_state_from_2027"), calls: calls()))
         for borrowed in [
             copy.balanceNoSession, copy.balanceSessionExpired, copy.balanceNoOrganization,
             copy.balanceUnavailable, copy.balanceUnreported, copy.balanceNoRemaining,

@@ -95,8 +95,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// would be doing exactly what the field exists to prevent. This value is
     /// larger than any power of ten the Rust formatter can raise, so every
     /// figure formatted with it comes back as the empty string, and the row
-    /// falls to the sentence that says the answer arrived in a form this app
-    /// cannot read. A wrong figure is worse than no figure when the figure is
+    /// stays unavailable. A wrong figure is worse than no figure when it is
     /// somebody's money.
     public static let unreadableScale: UInt8 = .max
 
