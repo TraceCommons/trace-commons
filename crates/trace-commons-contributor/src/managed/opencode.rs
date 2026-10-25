@@ -1,4 +1,4 @@
-//! Qualified OpenCode 1.19.0 managed profile and exact-session export.
+//! Version-aware OpenCode managed profiles and exact-session export.
 //! Standard profiles are never read or changed. Exports are local transcripts,
 //! not evidence of attestation or permission to upload.
 use super::{
@@ -25,7 +25,7 @@ pub fn valid_model(model: &str) -> bool {
 }
 
 /// Every native invocation gets isolated config, state, auth, cache and data.
-/// Pure mode prevents external plugins from changing the selected provider.
+/// Project configuration is disabled; version-specific flags are applied later.
 pub(crate) fn isolate(command: &mut Command, root: &Path) -> Result<(), ManagedError> {
     private_directory(root)?;
     for (key, _) in std::env::vars_os() {
@@ -56,8 +56,9 @@ pub(crate) fn isolate(command: &mut Command, root: &Path) -> Result<(), ManagedE
         command.env(key, path);
     }
     command
-        .arg("--pure")
         .env("OPENCODE_DISABLE_PROJECT_CONFIG", "true")
+        .env("OPENCODE_DISABLE_CLAUDE_CODE", "true")
+        .env("OPENCODE_DISABLE_FILEWATCHER", "true")
         .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
         .env("OPENCODE_DISABLE_MODELS_FETCH", "true")
         .env("OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER", "true")
@@ -68,11 +69,83 @@ pub(crate) fn isolate(command: &mut Command, root: &Path) -> Result<(), ManagedE
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Version {
+    V1,
+    V2,
+}
+
+impl Version {
+    pub(crate) fn from_native(version: Option<(u32, u32, u32)>) -> Result<Self, ManagedError> {
+        match version.map(|v| v.0) {
+            Some(1) => Ok(Self::V1),
+            Some(2) => Ok(Self::V2),
+            _ => Err(ManagedError::UnsupportedVersion),
+        }
+    }
+
+    pub(crate) fn interactive(self, command: &mut Command) {
+        command.arg(match self {
+            Self::V1 => "--pure",
+            Self::V2 => "--standalone",
+        });
+    }
+}
+
+// v2 has no --pure or CLI switch to ignore machine/MDM configuration.
+// Those settings outrank inline configuration, including provider and plugin
+// policy. Refuse them rather than launch outside the selected managed route.
+fn ensure_v2_system_configuration_absent() -> Result<(), ManagedError> {
+    #[cfg(target_os = "macos")]
+    let paths = {
+        let mut identity = Command::new("/usr/bin/id");
+        identity.arg("-un");
+        let output = bounded_output_limit(identity, 1024)?;
+        let username = std::str::from_utf8(&output.stdout)
+            .ok()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && Path::new(s).components().count() == 1)
+            .filter(|s| *s != "." && *s != "..")
+            .ok_or(ManagedError::SystemConfiguration)?;
+        if !output.status.success() {
+            return Err(ManagedError::SystemConfiguration);
+        }
+        vec![
+            PathBuf::from("/Library/Application Support/opencode"),
+            PathBuf::from("/Library/Managed Preferences/ai.opencode.managed.plist"),
+            PathBuf::from("/Library/Managed Preferences")
+                .join(username)
+                .join("ai.opencode.managed.plist"),
+        ]
+    };
+    #[cfg(windows)]
+    let paths = vec![
+        std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("opencode"),
+    ];
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let paths = vec![PathBuf::from("/etc/opencode")];
+    require_absent(&paths)
+}
+
+fn require_absent(paths: &[PathBuf]) -> Result<(), ManagedError> {
+    for path in paths {
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(ManagedError::SystemConfiguration),
+        }
+    }
+    Ok(())
+}
+
 pub struct OpenCodeSession {
     root: PathBuf,
     native: PathBuf,
     cwd: PathBuf,
     id: Uuid,
+    version: Version,
 }
 
 impl OpenCodeSession {
@@ -86,7 +159,9 @@ impl OpenCodeSession {
         if !native.is_absolute() || !native.is_file() || !cwd.is_absolute() || !cwd.is_dir() {
             return Err(ManagedError::InvalidRequest);
         }
-        let account_root = NativeProfiles::new(store).profile_root(account.id)?;
+        let profiles = NativeProfiles::new(store);
+        let version = Version::from_native(profiles.native_version(account, native)?)?;
+        let account_root = profiles.profile_root(account.id)?;
         let root = account_root.join(id.to_string());
         private_directory(&root)?;
         Ok(Self {
@@ -94,6 +169,7 @@ impl OpenCodeSession {
             native: native.into(),
             cwd: std::fs::canonicalize(cwd).map_err(|_| ManagedError::InvalidRequest)?,
             id,
+            version,
         })
     }
 
@@ -105,6 +181,9 @@ impl OpenCodeSession {
         let mut command = Command::new(&self.native);
         command.current_dir(&self.cwd);
         isolate(&mut command, &self.root)?;
+        if self.version == Version::V2 {
+            ensure_v2_system_configuration_absent()?;
+        }
         Ok(command)
     }
 
@@ -112,7 +191,14 @@ impl OpenCodeSession {
     /// Its exact ID binds the launch and subsequent export without time guesses.
     pub fn prepare(&self) -> Result<(), ManagedError> {
         let now = chrono::Utc::now().timestamp_millis();
-        let seed = json!({"info":{"id":self.session_id(),"slug":"managed-session","projectID":"global","directory":self.cwd,"title":"Managed session","version":"1.19.0","time":{"created":now,"updated":now}},"messages":[]});
+        let seed = match self.version {
+            Version::V1 => {
+                json!({"info":{"id":self.session_id(),"slug":"managed-session","projectID":"global","directory":self.cwd,"title":"Managed session","version":"1.19.0","time":{"created":now,"updated":now}},"messages":[]})
+            }
+            Version::V2 => {
+                json!({"info":{"id":self.session_id(),"projectID":"global","location":{"directory":self.cwd},"title":"Managed session","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":now,"updated":now}},"messages":[]})
+            }
+        };
         let profile =
             ConfigStore::open(self.root.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
         profile
@@ -122,7 +208,19 @@ impl OpenCodeSession {
             )
             .map_err(|_| ManagedError::StorageUnavailable)?;
         let mut command = self.base_command()?;
-        command.arg("import").arg(self.root.join("seed.json"));
+        match self.version {
+            Version::V1 => {
+                command
+                    .args(["--pure", "import"])
+                    .arg(self.root.join("seed.json"));
+            }
+            Version::V2 => {
+                command
+                    .args(["session", "import", "--standalone", "--directory"])
+                    .arg(&self.cwd)
+                    .arg(self.root.join("seed.json"));
+            }
+        }
         let output = bounded_output_limit(command, 65536)?;
         if !output.status.success() {
             return Err(ManagedError::LaunchUnknown);
@@ -172,32 +270,70 @@ impl OpenCodeSession {
         }) {
             options["headers"] = json!({"x-ironwire-session-id":self.session_id()});
         }
-        let config = json!({
-            "model":selected,"small_model":selected,"share":"disabled",
-            "enabled_providers":["trace-managed"],
-            "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
-                "options":options,
-                "models":listed
-            }}
-        });
+        let config = match self.version {
+            Version::V1 => json!({
+                "model":selected,"small_model":selected,"share":"disabled",
+                "enabled_providers":["trace-managed"],
+                "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
+                    "options":options,"models":listed
+                }}
+            }),
+            Version::V2 => {
+                let mut settings = options;
+                let headers = settings.as_object_mut().and_then(|s| s.remove("headers"));
+                let mut config = json!({
+                    "model":selected,"share":"disabled","update":"disable","plugins":[],
+                    "policies":[
+                        {"action":"provider.use","resource":"*","effect":"deny"},
+                        {"action":"provider.use","resource":"trace-managed","effect":"allow"},
+                        {"action":"integration.use","resource":"plugin:*","effect":"deny"}
+                    ],
+                    "agents":{"title":{"model":selected},"compaction":{"model":selected}},
+                    "providers":{"trace-managed":{"package":"@ai-sdk/openai-compatible","name":"Managed connection",
+                        "settings":settings,"models":listed
+                    }}
+                });
+                if let Some(headers) = headers {
+                    config["providers"]["trace-managed"]["headers"] = headers;
+                }
+                config
+            }
+        };
         command
             .env("OPENCODE_CONFIG_CONTENT", config.to_string())
-            .env("TRACE_COMMONS_OPENCODE_KEY", key)
-            .args(["--session", &self.session_id(), "--model", &selected]);
+            .env("TRACE_COMMONS_OPENCODE_KEY", key);
+        self.version.interactive(&mut command);
+        command.args(["--session", &self.session_id()]);
+        // v2 takes --model on `run`, but not on the interactive root command.
+        // Its explicit model selection lives in the isolated configuration.
+        if self.version == Version::V1 {
+            command.args(["--model", &selected]);
+        }
         Ok(command)
     }
 
     fn export(&self) -> Result<Vec<u8>, ManagedError> {
         let mut command = self.base_command()?;
-        command.args(["export", &self.session_id()]);
+        match self.version {
+            Version::V1 => {
+                command.args(["--pure", "export", &self.session_id()]);
+            }
+            Version::V2 => {
+                command.args(["session", "export", "--standalone", &self.session_id()]);
+            }
+        }
         let output = bounded_output_limit(command, EXPORT_LIMIT)?;
         if !output.status.success() {
             return Err(ManagedError::LaunchUnknown);
         }
         let value: serde_json::Value =
             serde_json::from_slice(&output.stdout).map_err(|_| ManagedError::InvalidRequest)?;
+        let directory = match self.version {
+            Version::V1 => &value["info"]["directory"],
+            Version::V2 => &value["info"]["location"]["directory"],
+        };
         if value["info"]["id"].as_str() != Some(self.session_id().as_str())
-            || value["info"]["directory"].as_str() != self.cwd.to_str()
+            || directory.as_str() != self.cwd.to_str()
         {
             return Err(ManagedError::InvalidRequest);
         }
@@ -223,6 +359,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v2_refuses_external_system_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system");
+        assert!(require_absent(std::slice::from_ref(&path)).is_ok());
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            require_absent(std::slice::from_ref(&path)),
+            Err(ManagedError::SystemConfiguration)
+        ));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        assert!(matches!(
+            require_absent(std::slice::from_ref(&path)),
+            Err(ManagedError::SystemConfiguration)
+        ));
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("missing"), &path).unwrap();
+            assert!(matches!(
+                require_absent(&[path]),
+                Err(ManagedError::SystemConfiguration)
+            ));
+        }
+    }
+
+    #[test]
+    fn v2_uses_private_server_and_native_provider_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = OpenCodeSession {
+            root: dir.path().join("profile"),
+            native: dir.path().join("opencode"),
+            cwd: dir.path().into(),
+            id: Uuid::new_v4(),
+            version: Version::V2,
+        };
+        let command = session
+            .command("fixture-model", "http://127.0.0.1:4321/v1", "synthetic-key")
+            .unwrap();
+        let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
+        assert_eq!(args, ["--standalone", "--session", &session.session_id()]);
+        let config = command
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        assert_eq!(config["model"], "trace-managed/fixture-model");
+        assert_eq!(config["agents"]["title"]["model"], config["model"]);
+        assert_eq!(config["agents"]["compaction"]["model"], config["model"]);
+        let provider = &config["providers"]["trace-managed"];
+        assert_eq!(provider["package"], "@ai-sdk/openai-compatible");
+        assert_eq!(provider["settings"]["baseURL"], "http://127.0.0.1:4321/v1");
+        assert_eq!(
+            provider["settings"]["apiKey"],
+            "{env:TRACE_COMMONS_OPENCODE_KEY}"
+        );
+        assert_eq!(
+            provider["headers"]["x-ironwire-session-id"],
+            session.session_id()
+        );
+        assert_eq!(
+            config["policies"],
+            json!([
+                {"action":"provider.use","resource":"*","effect":"deny"},
+                {"action":"provider.use","resource":"trace-managed","effect":"allow"},
+                {"action":"integration.use","resource":"plugin:*","effect":"deny"}
+            ])
+        );
+        assert_eq!(config["plugins"], json!([]));
+        assert!(!config.to_string().contains("synthetic-key"));
+        let direct = session
+            .command(
+                "fixture-model",
+                "https://api.openai.com/v1",
+                "synthetic-key",
+            )
+            .unwrap();
+        let direct = direct
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        let direct: serde_json::Value = serde_json::from_str(direct.to_str().unwrap()).unwrap();
+        assert!(
+            direct["providers"]["trace-managed"]
+                .get("headers")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn provider_header_binds_the_exact_seeded_session() {
         let dir = tempfile::tempdir().unwrap();
         let session = OpenCodeSession {
@@ -230,6 +458,7 @@ mod tests {
             native: dir.path().join("opencode"),
             cwd: dir.path().into(),
             id: Uuid::new_v4(),
+            version: Version::V1,
         };
         let command = session
             .command_with_models(

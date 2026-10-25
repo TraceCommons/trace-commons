@@ -106,6 +106,7 @@ public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Senda
 
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
+        public let folderSettings: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
         public let terminalDestination: String?
@@ -120,6 +121,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let terminalChoices: [ManagedTerminalChoice]?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
+            case folderSettings = "folder_settings"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
@@ -235,6 +237,7 @@ public enum ManagedSurface {
     /// else is the general failure. A missing tool is said on its account
     /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
+        if code == "managed-collection-account-busy" || message == "managed-collection-account-busy" { return "collection_account_busy" }
         if code == "managed-cli-options-invalid" || message == "managed-cli-options-invalid" { return "cli_options_invalid" }
         if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]

@@ -113,6 +113,7 @@ impl ManagedService {
             && self
                 .launch_account(
                     &LaunchRequest {
+                        cli_options: None,
                         model: None,
                         collect_traces: false,
                         purpose: view.purpose,
@@ -218,7 +219,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -401,6 +402,7 @@ impl ManagedService {
                 }
                 verify_visible_version(&self.profiles, &account)?;
                 let request = LaunchRequest {
+                    cli_options: None,
                     model: None,
                     collect_traces: false,
                     request_id: Uuid::new_v4(),
@@ -493,6 +495,52 @@ pub fn options_acknowledgment(shared: &DaemonShared, tool: ToolId) -> Result<Val
     }).map_err(refusal_label)
 }
 
+pub fn folder_snapshot(
+    shared: &DaemonShared,
+    tool: ToolId,
+    cwd: &std::path::Path,
+) -> Result<Value, &'static str> {
+    with_service(shared, |service| {
+        let store = ConfigStore::open(service.config_dir.clone())
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        let mut value = serde_json::to_value(crate::managed::folder::lookup(&store, tool, cwd)?)
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        value["revision"] = service.sessions.revision().into();
+        Ok(value)
+    })
+    .map_err(refusal_label)
+}
+
+fn remember_prepared(
+    shared: &DaemonShared,
+    request: &Request,
+    result: Result<Value, Refusal>,
+) -> Result<Value, Refusal> {
+    let value = result?;
+    if matches!(
+        request.method.as_str(),
+        "managed_launch_prepare" | "managed_session_start_again"
+    ) && value.get("ticket").is_some_and(Value::is_string)
+    {
+        let id: Uuid = serde_json::from_value(value["session_id"].clone())
+            .map_err(|_| ManagedError::InvalidRequest)?;
+        let prefs = with_service(shared, |service| Ok(service.sessions.folder_settings(id)))?;
+        if let Some(prefs) = prefs {
+            let write = Request {
+                id: request.id,
+                method: "set_settings".into(),
+                params: json!({"managed_folder_settings":[prefs]}),
+            };
+            let response = super::ipc::handle_set_settings(shared, &write);
+            if response.error.is_some() {
+                with_service(shared, |service| service.sessions.rollback_prepared(id))?;
+                return Err(Refusal::Unavailable("managed-folder-settings-save-failed"));
+            }
+        }
+    }
+    Ok(value)
+}
+
 fn refusal_label(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::Unavailable(value) => value,
@@ -564,7 +612,7 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
         value
     });
     drop(ended);
-    respond(request, result)
+    respond(request, remember_prepared(shared, request, result))
 }
 
 /// Every managed method on the socket. `managed_launch_redeem` is where a
@@ -588,7 +636,7 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     for route in ended {
         route.shutdown().await;
     }
-    respond(request, result)
+    respond(request, remember_prepared(shared, request, result))
 }
 
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
@@ -748,11 +796,13 @@ fn verify_visible_version(
 fn label(error: ManagedError) -> &'static str {
     match error {
         ManagedError::Conflict => "managed-conflict",
+        ManagedError::CollectionAccountBusy => "managed-collection-account-busy",
         ManagedError::NotFound => "managed-not-found",
         ManagedError::AmbiguousAccount => "managed-ambiguous-account",
         ManagedError::StorageUnavailable => "managed-storage-unavailable",
         ManagedError::ToolUnavailable => "managed-tool-unavailable",
         ManagedError::UnsupportedVersion => "managed-unsupported-version",
+        ManagedError::SystemConfiguration => "managed-system-configuration",
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
@@ -806,6 +856,7 @@ mod tests {
 
     fn launch(tool: ToolId, cwd: &std::path::Path) -> Value {
         json!(LaunchRequest {
+            cli_options: None,
             purpose: LaunchPurpose::Coding,
             request_id: Uuid::new_v4(),
             tool,
@@ -846,6 +897,7 @@ mod tests {
                 &mut service,
                 "managed_launch_prepare",
                 json!(LaunchRequest {
+                    cli_options: None,
                     purpose: LaunchPurpose::Coding,
                     request_id: Uuid::new_v4(),
                     tool: ToolId::Claude,
@@ -1057,17 +1109,21 @@ mod tests {
         );
     }
 
-    /// OpenCode starts on the sign-in like the others, with no model: the
-    /// proxy pins one at redeem. A request that names a model is refused.
+    /// OpenCode accepts either an explicit model or the sign-in proxy default.
     #[test]
-    fn opencode_starts_on_the_sign_in_without_a_model() {
+    fn opencode_starts_on_the_sign_in_with_a_chosen_or_default_model() {
         let (home, _store, mut service) = service();
         let mut named = launch(ToolId::Opencode, home.path());
         named["model"] = json!("gpt-5");
-        assert_eq!(
-            call(&mut service, "managed_launch_prepare", named, true),
-            Err(ManagedError::InvalidRequest)
-        );
+        let chosen: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_launch_prepare", named, true).unwrap(),
+        )
+        .unwrap();
+        let (context, host) = service
+            .redeem(chosen.session_id, chosen.ticket.as_deref().unwrap(), true)
+            .unwrap();
+        assert!(host);
+        assert_eq!(context.session.model.as_deref(), Some("gpt-5"));
         let prepared = prepare(&mut service, ToolId::Opencode, home.path());
         let (context, host) = service
             .redeem(

@@ -304,6 +304,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_folder_settings_config_preview_apply_and_show_share_the_launch_store() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let embedded = crate::daemon::start_embedded(store).await.unwrap();
+        let inspect = ConfigStore::resolve_existing(Some(dir.path().into())).unwrap();
+        let file = dir.path().join("folder-patch.json");
+        let patch = serde_json::json!({"managed_folder_settings":[{"tool":"codex","cwd":dir.path(),"model":"provider/model","collect_traces":true,"cli_options":"--sandbox workspace-write"}]});
+        std::fs::write(&file, serde_json::to_vec(&patch).unwrap()).unwrap();
+        let before = execute(&inspect, &ConfigCommand::Show).unwrap();
+        assert_eq!(
+            execute(&inspect, &ConfigCommand::Preview { file: file.clone() }).unwrap()["applied"],
+            false
+        );
+        assert_eq!(execute(&inspect, &ConfigCommand::Show).unwrap(), before);
+        execute(&inspect, &ConfigCommand::Apply { file }).unwrap();
+        let shown = execute(&inspect, &ConfigCommand::Show).unwrap();
+        assert_eq!(
+            shown["managed_folder_settings"][0]["model"],
+            "provider/model"
+        );
+        assert!(
+            shown["managed_folder_settings"][0]
+                .get("account_id")
+                .is_none()
+        );
+        let response = client::try_call(
+            &inspect,
+            "managed_folder_settings_get",
+            &serde_json::json!({"tool":"codex","cwd":dir.path()}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.result.unwrap()["collect_traces"], true);
+        embedded.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn managed_cli_options_config_commands_update_the_ui_and_launch_store() {
         let (dir, store) = crate::config::tests_support::temp_store();
         let embedded = crate::daemon::start_embedded(store).await.unwrap();

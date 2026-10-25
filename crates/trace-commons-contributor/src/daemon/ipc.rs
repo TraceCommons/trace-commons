@@ -343,6 +343,8 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "managed_snapshot",
     "managed_cli_options_set",
+    "managed_folder_settings_get",
+    "managed_folder_settings_reset",
     "managed_account_add",
     "managed_select",
     "managed_launch_prepare",
@@ -3789,6 +3791,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // counts one arm per string literal, and an or-pattern hides all but its last.
         "managed_snapshot" => super::managed::handle(shared, req),
         "managed_cli_options_set" => handle_set_managed_cli_options(shared, req),
+        "managed_folder_settings_get" => handle_managed_folder_settings(shared, req),
+        "managed_folder_settings_reset" => handle_managed_folder_settings(shared, req),
         "managed_account_add" => super::managed::handle(shared, req),
         "managed_select" => super::managed::handle(shared, req),
         "managed_launch_prepare" => super::managed::handle(shared, req),
@@ -6419,6 +6423,33 @@ fn handle_set_managed_terminal(shared: &DaemonShared, req: &Request) -> Response
     Response::ok(req.id, serde_json::json!({ "managed_terminal": app.id() }))
 }
 
+fn handle_managed_folder_settings(shared: &DaemonShared, req: &Request) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        tool: crate::managed::ToolId,
+        cwd: std::path::PathBuf,
+    }
+    let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "managed-invalid-request");
+    };
+    if req.method == "managed_folder_settings_reset" {
+        let write = Request {
+            id: req.id,
+            method: "set_settings".into(),
+            params: serde_json::json!({"managed_folder_settings":[{"tool":params.tool,"cwd":params.cwd,"reset":true}]}),
+        };
+        let response = handle_set_settings(shared, &write);
+        if response.error.is_some() {
+            return response;
+        }
+    }
+    match super::managed::folder_snapshot(shared, params.tool, &params.cwd) {
+        Ok(value) => Response::ok(req.id, value),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+    }
+}
+
 /// Per-agent launch options share the normal settings transaction and validator.
 /// Never take the managed mutex before the settings writer's commit lock.
 fn handle_set_managed_cli_options(shared: &DaemonShared, req: &Request) -> Response {
@@ -6485,7 +6516,7 @@ fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
     Response::ok(req.id, serde_json::json!({ "kind": kind, "on": on }))
 }
 
-fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
+pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     // Read before the commit lock, and policy and the queue are taken again
     // below only after it is released. `unenroll` holds policy and the queue
     // while it takes the commit lock, so holding commit while waiting for
@@ -6507,6 +6538,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     // Advance lifecycle consent only after this candidate is persisted.
     // Routing separately retains its warm reader when its endpoint is unchanged.
     let managed_options_before = settings.managed_cli_options.clone();
+    let managed_folders_before = settings.managed_folder_settings.clone();
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
@@ -6563,7 +6595,8 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             let attention_after = attention_settings(&settings);
-            let managed_options_changed = settings.managed_cli_options != managed_options_before;
+            let managed_options_changed = settings.managed_cli_options != managed_options_before
+                || settings.managed_folder_settings != managed_folders_before;
             let settlement_after = settings.settlement_estimate_enabled;
             drop(settings);
             // Off stops a running scan's result, hides the estimate and
@@ -6686,6 +6719,8 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
     // Options use the common settings transaction on the synchronous path.
     if req.method.starts_with("managed_")
         && req.method != "managed_cli_options_set"
+        && req.method != "managed_folder_settings_get"
+        && req.method != "managed_folder_settings_reset"
         && METHODS.contains(&req.method.as_str())
     {
         return super::managed::handle_async(shared, req).await;
@@ -14845,6 +14880,9 @@ mod tests {
                 workspace_id: "ws-1".into(),
                 minted_at: chrono::Utc::now(),
             });
+        // A launch preference write uses the durable credential lifecycle.
+        // Match a real completed sign-in instead of injecting a transient key.
+        s.settings.lock().unwrap().save_for_test(&s.store).unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let routes = |s: &DaemonShared| s.managed.lock().unwrap().as_ref().unwrap().route_count();
         let launch = |tool: &str| {
@@ -18483,7 +18521,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 94, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 96, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

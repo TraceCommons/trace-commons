@@ -3,11 +3,14 @@
 pub mod accounts;
 pub mod cli;
 pub mod codex;
+pub mod folder;
 pub mod models;
+pub mod native_collection;
 pub mod opencode;
 pub mod options;
 pub mod profiles;
 pub mod secrets;
+pub mod session_binding;
 pub mod sessions;
 pub mod signin;
 pub mod statusline;
@@ -88,6 +91,8 @@ pub struct Selection {
 pub enum ManagedError {
     #[error("managed selection conflict; refresh and try again")]
     Conflict,
+    #[error("trace collection requires exclusive access to this managed account")]
+    CollectionAccountBusy,
     #[error("managed account or session not found")]
     NotFound,
     #[error("account label is ambiguous; select an account ID")]
@@ -98,6 +103,8 @@ pub enum ManagedError {
     ToolUnavailable,
     #[error("unsupported native tool version")]
     UnsupportedVersion,
+    #[error("OpenCode system settings prevent an isolated managed session")]
+    SystemConfiguration,
     #[error("sign in to this account before launching")]
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]

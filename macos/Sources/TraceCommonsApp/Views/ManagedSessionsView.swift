@@ -38,6 +38,10 @@ struct ManagedSessionsSection: View {
                 onOpen: { path in
                     launching = nil
                     launch(choice.tool, in: path)
+                },
+                onOpenWithSettings: { path, settings in
+                    launching = nil
+                    launch(choice.tool, in: path, settings: settings)
                 }
             ).environmentObject(model)
         }
@@ -142,10 +146,11 @@ struct ManagedSessionsSection: View {
     }
 
     /// The launch, in the folder chosen in the dialog.
-    private func launch(_ tool: String, in path: String) {
+    private func launch(_ tool: String, in path: String, settings: ManagedFolderDraft? = nil) {
         guard !model.managedBusy,
-              let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
+              var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
+        if let settings { params = settings.applying(to: params) }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
     }
 
@@ -412,21 +417,20 @@ struct ManagedLaunchSheet: View {
     let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
     @State private var accountID = ""
-    @State private var selectedModel = ""
-    /// The model picked for Claude Code or Codex on a saved NEAR AI key;
-    /// `ManagedSurface.defaultModel` lets the session take the tool's default.
-    @State private var pickedModel = ManagedSurface.defaultModel
+    @State private var folderDraft = ManagedFolderDraft()
+    @State private var loadedAccountID: String?
     /// NEAR AI's chat models for `catalogueTool`; nil until read, or when
     /// they could not be.
     @State private var catalogue: ManagedModelCatalogue?
     @State private var catalogueTool: String?
-    @State private var collectTraces = false
-    private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
-    private var offersModelChoice: Bool {
-        selectedAccount.map { ManagedSurface.offersModelChoice(tool: $0.tool, connection: $0.connection) } ?? false
+    private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
+    private var folderReady: Bool {
+        guard let account = selectedAccount, let project, loadedAccountID == accountID else { return false }
+        return folderDraft.matches(tool: account.tool, cwd: project.path)
+            && ManagedFolderOptions.modelIsAvailable(folderDraft, tool: account.tool, connection: account.connection, catalogue: catalogue)
     }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
@@ -441,7 +445,7 @@ struct ManagedLaunchSheet: View {
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(
                     model.managedText("launch_short"), isDefault: true,
-                    isEnabled: toolAvailable && !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
+                    isEnabled: toolAvailable && folderReady && !model.managedBusy, id: "launch", action: launch),
             ],
             busy: model.managedBusy,
             onCancel: onClose
@@ -475,21 +479,10 @@ struct ManagedLaunchSheet: View {
                         ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
                     }
                 }
-                if offersModelChoice {
-                    ManagedField(label: model.managedText("model_choice")) {
-                        GlassPicker(
-                            model.managedText("model_choice"),
-                            selection: Binding(get: { pickedModel }, set: { pickedModel = $0 ?? ManagedSurface.defaultModel }),
-                            options: ManagedSurface.modelOptions(catalogue, copy: model.managedText).map { GlassPickerOption($0.title, value: $0.value) },
-                            placeholder: model.managedText("model_default_unknown"))
-                    }
-                }
-                if isOpenCode {
-                    GlassTextField(model.managedText("model"), text: $selectedModel)
-                    ManagedNote(text: model.managedText("opencode_scope"))
-                    Toggle(model.managedText("collect_traces"), isOn: $collectTraces)
-                        .toggleStyle(GlassToggleStyle(.settings))
-                    ManagedNote(text: model.managedText("collection_scope"))
+                if let account = selectedAccount {
+                    ManagedFolderOptions(tool: account.tool, connection: account.connection, draft: $folderDraft,
+                        catalogue: catalogue, supportsFolderSettings: supportsFolderSettings,
+                        retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
                     Text(project?.path ?? model.managedText("project_placeholder"))
@@ -506,29 +499,45 @@ struct ManagedLaunchSheet: View {
                 ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
             }
         }
-        .onAppear(perform: loadModels)
-        .onChange(of: accountID) { _, _ in loadModels() }
+        .onAppear { loadModels(); loadFolderSettings() }
+        .onChange(of: accountID) { _, _ in loadModels(); loadFolderSettings() }
+        .onChange(of: project) { _, _ in loadFolderSettings() }
     }
 
     private func launch() {
-        guard toolAvailable, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
-        let params = ManagedSurface.launchParams(
+        guard toolAvailable, folderReady, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        var params = ManagedSurface.launchParams(
             account: account, cwd: project.path, requestID: UUID().uuidString,
             generation: snapshot.generations[account.tool] ?? 0,
-            model: account.tool == "opencode" ? selectedModel : pickedModel, collectTraces: collectTraces)
+            model: folderDraft.model, collectTraces: folderDraft.collectTraces)
+        if supportsFolderSettings { params = folderDraft.applying(to: params) }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
         onClose()
+    }
+
+    private func loadFolderSettings(reset: Bool = false) {
+        guard let account = selectedAccount, let project else { return }
+        loadedAccountID = accountID
+        if !supportsFolderSettings {
+            folderDraft.useDefaults(tool: account.tool, cwd: project.path,
+                cliOptions: model.managedSnapshot?.cliOptions?[account.tool] ?? "")
+            return
+        }
+        let token = folderDraft.begin(tool: account.tool, cwd: project.path)
+        model.managedFolderSettings(tool: account.tool, cwd: project.path, reset: reset) { settings in
+            if let settings { folderDraft.complete(settings, token: token) }
+            else { folderDraft.fail(token: token) }
+        }
     }
 
     /// Read the picker's models for the chosen account's tool, once per
     /// tool. A different account starts again from the default.
     private func loadModels() {
-        guard let account = selectedAccount, offersModelChoice else { return }
+        guard let account = selectedAccount, ManagedSurface.folderModelMode(tool: account.tool, connection: account.connection) == .catalogue else { return }
         let tool = account.tool
         guard catalogueTool != tool else { return }
         catalogueTool = tool
         catalogue = nil
-        pickedModel = ManagedSurface.defaultModel
         model.managedModelCatalogue(tool: tool) { result in
             if catalogueTool == tool { catalogue = result }
         }

@@ -220,7 +220,7 @@ fn unsupported_native_logout_cannot_touch_credentials() {
 
 #[cfg(unix)]
 #[test]
-fn opencode_launcher_does_not_gate_on_version_number() {
+fn opencode_launcher_detects_supported_major_versions() {
     use std::os::unix::fs::PermissionsExt;
     use trace_commons_contributor::managed::ManagedError;
 
@@ -232,19 +232,30 @@ fn opencode_launcher_does_not_gate_on_version_number() {
         .unwrap();
     let profiles = NativeProfiles::new(&store);
     let native = home.path().join("opencode");
-    for version in [
-        "1.19.0",
-        "1.19.3",
-        "1.18.29",
-        "1.20.0",
-        "2.0.0",
-        "1.19.3-beta",
-        "unknown",
+    for (version, expected) in [
+        ("1.19.0", Some((1, 19, 0))),
+        ("opencode 1.19.4", Some((1, 19, 4))),
+        ("opencode v2.1.4", Some((2, 1, 4))),
+        ("2.0.0", Some((2, 0, 0))),
+        ("unknown", None),
+        ("1.19.3-beta", None),
+        ("opencode v3.0.0", None),
     ] {
-        std::fs::write(&native, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        // The version probe must not pass a version-specific flag first.
+        std::fs::write(
+            &native,
+            format!("#!/bin/sh\n[ \"$1\" = --version ] || exit 42\necho '{version}'\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
         let result = profiles.verify_version(&account, &native);
-        assert!(result.is_ok(), "{version}: {result:?}");
+        assert_eq!(result.is_ok(), expected.is_some(), "{version}: {result:?}");
+        if let Some(expected) = expected {
+            assert_eq!(
+                profiles.native_version(&account, &native).unwrap(),
+                Some(expected)
+            );
+        }
     }
     std::fs::write(&native, "#!/bin/sh\nexit 1\n").unwrap();
     assert!(matches!(

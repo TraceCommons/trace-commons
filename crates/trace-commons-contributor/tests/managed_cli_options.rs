@@ -136,6 +136,11 @@ fn routing_and_session_overrides_are_rejected_in_every_spelling() {
         "-mother/model",
         "--config=other",
         "--attach http://other",
+        "--server http://other",
+        "--server=http://other",
+        "--standalone=false",
+        "--no-standalone",
+        "--directory /other",
         "-cSESSION",
     ] {
         assert!(parse(ToolId::Opencode, value).is_err(), "{value}");

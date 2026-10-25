@@ -70,6 +70,13 @@ enum Command {
         home: Option<PathBuf>,
     },
     #[command(hide = true)]
+    ManagedSessionBind {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        nonce: String,
+    },
+    #[command(hide = true)]
     RedeemLaunch {
         #[arg(long)]
         session_id: uuid::Uuid,
@@ -556,6 +563,12 @@ async fn async_main(cli: Cli, json: bool) -> std::process::ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    // Exact-session hook receipts never open the daemon/config store, and
+    // malformed or unavailable receipts never print hook JSON or credentials.
+    if let Command::ManagedSessionBind { directory, nonce } = &cli.command {
+        crate::managed::session_binding::run_record(directory, nonce);
+        return Ok(());
+    }
     // Before anything that opens or creates the config directory: this runs
     // on every render of Claude Code's status line.
     if let Command::Statusline { home } = &cli.command {
@@ -600,6 +613,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             crate::managed::cli::accounts(&store, action, cli.json).await
         }
         Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
+        Command::ManagedSessionBind { .. } => {
+            unreachable!("binding recorder handled before config resolution")
+        }
         Command::RedeemLaunch { session_id, ticket } => {
             let code = crate::managed::supervisor::redeem_and_run(
                 &store,

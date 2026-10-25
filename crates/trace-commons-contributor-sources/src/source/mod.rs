@@ -821,8 +821,9 @@ impl SourceDeclaration {
 /// whole point:
 ///
 /// - `Some(Watch { path })` -- watch that directory.
-/// - `Some(Off)` -- the contributor said they do not use this agent. **No
-///   source is constructed and there is no fallback.** This is the state
+/// - `Some(Off)` -- no automatic discovery for this agent, with no
+///   conventional-root fallback. Separately opted-in managed exports remain
+///   eligible for the ordinary review pipeline. This is the state
 ///   that previously did not exist, and its absence is what made "I don't
 ///   use Codex" indistinguishable from "nobody has asked yet" and therefore
 ///   equal to watching the real `~/.codex`.
@@ -831,6 +832,7 @@ impl SourceDeclaration {
 #[derive(Clone, Default)]
 pub struct SourceRoots {
     managed_opencode: Option<PathBuf>,
+    managed_native: BTreeMap<&'static str, Vec<PathBuf>>,
     additional_native: BTreeMap<&'static str, Vec<PathBuf>>,
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
@@ -877,6 +879,17 @@ impl SourceRoots {
         self
     }
 
+    /// Explicit per-session exports do not enable broad native discovery.
+    pub fn with_managed_native_root(mut self, name: &'static str, root: PathBuf) -> Self {
+        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX) && root.is_dir() {
+            let paths = self.managed_native.entry(name).or_default();
+            paths.push(root);
+            paths.sort();
+            paths.dedup();
+        }
+        self
+    }
+
     /// Only exports explicitly requested at managed launch enter this folder.
     pub fn with_managed_opencode(mut self, root: PathBuf) -> Self {
         if root.is_dir() {
@@ -909,12 +922,14 @@ impl SourceRoots {
                 out.insert(spec.name, identity);
             }
         }
-        if let Some(managed) = &self.managed_opencode
-            && !matches!(
-                self.declared.get(SOURCE_OPENCODE),
-                Some(SourceDeclaration::Off)
-            )
-        {
+        for (name, paths) in &self.managed_native {
+            for path in paths {
+                out.entry(name)
+                    .or_default()
+                    .push_str(&format!(" managed:{}", path.to_string_lossy()));
+            }
+        }
+        if let Some(managed) = &self.managed_opencode {
             let identity = out.entry(SOURCE_OPENCODE).or_default();
             identity.push_str(&format!(" managed:{}", managed.to_string_lossy()));
         }
@@ -1079,9 +1094,7 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
 
     for spec in NATIVE_SOURCES {
-        if spec.name == SOURCE_OPENCODE
-            && !matches!(roots.declared.get(spec.name), Some(SourceDeclaration::Off))
-        {
+        if spec.name == SOURCE_OPENCODE {
             if let Some(managed) = &roots.managed_opencode {
                 let source = match roots.declared.get(spec.name) {
                     Some(SourceDeclaration::Watch { path }) => {
@@ -1101,23 +1114,24 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
                 Undeclared::Nothing => None,
             },
         };
-        if let Some(primary) = primary {
-            let mut paths = vec![primary];
+        let mut paths = primary.into_iter().collect::<Vec<_>>();
+        if !paths.is_empty() {
             if let Some(additional) = roots.additional_native.get(spec.name) {
-                for path in additional {
-                    if !paths.contains(path) {
-                        paths.push(path.clone());
-                    }
-                }
+                paths.extend(additional.iter().cloned());
             }
-            if paths.len() == 1 {
-                sources.push((spec.build)(paths.remove(0)));
-            } else {
-                sources.push(Box::new(multi_root::MultiRootSource::new(
-                    spec.name,
-                    paths.into_iter().map(spec.build).collect(),
-                )));
-            }
+        }
+        if let Some(managed) = roots.managed_native.get(spec.name) {
+            paths.extend(managed.iter().cloned());
+        }
+        paths.sort();
+        paths.dedup();
+        match paths.len() {
+            0 => {}
+            1 => sources.push((spec.build)(paths.remove(0))),
+            _ => sources.push(Box::new(multi_root::MultiRootSource::new(
+                spec.name,
+                paths.into_iter().map(spec.build).collect(),
+            ))),
         }
     }
 

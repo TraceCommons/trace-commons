@@ -58,6 +58,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Read or reset one folder/agent profile without choosing an account.
+    func managedFolderSettings(tool: String, cwd: String, reset: Bool = false,
+                               done: @escaping @MainActor (ManagedFolderSettings?) -> Void) {
+        guard let client else { return done(nil) }
+        Task.detached(priority: .userInitiated) {
+            let settings = try? { () throws -> ManagedFolderSettings in
+                let response = try client.managedAction(
+                    reset ? "managed_folder_settings_reset" : "managed_folder_settings_get",
+                    params: ["tool": tool, "cwd": cwd])
+                return try JSONDecoder().decode(ManagedFolderSettings.self,
+                    from: JSONSerialization.data(withJSONObject: response))
+            }()
+            await MainActor.run { done(settings) }
+        }
+    }
+
     /// The terminal app managed sessions open in, by the id the daemon
     /// offered in `capabilities.terminal_choices`. The daemon refuses any
     /// other value; the snapshot is re-read after the write.

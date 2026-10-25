@@ -19,8 +19,25 @@ struct ManagedFolderExplainerSheet: View {
     let onCancel: () -> Void
     /// Open, with the chosen folder's path.
     let onOpen: (String) -> Void
+    let onOpenWithSettings: ((String, ManagedFolderDraft) -> Void)?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
+    @State private var draft = ManagedFolderDraft()
+    @State private var catalogue: ManagedModelCatalogue?
+    private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
+    private var canOpen: Bool {
+        guard let path, !model.managedBusy else { return false }
+        return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
+            && ManagedFolderOptions.modelIsAvailable(draft, tool: tool, connection: "near_ai_signin", catalogue: catalogue))
+    }
+
+    init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String) -> Void,
+         onOpenWithSettings: ((String, ManagedFolderDraft) -> Void)? = nil) {
+        self.tool = tool
+        self.onCancel = onCancel
+        self.onOpen = onOpen
+        self.onOpenWithSettings = onOpenWithSettings
+    }
 
     /// The line, with the tool's name and the terminal the daemon reports.
     @MainActor
@@ -43,8 +60,8 @@ struct ManagedFolderExplainerSheet: View {
             title: ManagedSurface.startKey(tool).map(model.managedText) ?? "", width: .narrow,
             actions: [
                 .cancel(model.managedText("cancel"), action: onCancel),
-                GlassModalAction(Self.openLabel(tool: tool, model: model), isDefault: true, isEnabled: path != nil,
-                                 id: "open") { if let path { onOpen(path) } },
+                GlassModalAction(Self.openLabel(tool: tool, model: model), isDefault: true, isEnabled: canOpen,
+                                 id: "open", action: open),
             ],
             onCancel: onCancel
         ) {
@@ -73,7 +90,32 @@ struct ManagedFolderExplainerSheet: View {
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .fixedSize()
                 }
+                if path != nil, supportsFolderSettings {
+                    ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
+                        catalogue: catalogue, supportsFolderSettings: true,
+                        retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
+                }
             }
+        }
+        .onAppear {
+            loadFolderSettings()
+            if supportsFolderSettings { model.managedModelCatalogue(tool: tool) { catalogue = $0 } }
+        }
+        .onChange(of: path) { _, _ in loadFolderSettings() }
+    }
+
+    private func open() {
+        guard canOpen, let path else { return }
+        if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
+        else { onOpen(path) }
+    }
+
+    private func loadFolderSettings(reset: Bool = false) {
+        guard supportsFolderSettings, let path else { return }
+        let token = draft.begin(tool: tool, cwd: path)
+        model.managedFolderSettings(tool: tool, cwd: path, reset: reset) { settings in
+            if let settings { draft.complete(settings, token: token) }
+            else { draft.fail(token: token) }
         }
     }
 }

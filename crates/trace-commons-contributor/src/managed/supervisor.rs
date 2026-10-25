@@ -87,6 +87,9 @@ async fn run_native(
     if !login && row.tool != super::ToolId::Opencode {
         command.args(&context.cli_options);
     }
+    if !login && row.tool == super::ToolId::Claude {
+        command.arg("--session-id").arg(row.id.to_string());
+    }
     let mut route = None;
     // Removed when this function returns, however it returns.
     let mut codex_catalog: Option<super::codex::CatalogFile> = None;
@@ -231,6 +234,30 @@ async fn run_native(
     let _ = signals;
     #[cfg(unix)]
     let mut shutdown_at: Option<std::time::Instant> = None;
+    let mut native_collection = if row.collect_traces && !login && opencode.is_none() {
+        Some(super::native_collection::NativeCollection::snapshot(
+            store,
+            row.tool,
+            row.account_id,
+            row.id,
+        )?)
+    } else {
+        None
+    };
+    if row.tool == super::ToolId::Codex
+        && native_collection.is_some()
+        && profiles
+            .native_version(&account, &native)
+            .ok()
+            .flatten()
+            .is_some_and(|version| version.0 == 0 && version >= (0, 164, 0))
+    {
+        if let Some(capture) = native_collection.as_mut() {
+            // Unavailable tracking must not block the native session or loosen
+            // hook trust. Missing receipts fail only collection after exit.
+            let _ = capture.configure_codex(&mut command);
+        }
+    }
     let mut child = tokio::process::Command::from(command)
         .kill_on_drop(false)
         .spawn()?;
@@ -315,21 +342,22 @@ async fn run_native(
     let code = status.code().unwrap_or(1);
     let mut receipt = report(SessionState::Exited, Some(code));
     if row.collect_traces {
-        receipt.collection = Some(
-            match opencode
+        let collected = match opencode.as_ref() {
+            Some(session) => session.collect(store),
+            None => native_collection
                 .as_ref()
                 .ok_or(ManagedError::InvalidRequest)?
-                .collect(store)
-            {
-                Ok(()) => super::sessions::CollectionState::Collected,
-                Err(_) => {
-                    eprintln!(
-                        "OpenCode exited, but its trace could not be collected. The local session is preserved."
-                    );
-                    super::sessions::CollectionState::Failed
-                }
-            },
-        );
+                .collect(store),
+        };
+        receipt.collection = Some(match collected {
+            Ok(()) => super::sessions::CollectionState::Collected,
+            Err(_) => {
+                eprintln!(
+                    "The session exited, but its trace could not be collected. The local session is preserved."
+                );
+                super::sessions::CollectionState::Failed
+            }
+        });
     }
     let persisted = super::sessions::persist_exit(store, &receipt);
     let final_report: anyhow::Result<Value> = call(store, "managed_session_report", json!(receipt));
@@ -611,14 +639,14 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        near_ai_route, opencode_route_command, opencode_sign_in_command, sign_in_route_command,
-        status_line, stop_asked,
-    };
+    use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
+    #[cfg(unix)]
+    use super::{opencode_route_command, opencode_sign_in_command};
     use crate::config::ConfigStore;
+    #[cfg(unix)]
+    use crate::managed::{ConnectionKind, opencode::OpenCodeSession};
     use crate::managed::{
-        ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
-        sessions::LaunchContext, signin,
+        ManagedError, ToolId, models::ChatModel, sessions::LaunchContext, signin,
     };
     use serde_json::json;
 
@@ -828,12 +856,21 @@ mod tests {
     /// this session, starting on its default model and offering every
     /// model it lists, with a placeholder key. Without the port, the
     /// default or the list there is no command: no run.
+    #[cfg(unix)]
     #[test]
     fn opencode_on_the_sign_in_uses_the_route_port_and_models_or_does_not_run() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let native = home.path().join("opencode");
-        std::fs::write(&native, b"never executed").unwrap();
+        std::fs::write(
+            &native,
+            b"#!/bin/sh\n[ \"$1\" = --version ] || exit 1\necho '1.19.0'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let account = signin::entry(ToolId::Opencode).unwrap();
         let id = uuid::Uuid::new_v4();
         let session = OpenCodeSession::new(&store, &account, &native, id, home.path()).unwrap();
@@ -925,12 +962,21 @@ mod tests {
     /// OpenCode on a saved NEAR AI key runs against the launcher's own
     /// proxy through the same command as the sign-in: every model the
     /// proxy lists is in OpenCode's picker, not only the default.
+    #[cfg(unix)]
     #[test]
     fn opencode_on_a_saved_key_route_offers_every_listed_model() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let native = home.path().join("opencode");
-        std::fs::write(&native, b"never executed").unwrap();
+        std::fs::write(
+            &native,
+            b"#!/bin/sh\n[ \"$1\" = --version ] || exit 1\necho '1.19.0'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let account = signin::entry(ToolId::Opencode).unwrap();
         let session =
             OpenCodeSession::new(&store, &account, &native, uuid::Uuid::new_v4(), home.path())

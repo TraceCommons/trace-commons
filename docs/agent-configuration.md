@@ -173,6 +173,36 @@ and session identity remain managed by Trace Commons; overriding their flags is
 refused. Select OpenCode’s model in its launch dialog. For Codex model selection,
 use `--model`; the launcher’s route default takes precedence over `-c model=...`.
 
+Folder-specific launch choices use `managed_folder_settings`. For example:
+
+```json
+{
+  "managed_folder_settings": [{
+    "tool": "codex",
+    "cwd": "/absolute/path/to/project",
+    "model": null,
+    "collect_traces": true,
+    "cli_options": "-c model_reasoning_effort=high"
+  }]
+}
+```
+
+Use an existing absolute folder. Preview and apply this partial settings object
+with the same `config` commands above. Each supplied folder/agent entry replaces
+its choices; other entries are preserved. To forget one, apply an entry with
+`tool`, `cwd` and `"reset": true`. These profiles contain no account selection.
+Concurrent runs can share an account and folder; collection uses exact native
+session identities and never sweeps other sessions from the profile.
+The native folder-selection dialog restores the same choices and shows
+**Collect trace for review** beside the model and CLI options.
+
+`launch` restores folder choices unless explicitly overridden. Use `--model` or
+`--default-model`, `--collect-traces` or `--no-collect-traces`, and `--cli-options`
+(an empty string clears arguments) for the new session. Account selection remains
+the existing interface/CLI choice. Collection occurs after the session ends and
+continues through the existing review and contribution gates; enabling it does
+not authorize an upload.
+
 Keep account operations within the user's requested scope. Do not read credential files, copy tokens into patch files, or treat a sign-in button as proof that login completed.
 
 ## Errors and compatibility

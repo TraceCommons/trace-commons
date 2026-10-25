@@ -1,0 +1,94 @@
+{
+  "info": {
+    "id": "ses_12345678901234567890123456789012",
+    "projectID": "68e50905f2e53a6f9e95b42cf7ac68b9a03e6975",
+    "model": {
+      "id": "fixture-model",
+      "providerID": "trace-managed",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "outcome": "succeeded",
+    "time": {
+      "created": 0,
+      "updated": 1792957307759,
+      "idle": 1792957307764
+    },
+    "title": "Managed session",
+    "location": {
+      "directory": "/private/tmp/tc-opencode-v2-check/contract"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_174955a5a001PBe8XJMvH6l2Qc",
+      "time": {
+        "created": 1792957307482
+      },
+      "type": "model-switched",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed"
+      }
+    },
+    {
+      "id": "msg_174955a4f001DIRv3tiBC10Wtg",
+      "time": {
+        "created": 1792957307706
+      },
+      "text": "\"Return the synthetic word.\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_174955b4800131tUQs3J3E9XWG",
+      "time": {
+        "created": 1792957307732,
+        "streamed": 1792957307757,
+        "completed": 1792957307759
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Synthetic."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_174955b74001TQIW2E8P373rZ9",
+      "time": {
+        "created": 1792957307764
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}
