@@ -1907,6 +1907,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_owned_upload_status",
         include_str!("../../../../migrations/V137__account_trust_owned_upload_status.sql"),
     ),
+    (
+        138,
+        "account_trust_indexed_upload_frontiers",
+        include_str!("../../../../migrations/V138__account_trust_indexed_upload_frontiers.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.
@@ -2291,6 +2296,10 @@ impl Database for PgBackend {
 
     async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         PgBackend::tiered_account_trust_runtime_ready(self).await
+    }
+
+    async fn client_upload_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::client_upload_trust_runtime_ready(self).await
     }
 
     async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {

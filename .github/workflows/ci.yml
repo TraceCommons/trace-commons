@@ -139,6 +139,9 @@ jobs:
         admission_test_tokens
         admission_test_account_trust
         admission_test_account_trust_growth
+        admission_test_upload_trust_plan_ci
+        admission_test_upload_trust_scheduler_ci
+        admission_test_upload_trust_upgrade_ci
         admission_test_account_trust_live
         admission_test_account_trust_route
         admission_test_witness_evidence
@@ -296,6 +299,18 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
+      - name: bounded upload-trust frontier query plans
+        run: cargo test -p trace-commons-server --test upload_trust_frontier_plan_pg
+        env:
+          TRACE_COMMONS_UPLOAD_TRUST_PLAN_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_plan_ci
+      - name: deployed upload-trust migration upgrade
+        run: cargo test -p trace-commons-server --lib v137_invalidates_already_enabled_pre_migration_applied_generations_once -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_UPLOAD_TRUST_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_upgrade_ci
+      - name: independent upload-trust scheduler and least privilege
+        run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
       # NEAR AI starter advance, first slice (V131): write-once plausibility
       # features, the account read's filters, the ingest runtime's grants,
       # and the dry-run report over the earned-trust enumeration seam.

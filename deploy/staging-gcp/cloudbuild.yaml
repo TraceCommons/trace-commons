@@ -32,6 +32,9 @@ substitutions:
 steps:
   - name: 'ubuntu:24.04'
     id: build
+    env:
+      - 'RUSTFLAGS=-D warnings'
+      - 'CARGO_INCREMENTAL=0'
     entrypoint: bash
     args:
       - -c

@@ -16,7 +16,8 @@ readiness checks, even when its protected memberships have inheritance disabled.
 
 Verify the current staging VM/project, deployed revision, database identity,
 backup and applied migration set before executing the SQL. PostgreSQL 16 and
-migration V137 are required. V137 must repair both fact candidates and the
+migrations through V138 are required for activation. The bootstrap requires
+at least V137; V138 supplies the indexed frontier repair. V137 must repair both fact candidates and the
 fact writer to recognize the verified `trace_account_owned_principals` view
 through `trace_account_trust_live_owned_principal`;
 source/qualification regression tests must pass before rollout.
@@ -40,14 +41,24 @@ forbidden source/trust-table writes. It does not revoke unexpected grants or
 normalize another role to make a preflight pass. A refusal requires review of
 that identity; select a clean, reviewed identity rather than weakening checks.
 
-The exact group grants are `trace_account_trust_worker` and
-`trace_account_admission_runtime`, with `INHERIT TRUE`, `SET FALSE` and
-`ADMIN FALSE`. No `app`, guard or external evaluator membership is granted.
-Direct column-level SELECT is limited to the account/device/trust/budget reads
-used by `resolve_contribution_account` and `account_admission_status`.
-The reviewed runtime groups retain their existing grants; no direct facts,
-evaluations, frontiers or dependency-lock writes are added. Raw submission,
-gate-decision, audit and credit rows stay behind the existing definer seams.
+The login inherits only `trace_client_upload_trust_runtime`. That NOLOGIN
+role inherits the existing `trace_account_trust_worker`, whose reviewed grants
+are guarded recorder/evaluator EXECUTE seams and tenant-scoped evaluation
+SELECT. Both membership edges use `INHERIT TRUE`, `SET FALSE` and `ADMIN FALSE`.
+The login cannot inherit or SET the admission runtime, an app role, a guard,
+or the external evaluator. An existing login with the old broad admission
+membership is refused; this script does not revoke grants to make it pass.
+
+The upload-specific group adds only growth-invalidation enable/read and input
+generation EXECUTE, plus the exact account/device/trust/budget SELECT columns
+used by `resolve_contribution_account` and advisory `account_admission_status`.
+It has no direct table or column INSERT/UPDATE/REFERENCES rights, table
+DELETE/TRUNCATE/TRIGGER rights, admission reservation/transition/legacy-resume
+EXECUTE, reservation frontier locks, or dependency-pruning authority. SELECT
+outside the explicit status columns and evaluation table is also refused.
+Raw submission, gate, audit and credit rows stay behind the existing definer
+seams. Verification checks both table privileges and column privileges;
+`has_table_privilege` alone does not detect an isolated column grant.
 
 ## Password and configuration
 
@@ -70,14 +81,19 @@ account admission.
 The SQL ends with `BEGIN READ ONLY; SET LOCAL ROLE tc_upload_trust_login` and
 prints only role attributes and contract booleans. Required role attributes:
 LOGIN/INHERIT true; SUPERUSER/BYPASSRLS/CREATEDB/CREATEROLE false.
-Required worker/status EXECUTE and evaluation SELECT checks must be true.
-Direct write/access checks for private trust tables must be false.
+Required upload-trust/worker membership, worker/status EXECUTE and evaluation
+SELECT checks must be true. Admission-runtime membership, admission-transition
+EXECUTE, and direct table or column writes must be false.
 
 `external_invalidation_enabled` is allowed to be false at this preparation
 stage. The bootstrap never enables it. A later reviewed application startup
-activates the invalidation contract and must then pass the unchanged
-`external_account_trust_runtime_ready` and
-`tiered_account_trust_runtime_ready` checks before running the scheduler.
+activates the invalidation contract and must then pass
+`client_upload_trust_runtime_ready` and `tiered_account_trust_runtime_ready`
+before running the scheduler. Client-only readiness retains the external
+evaluation, ownership, invalidation, generation and forced-RLS checks, while
+refusing broad writes and admission mutation privileges. It does not require
+the unused reservation-lock and dependency-pruning seams. Existing admission
+runtime readiness and its required privileges are unchanged.
 A password or successful SQL completion does not establish those final checks,
 account evaluation freshness, or client-visible increased limits.
 

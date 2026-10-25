@@ -1943,7 +1943,9 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
 /// A value below the current default is accepted with no floor beyond
 /// non-zero -- throttling one's own uploads is not a safety concern -- but
 /// zero and anything above the ceiling are refused with the same
-/// `ERR_SETTINGS_INVALID_VALUE` label the other typed fields use.
+/// `ERR_SETTINGS_INVALID_VALUE` label the other typed fields use. JSON null
+/// resets only that cap to the shared default and server-following mode;
+/// internal persisted provenance flags are not accepted as input.
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -1997,14 +1999,26 @@ pub fn apply_settings_object(
             // is spelled `pause`, which (unlike a cap of zero) is visibly
             // temporary and does not fight the health-label machinery that
             // treats a reached cap as a `CapReached`/health-label
-            // condition on every single upload attempt.
+            // condition on every single upload attempt. Null resets this
+            // dimension to the shared default and opts back into server
+            // allowances; provenance itself is not a writable IPC field.
             "max_uploads_per_day" => {
-                settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
-                settings.max_uploads_per_day_explicit = Some(true);
+                if value.is_null() {
+                    settings.max_uploads_per_day = DEFAULT_MAX_UPLOADS_PER_DAY;
+                    settings.max_uploads_per_day_explicit = Some(false);
+                } else {
+                    settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
+                    settings.max_uploads_per_day_explicit = Some(true);
+                }
             }
             "max_bytes_per_day" => {
-                settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
-                settings.max_bytes_per_day_explicit = Some(true);
+                if value.is_null() {
+                    settings.max_bytes_per_day = DEFAULT_MAX_BYTES_PER_DAY;
+                    settings.max_bytes_per_day_explicit = Some(false);
+                } else {
+                    settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
+                    settings.max_bytes_per_day_explicit = Some(true);
+                }
             }
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
@@ -2477,6 +2491,51 @@ mod tests {
             assert_eq!(stored["max_bytes_per_day_explicit"], bytes_explicit);
             assert_eq!(stored["max_uploads_per_day"], count);
             assert_eq!(stored["max_bytes_per_day"], bytes);
+        }
+    }
+
+    #[test]
+    fn daily_limit_null_resets_only_its_own_choice_and_survives_reload() {
+        let (_dir, store) = temp_store();
+        let mut settings = DaemonSettings::default();
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({
+                "max_uploads_per_day": 7, "max_bytes_per_day": 1_024
+            }),
+        )
+        .unwrap();
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({
+                "max_uploads_per_day": null
+            }),
+        )
+        .unwrap();
+        settings.save(&store).unwrap();
+        let mut loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY);
+        assert!(!loaded.upload_count_is_explicit());
+        assert_eq!(loaded.max_bytes_per_day, 1_024);
+        assert!(loaded.upload_bytes_is_explicit());
+        apply_settings_object(
+            &mut loaded,
+            &serde_json::json!({
+                "max_bytes_per_day": null
+            }),
+        )
+        .unwrap();
+        loaded.save(&store).unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
+        assert!(!loaded.upload_bytes_is_explicit());
+        for key in ["max_uploads_per_day_explicit", "max_bytes_per_day_explicit"] {
+            let mut params = serde_json::Map::new();
+            params.insert(key.to_owned(), false.into());
+            assert_eq!(
+                apply_settings_object(&mut settings, &params.into()),
+                Err(ERR_SETTINGS_UNKNOWN_FIELD)
+            );
         }
     }
 

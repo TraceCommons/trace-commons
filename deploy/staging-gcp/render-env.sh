@@ -109,6 +109,8 @@ set +x
 #                       decisions, and read tc-staging-account-trust-worker-token
 #                       plus tc-staging-db-upload-trust-password for the dedicated
 #                       non-owner trust login. The main database URL stays as-is.
+#                       Expired/revoked scheduler credentials fail all ingest startup.
+#                       Rotate, rerender/restart and verify before revoking the old jti.
 #                       Runs the scoped trust scheduler every 300 seconds with
 #                       limit 10000. Keeps both admission ledgers off. See
 #                       docs/operator/client-upload-allowance.md for readiness.

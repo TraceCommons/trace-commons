@@ -82,11 +82,27 @@ pub(super) fn effective_settings(shared: &DaemonShared) -> DaemonSettings {
     apply_allowance(settings, allowance)
 }
 
-/// Refresh regardless of upload-cap state or automatic-admission eligibility.
-/// Local lifecycle checks invalidate an allowance even between network polls.
+/// Refresh for contributing work, even if a daily cap currently blocks it.
+/// No credential reads or HTTP while paused, quiesced, dry-running or idle.
+/// Explicit approvals count as work without requiring an anchored tenant or
+/// an armed project. Local lifecycle checks still invalidate cached scope.
 pub(super) async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
     let scope = commons_credentials::account_scope(&shared.store).ok();
-    if !shared.upload_allowance.prepare(scope.clone(), now, dry_run) {
+    let suspended = dry_run
+        || shared.dev_dry_run
+        || shared.is_paused(now)
+        || shared.quiesced.load(std::sync::atomic::Ordering::Relaxed);
+    let active = !suspended
+        && (super::account_admission::anything_armed(shared)
+            || shared
+                .queue
+                .lock()
+                .expect("queue lock")
+                .all()
+                .iter()
+                .any(|entry| entry.state == super::queue::QueueState::Approved));
+    // Skips do not consume the cadence: resuming/approving can fetch at once.
+    if !shared.upload_allowance.prepare(scope.clone(), now, !active) {
         return;
     }
     let Some(scope) = scope else {

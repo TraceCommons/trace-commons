@@ -70,7 +70,7 @@ independently refresh their advertised allowance every five minutes.
 
 Before enabling either mode:
 
-1. Deploy the schema through V137 and all subsequent migrations required by
+1. Deploy the schema through V138 and all subsequent migrations required by
    the server revision. V137 removes the staging recorder's accepted-credit
    prerequisite while preserving its gate/novelty/outcome checks. Do not
    fabricate historical credits to make trust facts eligible. Confirm forced
@@ -78,13 +78,16 @@ Before enabling either mode:
    Provision a dedicated `tc_upload_trust_login` as LOGIN, NOSUPERUSER,
    NOBYPASSRLS, NOCREATEROLE, with no trust-table ownership. Apply the reviewed
    narrow role/grant SQL prepared with the readiness evidence: only the
-   existing `trace_account_admission_runtime` and `trace_account_trust_worker`
-   scoped group memberships, their required EXECUTE contracts, and the
-   SELECT access required by the same account-status read. Do not grant
+   dedicated `trace_client_upload_trust_runtime` group, which inherits the
+   narrow `trace_account_trust_worker` seams and exact status-read grants.
+   Never grant `trace_account_admission_runtime`; it includes admission and
+   trust writes unrelated to this feature. Do not grant
    membership in `app`, guard or evaluator groups, broad table privileges,
    or direct writes on trust facts/evaluations. Use the
    [earned trust readiness checks](account-trust.md#switching-growth-live)
    under this dedicated login, not the main app owner login.
+   V138 replaces the per-row frontier discovery with indexed probes; retain
+   V137 unchanged after deployment.
    Store its password in `tc-staging-db-upload-trust-password` (16 or more
    ASCII letters/digits). Enabled shadow and applied renders read it into
    `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL` as the local
@@ -110,7 +113,12 @@ Before enabling either mode:
    server contract; an admin token is unnecessary. Store the token only in
    Secret Manager as `tc-staging-account-trust-worker-token` and grant the
    staging runtime account access. The renderer checks one-line JWT shape;
-   server startup verifies authentication, role and expiry. Never put the
+   server startup verifies authentication, role and expiry. With tenant-access
+   enforcement on, provision a legitimate active `account_trust_worker` service
+   grant bound to the token tenant, subject, issuer and audience before the
+   first scheduler tick. Keep this service grant valid independently of the
+   rotating token lifetime; do not reuse contributor/admin grants or disable
+   enforcement. Never put the
    token in shell arguments, output, source, or a rollout report.
 
 Render a shadow candidate first on the staging VM, using the existing
@@ -158,10 +166,18 @@ and fresh evaluations. Rotate the dedicated database password through its
 Secret Manager version and database role using the reviewed credential
 rotation procedure, then rerender/restart and recheck readiness; never
 replace the main app login or broaden its grants to bypass this check.
-An expired token stops successful scheduler work;
-evaluations eventually become stale and clients lose the earned uplift
-on a successful refresh. Revoke a compromised token by its `jti` through
-the existing signed-token revocation control.
+Token validation is fail-closed at startup: an expired or revoked scheduler
+token prevents **all ingest startup**, including signup and uploads. While
+ingest stays running, expiry stops successful scheduler work; evaluations
+then become stale and clients lose the earned uplift on a successful refresh.
+For routine rotation, publish the new token version, rerender/restart, and
+verify scheduler work **before revoking the old jti**. Never revoke the only
+configured token and then restart. For a compromised token, revoke it
+immediately and install a replacement before the next restart; if no valid
+replacement is available, disable the optional upload-trust scheduler/policy
+and restart to restore the existing staging upload/signup path. The scoped
+[renewal timer](../../deploy/staging-gcp/upload-trust-rotation.md) rotates before
+expiry and checks the restarted process; it does not relax authentication.
 
 To roll back this independent staging feature, unset
 `TC_CLIENT_UPLOAD_TRUST_MODE`, both `TC_UPLOAD_TRUST_*_VERSION` renderer

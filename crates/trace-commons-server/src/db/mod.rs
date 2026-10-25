@@ -364,6 +364,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }
+    /// Advisory client caps use a narrower worker/status role than admission.
+    /// No direct table or column writes, admission mutations, or ledger role.
+    async fn client_upload_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
     /// The extra grants a `tiered-v1` admission policy's in-process
     /// evaluator needs (V126). See `db/postgres_account_trust_growth.rs`.
     async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {

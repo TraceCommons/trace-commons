@@ -569,9 +569,9 @@ letters/digits or `._+-`; labels without a mode refuse. Only enabled modes
 read `tc-staging-account-trust-worker-token` and
 `tc-staging-db-upload-trust-password` (16 or more ASCII letters/digits).
 The trust login is non-owner, NOSUPERUSER, NOBYPASSRLS and NOCREATEROLE;
-apply only the reviewed narrow worker/admission-runtime contracts and
-required status SELECT grants. No `app`, guard or evaluator membership or
-direct trust-table writes. Apply migrations through V137; historical
+grant only `trace_client_upload_trust_runtime`, which carries the reviewed
+worker/status-read grants. No `trace_account_admission_runtime`, `app`, guard
+or evaluator membership or direct writes. Apply migrations through V138; historical
 credits must not be fabricated to qualify recorder history. Shadow uses the existing
 shadow policy pair; applied uses the independent client-upload pair. Both
 render the scoped scheduler at 300 seconds and limit 10000, leave both

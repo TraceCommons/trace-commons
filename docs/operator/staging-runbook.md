@@ -201,10 +201,10 @@ an authenticated successful null allowance followed by a client refresh;
 retain usage counters and contributor-chosen caps.
 
 
-The trust runtime requires schema through V137. It uses a separate
+The trust runtime requires schema through V138. It uses a separate
 `tc_upload_trust_login` non-owner LOGIN with NOSUPERUSER, NOBYPASSRLS and
-NOCREATEROLE, and the reviewed narrow worker/admission-runtime and status-read
-grants. Do not add `app`, guard or evaluator memberships or direct trust
+NOCREATEROLE, and the dedicated `trace_client_upload_trust_runtime` group and its reviewed
+worker/status-read grants. Do not add `app`, guard or evaluator memberships or direct trust
 fact/evaluation writes. The renderer sets
 `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL` for this pool in either
 mode; the main `DATABASE_URL` and app runtime identity stay unchanged.

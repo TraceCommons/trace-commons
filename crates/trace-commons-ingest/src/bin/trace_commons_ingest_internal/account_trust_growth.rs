@@ -236,10 +236,10 @@ pub(super) async fn require_independent_upload_trust_runtime_ready(
         .await
         .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?;
     anyhow::ensure!(
-        db.external_account_trust_runtime_ready()
+        db.client_upload_trust_runtime_ready()
             .await
-            .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?,
-        "external_account_trust_contract_not_ready"
+            .map_err(|_| anyhow::anyhow!("client_upload_trust_readiness_unavailable"))?,
+        "client_upload_trust_contract_not_ready"
     );
     anyhow::ensure!(
         db.tiered_account_trust_runtime_ready()
