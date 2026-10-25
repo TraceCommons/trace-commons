@@ -16,6 +16,7 @@ final class MonitorNoticeDismissals {
         case automaticHold = "automatic-contribution-held"
 
         var closeID: String { "health:" + rawValue }
+        var contextMayBeUnknown: Bool { self == .dailyCap || self == .automaticHold }
     }
 
     struct Scope: Equatable {
@@ -30,13 +31,15 @@ final class MonitorNoticeDismissals {
     struct Incident: Equatable {
         let kind: Kind
         let revision: String
-        let unboundDailyWindow: Bool
+        let unboundContext: Bool
 
-        init(kind: Kind, reasons: [String] = [], window: Date? = nil) {
+        init(kind: Kind, reasons: [String]? = [], window: Date? = nil) {
             self.kind = kind
-            unboundDailyWindow = kind == .dailyCap && window == nil
+            let materialReasons = Set((reasons ?? []).filter { !$0.isEmpty }).sorted()
+            unboundContext = (kind == .dailyCap && window == nil)
+                || (kind == .automaticHold && materialReasons.isEmpty)
             let period = window.map { ["quota-window", String($0.timeIntervalSince1970)] } ?? []
-            revision = MonitorNoticeDismissals.digest([kind.rawValue] + period + Set(reasons).sorted())
+            revision = MonitorNoticeDismissals.digest([kind.rawValue] + period + materialReasons)
         }
     }
 
@@ -60,15 +63,15 @@ final class MonitorNoticeDismissals {
         _ = revision
         guard let scope else { return false }
         guard let saved = records(scope)[incident.kind.rawValue] else { return false }
-        if incident.kind == .dailyCap,
-           incident.unboundDailyWindow || saved == Incident(kind: .dailyCap).revision { return true }
+        if incident.kind.contextMayBeUnknown,
+           incident.unboundContext || saved == Incident(kind: incident.kind).revision { return true }
         return saved == incident.revision
     }
 
     func dismiss(_ incident: Incident, scope: Scope?) {
         guard let scope else { return }
         var values = records(scope)
-        if incident.unboundDailyWindow, values[incident.kind.rawValue] != nil { return }
+        if incident.unboundContext, values[incident.kind.rawValue] != nil { return }
         values[incident.kind.rawValue] = incident.revision
         write(values, scope: scope)
     }
@@ -81,9 +84,10 @@ final class MonitorNoticeDismissals {
             switch condition {
             case .clear: values[kind.rawValue] = nil
             case .active(let incident):
-                guard !incident.unboundDailyWindow else { continue }
-                if kind == .dailyCap, values[kind.rawValue] == Incident(kind: .dailyCap).revision {
-                    // Bind a dismissal made before the quota window was known.
+                guard !incident.unboundContext else { continue }
+                if kind.contextMayBeUnknown, values[kind.rawValue] == Incident(kind: kind).revision {
+                    // Bind a dismissal made before its quota window or hold
+                    // reasons were known; unread context never resets it.
                     values[kind.rawValue] = incident.revision
                 } else if let old = values[kind.rawValue], old != incident.revision {
                     values[kind.rawValue] = nil
@@ -118,7 +122,7 @@ final class MonitorNoticeDismissals {
         }
         if let held = status.automaticContributionHeld?.heldSessions, held >= 0 {
             result[.automaticHold] = held > 0
-                ? .active(.init(kind: .automaticHold, reasons: status.automaticContributionHeld?.reasons ?? [])) : .clear
+                ? .active(.init(kind: .automaticHold, reasons: status.automaticContributionHeld?.reasons)) : .clear
         } else if label == Kind.automaticHold.rawValue {
             result[.automaticHold] = .active(.init(kind: .automaticHold))
         }

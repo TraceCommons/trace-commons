@@ -157,6 +157,32 @@ final class MonitorNoticeDismissalTests: XCTestCase {
         XCTAssertTrue(TracesStore.safeguards(other).contains { $0.condition == "privacy-filter-canary-failed" })
     }
 
+    func testMissingOrEmptyHoldReasonsRetainTheKnownIncidentAndBindAnUnboundDismissal() throws {
+        try withStore { defaults, scope in
+            let store = MonitorNoticeDismissals(defaults: defaults)
+            let known = MonitorNoticeDismissals.Incident(kind: .automaticHold, reasons: ["one"])
+            store.dismiss(known, scope: scope)
+            for json in [
+                #"{"automatic_contribution_held":{"held_sessions":4}}"#,
+                #"{"automatic_contribution_held":{"held_sessions":40,"reasons":[]}}"#
+            ] {
+                let observed = MonitorNoticeDismissals.conditions(status: try status(json), loaded: true)
+                store.reconcile(observed, scope: scope)
+                guard case .active(let incident) = observed[.automaticHold] else { return XCTFail("Missing active hold") }
+                XCTAssertTrue(store.isDismissed(incident, scope: scope))
+                XCTAssertTrue(store.isDismissed(known, scope: scope), "Unread reasons must retain the previous known identity")
+            }
+            store.reconcile([.automaticHold: .clear], scope: scope)
+            let unbound = MonitorNoticeDismissals.Incident(kind: .automaticHold, reasons: nil)
+            store.dismiss(unbound, scope: scope)
+            store.reconcile([.automaticHold: .active(known)], scope: scope)
+            XCTAssertTrue(store.isDismissed(known, scope: scope), "The first known reason set binds an earlier dismissal")
+            let changed = MonitorNoticeDismissals.Incident(kind: .automaticHold, reasons: ["two"])
+            store.reconcile([.automaticHold: .active(changed)], scope: scope)
+            XCTAssertFalse(store.isDismissed(changed, scope: scope), "A known material change still starts a new incident")
+        }
+    }
+
     func testScopeSeparatesAccountsConfigurationsAndChannelsWithoutStoringThem() {
         withStore { defaults, scope in
             let store = MonitorNoticeDismissals(defaults: defaults)
