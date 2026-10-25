@@ -402,6 +402,102 @@ mod tests {
         server.abort();
     }
 
+    /// Codex replays an answer as output_text on the next turn. NEAR AI
+    /// accepts that same assistant text only as input_text in request history.
+    #[tokio::test]
+    async fn codex_followup_replays_assistant_text_without_losing_history() {
+        type Seen = Arc<Mutex<Vec<Value>>>;
+        async fn response(
+            State(seen): State<Seen>,
+            Json(body): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            seen.lock().unwrap().push(body.clone());
+            let rejected = body["input"].as_array().unwrap().iter().any(|item| {
+                item["role"] == "assistant"
+                    && item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| part["type"] == "output_text")
+                    })
+            });
+            if rejected {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":"input did not match ResponseInput"}})),
+                );
+            }
+            (
+                axum::http::StatusCode::OK,
+                Json(json!({
+                    "id":"resp_fixture","object":"response","status":"completed",
+                    "model":"deepseek/deepseek-v4.1-flash-1017",
+                    "output":[{"type":"message","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"OK","annotations":[]}]}],
+                    "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+                })),
+            )
+        }
+        let seen: Seen = Arc::new(Mutex::new(vec![]));
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data":[{
+                        "id":"deepseek/deepseek-v4.1-flash-1017",
+                        "input_modalities":["text"],"output_modalities":["text"]
+                    }]}))
+                }),
+            )
+            .route("/v1/responses", post(response))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().into()).unwrap();
+        let route = ManagedRoute::start_at(
+            &store,
+            Uuid::new_v4(),
+            ApiKey::new("fixture-codex".into()).unwrap(),
+            &endpoint,
+            ToolId::Codex,
+            Some("deepseek/deepseek-v4.1-flash-1017"),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{}/openai/v1/responses", route.port());
+        let first = json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"Say OK."}]});
+        let history = json!([
+            first,
+            {"type":"message","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"OK","annotations":[]}]},
+            {"type":"message","role":"user",
+                "content":[{"type":"input_text","text":"Say OK again."}]}
+        ]);
+        let mut outcomes = vec![];
+        for input in [json!([first]), history.clone()] {
+            let result = client
+                .post(&url)
+                .json(&json!({"model":route.default_model(),"input":input,"stream":false}))
+                .send()
+                .await
+                .unwrap();
+            outcomes.push((result.status(), result.text().await.unwrap()));
+        }
+        route.shutdown().await;
+        server.abort();
+        assert!(outcomes[0].0.is_success(), "first turn: {:?}", outcomes[0]);
+        assert!(outcomes[1].0.is_success(), "follow-up: {:?}", outcomes[1]);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["input"], json!([first]));
+        let mut expected = history;
+        expected[1]["content"][0]["type"] = json!("input_text");
+        assert_eq!(seen[1]["input"], expected);
+    }
+
     /// A real route serves the `statusline` subcommand's line from its
     /// home, which is where the launcher computes it, and its call log
     /// records the exchange but never a request body.
