@@ -25,6 +25,7 @@ pub mod account_onboarding;
 pub(crate) mod account_session_renewal;
 pub mod activity_missions;
 pub mod admission_setup;
+pub(crate) mod agent_config;
 pub mod approved_envelope;
 pub mod arming_wording;
 pub mod attached;

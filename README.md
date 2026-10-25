@@ -195,6 +195,9 @@ cargo test -p trace-commons-server --test trace_corpus_pg_store
 
 ### Contributor CLI
 
+For AI agents, see [Configure the app with an AI agent](docs/agent-configuration.md)
+and the [copyable sample prompt](docs/examples/agent-configuration-prompt.md).
+
 Signed binaries are published per release, so contributors do not need this
 repository or a Rust toolchain. https://tracecommons.ai/install/ is the fuller
 guide, including how to verify a download by hand; the short form follows.

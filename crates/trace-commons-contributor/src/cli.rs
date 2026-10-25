@@ -3,6 +3,8 @@ use crate::config::ConfigStore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[path = "cli/config.rs"]
+mod config_cli;
 #[path = "cli/insights.rs"]
 mod insights_cli;
 #[path = "cli/mission_draft.rs"]
@@ -44,6 +46,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover, inspect, preview, and apply running-app settings as JSON
+    Config(config_cli::ConfigArgs),
     /// Launch a coding tool in this terminal with an isolated saved account.
     Launch(crate::managed::cli::LaunchArgs),
     /// Manage saved native subscriptions and OS-protected API keys.
@@ -408,6 +412,9 @@ enum DaemonAction {
     /// Show what the daemon is doing and whether anything is wrong
     Status,
     /// List sessions waiting for a decision
+    #[command(
+        long_about = "List pending traces. With --json, rows include available settlement_estimate low_usd_micros/high_usd_micros bands; absent means unknown, not zero. Estimates are not guaranteed payouts."
+    )]
     Pending,
     /// Show what would be sent for one queued session
     Preview { entry_id: String },
@@ -436,9 +443,9 @@ enum DaemonAction {
     Pause,
     /// Resume after a pause
     Resume,
-    /// List projects and their upload modes
+    /// List folders, effective upload modes, and each folder's stored rule
     Projects,
-    /// Set a project's upload mode
+    /// Set a folder to ignore, notify, or automatic (auto includes backlog by default)
     Project {
         /// The project's working directory
         path: PathBuf,
@@ -578,6 +585,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&preview)?);
         return Ok(());
     }
+    if let Command::Config(args) = &cli.command {
+        let store = ConfigStore::resolve_existing(cli.config_dir.clone())
+            .map_err(|_| anyhow::anyhow!("config-state-dir-unavailable: check --config-dir"))?;
+        return config_cli::run(&store, args);
+    }
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
         Command::Launch(args) => {
@@ -667,6 +679,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             commands::submit(&store, &sel).await
         }
         Command::ImportPreview { .. }
+        | Command::Config(_)
         | Command::Insights(_)
         | Command::MissionDraft { .. }
         | Command::MissionDrafts(_)

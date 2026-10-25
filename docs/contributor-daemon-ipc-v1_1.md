@@ -668,6 +668,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
+| `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
+| `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
@@ -4933,6 +4935,57 @@ Each stored row keeps the earliest and latest recorded event for this. A row
 stored before they were kept is read once more, within the per-poll limits,
 even when its file is unchanged; until then its drill's date and span are
 `null`, never guessed.
+
+### Agent settings discovery and preview
+
+`get_config_schema` takes an empty object and returns
+`schema_version: "trace_commons.config_schema.v1"`, `patch_schema`, and
+`semantics`. `patch_schema` is a JSON Schema for the writable settings patch:
+types, enums, numeric bounds, examples and descriptions come from the running
+daemon. Platform-specific terminal identifiers and notification kinds reflect
+that build. `x-constraints` records contextual rules (for example, a trajectory
+source cannot watch the user's home directory); the existing settings parser
+remains authoritative. Credentials and read-only response fields are not
+writable properties. Nonempty or non-object parameters are refused as
+`bad_params` / `config-schema-params-must-be-empty`.
+
+`preview_settings` takes the same partial object as `set_settings` and validates
+it with the same parser, against a cloned in-memory snapshot. It returns:
+
+```json
+{
+  "schema_version": "trace_commons.settings_preview.v1",
+  "applied": false,
+  "changes": [
+    {"key": "max_uploads_per_day", "before": 50, "after": 12, "redacted": false}
+  ]
+}
+```
+
+Each change names a canonical persisted field, including side effects such as
+`notify.verdicts_landed` clearing `verdicts_offer_pending`. An alias such as
+`claude_root` reports `claude_source`. Changes are detected before redaction,
+so replacing one hidden source path with another still produces a change;
+its before/after values are null and `redacted` is true. Null in a redacted
+change does **not** mean that the setting was cleared. Unchanged fields are
+omitted. A valid no-op returns an empty `changes` array; an empty patch is
+refused as `bad_params` / `no-known-setting-supplied`, just like `set_settings`.
+Invalid fields and values use the existing fixed settings error labels and
+never echo the submitted value.
+
+Preview writes no files, publishes no events, changes no settings or approval
+queue, and starts no services. It does not reserve a transaction: applying
+later through `set_settings` validates against the then-current state. Apply's
+runtime result (including private inference state) must be read separately
+from the saved setting. `get_settings` contains read-only and redacted fields;
+it is an inspection response, not a patch template.
+
+Both methods are advertised by `hello`, available through the existing C ABI
+call entrypoint, and allowed in developer dry-run mode because they are local
+reads. Older daemons report the existing unknown-method error; clients should
+request an app update rather than writing settings files directly. See the
+[agent CLI guide](agent-configuration.md) for the discover/inspect/preview/apply
+workflow and trace-estimate and project-policy discovery.
 
 ### `set_settings`
 

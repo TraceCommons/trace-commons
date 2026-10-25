@@ -1,0 +1,158 @@
+# Configure the app with an AI agent
+
+An agent with terminal access can use `near-ai` to discover the running app's settings, preview changes, apply them, inspect trace value estimates, and manage folder upload policies. No MCP server is required. Give the agent the [sample prompt](examples/agent-configuration-prompt.md) with your desired changes.
+
+These configuration commands require a build containing this feature in both the CLI and the app. They do not modify settings files directly. The app's daemon validates and persists changes using the same settings path as the UI.
+
+## Select the app and channel
+
+Use the CLI bundled with the app you want to configure. For the production macOS app:
+
+```sh
+TC_CLI='/Applications/Near.ai.app/Contents/MacOS/near-ai'
+TC_DIR="$HOME/Library/Application Support/trace-commons"
+"$TC_CLI" --version
+"$TC_CLI" --config-dir "$TC_DIR" --json config show
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon status
+```
+
+For staging, use both the staging CLI and its separate directory:
+
+```sh
+TC_CLI='/Applications/Near.ai Staging.app/Contents/MacOS/near-ai'
+TC_DIR="$HOME/Library/Application Support/trace-commons-staging"
+"$TC_CLI" --version
+"$TC_CLI" --config-dir "$TC_DIR" --json config show
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon status
+```
+
+Start with `config show`: it requires the running app and does not create a missing state directory. Then check that `daemon_running` is `true` in status. Launch the chosen app if it is not running. Do not start a second daemon against the same directory or substitute the other channel's CLI. `--config-dir` selects local state; it does not change a binary's compiled channel.
+
+On Linux or Windows, use the installed `near-ai` binary, or the equivalent `trace-commons-contributor` binary, and the app's actual state directory. See the [platform directory table](../README.md#uninstalling). Respect any configured directory override. Paths and app installation locations may differ; confirm them before acting.
+
+## Discover and inspect settings
+
+```sh
+"$TC_CLI" config --help
+"$TC_CLI" --config-dir "$TC_DIR" --json config schema
+"$TC_CLI" --config-dir "$TC_DIR" --json config show
+```
+
+`config schema` asks the running daemon for its supported patch schema, including field types, enum choices, numeric bounds, and descriptions. Use its `patch_schema.properties` to discover writable settings rather than guessing names from UI labels. The schema and preview responses have versioned `schema_version` fields.
+
+`config show` returns effective saved settings with credentials and source paths redacted. It includes read-only fields: **do not copy its entire output into an apply file**. Write a partial object containing only the settings the user asked to change. Folder rules and accounts have dedicated commands described below.
+
+## Preview and apply a settings patch
+
+For example, to disable desktop notifications and enable the app's trace-value estimates:
+
+```sh
+cat > /tmp/trace-commons-settings.json <<'JSON'
+{
+  "notifications_enabled": false,
+  "settlement_estimate_enabled": true
+}
+JSON
+"$TC_CLI" --config-dir "$TC_DIR" --json config preview \
+  --file /tmp/trace-commons-settings.json
+"$TC_CLI" --config-dir "$TC_DIR" --json config apply \
+  --file /tmp/trace-commons-settings.json
+"$TC_CLI" --config-dir "$TC_DIR" --json config show
+```
+
+Use a task-specific file location when sharing a machine. Patch files are JSON objects, not RFC 6902 JSON Patch arrays. Empty objects, duplicate keys, invalid types or values, unknown settings, and files larger than 1 MiB are refused. Nested objects follow the schema's documented semantics: some merge selected subfields while source declarations replace a declaration. `null` is accepted only where the schema says so.
+
+Preview validates a cloned candidate and returns `applied: false` with `changes`: canonical field names, before/after values, and a `redacted` flag. Aliases can affect a differently named canonical field. Side effects within settings, such as clearing an offer flag, appear in the preview too. A hidden path change is still reported as a redacted change; its actual path is not echoed. Preview does not write files, start services, change folder rules, or approve uploads.
+
+Apply validates again and updates only the supplied settings through the daemon. A preview does not reserve the state: the UI or another client may change settings in between. Recheck the result and run `config show` after applying. Preserve any runtime outcome returned by the setter, such as `private_inference_state`; saving `private_inference: true` does not prove that authentication or proxy startup succeeded.
+
+Configuration does not complete browser sign-in, grant operating-system permissions, enroll an account, or approve traces. Use the app's existing flows where those are required.
+
+## Discover trace value estimates
+
+```sh
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon pending
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon status
+```
+
+`daemon pending` returns queue rows in `pending`, with `entry_id`, source and project identity. A row may contain:
+
+```json
+{
+  "entry_id": "example-entry-id",
+  "project_label": "example-project",
+  "settlement_estimate": {
+    "low_usd_micros": 120000,
+    "high_usd_micros": 350000,
+    "drawn": true
+  }
+}
+```
+
+This illustrative range is **$0.12–$0.35 of estimated inference credit**, not a guaranteed payment. Divide USD micros by 1,000,000 to display dollars. An optional `tier` gives the estimate's category. Do not treat the legacy `credit_estimate` field as dollars; it can be present with `drawn: false`.
+
+A missing estimate means unknown, not zero. The estimate switch may be off, the pricing table may be unavailable or stale, features may be missing, or the trace may already have been sent. `daemon status` can provide aggregate estimate context including `known`, `unknown`, `table_version`, `pricing_version`, and `estimated_at`. Report that context when available; do not invent it for individual rows. Estimates may appear asynchronously after enabling them.
+
+This is discovery of pending traces known to the daemon, not a valuation API for arbitrary files. These read commands neither approve nor upload traces. `daemon pending` and `daemon projects` include `daemon_running`; false means the response is reconstructed from saved local state and may be stale.
+
+## Inspect and change folder policies
+
+```sh
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon projects
+```
+
+For each row in `projects`:
+
+| Field | Meaning |
+| --- | --- |
+| `project_id`, `project_label`, `project_path` | Folder identity and display path |
+| `folder_mode` | The folder's saved rule |
+| `mode` | Effective rule, including any global override |
+| `configured` | Whether an explicit folder rule exists |
+| `from_now` | For automatic folders, whether existing backlog was excluded |
+| `automatic_disclosure` | Automatic privacy-review disclosure label (`model_scrubbed` or `patterns_only`) |
+| `is_unresolved_bucket` | Traces without a resolved working folder; cannot be made automatic |
+
+Modes are `ignore`, `notify_only`, and `auto_upload`. The CLI flags use the shorter names `ignore`, `notify`, and `auto`:
+
+```sh
+# Ignore a folder explicitly chosen by the user.
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon project \
+  /absolute/path/to/project --mode ignore
+
+# Make NEW traces automatic; keep the existing backlog waiting.
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon project \
+  /absolute/path/to/project --mode auto --from-now
+
+# Include the existing backlog when the user explicitly requested that.
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon project \
+  /absolute/path/to/project --mode auto --include-backlog
+
+# Return to notifying rather than automatically approving new traces.
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon project \
+  /absolute/path/to/project --mode notify
+
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon projects
+```
+
+**Entering automatic mode without `--from-now` includes the existing backlog by default.** Use an explicit flag so the user's intended scope is visible. An already-automatic folder can retain its existing hold when no flag is supplied. These policy commands can enable uploads subject to the app's existing enrollment, consent, privacy and other gates; they are not harmless display preferences.
+
+Resolve `~` in a displayed project path before passing it as an argument, and use an existing absolute folder path. Do not infer folders from display labels alone. Check both `mode` and `folder_mode` after the change: a global rule may override the folder's own setting. The legacy project command can save a rule while the daemon is unavailable; check live status first when configuring the running app.
+
+## Accounts and managed sessions
+
+Use existing account/session commands rather than treating credentials as settings:
+
+```sh
+"$TC_CLI" accounts --help
+"$TC_CLI" sessions --help
+"$TC_CLI" launch --help
+```
+
+Keep account operations within the user's requested scope. Do not read credential files, copy tokens into patch files, or treat a sign-in button as proof that login completed.
+
+## Errors and compatibility
+
+Configuration commands require a live daemon. A missing daemon is an error, not a request to create offline settings. Older daemons may not support schema or preview; update the selected app and matching CLI instead of bypassing validation by editing JSON files. Inspect the structured error and exit status. A failed validation must not be reported as an applied change.
+
+For the underlying protocol, see the [daemon IPC reference](contributor-daemon-ipc-v1_1.md). For an agent-ready workflow, copy the [sample prompt](examples/agent-configuration-prompt.md).

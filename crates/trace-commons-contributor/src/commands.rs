@@ -4139,7 +4139,8 @@ pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
 }
 
 pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
-    let resp = daemon_call(store, "list_pending", serde_json::json!({}))?;
+    let (resp, liveness) = daemon_call_probed(store, "list_pending", serde_json::json!({}))?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
         let empty = Vec::new();
         let entries = v["pending"].as_array().unwrap_or(&empty);
@@ -4422,7 +4423,8 @@ pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> 
 }
 
 pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
-    let resp = daemon_call(store, "list_projects", serde_json::json!({}))?;
+    let (resp, liveness) = daemon_call_probed(store, "list_projects", serde_json::json!({}))?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
         let empty = Vec::new();
         let projects = v["projects"].as_array().unwrap_or(&empty);
