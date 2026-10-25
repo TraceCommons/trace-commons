@@ -588,6 +588,19 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
 
+    /// Bounded, tenant-ID-only discovery of potentially unsettled utility credit.
+    /// Eligibility and holds are rechecked inside each tenant's settlement pass.
+    async fn pending_credit_settlement_tenants(
+        &self,
+        _after: Option<&str>,
+        _limit: usize,
+        _novelty_settle_from: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "credit_settlement_enumerator_unavailable".into(),
+        ))
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
 
     /// Try to acquire the per-tenant NEAR settlement submit advisory lock without

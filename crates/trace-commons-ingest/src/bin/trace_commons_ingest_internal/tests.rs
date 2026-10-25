@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "tests/multitenant_settlement_tests.rs"]
+mod multitenant_settlement_tests;
+
 #[path = "tests/account_binding_gate_tests.rs"]
 mod account_binding_gate_tests;
 #[path = "tests/activity_missions_tests.rs"]
@@ -17597,6 +17600,7 @@ async fn admin_config_status_reports_credit_settlement_scheduler_without_secrets
     let mut state = test_state(temp.path().to_path_buf());
     Arc::make_mut(&mut state).credit_settlement_scheduler =
         Some(TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("config-status-settlement-token".to_string()),
             interval: StdDuration::from_secs(180),
             dry_run: true,
@@ -25230,6 +25234,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
     let error = validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: true,
@@ -25255,6 +25260,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
     let missing_contract = validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: false,
@@ -25278,6 +25284,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
     validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: true,
@@ -25298,6 +25305,7 @@ async fn credit_settlement_scheduler_config_requires_utility_worker_auth_and_liv
     validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: false,
@@ -25326,6 +25334,7 @@ async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live
     let live_error = validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: false,
@@ -25349,6 +25358,7 @@ async fn credit_settlement_scheduler_requires_authorized_central_issuer_for_live
     validate_trace_credit_settlement_scheduler_config(
         state.as_ref(),
         Some(&TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: true,
@@ -28672,6 +28682,7 @@ async fn operational_summary_reports_credit_settlement_scheduler_without_secrets
     {
         let state = Arc::make_mut(&mut state);
         state.credit_settlement_scheduler = Some(TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("operational-summary-settlement-token".to_string()),
             interval: StdDuration::from_secs(210),
             dry_run: true,
@@ -48695,6 +48706,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     let dry_run = run_trace_credit_settlement_scheduler_tick(
         state.clone(),
         &TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: true,
@@ -48726,6 +48738,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     let live = run_trace_credit_settlement_scheduler_tick(
         state.clone(),
         &TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: false,
@@ -48761,6 +48774,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     let retry = run_trace_credit_settlement_scheduler_tick(
         state.clone(),
         &TraceCreditSettlementSchedulerConfig {
+            scope: CreditSettlementSchedulerScope::Tenant,
             worker_token: SecretString::from("utility-worker-token-a".to_string()),
             interval: StdDuration::from_secs(60),
             dry_run: false,

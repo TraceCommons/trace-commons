@@ -42,7 +42,7 @@ explicitly (no implicit zero defaults).
 | `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` | Phase B | (none) | Attestation verifier label. Unused in v1. |
 | `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on aggregate perplexity (micros). Pass if measured >= floor. Pilot-launch default: `0` (disabled) — see A2.5 spec / `calibration.md` Phase 1. |
 | `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on tail fraction (micros). Pilot-launch default: `0` — calibrate post-first-1000-pilot-traces per A2.5 spec / `calibration.md` Phase 1. |
-| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). Pilot-launch recommendation: `500000` (cosine novelty 0.5); primary active floor at launch under A2.5. |
+| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). Provisional BGE-large-en-v1.5 holding value: `100000` (cosine novelty 0.10); see calibration.md and the October 24 isolated controls. |
 | `TRACE_COMMONS_GATE_POLICY_VERSION` | R when enclave_local_gpu | (none) | Human label for the policy version (e.g. `pilot-v1`). Stamps audit rows. |
 | `TRACE_COMMONS_GATE_TOP_K` | optional | `5` | Number of nearest neighbors used for novelty. |
 
@@ -218,7 +218,8 @@ configured, and prints all three assignments in env-file format.
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` | optional | — | NEAR contract id for settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT` | optional | `false` | Require NEAR contract presence. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED` | optional | `false` | Toggles the settlement scheduler. |
-| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN` | R when enabled | — | Scheduler bearer token. |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE` | optional | `tenant` | `tenant` uses the configured tenant bearer; explicit `all_tenants` uses the deployment's private internal scheduler and bounded database enumeration. See [automatic credit settlement](automatic-credit-settlement.md). |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN` | R for enabled tenant scope | — | Scheduler bearer token; must be absent for `all_tenants`. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS` | optional | — | Run cadence. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION` | R when enabled | — | Pinned policy version. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON` | optional | — | Reason label written to audit. |

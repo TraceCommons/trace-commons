@@ -2482,6 +2482,7 @@ struct TraceCreditCycleSchedulerConfig {
 
 #[derive(Clone)]
 struct TraceCreditSettlementSchedulerConfig {
+    scope: CreditSettlementSchedulerScope,
     worker_token: SecretString,
     interval: StdDuration,
     dry_run: bool,
@@ -2492,6 +2493,38 @@ struct TraceCreditSettlementSchedulerConfig {
     ranking_model_version: Option<String>,
     ranking_target_use: Option<TraceAllowedUse>,
     limit: usize,
+}
+
+#[derive(Clone, Default)]
+enum CreditSettlementSchedulerScope {
+    #[default]
+    Tenant,
+    AllTenants {
+        cursor: Arc<tokio::sync::Mutex<Option<String>>>,
+    },
+}
+
+const CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE";
+const CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT: usize = 100;
+
+fn internal_credit_settlement_actor(tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_owned(),
+        role: TokenRole::UtilityWorker,
+        principal_ref: format!(
+            "principal_sha256:{}",
+            hex::encode(Sha256::digest(b"internal:credit-settlement-scheduler:v1"))
+        ),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::InternalScheduler,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
 }
 
 #[derive(Clone)]
@@ -3656,6 +3689,7 @@ impl TenantCtx {
 enum TraceAuthMethod {
     StaticToken,
     SignedClaim,
+    InternalScheduler,
 }
 
 impl TraceAuthMethod {
@@ -3663,6 +3697,7 @@ impl TraceAuthMethod {
         match self {
             Self::StaticToken => "static_token",
             Self::SignedClaim => "signed_claim",
+            Self::InternalScheduler => "internal_scheduler",
         }
     }
 }
@@ -7821,10 +7856,31 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditSettlementSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED);
     let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN)?;
+    let scope = match optional_trimmed_env(CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV)?.as_deref() {
+        None | Some("tenant") => CreditSettlementSchedulerScope::Tenant,
+        Some("all_tenants") => {
+            anyhow::ensure!(
+                enabled,
+                "all_tenants settlement requires explicit scheduler enablement"
+            );
+            anyhow::ensure!(
+                worker_token.is_none(),
+                "all_tenants settlement must not configure a tenant bearer"
+            );
+            CreditSettlementSchedulerScope::AllTenants {
+                cursor: Arc::new(tokio::sync::Mutex::new(None)),
+            }
+        }
+        Some(_) => anyhow::bail!("invalid credit settlement scheduler scope"),
+    };
     if !enabled && worker_token.is_none() {
         return Ok(None);
     }
-    let Some(worker_token) = worker_token else {
+    let worker_token = if matches!(scope, CreditSettlementSchedulerScope::AllTenants { .. }) {
+        String::new()
+    } else if let Some(worker_token) = worker_token {
+        worker_token
+    } else {
         anyhow::bail!(
             "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN}"
         );
@@ -7838,7 +7894,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
     let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION}"
+                "credit settlement scheduler requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION}"
             )
         })
         .and_then(|configured| {
@@ -7889,6 +7945,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
         TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT,
     )?;
     Ok(Some(TraceCreditSettlementSchedulerConfig {
+        scope,
         worker_token: SecretString::from(worker_token),
         interval: StdDuration::from_secs(interval_seconds),
         dry_run: env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN),
@@ -11612,6 +11669,31 @@ fn spawn_trace_credit_settlement_scheduler_task(
         move |state| {
             let config = tick_config.clone();
             async move {
+                if matches!(
+                    config.scope,
+                    CreditSettlementSchedulerScope::AllTenants { .. }
+                ) {
+                    let summary = run_all_tenant_credit_settlement_tick(
+                        state,
+                        &config,
+                        CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
+                    )
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                    tracing::info!(
+                        tenants_checked = summary.tenants_checked,
+                        tenants_failed = summary.tenants_failed,
+                        settled_source_event_count = summary.settled_source_event_count,
+                        "All-tenant credit settlement scheduler tick completed"
+                    );
+                    anyhow::ensure!(
+                        summary.tenants_failed == 0,
+                        "credit settlement tenant failures; inspect hashed failure diagnostics"
+                    );
+                    return Ok(());
+                }
                 let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
                     .await
                     .map_err(|error| {
@@ -12090,11 +12172,30 @@ async fn validate_trace_credit_settlement_scheduler_config(
     let Some(config) = config else {
         return Ok(());
     };
-    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
-    let auth = authenticate_with_tenant_access_grant(state, &headers)
-        .await
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+    let auth = match &config.scope {
+        CreditSettlementSchedulerScope::Tenant => {
+            let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+                .map_err(trace_credit_settlement_scheduler_config_error)?;
+            authenticate_with_tenant_access_grant(state, &headers)
+                .await
+                .map_err(trace_credit_settlement_scheduler_config_error)?
+        }
+        CreditSettlementSchedulerScope::AllTenants { .. } => {
+            anyhow::ensure!(
+                state.require_db_mirror_writes && state.db_reviewer_reads,
+                "all_tenants settlement requires database mirror writes and reviewer reads"
+            );
+            let db = state
+                .db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("all_tenants settlement requires a database"))?;
+            // Fail startup on absent role/migration. Enumeration never mints
+            // an HTTP credential and restores the ordinary role on return.
+            db.pending_credit_settlement_tenants(None, 1, state.novelty_utility_settle_from)
+                .await?;
+            internal_credit_settlement_actor("scheduler-validation")
+        }
+    };
     require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
     require_credit_settlement_central_issuer_principal_if_configured(state, &auth, config.dry_run)
         .map_err(trace_credit_settlement_scheduler_config_error)?;
@@ -30581,7 +30682,7 @@ async fn run_credit_settlement(
         if let Err(error) = locks.release().await {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(&error),
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "failed to release credit settlement run locks after settlement"
             );
         }
@@ -30677,7 +30778,7 @@ async fn run_credit_settlement_unlocked(
         if repaired_outbox_count > 0 {
             tracing::warn!(
                 repaired_outbox_count,
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "repaired missing NEAR credit outbox items for finalized settlement batches"
             );
         }
@@ -34594,7 +34695,7 @@ async fn append_credit_settlement_finalize_with_db_mirror(
                 tracing::warn!(
                     repaired_outbox_count = repaired,
                     settlement_batch_id = %batch.settlement_batch_id,
-                    tenant_id = %tenant.tenant_id,
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                     "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
                 );
             }
@@ -34637,7 +34738,7 @@ async fn append_credit_settlement_finalize_with_db_mirror(
             tracing::warn!(
                 repaired_outbox_count = repaired,
                 settlement_batch_id = %batch.settlement_batch_id,
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "repaired missing NEAR credit outbox items after partial settlement finalize"
             );
         }
@@ -47641,6 +47742,12 @@ async fn run_trace_credit_settlement_scheduler_tick(
     state: Arc<AppState>,
     config: &TraceCreditSettlementSchedulerConfig,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    if !matches!(config.scope, CreditSettlementSchedulerScope::Tenant) {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "tenant scheduler scope required",
+        ));
+    }
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
     let Json(response) = credit_settlement_worker_run_handler(
         State(state),
@@ -47660,6 +47767,106 @@ async fn run_trace_credit_settlement_scheduler_tick(
     )
     .await?;
     Ok(response)
+}
+
+#[derive(Default)]
+struct AllTenantCreditSettlementSummary {
+    tenants_checked: usize,
+    tenants_failed: usize,
+    settled_source_event_count: usize,
+}
+
+/// Deployment-only entry point; no HTTP route accepts this scope or actor.
+/// The existing kernel remains authoritative for financial eligibility.
+async fn run_all_tenant_credit_settlement_tick(
+    state: Arc<AppState>,
+    config: &TraceCreditSettlementSchedulerConfig,
+    tenant_limit: usize,
+) -> ApiResult<AllTenantCreditSettlementSummary> {
+    let CreditSettlementSchedulerScope::AllTenants { cursor } = &config.scope else {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "all_tenants scheduler scope required",
+        ));
+    };
+    if !state.require_db_mirror_writes || !state.db_reviewer_reads {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "all_tenants settlement database reads and writes required",
+        ));
+    }
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "all_tenants settlement database required",
+        )
+    })?;
+    let mut cursor = cursor.lock().await;
+    let mut tenants = db
+        .pending_credit_settlement_tenants(
+            cursor.as_deref(),
+            tenant_limit,
+            state.novelty_utility_settle_from,
+        )
+        .await
+        .map_err(internal_error)?;
+    if tenants.is_empty() && cursor.is_some() {
+        *cursor = None;
+        tenants = db
+            .pending_credit_settlement_tenants(
+                None,
+                tenant_limit,
+                state.novelty_utility_settle_from,
+            )
+            .await
+            .map_err(internal_error)?;
+    }
+    *cursor = if tenants.len() == tenant_limit {
+        tenants.last().cloned()
+    } else {
+        None
+    };
+    let mut summary = AllTenantCreditSettlementSummary::default();
+    for tenant_id in tenants {
+        summary.tenants_checked += 1;
+        let result = if !state.db_reviewer_reads_for_tenant(&tenant_id) {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "settlement tenant database reviewer reads disabled",
+            ))
+        } else {
+            run_credit_settlement(
+                state.as_ref(),
+                &internal_credit_settlement_actor(&tenant_id),
+                TraceCreditSettlementRunRequest {
+                    dry_run: config.dry_run,
+                    policy_version: config.policy_version.clone(),
+                    reason: config.reason.clone(),
+                    issuer_approval_evidence_hash: config.issuer_approval_evidence_hash.clone(),
+                    near_contract_id: config.near_contract_id.clone(),
+                    ranking_model_version: config.ranking_model_version.clone(),
+                    ranking_target_use: config.ranking_target_use,
+                },
+                Some(config.limit),
+            )
+            .await
+        };
+        match result {
+            Ok(response) if response.policy_version_allowed => {
+                summary.settled_source_event_count += response.settled_source_event_count
+            }
+            Ok(_) => {
+                summary.tenants_failed += 1;
+            }
+            Err(error) => {
+                summary.tenants_failed += 1;
+                tracing::warn!(tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    status = %error.0, error_hash = %sha256_prefixed(&error.1.0.error),
+                    "Automatic credit settlement tenant failed");
+            }
+        }
+    }
+    Ok(summary)
 }
 
 async fn run_trace_process_evaluation_scheduler_tick(

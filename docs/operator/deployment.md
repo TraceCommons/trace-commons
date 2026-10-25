@@ -170,7 +170,7 @@ export TRACE_COMMONS_VECTOR_INDEX_DIM=1024
 # post-first-1000-pilot-traces. Novelty is the active primary gate at launch.
 export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=6246774  # A2.7 (2026-05-15): calibrated from Qwen 3.6 27B per-trace scores; 0.5x headroom on geomean(Youden's-J=13.03, p10_novel=11.98). See docs/superpowers/reports/2026-05-15-a27-calibration-result.json.
 export TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS=0   # A2.5: calibrate post-first-1000-traces
-export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000    # 0.5 cosine novelty; unchanged
+export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=100000    # 0.10 cosine novelty; provisional BGE holding value
 export TRACE_COMMONS_GATE_POLICY_VERSION=pilot-v1
 export TRACE_COMMONS_GATE_TOP_K=5
 
@@ -459,9 +459,9 @@ Expect `private_person` and `private_email` spans. An empty `data` array or a
 call.
 
 At least one of the three gate floors must be positive — the binary
-refuses to start if all are zero. Under the A2.5 pilot-launch defaults
-the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000`,
-cosine novelty 0.5) is the floor satisfying that invariant; the
+refuses to start if all are zero. Under the restored BGE holding defaults
+the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=100000`,
+cosine novelty 0.10) is the floor satisfying that invariant; the
 perplexity and tail-fraction floors ship disabled. The tail-fraction
 floor is calibrated against the pilot distribution after ~1000 traces;
 the perplexity floor stays at zero until Phase A.5 work lands a

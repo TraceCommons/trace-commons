@@ -439,6 +439,7 @@ if [ -f "$ingest" ]; then
   expect "$ingest" TRACE_COMMONS_NEAR_ACCOUNT_NAME_KEK_KEY "$hex_name_kek"
   expect "$ingest" TRACE_COMMONS_ADMISSION_ENABLED false
   expect "$ingest" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE disabled
+  expect "$ingest" TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS 100000
   expect "$ingest" TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED false
   expect "$ingest" TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS 0
   expect "$ingest" TRACE_COMMONS_GATE_POLICY_VERSION staging-2026-10
@@ -1129,6 +1130,33 @@ if run_render scorer-off-secret-set \
   pass "a render without TC_SCORER_PRODUCTION_HOST ignores the scorer production key"
 else
   fail "a render without TC_SCORER_PRODUCTION_HOST wrote scorer production-host settings"
+fi
+
+# Automatic credit settlement is an explicit deployment opt-in, independent
+# of on-chain NEAR settlement and without a reusable tenant bearer token.
+if run_render settlement-auto TC_CREDIT_SETTLEMENT_ALL_TENANTS=1 \
+    TC_CREDIT_SETTLEMENT_POLICY_VERSION=staging-2026-10; then
+  expect "$out/ingest.env" TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE all_tenants
+  expect "$out/ingest.env" TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED true
+  expect "$out/ingest.env" TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION staging-2026-10
+  expect "$out/ingest.env" TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN false
+  if grep -q '^TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN=' "$out/ingest.env"; then
+    fail "all-tenant settlement wrote a tenant bearer"
+  fi
+else
+  fail "explicit all-tenant settlement render failed"
+fi
+if run_render settlement-auto-no-policy TC_CREDIT_SETTLEMENT_ALL_TENANTS=1; then
+  fail "all-tenant settlement accepted no policy version"
+elif refused settlement-auto-no-policy; then
+  pass "all-tenant settlement requires explicit policy version"
+fi
+if run_render settlement-auto-default; then
+  if grep -q '^TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED=true' "$out/ingest.env"; then
+    fail "default render enabled automatic settlement"
+  else
+    pass "default render leaves automatic settlement disabled"
+  fi
 fi
 
 # 4. caddy adapt, where caddy is installed.

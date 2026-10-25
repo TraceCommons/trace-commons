@@ -52,6 +52,7 @@ the link.
 | Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Enabling the unbound passkey-account reaper | [`./unbound-account-reaper.md`](./unbound-account-reaper.md) |
+| Automatically settling eligible contributor credits | [`./automatic-credit-settlement.md`](./automatic-credit-settlement.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
 | Publishing executable mission packages | [`./mission-packages.md`](./mission-packages.md) |
