@@ -22,6 +22,9 @@ struct PrivateAISection: View {
             // Which NEAR AI organization Private AI spends from. Drawn only
             // with two or more organizations.
             SpendOrganizationCard()
+            if let copy = model.privateInferenceCopy {
+                FundingRow(copy: copy)
+            }
             // NEAR AI credit payout: which owned organization earned credit
             // goes to. Hides itself unless the commons lists the rail as
             // enabled.

@@ -141,10 +141,7 @@ struct InferenceTabView: View {
     }
 
     private func networkTotals(_ network: DaemonData.NetworkInferenceSummary) -> some View {
-        let totals = HomePrivateAI.networkTotals(network)
-        let priced = store.calls.flatMap { page in
-            page.readable ? Self.pageTotals(page, summary: store.summary).priced : nil
-        } ?? "—"
+        let totals = Self.networkHeaderTotals(network)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             Text(MonitorWords.table?.windowLine(hours: network.windowHours) ?? "—")
                 .glassType(GlassTokens.TypeScale.caption)
@@ -152,9 +149,31 @@ struct InferenceTabView: View {
             HStack(spacing: GlassTokens.Space.s3) {
                 GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
                 GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
-                GlassLegendCell(MonitorWords.priced, value: priced, status: .kept)
+                GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
             }
         }
+    }
+
+    /// Every figure in the header covers the same shared and managed window.
+    /// A partial registry price cannot stand for the cost of all displayed calls.
+    static func networkHeaderTotals(
+        _ network: DaemonData.NetworkInferenceSummary?
+    ) -> (calls: Int?, verified: Int?, priced: String) {
+        let totals = HomePrivateAI.networkTotals(network)
+        guard totals.calls != nil, let network, network.readable,
+              let summary = network.summary, summary.enabled else {
+            return (totals.calls, totals.verified, "—")
+        }
+        var usd = 0.0
+        for route in [summary.routed, summary.outside, summary.unknown] {
+            guard let pricedCalls = route.pricedCalls, pricedCalls == route.calls,
+                  let cost = route.costUSD, cost.isFinite, cost >= 0 else {
+                return (totals.calls, totals.verified, "—")
+            }
+            usd += cost
+            guard usd.isFinite else { return (totals.calls, totals.verified, "—") }
+        }
+        return (totals.calls, totals.verified, formattedUSD(usd))
     }
 
     /// The hours the tab's counts cover: the calls page's `window_hours`,
@@ -319,7 +338,11 @@ struct InferenceTabView: View {
     }
 
     static func money(_ micros: Int64) -> String {
-        (Double(micros) / 1_000_000).formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)))
+        formattedUSD(Double(micros) / 1_000_000)
+    }
+
+    private static func formattedUSD(_ usd: Double) -> String {
+        usd.formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)))
     }
 
     static func tone(_ label: DaemonData.ProofLabel) -> GlassTag.Tone {

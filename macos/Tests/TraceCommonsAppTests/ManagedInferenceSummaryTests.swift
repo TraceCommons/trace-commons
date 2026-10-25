@@ -81,6 +81,98 @@ final class ManagedInferenceSummaryTests: XCTestCase {
         XCTAssertNil(HomePrivateAI.totals(store).verified)
     }
 
+    private func pricingSummary(
+        calls: [UInt64] = [3, 4, 5], pricedCalls: [UInt64?] = [3, 4, 5],
+        costs: [Double?] = [0.125, 0.25, 0.625], readable: Bool = true, enabled: Bool = true
+    ) throws -> DaemonData.NetworkInferenceSummary {
+        let frame = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(
+            reply(calls: calls, readable: readable, enabled: enabled).utf8)) as? [String: Any])
+        var result = try XCTUnwrap(frame["result"] as? [String: Any])
+        var summary = try XCTUnwrap(result["summary"] as? [String: Any])
+        for (index, route) in ["routed", "outside", "unknown"].enumerated() {
+            var total = try XCTUnwrap(summary[route] as? [String: Any])
+            total["priced_calls"] = pricedCalls[index]
+            total["cost_usd"] = costs[index]
+            summary[route] = total
+        }
+        result["summary"] = summary
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DaemonData.NetworkInferenceSummary.self,
+                                  from: JSONSerialization.data(withJSONObject: result))
+    }
+
+    func testNetworkHeaderPricingRequiresCoverageOfItsManagedCalls() async throws {
+        let transport = Transport(reply())
+        transport.callsReadable = true
+        let store = InferenceStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        XCTAssertEqual(store.calls?.calls.count, 0)
+        let totals = InferenceTabView.networkHeaderTotals(store.networkSummary)
+        XCTAssertEqual(totals.calls, 12)
+        XCTAssertEqual(totals.verified, 6)
+        XCTAssertEqual(totals.priced, "—", "the empty shared page cannot price managed calls")
+    }
+
+    func testNetworkHeaderSumsCompletePricingAcrossEveryRoute() throws {
+        let totals = InferenceTabView.networkHeaderTotals(try pricingSummary())
+        XCTAssertEqual(totals.calls, 12)
+        XCTAssertEqual(totals.verified, 6)
+        XCTAssertEqual(totals.priced, InferenceTabView.money(1_000_000))
+        let zero = try pricingSummary(costs: [0, 0, 0])
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(zero).priced, InferenceTabView.money(0))
+        let empty = try pricingSummary(calls: [0, 0, 0], pricedCalls: [0, 0, 0], costs: [0, 0, 0])
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(empty).priced, InferenceTabView.money(0))
+    }
+
+    func testNetworkHeaderMissingAndPartialPricingStayUnknown() throws {
+        for summary in [
+            try pricingSummary(pricedCalls: [3, 3, 5]),
+            try pricingSummary(pricedCalls: [3, 4, 6]),
+            try pricingSummary(pricedCalls: [nil, 4, 5]),
+            try pricingSummary(costs: [0.125, nil, 0.625]),
+            try pricingSummary(costs: [-0.125, 0.25, 0.625]),
+            try pricingSummary(costs: [Double.greatestFiniteMagnitude, Double.greatestFiniteMagnitude, 0]),
+            try pricingSummary(calls: [.max, 1, 0], pricedCalls: [.max, 1, 0], costs: [0, 0, 0]),
+            try pricingSummary(calls: [UInt64(Int.max), 1, 0],
+                               pricedCalls: [UInt64(Int.max), 1, 0], costs: [0, 0, 0])
+        ] {
+            XCTAssertEqual(InferenceTabView.networkHeaderTotals(summary).priced, "—")
+        }
+        let missing = try pricingSummary(pricedCalls: [nil, 4, 5], costs: [nil, 0.25, 0.625])
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(missing).calls, 12,
+                       "missing prices must not discard call counts")
+    }
+
+    func testNetworkHeaderRejectsNonfiniteDecodedCosts() throws {
+        for value in ["NaN", "Infinity", "-Infinity"] {
+            let frame = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply().utf8)) as? [String: Any])
+            var result = try XCTUnwrap(frame["result"] as? [String: Any])
+            var summary = try XCTUnwrap(result["summary"] as? [String: Any])
+            var routed = try XCTUnwrap(summary["routed"] as? [String: Any])
+            routed["priced_calls"] = 3
+            routed["cost_usd"] = value
+            summary["routed"] = routed
+            result["summary"] = summary
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+                positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+            let decoded = try decoder.decode(DaemonData.NetworkInferenceSummary.self,
+                                             from: JSONSerialization.data(withJSONObject: result))
+            XCTAssertEqual(InferenceTabView.networkHeaderTotals(decoded).priced, "—")
+        }
+    }
+
+    func testNetworkHeaderRejectsUnavailablePricing() throws {
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(nil).priced, "—")
+        let noSummary = try JSONDecoder().decode(DaemonData.NetworkInferenceSummary.self,
+            from: Data(#"{"readable":true,"summary":null}"#.utf8))
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(noSummary).priced, "—")
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(try pricingSummary(readable: false)).priced, "—")
+        XCTAssertEqual(InferenceTabView.networkHeaderTotals(try pricingSummary(enabled: false)).priced, "—")
+    }
+
     func testRefreshClearsStaleSummaryIncludingUnsupportedDaemon() async {
         let transport = Transport(reply())
         let store = InferenceStore(client: LiveDaemonClient(transport: transport))

@@ -95,8 +95,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// would be doing exactly what the field exists to prevent. This value is
     /// larger than any power of ten the Rust formatter can raise, so every
     /// figure formatted with it comes back as the empty string, and the row
-    /// falls to the sentence that says the answer arrived in a form this app
-    /// cannot read. A wrong figure is worse than no figure when the figure is
+    /// stays unavailable. A wrong figure is worse than no figure when it is
     /// somebody's money.
     public static let unreadableScale: UInt8 = .max
 
@@ -220,16 +219,14 @@ public enum BalanceSurface {
     /// What the remaining figure renders as: money, or the Rust's sentence
     /// for there being no money to render.
     ///
-    /// Two cases rather than an optional string, so a caller cannot treat
-    /// "no figure" as "nothing to draw" and leave the row silent. There is
-    /// ALWAYS something to say about what is left; sometimes it is a
-    /// sentence rather than a number.
+    /// An unavailable reading is a placeholder, never a zero amount or an
+    /// account explanation inferred from missing data.
     public enum Remaining: Equatable, Sendable {
+        case unavailable
         /// A real amount, including `$0.00` and including a debt.
         case figure(String)
         /// No figure exists. The string is the Rust's own explanation --
-        /// the uncapped-account sentence for a null, the unreadable-answer
-        /// sentence for a scale this build cannot honour.
+        /// for example, the uncapped-account sentence for a null.
         case sentence(String)
     }
 
@@ -254,14 +251,17 @@ public enum BalanceSurface {
     /// row is figures, and a sentence above them announcing that the read
     /// succeeded is this app narrating itself.
     ///
-    /// A caught panic in the Rust falls back to the payload's unreported
-    /// sentence -- the one that says the question was not answered, never one
-    /// that claims something about what is kept here or what the service did.
+    /// Expired sign-in needs no extra notice beside the recovery controls.
+    /// Unreported and unsupported readings stay quiet rather than showing
+    /// compatibility warnings during loading. Figure availability still
+    /// comes from the original shared state line.
     public static func stateLine(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> String? {
-        guard let line = calls.stateLine(status.state) else { return copy.balanceUnreported }
-        return line.isEmpty ? nil : line
+        guard status.state != "session_expired" else { return nil }
+        guard let line = calls.stateLine(status.state), !line.isEmpty,
+              line != copy.balanceUnreported, line != copy.balanceUnknown else { return nil }
+        return line
     }
 
     /// Whether the figures are the row, or the sentence is.
@@ -346,7 +346,8 @@ public enum BalanceSurface {
         }
         guard let sentence = calls.remainingLine(present, nanos, status.scale),
             !sentence.isEmpty
-        else { return .sentence(copy.balanceUnknown) }
+        else { return .unavailable }
+        guard sentence != copy.balanceUnknown, sentence != copy.balanceUnreported else { return .unavailable }
         return .sentence(sentence)
     }
 

@@ -3,10 +3,8 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// The Private AI tab's account cards, after the Private AI summary and the
-/// calls: the balance and the funding, then the card that opens the Private
-/// AI section of Settings. The managed cards lead the tab instead (owner,
-/// 2026-10-12: `InferenceTabView`).
+/// The Private AI tab's link to Settings. Balance stays on the tab; billing,
+/// the standard tool settings, and the connection controls live in Settings.
 /// The standard settings, the local tools and the connection (the switch,
 /// then sign-in) are in that section (owner, 2026-10-10:
 /// `PrivateAISettingsPanels`).
@@ -43,18 +41,14 @@ struct InferenceAccountSection: View {
     }
 }
 
-/// The NEAR AI balance and, under it, billing (owner, 2026-10-19: moved to
-/// the top of the Private AI tab, under the Private AI switch). Nothing is
-/// drawn until the core's Private AI words arrive.
+/// The NEAR AI balance near the top of Private AI. Billing lives in Settings.
+/// Nothing is drawn until the core's Private AI words arrive.
 struct InferenceBalanceSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                PrivateAIBalanceCard(copy: copy)
-                FundingRow(copy: copy)
-            }
+            PrivateAIBalanceCard(copy: copy)
         }
     }
 }
@@ -210,17 +204,17 @@ struct PrivateAIBalanceCard: View {
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
-    /// icon, what the figures cover, and the state or the figures under it.
+    /// icon and the state or the figures under it.
     var body: some View {
         GlassIconCard(
-            systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
+            systemImage: "dollarsign.circle", title: copy.balanceTitle,
             refresh: .init(
                 copy.panelBalanceRefreshAccessibility,
                 isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
                 action: { model.refreshNearAiBalanceFromButton() }),
             content: {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    BalanceRow(copy: copy, showsScope: false)
+                    BalanceRow(copy: copy)
                     NearAiSignInControl(copy: copy)
                 }
             })
