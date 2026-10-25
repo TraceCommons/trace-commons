@@ -1780,7 +1780,13 @@ async fn source_submission_owned_by_account(
             SELECT 1 FROM trace_submissions s
             WHERE s.tenant_id=$1 AND s.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_account_principals p
-                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref
+                WHERE p.tenant_id=s.tenant_id
+                  AND (p.principal_ref=s.auth_principal_ref OR EXISTS (
+                      SELECT 1 FROM trace_device_upload_principals u
+                      WHERE u.tenant_id=p.tenant_id
+                        AND u.device_principal_ref=p.principal_ref
+                        AND u.upload_principal_ref=s.auth_principal_ref
+                  ))
                   AND p.account_id IN (SELECT account_id FROM owned)
             )
          ) AND NOT EXISTS (
@@ -7563,7 +7569,13 @@ impl PgBackend {
                 "SELECT EXISTS(SELECT 1 FROM trace_submission_sessions m
              WHERE m.tenant_id=$1 AND m.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_account_principals p WHERE p.tenant_id=m.tenant_id
-                AND p.account_id=m.account_id AND p.principal_ref=$3))",
+                AND p.account_id=m.account_id
+                AND (p.principal_ref=$3 OR EXISTS (
+                    SELECT 1 FROM trace_device_upload_principals u
+                    WHERE u.tenant_id=p.tenant_id
+                      AND u.device_principal_ref=p.principal_ref
+                      AND u.upload_principal_ref=$3
+                ))))",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,

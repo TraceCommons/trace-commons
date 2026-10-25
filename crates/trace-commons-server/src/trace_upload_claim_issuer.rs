@@ -2153,19 +2153,27 @@ impl TraceUploadClaimIssuerState {
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
-        self.issue_claim_for_authorized_actor(
-            AuthorizedUploadClaimActor {
-                actor,
-                tenant_id,
-                grant_principal_ref,
-                allowed_consent_scopes: granted_scopes,
-                allowed_uses: granted_uses,
-                policy_label: None,
-            },
-            request,
-            now,
-        )
-        .await
+        let response = self
+            .issue_claim_for_authorized_actor(
+                AuthorizedUploadClaimActor {
+                    actor: actor.clone(),
+                    tenant_id: tenant_id.clone(),
+                    grant_principal_ref,
+                    allowed_consent_scopes: granted_scopes,
+                    allowed_uses: granted_uses,
+                    policy_label: None,
+                },
+                request,
+                now,
+            )
+            .await?;
+        // Keep financial ownership tied to the authenticated device, while
+        // preserving the claim principal as submission provenance. Never
+        // return a usable claim if its ownership association could not persist.
+        db.bind_device_upload_principal(&tenant_id, &device_key_id, &actor)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        Ok(response)
     }
 
     async fn issue_claim_for_device_jwt(
@@ -2215,19 +2223,24 @@ impl TraceUploadClaimIssuerState {
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
-        self.issue_claim_for_authorized_actor(
-            AuthorizedUploadClaimActor {
-                actor,
-                tenant_id: tenant_id.to_string(),
-                grant_principal_ref,
-                allowed_consent_scopes: granted_scopes,
-                allowed_uses: granted_uses,
-                policy_label: None,
-            },
-            request,
-            now,
-        )
-        .await
+        let response = self
+            .issue_claim_for_authorized_actor(
+                AuthorizedUploadClaimActor {
+                    actor: actor.clone(),
+                    tenant_id: tenant_id.to_string(),
+                    grant_principal_ref,
+                    allowed_consent_scopes: granted_scopes,
+                    allowed_uses: granted_uses,
+                    policy_label: None,
+                },
+                request,
+                now,
+            )
+            .await?;
+        db.bind_device_upload_principal(&tenant_id, &auth.device_key_id, &actor)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        Ok(response)
     }
 
     fn validate_upload_claim_request(
@@ -5758,6 +5771,7 @@ mod tests {
     use crate::trace_corpus_storage::*;
 
     struct StubDeviceKeyDb {
+        refuse_upload_binding: bool,
         device_keys: std::sync::RwLock<
             std::collections::HashMap<(String, String), crate::db::DeviceKeyRecord>,
         >,
@@ -5766,6 +5780,7 @@ mod tests {
     impl StubDeviceKeyDb {
         fn new() -> Self {
             Self {
+                refuse_upload_binding: false,
                 device_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
             }
         }
@@ -6385,6 +6400,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::db::Database for StubDeviceKeyDb {
+        async fn bind_device_upload_principal(
+            &self,
+            _tenant_id: &str,
+            _device_key_id: &str,
+            _actor_ref: &str,
+        ) -> Result<(), DatabaseError> {
+            if self.refuse_upload_binding {
+                Err(DatabaseError::Pool("upload ownership unavailable".into()))
+            } else {
+                Ok(())
+            }
+        }
+
         async fn run_migrations(&self) -> Result<(), DatabaseError> {
             Ok(())
         }
@@ -6445,6 +6473,15 @@ mod tests {
         tenant_id: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value, String) {
+        post_signed_device_claim_with_binding(tenant_id, body, false, false).await
+    }
+
+    async fn post_signed_device_claim_with_binding(
+        tenant_id: &str,
+        body: serde_json::Value,
+        refuse_binding: bool,
+        device_jwt: bool,
+    ) -> (StatusCode, serde_json::Value, String) {
         use ring::signature::KeyPair;
         use std::sync::Arc;
         use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
@@ -6458,7 +6495,9 @@ mod tests {
         let device_key_id = device_key_id_from_public_key_bytes(pk);
         let pk_b64 = base64::engine::general_purpose::STANDARD.encode(pk);
 
-        let stub = Arc::new(StubDeviceKeyDb::new());
+        let mut db = StubDeviceKeyDb::new();
+        db.refuse_upload_binding = refuse_binding;
+        let stub = Arc::new(db);
         stub.insert_test_device_key(
             tenant_id,
             &device_key_id,
@@ -6482,8 +6521,81 @@ mod tests {
         let sig = kp.sign(body_str.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
 
-        let (status, response) = post_device_claim(config, &device_key_id, &sig_b64, body).await;
+        let (status, response) = if device_jwt {
+            let mut header = Header::new(Algorithm::EdDSA);
+            header.kid = Some(device_key_id.clone());
+            let now = Utc::now();
+            let token = jsonwebtoken::encode(
+                &header,
+                &json!({"tenant_id": tenant_id, "aud": "trace-commons-upload",
+                    "iat": now.timestamp(), "exp": (now + Duration::minutes(5)).timestamp()}),
+                &EncodingKey::from_ed_der(pkcs8.as_ref()),
+            )
+            .unwrap();
+            let router = trace_upload_claim_issuer_router(config).unwrap();
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/trace-upload-claim")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body_str))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        } else {
+            post_device_claim(config, &device_key_id, &sig_b64, body).await
+        };
         (status, response, device_key_id)
+    }
+
+    #[tokio::test]
+    async fn device_claim_refuses_token_when_upload_ownership_cannot_be_recorded() {
+        let tenant = "test-device-tenant";
+        for subject in [None, Some("sha256:subject")] {
+            let (status, body, _) = post_signed_device_claim_with_binding(
+                tenant,
+                device_claim_request_body(tenant, subject),
+                true,
+                false,
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(body.get("access_token").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn device_jwt_claim_refuses_token_when_upload_ownership_cannot_be_recorded() {
+        let tenant = "test-device-tenant";
+        let (status, body, _) = post_signed_device_claim_with_binding(
+            tenant,
+            device_claim_request_body(tenant, None),
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.get("access_token").is_none());
+    }
+
+    #[tokio::test]
+    async fn device_jwt_claim_succeeds_when_upload_ownership_is_recorded() {
+        let tenant = "test-device-tenant";
+        let (status, body, device) = post_signed_device_claim_with_binding(
+            tenant,
+            device_claim_request_body(tenant, None),
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decode_issued_claims(&body)["principal_ref"], device);
     }
 
     fn decode_issued_claims(body: &serde_json::Value) -> serde_json::Value {

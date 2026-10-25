@@ -382,3 +382,74 @@ async fn the_dry_run_report_reads_through_the_database() {
     );
     assert_eq!(report.failed, 0);
 }
+
+#[tokio::test]
+async fn device_upload_features_follow_the_parent_account_membership() {
+    use trace_commons_server::account_trust::{
+        device_claim_actor, device_principal_ref, device_upload_principal_refs,
+    };
+
+    let Some(fx) = fixture().await else { return };
+    let tenant = anchored_tenant();
+    let device = principal();
+    let parent = device_principal_ref(&tenant, &device);
+    let account_id = seed_account(&fx.admin, &tenant, &parent).await;
+    fx.admin
+        .execute(
+            "INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash)
+         VALUES($1,$2,'fixture-public-key',$2)",
+            &[&tenant, &device],
+        )
+        .await
+        .unwrap();
+    let subject = trace_commons_protocol::onboarding::user_subject_hash(&device);
+    let actor = device_claim_actor(&tenant, &device, Some(&subject));
+    let [alias, _] = device_upload_principal_refs(&tenant, &device, &actor).unwrap();
+    fx.admin_db
+        .bind_device_upload_principal(&tenant, &device, &actor)
+        .await
+        .unwrap();
+    let submission = seed_submission(&fx.admin, &tenant, &alias, "accepted", at(1)).await;
+    fx.admin
+        .batch_execute(
+            "GRANT SELECT ON trace_submissions, trace_account_principals TO trace_ingest_runtime",
+        )
+        .await
+        .unwrap();
+    let runtime = login_with_role(
+        &fx,
+        "tc_starter_upload_runtime_login",
+        "trace_ingest_runtime",
+    )
+    .await;
+    runtime
+        .record_starter_plausibility_features(&tenant, submission, &features(7))
+        .await
+        .unwrap();
+    let account = find_account(&fx.admin_db, &tenant, account_id).await;
+    assert_eq!(
+        runtime
+            .starter_plausibility_features_for_account(&account)
+            .await
+            .unwrap(),
+        vec![features(7)],
+        "the account must count accepted contributions made with its device's upload claim",
+    );
+
+    fx.admin
+        .execute(
+            "UPDATE trace_account_principals SET unlinked_at=now()
+         WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3",
+            &[&tenant, &account_id, &parent],
+        )
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .starter_plausibility_features_for_account(&account)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an upload association must not outlive its parent account membership"
+    );
+}

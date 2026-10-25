@@ -14,16 +14,17 @@ use crate::error::DatabaseError;
 use crate::starter_plausibility::{MAX_EVALUATED_ENVELOPES, StarterEnvelopeFeatures};
 
 /// An account's counted features: its own submissions (through a live
-/// principal link), still `accepted` and not withdrawn. Read newest first,
+/// ownership relation, including verified device uploads), still `accepted`
+/// and not withdrawn. Read newest first,
 /// so the cap drops the oldest rather than the ones inside the age window;
 /// the caller reverses them back to oldest first.
 const ACCOUNT_FEATURES_SQL: &str = "SELECT f.features
    FROM trace_starter_plausibility_features f
    JOIN trace_submissions s
      ON s.tenant_id = f.tenant_id AND s.submission_id = f.submission_id
-   JOIN trace_account_principals p
+   JOIN trace_account_owned_principals p
      ON p.tenant_id = s.tenant_id AND p.principal_ref = s.auth_principal_ref
-    AND p.account_id = $2 AND p.unlinked_at IS NULL
+    AND p.account_id = $2
   WHERE f.tenant_id = $1 AND f.tenant_id = trace_current_tenant_id()
     AND s.status = 'accepted' AND s.withdrawn_at IS NULL
   ORDER BY s.received_at DESC, s.submission_id DESC

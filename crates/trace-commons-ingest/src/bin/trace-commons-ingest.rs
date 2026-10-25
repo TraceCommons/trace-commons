@@ -35260,12 +35260,23 @@ async fn active_credit_hold_account_refs_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<BTreeSet<String>> {
-    Ok(read_credit_holds_for_admin(state, tenant)
+    let refs = read_credit_holds_for_admin(state, tenant)
         .await?
         .into_iter()
         .filter(|hold| hold.released_at.is_none())
         .map(|hold| hold.credit_account_ref)
-        .collect())
+        .collect();
+    if let Some(db) = state.db_mirror.as_ref() {
+        return Ok(
+            trace_commons_server::credit_hold_ownership::expand_credit_hold_ownership(
+                db.as_ref(),
+                &tenant.tenant_id,
+                refs,
+            )
+            .await?,
+        );
+    }
+    Ok(refs)
 }
 
 async fn read_near_credit_outbox_items_for_admin(
@@ -63983,18 +63994,20 @@ async fn caller_credit_account_scope(
         // No DB mirror => no account linkage to broaden from. Own-principal only.
         return Ok(None);
     };
-    let aliases = tenant
-        .principal_aliases()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let resolved = db
-        .resolve_principals_to_accounts(&tenant.tenant_id, &aliases)
-        .await
-        .context("failed to resolve contributor principal to account for credit visibility")?;
-    let Some(account_id) = aliases
-        .iter()
-        .find_map(|alias| resolved.get(alias).copied())
-    else {
+    // Contribution ownership does not confer account authentication authority.
+    // Only a direct active membership may broaden this credential's visibility;
+    // once authorized, expansion includes the account's owned upload aliases.
+    let mut account_id = None;
+    for principal in tenant.principal_aliases() {
+        account_id = db
+            .resolve_account_for_principal(&tenant.tenant_id, principal)
+            .await
+            .context("failed to resolve contributor principal to account for credit visibility")?;
+        if account_id.is_some() {
+            break;
+        }
+    }
+    let Some(account_id) = account_id else {
         // Caller has no active account link: unchanged own-principal scope.
         return Ok(None);
     };

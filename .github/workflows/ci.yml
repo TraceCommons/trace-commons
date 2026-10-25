@@ -143,6 +143,8 @@ jobs:
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
+        admission_test_upload_ownership
+        admission_test_credit_hold_ownership
         admission_test_activity_missions
         admission_test_inference_connection
         admission_test_inference_connection_route
@@ -440,6 +442,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      - name: upload_principal_ownership_pg
+        run: cargo test -p trace-commons-server --test upload_principal_ownership_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_ownership
+      - name: credit_hold_ownership_pg
+        run: cargo test -p trace-commons-server --lib credit_hold_ownership::tests
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_credit_hold_ownership
       # Activity progress uses the owner URL only to migrate and seed fixtures.
       # Its account-history SELECT grants stay in this fresh test database;
       # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,

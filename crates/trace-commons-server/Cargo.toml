@@ -155,6 +155,10 @@ name = "trace-commons-review"
 path = "src/bin/trace-commons-review.rs"
 
 [[bin]]
+name = "trace-commons-repair-upload-ownership"
+path = "src/bin/trace-commons-repair-upload-ownership.rs"
+
+[[bin]]
 name = "trace-commons-admin"
 path = "src/bin/trace-commons-admin.rs"
 
