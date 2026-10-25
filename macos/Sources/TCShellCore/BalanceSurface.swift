@@ -252,12 +252,14 @@ public enum BalanceSurface {
     /// row is figures, and a sentence above them announcing that the read
     /// succeeded is this app narrating itself.
     ///
+    /// Expired sign-in needs no extra notice beside the recovery controls.
     /// Unreported and unsupported readings stay quiet rather than showing
     /// compatibility warnings during loading. Figure availability still
     /// comes from the original shared state line.
     public static func stateLine(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> String? {
+        guard status.state != "session_expired" else { return nil }
         guard let line = calls.stateLine(status.state), !line.isEmpty,
               line != copy.balanceUnreported, line != copy.balanceUnknown else { return nil }
         return line

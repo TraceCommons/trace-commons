@@ -247,10 +247,14 @@ final class BalanceSurfaceTests: XCTestCase {
         XCTAssertNotEqual(later, copy().balanceUnavailable)
     }
 
-    /// `known` answers the empty string, and this surface turns that into NO
-    /// LINE rather than a blank one: the row's content is the figures.
-    func testKnownDrawsNoStateSentenceAtAll() {
+    /// A known balance needs no announcement; an expired sign-in needs no
+    /// extra notice beside the existing sign-in controls, and has no figure.
+    func testKnownAndExpiredSessionDrawNoStateSentence() {
         XCTAssertNil(BalanceSurface.stateLine(known(), copy: copy(), calls: calls()))
+        let expired = BalanceStatus(state: "session_expired")
+        XCTAssertNil(BalanceSurface.stateLine(expired, copy: copy(), calls: calls()))
+        XCTAssertFalse(BalanceSurface.showsFigures(expired, calls: calls()))
+        XCTAssertEqual(BalanceSurface.action(expired, calls: calls(action: { _ in 31 })), .obtain)
     }
 
     /// A caught panic falls back to the payload's UNREPORTED sentence --
@@ -278,7 +282,7 @@ final class BalanceSurfaceTests: XCTestCase {
         for state in ["", "no_session", "session_expired", "unavailable", "a_state_from_2027"] {
             XCTAssertFalse(
                 BalanceSurface.showsFigures(BalanceStatus(state: state), calls: calls()),
-                "\(state) has a sentence and must not also show figures")
+                "\(state) has no balance reading and must not show figures")
         }
         // A caught panic draws no figures either.
         XCTAssertFalse(BalanceSurface.showsFigures(known(), calls: calls(line: { _ in nil })))
