@@ -1524,6 +1524,7 @@ struct HomeAccountTiles: View {
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
                                      detail: balance.detail, detailInk: balance.detailInk,
+                                     supplementaryDetail: HomeFormat.balanceReceived(model.balanceStatus, calls: model.balanceCalls),
                                      systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
                                      action: openPrivateAI)
                     }
@@ -1550,6 +1551,8 @@ private struct HomeStatTile: View {
     /// size and estimate), in `detailInk` when it carries a tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
+    /// A separate neutral fact, such as incoming credit rather than net change.
+    var supplementaryDetail: String? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
     /// A quieter figure beside the value; nil draws none.
@@ -1564,12 +1567,14 @@ private struct HomeStatTile: View {
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
+                              supplementaryDetail: supplementaryDetail, systemImage: systemImage,
                               valueAccessory: valueAccessory, interactive: true, iconPlacement: .watermark)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
+                          supplementaryDetail: supplementaryDetail, systemImage: systemImage,
                           valueAccessory: valueAccessory, iconPlacement: .watermark)
         }
     }
@@ -1636,8 +1641,8 @@ enum HomeFormat {
     ///
     /// With a figure, the core's line for the change over the last 24 hours
     /// goes under it (owner, 2026-10-23), up in the status green and down in
-    /// the status red as the Credit tile's change is drawn; with no reading
-    /// from a day ago there is no line, never "$0.00".
+    /// the status red as the Credit tile's change is drawn. Missing history
+    /// uses the core's explanation; it is never represented as "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
@@ -1654,11 +1659,24 @@ enum HomeFormat {
     }
 
     /// The Balance tile's 24-hour change: the core's words, inked by the
-    /// sign of the core's figure. Nil without both, or for no change.
-    static func balanceChange(_ status: BalanceStatus) -> (text: String, ink: GlassRGBA)? {
-        guard let text = status.change24hText, !text.isEmpty, let nanos = status.change24hNanos, nanos != 0
-        else { return nil }
-        return (text, nanos > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
+    /// sign of the core's figure. Zero and unavailable history stay neutral.
+    static func balanceChange(_ status: BalanceStatus) -> (text: String, ink: GlassRGBA?)? {
+        guard let nanos = status.change24hNanos else {
+            return status.change24hUnavailableText.map { ($0, nil) }
+        }
+        guard let text = status.change24hText, !text.isEmpty else { return nil }
+        let direction = status.change24hDirection ?? (nanos == 0 ? 0 : (nanos > 0 ? 1 : -1))
+        let ink: GlassRGBA? = direction == 0 ? nil
+            : (direction > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
+        return (text, ink)
+    }
+
+    /// A distinct incoming-credit line. Spending never changes this amount.
+    /// Failed or signed-out reads cannot display even an accidentally retained value.
+    static func balanceReceived(_ status: BalanceStatus, calls: BalanceCalls) -> String? {
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return nil }
+        guard status.received24hNanos != nil else { return status.received24hUnavailableText }
+        return status.received24hText
     }
 
     /// The daemon's balance label with no NEAR AI sign-in kept here.

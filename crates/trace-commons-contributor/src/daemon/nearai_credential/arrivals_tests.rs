@@ -186,6 +186,76 @@ fn the_seen_list_stays_bounded() {
     );
 }
 
+// ---- incoming credit in the rolling 24-hour window ----
+
+#[test]
+fn received_24h_counts_unique_positive_transfers_in_the_window_not_balance() {
+    let now = at("2026-10-24T12:00:00Z");
+    let rows = [
+        transfer("recent", 2 * DOLLAR, "2026-10-24T11:00:00Z"),
+        transfer("recent", 2 * DOLLAR, "2026-10-24T11:00:00Z"),
+        transfer("boundary", DOLLAR, "2026-10-23T12:00:00Z"),
+        transfer("inside", 3 * DOLLAR, "2026-10-23T12:01:00Z"),
+        transfer("future", 9 * DOLLAR, "2026-10-24T12:01:00Z"),
+        transfer("negative", -DOLLAR, "2026-10-24T11:00:00Z"),
+    ];
+    let mut record = ArrivalsRecord::default();
+    record.record_received_window(&rows, now);
+    record.record_sample(now - CHANGE_WINDOW, Some(100 * DOLLAR));
+    record.record_sample(now, Some(DOLLAR));
+    assert_eq!(record.received_24h(now), Some(5 * DOLLAR));
+    assert_eq!(
+        record.received_24h(now + Duration::minutes(2)),
+        Some(2 * DOLLAR)
+    );
+    assert_eq!(record.received_24h(now - Duration::seconds(1)), None);
+    assert_eq!(
+        record.received_24h(now + POLL_INTERVAL + Duration::seconds(1)),
+        None
+    );
+}
+
+#[test]
+fn received_24h_legacy_is_unknown_until_complete_scan_and_empty_is_known_zero() {
+    let now = at("2026-10-24T12:00:00Z");
+    let mut record: ArrivalsRecord = serde_json::from_value(serde_json::json!({
+        "scanned":true,"received_total_nanos":9_000_000_000i64,
+        "seen":[{"id":"old","at":"2026-10-24T11:00:00Z"}]
+    }))
+    .unwrap();
+    assert_eq!(record.received_24h(now), None);
+    record.record_received_window(&[transfer("old", DOLLAR, "2026-10-24T11:00:00Z")], now);
+    assert_eq!(record.received_24h(now), Some(DOLLAR));
+    assert_eq!(record.received_total_nanos, 9 * DOLLAR);
+    record.record_received_window(&[], now);
+    assert_eq!(record.received_24h(now), Some(0));
+    record.adopt("another-org");
+    assert_eq!(record.received_24h(now), None);
+}
+
+#[test]
+fn received_24h_overflow_or_unbounded_window_is_unknown() {
+    let now = at("2026-10-24T12:00:00Z");
+    let mut record = ArrivalsRecord::default();
+    record.record_received_window(
+        &[
+            transfer("one", i64::MAX, "2026-10-24T11:00:00Z"),
+            transfer("two", 1, "2026-10-24T11:00:00Z"),
+        ],
+        now,
+    );
+    assert_eq!(record.received_24h(now), None);
+    let rows: Vec<_> = (0..=MAX_SEEN)
+        .map(|i| IncomingTransfer {
+            id: format!("transfer-{i}"),
+            amount: 1,
+            created_at: now,
+        })
+        .collect();
+    record.record_received_window(&rows, now);
+    assert_eq!(record.received_24h(now), None);
+}
+
 // ---- the 24-hour change ----
 
 #[test]
@@ -489,6 +559,88 @@ mod live {
     }
 
     #[tokio::test]
+    async fn recipient_verification_failure_invalidates_the_visible_summary_and_publishes_refresh()
+    {
+        let s = shared();
+        let ingest = link_recipient(&s).await;
+        let stub = Stub::default();
+        let api = serve(&stub).await;
+        poll_with(&s, &api).await.unwrap();
+        assert_eq!(snapshot(&s.store).received_24h(Utc::now()), Some(0));
+        ingest.stub.lock().unwrap().linked = false;
+        let mut events = s.events.subscribe();
+        let _ = poll_with(&s, &api).await;
+        let record = snapshot(&s.store);
+        assert!(record.recipient_ref.is_none());
+        assert_eq!(record.received_24h(Utc::now()), None);
+        assert_eq!(
+            events.try_recv().unwrap().event,
+            crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_followup_scan_hides_the_window_without_changing_the_balance() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        let stub = Stub::default();
+        *stub.remaining.lock().unwrap() = 7 * DOLLAR;
+        let api = serve(&stub).await;
+        poll_with(&s, &api).await.unwrap();
+        assert_eq!(snapshot(&s.store).received_24h(Utc::now()), Some(0));
+        *stub.refuse.lock().unwrap() = Some(StatusCode::SERVICE_UNAVAILABLE);
+        assert!(poll_with(&s, &api).await.is_err());
+        assert_eq!(snapshot(&s.store).received_24h(Utc::now()), None);
+        assert!(matches!(
+            balance::read_via(&s, &api).await,
+            BalanceReport::Known(_)
+        ));
+    }
+
+    #[test]
+    fn explicit_refresh_reads_receipts_after_five_seconds_without_changing_background_cadence() {
+        let s = shared();
+        let now = Utc::now();
+        assert!(take_poll_due_with_fresh(&s.store, now, false));
+        assert!(!take_poll_due_with_fresh(
+            &s.store,
+            now + Duration::seconds(4),
+            true
+        ));
+        assert!(take_poll_due_with_fresh(
+            &s.store,
+            now + Duration::seconds(5),
+            true
+        ));
+        assert!(!take_poll_due_with_fresh(
+            &s.store,
+            now + Duration::minutes(1),
+            false
+        ));
+        assert!(take_poll_due_with_fresh(
+            &s.store,
+            now + POLL_INTERVAL + Duration::seconds(5),
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_capped_ledger_scan_never_becomes_a_complete_credit_total() {
+        let s = shared();
+        let _ingest = link_recipient(&s).await;
+        let stub = Stub::default();
+        *stub.ledger.lock().unwrap() = (0..=MAX_PAGES * 2)
+            .map(|i| row(&format!("transfer-{i}"), DOLLAR, "2026-10-24T11:00:00Z"))
+            .collect();
+        let api = serve(&stub).await;
+        assert!(poll_with(&s, &api).await.is_err());
+        let record = snapshot(&s.store);
+        assert!(!record.scanned);
+        assert_eq!(record.received_total_nanos, 0);
+        assert_eq!(record.received_24h(Utc::now()), None);
+    }
+
+    #[tokio::test]
     async fn a_poll_counts_every_page_once_and_shares_one_exchange_with_the_balance() {
         let s = shared();
         let _ingest = link_recipient(&s).await;
@@ -532,10 +684,13 @@ mod live {
         assert_eq!(ledger_calls.len(), 3, "{calls:?}");
         assert!(ledger_calls.iter().all(|(_, bearer)| bearer == "jwt_1"));
 
-        // Polled again with nothing new: nothing counted, no event.
+        // A complete scan with nothing new still refreshes the rolling window.
         assert_eq!(poll_with(&s, &api).await.unwrap(), 0);
         assert_eq!(snapshot(&s.store).received_total_nanos, 6 * DOLLAR);
-        assert!(events.try_recv().is_err());
+        assert_eq!(
+            events.try_recv().unwrap().event,
+            crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED
+        );
 
         // A new transfer lands: only it is counted.
         stub.ledger
@@ -799,6 +954,14 @@ mod live {
             amount: 4 * DOLLAR,
             created_at: now - Duration::hours(2),
         }]);
+        record.record_received_window(
+            &[IncomingTransfer {
+                id: "t1".into(),
+                amount: 4 * DOLLAR,
+                created_at: now - Duration::hours(2),
+            }],
+            now,
+        );
         set_for_test(&s.store, record);
         let known = |remaining| {
             BalanceReport::Known(balance::BalanceReading {
@@ -814,29 +977,71 @@ mod live {
         let up = balance_value(&s, known(Some(8 * DOLLAR + 200_000_000)));
         assert_eq!(up["change_24h_nanos"], 3 * DOLLAR + 200_000_000);
         assert_eq!(up["change_24h_text"], "+$3.20 in the last 24 hours");
+        assert_eq!(up["change_24h_direction"], 1);
         assert_eq!(up["received_total_nanos"], 4 * DOLLAR);
+        assert_eq!(up["received_24h_nanos"], 4 * DOLLAR);
+        assert_eq!(
+            up["received_24h_text"],
+            "$4.00 received in the last 24 hours"
+        );
+        assert_eq!(up["received_24h_checked_at"], now.to_rfc3339());
 
         let down = balance_value(&s, known(Some(4 * DOLLAR)));
         assert_eq!(down["change_24h_nanos"], -DOLLAR);
         assert_eq!(down["change_24h_text"], "-$1.00 in the last 24 hours");
+        assert_eq!(down["change_24h_direction"], -1);
+        let subcent = balance_value(&s, known(Some(5 * DOLLAR - 9_000_000)));
+        assert_eq!(subcent["change_24h_nanos"], -9_000_000);
+        assert_eq!(subcent["change_24h_direction"], 0);
+        assert_eq!(subcent["change_24h_text"], "$0.00 in the last 24 hours");
 
         // No limit set now: no remaining figure, so no change -- not zero.
         let unknown = balance_value(&s, known(None));
         assert!(unknown["change_24h_nanos"].is_null(), "{unknown}");
-        assert!(unknown["change_24h_text"].is_null(), "{unknown}");
+        assert!(unknown["change_24h_direction"].is_null());
+        assert_eq!(
+            unknown["change_24h_unavailable_text"],
+            "24-hour balance change unavailable"
+        );
 
         // Any state but `known` carries none of it.
         let expired = balance_value(&s, BalanceReport::SessionExpired);
         assert!(expired["change_24h_nanos"].is_null());
         assert!(expired["received_total_nanos"].is_null());
+        assert!(expired["received_24h_nanos"].is_null());
+        assert!(expired["received_24h_text"].is_null());
+
+        // Switching only the spending organization cannot surface payouts
+        // into a different organization under its balance.
+        s.settings
+            .lock()
+            .unwrap()
+            .near_ai_inference
+            .as_mut()
+            .unwrap()
+            .organization_id = "other".into();
+        let other = balance_value(&s, known(Some(DOLLAR)));
+        assert!(other["received_24h_nanos"].is_null());
+        assert_eq!(
+            other["received_24h_unavailable_text"],
+            "Amount received in 24 hours unavailable"
+        );
     }
 
     #[test]
     fn a_poll_is_due_every_interval_and_not_between() {
         let s = shared();
         let t0 = Utc::now();
-        assert!(take_poll_due(&s.store, t0));
-        assert!(!take_poll_due(&s.store, t0 + Duration::minutes(5)));
-        assert!(take_poll_due(&s.store, t0 + POLL_INTERVAL));
+        assert!(take_poll_due_with_fresh(&s.store, t0, false));
+        assert!(!take_poll_due_with_fresh(
+            &s.store,
+            t0 + Duration::minutes(5),
+            false
+        ));
+        assert!(take_poll_due_with_fresh(
+            &s.store,
+            t0 + POLL_INTERVAL,
+            false
+        ));
     }
 }

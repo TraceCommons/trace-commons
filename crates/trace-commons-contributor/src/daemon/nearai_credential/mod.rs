@@ -529,7 +529,14 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
 /// malformed value, is an ordinary read, because this route never errors.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
-    let report = balance::read(shared, fresh).await;
+    let mut report = balance::read(shared, fresh).await;
+    if matches!(report, balance::BalanceReport::Known(_)) {
+        arrivals::refresh_if_due(shared, fresh).await;
+        // The selected organization or session can change during receipt
+        // I/O. Re-read through the identity-aware cache before pairing the
+        // current organization's history with its current balance.
+        report = balance::read(shared, false).await;
+    }
     Response::ok(req.id, arrivals::balance_value(shared, report))
 }
 

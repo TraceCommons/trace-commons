@@ -35,9 +35,19 @@ public struct BalanceStatus: Equatable, Sendable {
     /// What is left now minus what was left about a day ago, signed, or
     /// `nil` with no reading from about a day ago. NEVER drawn as zero.
     public let change24hNanos: Int64?
-    /// The core's finished line for that change, or `nil` when there is
-    /// nothing to say (no change, under a cent, or not known).
+    /// The core's finished line for a known change, including zero.
     public let change24hText: String?
+    /// Core-selected direction at displayed precision: -1, 0, or 1.
+    /// Older daemon payloads omit it; zero keeps subcent movement neutral.
+    public let change24hDirection: Int?
+    /// The core's explanation when no comparable balance history exists.
+    public let change24hUnavailableText: String?
+    /// Incoming credit in the rolling 24-hour window, independent of spending.
+    /// Nil means unknown; zero means a complete read found no incoming credit.
+    public let received24hNanos: Int64?
+    public let received24hText: String?
+    public let received24hCheckedAt: Date?
+    public let received24hUnavailableText: String?
     /// All NEAR AI credit the daemon has counted arriving in the spending
     /// organization, or `nil` until it has read the whole ledger. Only ever
     /// compared with an earlier value of itself, to see that credit arrived.
@@ -52,7 +62,13 @@ public struct BalanceStatus: Equatable, Sendable {
         observedAt: Date? = nil,
         change24hNanos: Int64? = nil,
         change24hText: String? = nil,
-        receivedTotalNanos: Int64? = nil
+        receivedTotalNanos: Int64? = nil,
+        change24hUnavailableText: String? = nil,
+        change24hDirection: Int? = nil,
+        received24hNanos: Int64? = nil,
+        received24hText: String? = nil,
+        received24hCheckedAt: Date? = nil,
+        received24hUnavailableText: String? = nil
     ) {
         self.state = state
         self.remainingNanos = remainingNanos
@@ -63,6 +79,12 @@ public struct BalanceStatus: Equatable, Sendable {
         self.change24hNanos = change24hNanos
         self.change24hText = change24hText
         self.receivedTotalNanos = receivedTotalNanos
+        self.change24hUnavailableText = change24hUnavailableText
+        self.change24hDirection = change24hDirection.flatMap { (-1...1).contains($0) ? $0 : nil }
+        self.received24hNanos = received24hNanos
+        self.received24hText = received24hText
+        self.received24hCheckedAt = received24hCheckedAt
+        self.received24hUnavailableText = received24hUnavailableText
     }
 
     /// The scale used when the wire carried none.
@@ -107,7 +129,13 @@ public struct BalanceStatus: Equatable, Sendable {
             observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp),
             change24hNanos: object["change_24h_nanos"] as? Int64,
             change24hText: (object["change_24h_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-            receivedTotalNanos: object["received_total_nanos"] as? Int64)
+            receivedTotalNanos: object["received_total_nanos"] as? Int64,
+            change24hUnavailableText: (object["change_24h_unavailable_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            change24hDirection: object["change_24h_direction"] as? Int,
+            received24hNanos: object["received_24h_nanos"] as? Int64,
+            received24hText: (object["received_24h_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            received24hCheckedAt: (object["received_24h_checked_at"] as? String).flatMap(Self.timestamp),
+            received24hUnavailableText: (object["received_24h_unavailable_text"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// RFC 3339, the shape `chrono`'s `DateTime<Utc>` serializes to.

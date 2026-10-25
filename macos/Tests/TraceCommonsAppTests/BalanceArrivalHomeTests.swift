@@ -50,6 +50,74 @@ final class BalanceArrivalHomeTests: XCTestCase {
         XCTAssertNil(orphan.detail)
     }
 
+    func testKnownZeroChangeIsVisibleWithoutGainOrLossColor() throws {
+        let zero = try tile("""
+            {"state":"known","scale":9,"remaining_nanos":8200000000,
+             "change_24h_nanos":0,"change_24h_text":"$0.00 in the last 24 hours"}
+            """)
+        XCTAssertEqual(zero.detail, "$0.00 in the last 24 hours")
+        XCTAssertNil(zero.detailInk)
+    }
+
+    func testSubcentChangeUsesTheCoreFormattingPrecisionAndStaysNeutral() throws {
+        for nanos in [-9_000_000, 9_000_000] {
+            let tiny = try tile("""
+                {"state":"known","scale":9,"remaining_nanos":8200000000,
+                 "change_24h_nanos":\(nanos),"change_24h_direction":0,"change_24h_text":"$0.00 in the last 24 hours"}
+                """)
+            XCTAssertEqual(tiny.detail, "$0.00 in the last 24 hours")
+            XCTAssertNil(tiny.detailInk)
+        }
+        let alternateScale = try tile("""
+            {"state":"known","scale":3,"remaining_nanos":8200,
+             "change_24h_nanos":20,"change_24h_direction":1,"change_24h_text":"+$0.02 in the last 24 hours"}
+            """)
+        XCTAssertEqual(alternateScale.detailInk, GlassTokens.Color.statusOnText)
+    }
+
+    func testIncomingCreditIsIndependentOfSpendingAndZeroIsKnown() {
+        let model = AppModel()
+        let received = BalanceStatus.parse(fromJSON: """
+            {"state":"known","scale":9,"remaining_nanos":8200000000,
+             "change_24h_nanos":-2000000000,"change_24h_text":"-$2.00 in the last 24 hours",
+             "received_24h_nanos":1250000000,"received_24h_text":"$1.25 received in the last 24 hours"}
+            """)
+        XCTAssertEqual(HomeFormat.balanceReceived(received, calls: model.balanceCalls),
+                       "$1.25 received in the last 24 hours")
+        let zero = BalanceStatus.parse(fromJSON: """
+            {"state":"known","scale":9,"remaining_nanos":8200000000,
+             "received_24h_nanos":0,"received_24h_text":"$0.00 received in the last 24 hours"}
+            """)
+        XCTAssertEqual(HomeFormat.balanceReceived(zero, calls: model.balanceCalls),
+                       "$0.00 received in the last 24 hours")
+        for state in ["no_session", "unreachable", ""] {
+            let hidden = BalanceStatus(state: state, received24hNanos: 1_250_000_000,
+                                       received24hText: "$1.25 received in the last 24 hours")
+            XCTAssertNil(HomeFormat.balanceReceived(hidden, calls: model.balanceCalls))
+        }
+        let orphan = BalanceStatus(state: "known", received24hText: "$1.25 received in the last 24 hours")
+        XCTAssertNil(HomeFormat.balanceReceived(orphan, calls: model.balanceCalls))
+    }
+
+    func testUnavailableHistoryUsesTheCoreExplanationWithoutInventingZero() throws {
+        let status = BalanceStatus.parse(fromJSON: """
+            {"state":"known","scale":9,"remaining_nanos":8200000000,
+             "change_24h_nanos":null,"change_24h_text":null,
+             "change_24h_unavailable_text":"24-hour balance change unavailable",
+             "received_24h_nanos":null,"received_24h_text":null,
+             "received_24h_unavailable_text":"Amount received in 24 hours unavailable"}
+            """)
+        let model = AppModel()
+        let copy = try XCTUnwrap(model.privateInferenceCopy)
+        let rendered = HomeFormat.balance(status, copy: copy, calls: model.balanceCalls)
+        XCTAssertEqual(rendered.detail, "24-hour balance change unavailable")
+        XCTAssertNil(rendered.detailInk)
+        XCTAssertEqual(HomeFormat.balanceReceived(status, calls: model.balanceCalls),
+                       "Amount received in 24 hours unavailable")
+        XCTAssertNil(status.received24hNanos)
+        XCTAssertNil(status.change24hNanos)
+    }
+
     /// The flourish is one self-contained view, marked as a placeholder, and
     /// it reads Reduce Motion.
     func test_theFlourishIsOneSwappablePlaceholderThatReadsReduceMotion() throws {

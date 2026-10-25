@@ -38,9 +38,9 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 /// The record's file, in the daemon's directory.
@@ -105,6 +105,21 @@ pub(crate) struct SeenTransfer {
     pub(crate) at: DateTime<Utc>,
 }
 
+/// An incoming amount and its ledger time. No sender, memo or account data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ReceivedTransfer {
+    at: DateTime<Utc>,
+    amount: i64,
+}
+
+/// A complete rolling-window read, independent of the notification baseline.
+/// Older record versions have no window until a successful ledger scan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReceivedWindow {
+    checked_at: DateTime<Utc>,
+    transfers: Vec<ReceivedTransfer>,
+}
+
 /// Everything kept about one organization's credit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ArrivalsRecord {
@@ -133,6 +148,8 @@ pub(crate) struct ArrivalsRecord {
     /// The newest transfer time counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) high_water: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) received_window: Option<ReceivedWindow>,
 }
 
 /// Whether credit received is worth a notification: `Some(amount)` to
@@ -253,6 +270,51 @@ impl ArrivalsRecord {
         }
         self.scanned = true;
         added
+    }
+
+    /// Replace the window only after a complete fetch covering at least the
+    /// preceding 24 hours. Rebuilding from ledger rows also hydrates old files
+    /// whose deduplication entries have timestamps but no amounts.
+    fn record_received_window(&mut self, rows: &[IncomingTransfer], checked_at: DateTime<Utc>) {
+        let mut ids = HashSet::new();
+        let transfers: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                row.amount > 0
+                    && row.created_at > checked_at - CHANGE_WINDOW
+                    && row.created_at <= checked_at
+                    && ids.insert(&row.id)
+            })
+            .take(MAX_SEEN + 1)
+            .map(|row| ReceivedTransfer {
+                at: row.created_at,
+                amount: row.amount,
+            })
+            .collect();
+        self.received_window = (transfers.len() <= MAX_SEEN).then_some(ReceivedWindow {
+            checked_at,
+            transfers,
+        });
+    }
+
+    /// Incoming credit within (now - 24h, now], without balance/spending.
+    /// A missing, stale or future-dated scan is unknown, never a zero. The
+    /// display is as current as the poll cadence; expired transfers age out
+    /// even before the next network read.
+    fn received_24h(&self, now: DateTime<Utc>) -> Option<i64> {
+        let window = self.received_window.as_ref()?;
+        if now < window.checked_at
+            || now - window.checked_at > POLL_INTERVAL
+            || window.transfers.len() > MAX_SEEN
+            || window.transfers.iter().any(|row| row.amount <= 0)
+        {
+            return None;
+        }
+        window
+            .transfers
+            .iter()
+            .filter(|row| row.at > now - CHANGE_WINDOW && row.at <= now)
+            .try_fold(0i64, |sum, row| sum.checked_add(row.amount))
     }
 
     /// What a notification would announce now, if anything.
@@ -474,13 +536,13 @@ fn spending_organization(shared: &DaemonShared) -> Option<String> {
 // ---- the balance reply ----
 
 /// `near_ai_balance`'s answer: the balance, and beside it the 24-hour change
-/// and the credit received so far.
+/// and cumulative/rolling incoming credit for the same organization.
 ///
 /// `change_24h_nanos` and `change_24h_text` are null with no reading from
-/// about a day ago, and `change_24h_text` is also null for a change under a
-/// cent, which the tile does not say. `received_total_nanos` is null until
-/// one whole read of the transfer ledger has finished. All three are null in
-/// every state but `known`.
+/// about a day ago. Known zero/subcent changes have neutral copy. Incoming
+/// 24-hour fields require a fresh complete ledger scan. Separate unavailable
+/// copy explains unknown metrics without fabricating numeric values. No
+/// summary fields are added in states other than `known`.
 pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> serde_json::Value {
     let mut value = report.to_value();
     let BalanceReport::Known(reading) = report else {
@@ -495,11 +557,28 @@ pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> ser
         .then(|| samples.change_24h(reading.observed_at, reading.remaining_nanos))
         .flatten();
     if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "change_24h_unavailable_text".into(),
+            crate::private_inference_copy::BALANCE_CHANGE_24H_UNAVAILABLE.into(),
+        );
+        object.insert(
+            "received_24h_unavailable_text".into(),
+            crate::private_inference_copy::CREDIT_RECEIVED_24H_UNAVAILABLE.into(),
+        );
         if let Some(change) = change {
             object.insert("change_24h_nanos".into(), change.into());
+            // Color reflects the displayed cents, while the raw numeric
+            // amount remains precise for non-visual consumers.
+            let direction = if change.unsigned_abs() < 10_000_000 {
+                0
+            } else {
+                change.signum()
+            };
+            object.insert("change_24h_direction".into(), direction.into());
             let text = crate::private_inference_copy::balance_change_line(change, BALANCE_SCALE);
             if !text.is_empty() {
                 object.insert("change_24h_text".into(), text.into());
+                object.remove("change_24h_unavailable_text");
             }
         }
         if record.scanned
@@ -517,6 +596,24 @@ pub(crate) fn balance_value(shared: &DaemonShared, report: BalanceReport) -> ser
                 "received_total_nanos".into(),
                 record.received_total_nanos.into(),
             );
+            if let Some(received) = record.received_24h(Utc::now()) {
+                object.insert("received_24h_nanos".into(), received.into());
+                object.insert(
+                    "received_24h_text".into(),
+                    crate::private_inference_copy::credit_received_24h_line(
+                        received,
+                        BALANCE_SCALE,
+                    )
+                    .into(),
+                );
+                if let Some(window) = &record.received_window {
+                    object.insert(
+                        "received_24h_checked_at".into(),
+                        window.checked_at.to_rfc3339().into(),
+                    );
+                }
+                object.remove("received_24h_unavailable_text");
+            }
         }
     }
     value
@@ -535,11 +632,16 @@ fn last_polls() -> &'static Mutex<HashMap<PathBuf, DateTime<Utc>>> {
 }
 
 /// Whether a poll is due at `now`, and if so, mark it started.
-fn take_poll_due(store: &ConfigStore, now: DateTime<Utc>) -> bool {
+fn take_poll_due_with_fresh(store: &ConfigStore, now: DateTime<Utc>, fresh: bool) -> bool {
     let mut map = last_polls().lock().unwrap_or_else(|e| e.into_inner());
     let last = map.get(store.dir()).copied();
+    let interval = if fresh {
+        Duration::seconds(5)
+    } else {
+        POLL_INTERVAL
+    };
     // A clock that went backwards reads as a poll just now.
-    if last.is_some_and(|last| now - last < POLL_INTERVAL && last <= now + POLL_INTERVAL) {
+    if last.is_some_and(|last| now - last < interval && last <= now + interval) {
         return false;
     }
     map.insert(store.dir().to_path_buf(), now);
@@ -551,13 +653,36 @@ fn take_poll_due(store: &ConfigStore, now: DateTime<Utc>) -> bool {
 /// verified against the commons before any incoming transfers are read.
 /// Cheap otherwise. Logs labels only.
 pub async fn poll(shared: &DaemonShared, now: DateTime<Utc>) {
+    poll_due(shared, now, false).await;
+}
+
+/// Balance reads also initialize the receipt summary; an explicit Refresh
+/// reads it again with the same five-second floor as the balance button.
+/// Called after the balance read releases the management-session lock.
+pub(super) async fn refresh_if_due(shared: &DaemonShared, fresh: bool) {
+    poll_due(shared, Utc::now(), fresh).await;
+}
+
+async fn poll_due(shared: &DaemonShared, now: DateTime<Utc>, fresh: bool) {
+    // A refresh button and the supervisor can race. Serialize complete polls
+    // so an earlier snapshot cannot overwrite a newer window after awaiting
+    // the session lock. No synchronous map lock crosses an await.
+    static POLLS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let lock = POLLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(shared.store.dir().to_path_buf())
+        .or_default()
+        .clone();
+    let _poll = lock.lock().await;
     if shared
         .settings
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .near_ai_session
         .is_none()
-        || !take_poll_due(&shared.store, now)
+        || !take_poll_due_with_fresh(&shared.store, now, fresh)
     {
         return;
     }
@@ -584,15 +709,25 @@ pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i
         result => {
             // Preserve seen transfer IDs, but suppress notifications while
             // this generation no longer has a verified active recipient.
-            update_record_checked(
+            let invalidated = update_record_checked(
                 shared,
                 records(),
                 ARRIVALS_FILE,
                 Some(expected_recipient.as_deref()),
                 |record| {
+                    let was_visible = record.recipient_ref.is_some();
                     record.recipient_ref = None;
+                    record.received_window = None;
+                    was_visible
                 },
-            );
+            )
+            .unwrap_or(false);
+            if invalidated {
+                shared.publish(
+                    crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED,
+                    serde_json::json!({}),
+                );
+            }
             return match result {
                 Ok(None) => Ok(0),
                 Err(()) => Err(anyhow::anyhow!("near_ai_credit_recipient_unavailable")),
@@ -600,17 +735,43 @@ pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i
             };
         }
     };
+    let checked_at = Utc::now();
     let cutoff = {
         let record = snapshot(&shared.store);
         (record.organization_id.as_deref() == Some(organization_id.as_str()))
-            .then(|| record.scan_cutoff())
+            .then(|| {
+                record
+                    .scan_cutoff()
+                    .map(|cutoff| cutoff.min(checked_at - CHANGE_WINDOW))
+            })
             .flatten()
     };
     let rows = balance::with_management_session(shared, api, |tokens| {
         fetch_incoming(api, tokens, organization_id.clone(), cutoff)
     })
-    .await?;
-    let added = update_record_checked(
+    .await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            let cleared = update_record_checked(
+                shared,
+                records(),
+                ARRIVALS_FILE,
+                Some(expected_recipient.as_deref()),
+                |record| {
+                    record.received_window = None;
+                },
+            );
+            if cleared.is_some() {
+                shared.publish(
+                    crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED,
+                    serde_json::json!({}),
+                );
+            }
+            return Err(error);
+        }
+    };
+    let applied = update_record_checked(
         shared,
         records(),
         ARRIVALS_FILE,
@@ -620,6 +781,7 @@ pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i
             record.recipient_ref = expected_recipient.clone();
             let first_read = !record.scanned;
             let added = record.apply_transfers(&rows);
+            record.record_received_window(&rows, checked_at);
             // Credit already in the ledger at the first read is history -- an
             // upgrade, or a new organization -- not an arrival. It becomes the
             // baseline without a notification, so "the first credit ever" is
@@ -629,15 +791,16 @@ pub(crate) async fn poll_with(shared: &DaemonShared, api: &CloudApi) -> Result<i
             }
             added
         },
-    )
-    .unwrap_or(0);
-    if added > 0 {
+    );
+    // A complete zero-arrival scan can turn unknown into zero or age a
+    // previous arrival out of the window, so it also refreshes the Home tile.
+    if applied.is_some() {
         shared.publish(
             crate::daemon::ipc::EVENT_NEAR_AI_BALANCE_CHANGED,
             serde_json::json!({}),
         );
     }
-    Ok(added)
+    Ok(applied.unwrap_or(0))
 }
 
 /// Read the ledger, newest first, back to `cutoff` (or all of it). May run
@@ -663,10 +826,12 @@ async fn fetch_incoming(
         rows.extend(page.transfers);
         match page.next_cursor {
             Some(next) if !done => cursor = Some(next),
-            _ => break,
+            _ => return Ok(rows),
         }
     }
-    Ok(rows)
+    // A bounded scan is not a complete ledger. Do not publish an undercount
+    // as a total or establish a notification baseline from partial pages.
+    Err(anyhow::anyhow!("near_ai_credit_scan_incomplete"))
 }
 
 /// Put `record` in place for `store`, in memory and on disk, as if earlier
