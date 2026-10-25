@@ -99,7 +99,7 @@ final class BalanceArrivalHomeTests: XCTestCase {
         XCTAssertNil(HomeFormat.balanceReceived(orphan, calls: model.balanceCalls))
     }
 
-    func testUnavailableHistoryUsesTheCoreExplanationWithoutInventingZero() throws {
+    func testUnavailableHistoryDrawsNothingWithoutInventingZero() throws {
         let status = BalanceStatus.parse(fromJSON: """
             {"state":"known","scale":9,"remaining_nanos":8200000000,
              "change_24h_nanos":null,"change_24h_text":null,
@@ -110,10 +110,9 @@ final class BalanceArrivalHomeTests: XCTestCase {
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let rendered = HomeFormat.balance(status, copy: copy, calls: model.balanceCalls)
-        XCTAssertEqual(rendered.detail, "24-hour balance change unavailable")
+        XCTAssertNil(rendered.detail)
         XCTAssertNil(rendered.detailInk)
-        XCTAssertEqual(HomeFormat.balanceReceived(status, calls: model.balanceCalls),
-                       "Amount received in 24 hours unavailable")
+        XCTAssertNil(HomeFormat.balanceReceived(status, calls: model.balanceCalls))
         XCTAssertNil(status.received24hNanos)
         XCTAssertNil(status.change24hNanos)
     }
