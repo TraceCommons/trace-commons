@@ -8,6 +8,7 @@ import XCTest
 /// disagree; an unmixed box is the caller's binding alone, with no value
 /// written over the system's.
 final class CheckboxMixedTests: XCTestCase {
+    @MainActor
     func test_anUnmixedBoxIsTheCallersBindingAlone() {
         var value = true
         let binding = Binding(get: { value }, set: { value = $0 })
@@ -15,6 +16,7 @@ final class CheckboxMixedTests: XCTestCase {
         XCTAssertEqual(sources.map(\.wrappedValue), [true])
     }
 
+    @MainActor
     func test_aMixedBoxReadsAsMixedToANativeToggle() {
         var value = false
         let binding = Binding(get: { value }, set: { value = $0 })
@@ -22,6 +24,7 @@ final class CheckboxMixedTests: XCTestCase {
         XCTAssertEqual(Set(sources.map(\.wrappedValue)), [true, false])
     }
 
+    @MainActor
     func test_settingAMixedBoxWritesThroughToTheCaller() {
         var value = false
         let binding = Binding(get: { value }, set: { value = $0 })

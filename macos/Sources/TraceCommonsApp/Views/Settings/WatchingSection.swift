@@ -11,9 +11,9 @@ struct WatchingSection: View {
             watcher(paused: model.status.paused, armed: Self.controlsArmed(
                 read: model.statusRead, lastReadFailed: model.statusReadFailed, startup: model.startup))
         }
-        GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle) {
+        GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {
             GlassRefreshButton(SettingsLegacyWords.refresh, action: model.refreshSettings)
-        } content: {
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.daemonSettings == nil {
                     SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
@@ -37,10 +37,10 @@ struct WatchingSection: View {
     /// is current (`controlsArmed`). Pausing here is until it is resumed, as
     /// #1146's is; the menu bar keeps the timed pauses.
     private func watcher(paused: Bool, armed: Bool) -> some View {
-        GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle) {
+        GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle, accessory: {
             GlassChip(glass: paused ? SettingsLegacyWords.watcherPaused : SettingsLegacyWords.watcherWatching,
                       muted: paused)
-        } content: {
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                 Text(SettingsLegacyWords.watcherCaption)
                     .glassType(GlassTokens.TypeScale.caption)

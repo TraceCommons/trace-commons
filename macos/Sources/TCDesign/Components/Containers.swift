@@ -228,7 +228,11 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
 
     /// The head and anything under it.
     private var stack: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        // Alignment guides may run outside the main actor. Resolve the
+        // font metric here and capture only the immutable scalar values.
+        let iconTopInset = Self.iconTopInset
+        let titleCapHeight = Self.titleCapHeight
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
                 HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
                     // The icon's top on the title's cap height, the top
@@ -237,7 +241,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                         .glassGlyph(Self.iconSize, weight: .regular)
                         .foregroundStyle(promo == nil ? GlassColor.textSecondary : GlassColor.accentText)
                         .frame(width: Self.iconColumn)
-                        .alignmentGuide(.iconTitleTop) { $0[.top] + Self.iconTopInset }
+                        .alignmentGuide(.iconTitleTop) { $0[.top] + iconTopInset }
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
@@ -245,7 +249,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                                 .glassType(GlassTokens.TypeScale.bodyStrong)
                                 .foregroundStyle(GlassColor.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - Self.titleCapHeight }
+                                .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - titleCapHeight }
                                 .accessibilityAddTraits(.isHeader)
                             if subtitle.isEmpty { infoButton }
                         }

@@ -19,7 +19,7 @@ enum DaemonWork {
     )
 
     /// Runs `work` on the daemon-call queue and resumes with its answer.
-    static func run<T>(_ work: @escaping () -> T) async -> T {
+    static func run<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { continuation in
             queue.async { continuation.resume(returning: work()) }
         }

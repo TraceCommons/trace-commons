@@ -93,7 +93,7 @@ struct ManagedSessionsSection: View {
         case install
     }
 
-    static func toolArea(_ snapshot: ManagedSnapshot) -> ToolArea {
+    nonisolated static func toolArea(_ snapshot: ManagedSnapshot) -> ToolArea {
         if !snapshot.capabilities.terminalLaunch { return .noTerminal }
         if snapshot.needsToolInstallation { return .install }
         return .buttons

@@ -604,6 +604,7 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
 /// a hosting view of any content type: the `MenuBarExtra`'s hosting view
 /// is generic over a type SwiftUI does not expose, and this conformance
 /// reaches its settings through a plain `NSView`.
+@MainActor
 protocol HostingWindowSizing: AnyObject {
     var sizingOptions: NSHostingSizingOptions { get set }
     var safeAreaRegions: SafeAreaRegions { get set }

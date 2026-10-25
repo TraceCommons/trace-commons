@@ -101,7 +101,7 @@ struct SessionDetailView: View {
     /// else the app's own record's. Withdraw stands on the record, as the
     /// legacy row offered it, so reading the detail, or failing to, never
     /// hides it or its outcome. An unknown status still offers none.
-    static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {
+    nonisolated static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {
         detail?.contributionStatus ?? record.status
     }
 

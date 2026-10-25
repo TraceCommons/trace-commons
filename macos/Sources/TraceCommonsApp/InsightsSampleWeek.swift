@@ -60,7 +60,10 @@ enum InsightsSampleWeek {
         try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    private static let coverage: [String: Any] = ["known": 34, "partial": 2, "unknown": 1, "reasons": [String: Any]()]
+    // Build untyped JSON values per request, so no shared Any container crosses tasks.
+    private static var coverage: [String: Any] {
+        ["known": 34, "partial": 2, "unknown": 1, "reasons": [String: Any]()]
+    }
     private static let weeks = ["2026-10-05", "2026-09-28", "2026-09-21", "2026-09-07", "2026-08-31"]
 
     private static func share(_ numerator: Int, _ denominator: Int, _ permille: Int) -> [String: Any] {
@@ -71,35 +74,37 @@ enum InsightsSampleWeek {
         ["date": date, "uncached": uncached, "cache_read": read, "cache_write": write, "output": output]
     }
 
-    static let overview: [String: Any] = [
-        "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
-        "coverage": coverage, "undated_sessions": 0, "sessions": 37,
-        "sources": [
-            ["source": "claude_code", "sessions": 31, "tokens": 45_000_000,
-             "cache_share": share(38_500_000, 44_150_000, 872), "largest_session": ["tokens": 4_400_000],
-             "change_permille": -120, "best": ["previous_best_permille": 840, "is_new_best": true]],
-            ["source": "codex", "sessions": 6, "tokens": 6_200_000,
-             "cache_share": share(4_588_000, 6_200_000, 740), "largest_session": ["tokens": 1_300_000],
-             "change_permille": 40, "best_week": "not_best"],
-        ],
-        "by_day": [
-            day("2026-10-05", 400_000, 6_100_000, 500_000, 120_000),
-            day("2026-10-06", 600_000, 8_300_000, 700_000, 150_000),
-            day("2026-10-07", 500_000, 9_000_000, 800_000, 180_000),
-            day("2026-10-08", 400_000, 7_200_000, 600_000, 140_000),
-            day("2026-10-09", 300_000, 5_400_000, 400_000, 100_000),
-            day("2026-10-10", 50_000, 900_000, 100_000, 20_000),
-            day("2026-10-11", 100_000, 1_600_000, 200_000, 30_000),
-        ],
-        "codex_interval_tokens": 6_200_000,
-        "by_model": [
-            ["label": "claude-haiku-5-5", "tokens": 2_100_000], ["label": "claude-opus-5-5", "tokens": 29_000_000],
-            ["label": "claude-sonnet-5-5", "tokens": 14_000_000], ["label": "gpt-5-codex", "tokens": 6_200_000],
-            ["label": NSNull(), "tokens": 800_000],
-        ],
-        "by_tool": [["source": "claude_code", "tokens": 45_000_000], ["source": "codex", "tokens": 6_200_000]],
-        "by_project": "not_available_for_analyzed_files", "weeks": weeks,
-    ]
+    static var overview: [String: Any] {
+        [
+            "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
+            "coverage": coverage, "undated_sessions": 0, "sessions": 37,
+            "sources": [
+                ["source": "claude_code", "sessions": 31, "tokens": 45_000_000,
+                 "cache_share": share(38_500_000, 44_150_000, 872), "largest_session": ["tokens": 4_400_000],
+                 "change_permille": -120, "best": ["previous_best_permille": 840, "is_new_best": true]],
+                ["source": "codex", "sessions": 6, "tokens": 6_200_000,
+                 "cache_share": share(4_588_000, 6_200_000, 740), "largest_session": ["tokens": 1_300_000],
+                 "change_permille": 40, "best_week": "not_best"],
+            ],
+            "by_day": [
+                day("2026-10-05", 400_000, 6_100_000, 500_000, 120_000),
+                day("2026-10-06", 600_000, 8_300_000, 700_000, 150_000),
+                day("2026-10-07", 500_000, 9_000_000, 800_000, 180_000),
+                day("2026-10-08", 400_000, 7_200_000, 600_000, 140_000),
+                day("2026-10-09", 300_000, 5_400_000, 400_000, 100_000),
+                day("2026-10-10", 50_000, 900_000, 100_000, 20_000),
+                day("2026-10-11", 100_000, 1_600_000, 200_000, 30_000),
+            ],
+            "codex_interval_tokens": 6_200_000,
+            "by_model": [
+                ["label": "claude-haiku-5-5", "tokens": 2_100_000], ["label": "claude-opus-5-5", "tokens": 29_000_000],
+                ["label": "claude-sonnet-5-5", "tokens": 14_000_000], ["label": "gpt-5-codex", "tokens": 6_200_000],
+                ["label": NSNull(), "tokens": 800_000],
+            ],
+            "by_tool": [["source": "claude_code", "tokens": 45_000_000], ["source": "codex", "tokens": 6_200_000]],
+            "by_project": "not_available_for_analyzed_files", "weeks": weeks,
+        ]
+    }
 
     /// Six weeks, oldest first; `nil` is a week with no figure.
     private static func patternWeeks(_ values: [Int?]) -> [[String: Any]] {
@@ -120,58 +125,64 @@ enum InsightsSampleWeek {
         ["letter": letter, "ext": ext ?? NSNull(), "reads": reads, "after_shrink": shrink, "tokens": tokens]
     }
 
-    static let patterns: [String: Any] = [
-        "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
-        "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
-        "long_context_threshold": 150_000,
-        "cards": [
-            card("repeated_reads", tokens: 2_300_000, count: 41, files: 6, sessions: 9,
-                 basis: "estimate_from_result_size", inferred: false, change: 180,
-                 weeks: [1_100_000, 1_600_000, nil, 1_900_000, 1_500_000, 2_300_000]),
-            card("retried_calls", tokens: 410_000, count: 37, sessions: 7,
-                 basis: "estimate_from_result_size", inferred: false, change: -60,
-                 weeks: [520_000, 470_000, nil, 390_000, 440_000, 410_000]),
-            card("edit_fail_edit", tokens: 180_000, count: 12, sessions: 5,
-                 basis: "estimate_from_result_size", inferred: true, change: 90,
-                 weeks: [120_000, 200_000, nil, 150_000, 165_000, 180_000]),
-            card("long_context", tokens: 9_800_000, count: nil, sessions: 6,
-                 basis: "from_counters", inferred: false, change: 310,
-                 weeks: [4_100_000, 6_300_000, nil, 5_200_000, 7_500_000, 9_800_000]),
-        ],
-        "reread_files": [
-            reread("A", "ts", 9, 2, 640_000), reread("B", "rs", 8, 0, 510_000), reread("C", "md", 7, 3, 420_000),
-            reread("D", "json", 6, 0, 300_000), reread("E", nil, 5, 0, 150_000),
-        ],
-        "weeks": weeks,
-    ]
+    static var patterns: [String: Any] {
+        [
+            "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
+            "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
+            "long_context_threshold": 150_000,
+            "cards": [
+                card("repeated_reads", tokens: 2_300_000, count: 41, files: 6, sessions: 9,
+                     basis: "estimate_from_result_size", inferred: false, change: 180,
+                     weeks: [1_100_000, 1_600_000, nil, 1_900_000, 1_500_000, 2_300_000]),
+                card("retried_calls", tokens: 410_000, count: 37, sessions: 7,
+                     basis: "estimate_from_result_size", inferred: false, change: -60,
+                     weeks: [520_000, 470_000, nil, 390_000, 440_000, 410_000]),
+                card("edit_fail_edit", tokens: 180_000, count: 12, sessions: 5,
+                     basis: "estimate_from_result_size", inferred: true, change: 90,
+                     weeks: [120_000, 200_000, nil, 150_000, 165_000, 180_000]),
+                card("long_context", tokens: 9_800_000, count: nil, sessions: 6,
+                     basis: "from_counters", inferred: false, change: 310,
+                     weeks: [4_100_000, 6_300_000, nil, 5_200_000, 7_500_000, 9_800_000]),
+            ],
+            "reread_files": [
+                reread("A", "ts", 9, 2, 640_000), reread("B", "rs", 8, 0, 510_000), reread("C", "md", 7, 3, 420_000),
+                reread("D", "json", 6, 0, 300_000), reread("E", nil, 5, 0, 150_000),
+            ],
+            "weeks": weeks,
+        ]
+    }
 
-    private static let cacheGoal: [String: Any] = ["kind": "cache_share_at_least", "source": "claude_code", "permille": 850]
+    private static var cacheGoal: [String: Any] {
+        ["kind": "cache_share_at_least", "source": "claude_code", "permille": 850]
+    }
 
     private static func marks(_ marks: [String], _ direction: String, from: Int) -> [String: Any] {
         ["marks": marks, "change": ["direction": direction, "from": from]]
     }
 
-    static let comparisons: [String: Any] = [
-        "feed": "counter_pass", "week_start": "2026-10-05",
-        "goals": [
-            ["id": "g1", "goal": cacheGoal, "figure": 872,
-             "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
-            ["id": "g2", "goal": ["kind": "repeated_reads_under", "tokens": 2_000_000], "figure": 2_300_000,
-             "marks": marks(["met", "met", "no_figure", "met", "met", "not_met"], "up", from: 1_500_000)],
-        ],
-        "lever": ["pick": ["kind": "repeated_reads", "tokens": 2_300_000, "count": 41, "files": 6, "ratio_permille": 1500],
-                  "disabled": [String](), "card_enabled": true],
-        "recap": [
-            "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
-            "sources": [["source": "claude_code", "tokens": 45_000_000, "change_permille": -120],
-                        ["source": "codex", "tokens": 6_200_000, "change_permille": 40]],
-            "items": [
-                ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
-                ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
-                ["kind": "pattern_up", "pattern": "long_context", "up_permille": 310],
+    static var comparisons: [String: Any] {
+        [
+            "feed": "counter_pass", "week_start": "2026-10-05",
+            "goals": [
+                ["id": "g1", "goal": cacheGoal, "figure": 872,
+                 "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
+                ["id": "g2", "goal": ["kind": "repeated_reads_under", "tokens": 2_000_000], "figure": 2_300_000,
+                 "marks": marks(["met", "met", "no_figure", "met", "met", "not_met"], "up", from: 1_500_000)],
             ],
-        ],
-    ]
+            "lever": ["pick": ["kind": "repeated_reads", "tokens": 2_300_000, "count": 41, "files": 6, "ratio_permille": 1500],
+                      "disabled": [String](), "card_enabled": true],
+            "recap": [
+                "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
+                "sources": [["source": "claude_code", "tokens": 45_000_000, "change_permille": -120],
+                            ["source": "codex", "tokens": 6_200_000, "change_permille": 40]],
+                "items": [
+                    ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
+                    ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
+                    ["kind": "pattern_up", "pattern": "long_context", "up_permille": 310],
+                ],
+            ],
+        ]
+    }
 
     /// One Claude Code trace, 52 turns: context grows to the threshold,
     /// the cache is written again after a pause, a file is read again, and

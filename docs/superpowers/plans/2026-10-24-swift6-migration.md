@@ -1,0 +1,36 @@
+# Swift 6 Migration Implementation Plan
+
+> **For agentic workers:** Use subagent-driven-development to implement the independent app, library, and test scopes, then integrate and verify them together.
+
+**Goal:** Run every native macOS Swift target in Swift 6 language mode, resolve the observed concurrency diagnostics, and open a reviewable PR.
+
+**Architecture:** Keep existing main-actor UI ownership and the synchronized Rust callback boundary. Make immutable geometry independent of actor isolation where correct, preserve Sendable callback contracts, and migrate the remaining app/app-test/demo targets. Shared native components already use Swift 6.
+
+**Tech Stack:** SwiftPM, SwiftUI/AppKit, XCTest/Swift Testing, existing Rust FFI.
+
+**Spec:** User-approved scope in this conversation: a separate migration PR while staging build 22 continues.
+
+## Global Constraints
+
+- Keep macOS 14 minimum, UI behavior and animations, Rust ABI, release channel identities, and existing dependencies.
+- Resolve isolation and callback ownership explicitly; add no blanket unchecked Sendable, preconcurrency, or warning suppression to silence failures.
+- Preserve the existing lock/lifetime guarantees of C callbacks and subscription teardown.
+- Validate on the CI-supported Xcode/Swift toolchain as well as the available local compiler; do not rely on Swift 6.4-only APIs.
+- Keep staging build 22's frozen source commit and installation task independent.
+
+## Tasks
+
+- [ ] Flip the three remaining Swift 5 targets to Swift 6, reset relocated Swift artifacts, rebuild FFI, and capture compiler diagnostics as the failing baseline.
+- [ ] Repair app callback/isolation diagnostics without changing event ordering or UI work placement.
+- [ ] Repair design-library pure geometry and test actor isolation, with focused regressions for meaningful behavior changes.
+- [ ] Repair app-test actor/discovery compatibility and the FFI demo under the stricter mode.
+- [ ] Run clean builds, affected tests and the broad suite; check concurrency/lifecycle regressions and review independently.
+- [ ] Add a useful CI guard for migrated targets, open a PR with exact validation results, and leave merging to explicit user authorization.
+
+## Review Focus
+
+- Native callbacks arriving from non-main threads must hand off UI updates safely and preserve teardown barriers.
+- Refresh/subscription callbacks must not publish stale state after detach or cancellation.
+- Geometry/alignment callbacks must remain pure and preserve measured layout.
+- XCTest discovery must execute actor-isolated cases without unsafe casts or runtime crashes.
+- Build guards must not raise deployment floors or rely on a newer toolchain than release CI.

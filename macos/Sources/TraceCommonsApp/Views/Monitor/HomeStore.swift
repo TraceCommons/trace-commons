@@ -56,7 +56,7 @@ final class HomeStore {
     }
 
     /// History rows read at once: the page, not the whole record.
-    static let historyLimit = 100
+    nonisolated static let historyLimit = 100
 
     /// The verdict news card, in the daemon's words; nil when there is no
     /// news to show on History.

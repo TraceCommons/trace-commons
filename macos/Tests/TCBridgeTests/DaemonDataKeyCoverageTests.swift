@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 @testable import TCShellCore
 import XCTest
@@ -154,12 +155,9 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
 
     func testEveryKeyTheDaemonSendsIsDeclared() throws {
         let daemon = try startDaemonWithOneSession()
-        var frames: [String] = []
-        let framesLock = NSLock()
+        let frames = OSAllocatedUnfairLock(initialState: [String]())
         let subscription = try XCTUnwrap(daemon.subscribe { json in
-            framesLock.lock()
-            frames.append(json)
-            framesLock.unlock()
+            frames.withLock { $0.append(json) }
         })
         defer { _ = daemon.unsubscribe(subscription) }
 
@@ -268,15 +266,11 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         // them. `preview_ready` is published from the scheduler's thread, so
         // give it a moment to land.
         for _ in 0..<100 {
-            framesLock.lock()
-            let seen = frames.contains { $0.contains(#""preview_ready""#) }
-            framesLock.unlock()
+            let seen = frames.withLock { $0.contains { $0.contains(#""preview_ready""#) } }
             if seen { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        framesLock.lock()
-        let delivered = frames
-        framesLock.unlock()
+        let delivered = frames.withLock { $0 }
         for frame in delivered {
             let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
             let name = try XCTUnwrap(object["event"] as? String)

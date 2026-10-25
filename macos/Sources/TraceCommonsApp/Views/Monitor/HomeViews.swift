@@ -280,7 +280,6 @@ private struct HomeOverview: View {
     /// waiting opens Traces, contributed opens History, and pending credit
     /// opens Private AI.
     private var stats: some View {
-        let condition = HomeFormat.pendingCondition(freshCredit)
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)

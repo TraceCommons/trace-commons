@@ -163,6 +163,7 @@ final class ComponentContractTests: XCTestCase {
     /// A tinted count is #1146's verdict pair, whose contrast is checked
     /// with the status text colours on their own tints; a status with no
     /// tint keeps the white count pill.
+    @MainActor
     func test_aTintedCountIsTheVerdictPair() {
         let c = GlassTokens.Color.self
         XCTAssertTrue(GlassBadge.tinted(.ask) == (c.tintAsk, c.statusAskText))

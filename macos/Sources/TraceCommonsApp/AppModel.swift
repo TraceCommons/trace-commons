@@ -3823,13 +3823,20 @@ final class AppModel: ObservableObject {
 
     func openPreview(entryID: String) async -> PreviewOutcome {
         guard let client else { return .failed("the watcher isn't running") }
-        return await Task.detached(priority: .userInitiated) { () -> PreviewOutcome in
-            do {
-                return .opened(try client.openPreview(entryID: entryID))
-            } catch {
-                return .failed("\(error)")
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // The blocking redaction pass creates a fresh handle here.
+                // Resume transfers it once to the main-actor caller; this
+                // worker keeps no reference to use after that handoff.
+                let outcome: PreviewOutcome
+                do {
+                    outcome = .opened(try client.openPreview(entryID: entryID))
+                } catch {
+                    outcome = .failed("\(error)")
+                }
+                continuation.resume(returning: outcome)
             }
-        }.value
+        }
     }
 
     /// Opens a real preview for the first waiting entry, runs a real search
@@ -4057,11 +4064,16 @@ extension AppModel: FirstRunDaemon {
     }
 
     func setSourceSettings(settingsJSON: String) async -> Bool {
-        guard let object = try? JSONSerialization.jsonObject(with: Data(settingsJSON.utf8)),
-            let declarations = object as? [String: Any]
-        else { return false }
-        guard case .success(let settings) = await firstRunCall({ try $0.setSettings(declarations) })
-        else { return false }
+        let result = await firstRunCall { client in
+            // Only the serialized input crosses to the worker. The untyped
+            // dictionary stays local to the call that validates and sends it.
+            let object = try JSONSerialization.jsonObject(with: Data(settingsJSON.utf8))
+            guard let declarations = object as? [String: Any] else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            return try client.setSettings(declarations)
+        }
+        guard case .success(let settings) = result else { return false }
         publishIfChanged(\.daemonSettings, settings)
         return true
     }
@@ -4373,7 +4385,7 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.
-    private func firstRunCall<T>(_ work: @escaping (DaemonClient) throws -> T) async -> Result<T, Error>? {
+    private func firstRunCall<T: Sendable>(_ work: @escaping @Sendable (DaemonClient) throws -> T) async -> Result<T, Error>? {
         guard let client else { return nil }
         // On the daemon-call queue, not the cooperative pool: a call that
         // waits on the network (a renewal, a ceremony) must not hold one of

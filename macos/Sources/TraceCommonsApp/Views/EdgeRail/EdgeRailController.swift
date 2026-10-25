@@ -125,7 +125,7 @@ final class EdgeRailOpening {
 
     init(
         state: EdgeRailState,
-        nextTurn: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void = GlassWindowFrame.onNextTurn,
+        nextTurn: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void = { GlassWindowFrame.onNextTurn($0) },
         animate: @escaping Animate = EdgeRailOpening.animate,
         place: @escaping @MainActor (Bool) -> Void
     ) {

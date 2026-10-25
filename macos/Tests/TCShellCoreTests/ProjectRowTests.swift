@@ -13,12 +13,12 @@ final class ProjectRowTests: XCTestCase {
     /// RFC 3339, optionally with fractional seconds.
     private func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
         decoder.dateDecodingStrategy = .custom { d in
             let text = try d.singleValueContainer().decode(String.self)
+            let withFraction = ISO8601DateFormatter()
+            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let plain = ISO8601DateFormatter()
+            plain.formatOptions = [.withInternetDateTime]
             if let x = withFraction.date(from: text) { return x }
             if let x = plain.date(from: text) { return x }
             throw DecodingError.dataCorrupted(

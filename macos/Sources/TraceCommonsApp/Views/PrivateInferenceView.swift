@@ -63,7 +63,7 @@ struct PrivateAISwitchCard: View {
     let calls: PrivateInferenceCalls
     let busy: Bool
     let refusal: String?
-    let onSet: (Bool) -> Void
+    let onSet: @MainActor @Sendable (Bool) -> Void
     let onDismiss: () -> Void
     /// Re-reads the connection from the refresh control beside its heading.
     var onRefresh: (() -> Void)?

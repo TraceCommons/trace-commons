@@ -10,6 +10,7 @@ import XCTest
 final class CardBeaconTests: XCTestCase {
     /// A pass every 15s, the first soon after focus; the light fades in
     /// and out inside one turn, and the turn ends well before the next.
+    @MainActor
     func test_aPassComesEvery15SecondsAndRestsBetween() {
         XCTAssertEqual(GlassCardBeacon.every, .seconds(15))
         XCTAssertLessThanOrEqual(GlassCardBeacon.first, .seconds(1), "the first pass comes soon after focus")
@@ -19,6 +20,7 @@ final class CardBeaconTests: XCTestCase {
 
     /// The light is soft (owner, 2026-10-22: dimmed a bit): never at full
     /// strength, and its glow softer than the edge it lights.
+    @MainActor
     func test_theLightIsSoft() throws {
         XCTAssertLessThan(GlassCardBeacon.peak, 1)
         XCTAssertGreaterThan(GlassCardBeacon.peak, 0.3, "still seen")
@@ -30,6 +32,7 @@ final class CardBeaconTests: XCTestCase {
 
     /// A turn still under way when the window comes back into focus ends
     /// before the next starts; otherwise the first pass waits `first`.
+    @MainActor
     func test_aTurnUnderWayIsNotCutShort() {
         let now = ContinuousClock.now
         XCTAssertEqual(GlassCardBeacon.firstWait(now: now, passEnds: nil), GlassCardBeacon.first)
@@ -39,6 +42,7 @@ final class CardBeaconTests: XCTestCase {
 
     /// Two narrow lit arcs half a turn apart, top and bottom at the start
     /// (owner, 2026-10-22: two light sources), clear everywhere else.
+    @MainActor
     func test_twoBeamsHalfATurnApart() throws {
         let stops = GlassCardBeacon.beam(.white).stops
         XCTAssertEqual(stops.first?.color, .clear)

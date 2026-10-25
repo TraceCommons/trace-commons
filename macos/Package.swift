@@ -118,7 +118,7 @@ let package = Package(
                 "TCUpdates",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", ffiLibDir,
@@ -155,7 +155,7 @@ let package = Package(
         .testTarget(
             name: "TraceCommonsAppTests",
             dependencies: ["TraceCommonsApp"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", ffiLibDir,
@@ -166,7 +166,7 @@ let package = Package(
         .executableTarget(
             name: "tc-ffi-demo",
             dependencies: ["TCBridge"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", ffiLibDir,

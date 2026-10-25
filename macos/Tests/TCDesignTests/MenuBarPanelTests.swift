@@ -7,6 +7,7 @@ import XCTest
 final class MenuBarPanelTests: XCTestCase {
     /// A day with nothing draws no bar; any count draws at least 6pt, and
     /// more draws taller.
+    @MainActor
     func test_aZeroDrawsNothingAndAnyCountIsVisible() {
         XCTAssertEqual(GlassDayGraph.height(0, max: 5), 0)
         XCTAssertGreaterThanOrEqual(GlassDayGraph.height(1, max: 100), 6)
@@ -18,6 +19,7 @@ final class MenuBarPanelTests: XCTestCase {
     /// keeps the full graph's dot pitch across eleven days in the
     /// popover's width, where the full graph's gaps crowd the dots closer
     /// than they are apart down the column.
+    @MainActor
     func test_theCompactBarGraphKeepsTheDotPitch() {
         let width: CGFloat = 285 - 2 * GlassTokens.Space.s5
         let days = 11
@@ -34,6 +36,7 @@ final class MenuBarPanelTests: XCTestCase {
     /// The bars fit the item: six steps of two bars make a graph of under
     /// 18pt, centred in the item's height as the mark is, and each kind of
     /// bar's busiest step reaches the graph's edge without crossing it.
+    @MainActor
     func test_theBarsStayInsideTheItem() {
         XCTAssertLessThanOrEqual(GlassMenuBarStrip.graphWidth(steps: 6), 18)
         XCTAssertEqual(GlassMenuBarStrip.graphWidth(steps: 0), 0)
@@ -59,6 +62,7 @@ final class MenuBarPanelTests: XCTestCase {
 
     /// A step with nothing draws no segment; any count draws at least
     /// `least`, beside a busy step.
+    @MainActor
     func test_aZeroDrawsNoSegmentAndAnyCountShows() {
         let traces = [GlassDayColumn(id: "0", up: 0, down: 1), GlassDayColumn(id: "1", up: 1_000, down: 0)]
         let steps = GlassMenuBarStrip.steps(traces: traces, privateAI: nil, condition: .live)
@@ -76,6 +80,7 @@ final class MenuBarPanelTests: XCTestCase {
 
     /// Every segment's length is whole points, whatever the count, so its
     /// end is crisp on a 1x display.
+    @MainActor
     func test_everySegmentEndsOnAWholePoint() {
         for max in 1 ... 12 {
             for count in 0 ... max {
@@ -88,6 +93,7 @@ final class MenuBarPanelTests: XCTestCase {
     /// Private AI and traces are separate bars, each on its own scale:
     /// verified never outreaches the calls it is counted among, and a
     /// handful of traces reach as far as hundreds of calls.
+    @MainActor
     func test_eachKindOfBarHasItsOwnScale() {
         let traces = [GlassDayColumn(id: "0", up: 1, down: 1), GlassDayColumn(id: "1", up: 1, down: 1)]
         let ai = [GlassDayColumn(id: "0", up: 250, down: 500), GlassDayColumn(id: "1", up: 500, down: 500)]
@@ -99,6 +105,7 @@ final class MenuBarPanelTests: XCTestCase {
     }
 
     /// The badge shows two digits at most: 99+ past 99.
+    @MainActor
     func test_theBadgeStopsAtNinetyNine() {
         XCTAssertEqual(GlassMenuBarStrip.badgeText(1), "1")
         XCTAssertEqual(GlassMenuBarStrip.badgeText(99), "99")
@@ -110,6 +117,7 @@ final class MenuBarPanelTests: XCTestCase {
     /// and the attention mark, never the last activity; trouble keeps the
     /// bars and adds the mark; pausing greys only the trace segments; live
     /// data draws as recorded.
+    @MainActor
     func test_anUnavailableCoreIsNeverDrawnAsActivity() {
         let columns = (0 ..< 6).map { GlassDayColumn(id: String($0), up: $0, down: 6 - $0) }
         let down = GlassMenuBarStrip.steps(traces: columns, privateAI: columns, condition: .unavailable)
@@ -139,6 +147,7 @@ final class MenuBarPanelTests: XCTestCase {
     /// The nudge mark: the news ring only in the badge's empty slot on a
     /// live strip; the halo only around a badge that is drawn. Never over
     /// the attention mark, never on an unavailable strip.
+    @MainActor
     func test_theMarkIsDrawnOnlyWhereItsSlotIs() {
         XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: nil, condition: .live), .news)
         XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: 3, condition: .live), .none)

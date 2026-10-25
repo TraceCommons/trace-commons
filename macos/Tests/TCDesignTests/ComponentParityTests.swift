@@ -10,6 +10,7 @@ final class ComponentParityTests: XCTestCase {
     // MARK: Glyphs
 
     /// Every glyph parses, and each is drawn at #1146's size and stroke.
+    @MainActor
     func test_everyGlyphParsesAtTheReferenceSize() throws {
         for glyph in GlassGlyph.allCases {
             let path = try XCTUnwrap(glyph.path, "\(glyph) does not parse")
@@ -33,12 +34,14 @@ final class ComponentParityTests: XCTestCase {
     // MARK: Components
 
     /// The folder button: 10pt sides, bold (#1146 `.tc-btn--folder`).
+    @MainActor
     func test_theFolderButtonIsTheReferenceButton() {
         XCTAssertEqual(GlassFolderButton.horizontalPadding, 10)
         XCTAssertEqual(GlassFolderButton.type.weight, .bold)
     }
 
     /// The expander's 6 / 2 / 2 padding (#1146 `.tc-expander`).
+    @MainActor
     func test_theExpanderPadding() {
         XCTAssertEqual(GlassExpander.padding, EdgeInsets(top: 6, leading: 2, bottom: 2, trailing: 2))
     }
@@ -57,6 +60,7 @@ final class ComponentParityTests: XCTestCase {
 
     /// The tree's session tile carries #1146's mark; the folder's is the
     /// core's word, from the window's root, and none is drawn without it.
+    @MainActor
     func test_theTileMarks() {
         XCTAssertEqual(GlassToolTile.sessionMark, "▤")
         XCTAssertEqual(EnvironmentValues().glassFolderMark, "")
@@ -65,6 +69,7 @@ final class ComponentParityTests: XCTestCase {
     /// A switch takes #1146's 38pt column, and a row without one reserves
     /// none, so the Traces tree's pills sit beside the row menu (owner,
     /// 2026-10-08: no switches on the tree).
+    @MainActor
     func test_onlyARowWithASwitchTakesTheWatchColumn() throws {
         XCTAssertEqual(GlassListRow.watchColumn, 38)
         let rows = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["ListRow.swift"])
@@ -79,6 +84,7 @@ final class ComponentParityTests: XCTestCase {
     }
 
     /// The bar graph's labels are `statusOff`, primary under the pointer.
+    @MainActor
     func test_theBarGraphLabels() {
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: false), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: true), GlassTokens.Color.textPrimary)
@@ -87,6 +93,7 @@ final class ComponentParityTests: XCTestCase {
     /// The tapered matrix: nothing lit for nothing, one dot for a count of
     /// one, a full column at the maximum brightening to the tip, and a
     /// partial last dot that keeps 9 apart from 11.
+    @MainActor
     func test_theBarGraphTapersItsDots() {
         XCTAssertEqual(GlassBarGraph.dotAlphas(0, of: 40), Array(repeating: 0, count: 7))
         let one = GlassBarGraph.dotAlphas(1, of: 40)
@@ -102,6 +109,7 @@ final class ComponentParityTests: XCTestCase {
 
     /// A thin graph's outer labels hug its edges, so a label wider than its
     /// column is never cut; a wide graph centres every label.
+    @MainActor
     func test_theBarGraphKeepsItsOuterLabelsInside() {
         XCTAssertEqual(GlassBarGraph.labelAlignment(index: 0, count: 42, thin: true), .leading)
         XCTAssertEqual(GlassBarGraph.labelAlignment(index: 41, count: 42, thin: true), .trailing)
@@ -121,6 +129,7 @@ final class ComponentParityTests: XCTestCase {
     /// the pointer, secondary otherwise; a 2pt line reaching 30% past the
     /// tab each side; the line full in dark and lower in light, the halo
     /// faint in both.
+    @MainActor
     func test_theRuleTabsEmber() {
         XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: true, hovering: false))
         XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: false, hovering: true))
@@ -134,6 +143,7 @@ final class ComponentParityTests: XCTestCase {
     }
 
     /// The map field is #1146's ellipse: 80% by 60%, centred at 50% / 55%.
+    @MainActor
     func test_theMapFieldGeometry() {
         XCTAssertEqual(GlassMapField.radii, CGSize(width: 0.8, height: 0.6))
         XCTAssertEqual(GlassMapField.center, UnitPoint(x: 0.5, y: 0.55))
@@ -220,6 +230,7 @@ final class ComponentParityTests: XCTestCase {
     /// A tree's top-level rows sit flush left, one level in for each level
     /// under it: the Traces tree, whose top level is folders, starts its
     /// folders at the edge (owner, 2026-10-11).
+    @MainActor
     func testATreesTopLevelRowsSitFlushLeft() {
         XCTAssertEqual(GlassListRow.leadingInset(.tool, root: .tool), 8)
         XCTAssertEqual(GlassListRow.leadingInset(.folder, root: .tool), 26)

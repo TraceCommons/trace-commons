@@ -126,7 +126,7 @@ jobs:
         run: python3 scripts/design-tokens/generate.py --check
       - name: swift test
         working-directory: macos
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
       # `swift test` builds Debug only, so a DEBUG-only symbol (sample
       # clients, monitor windows behind `#if DEBUG`) reachable from a Release
       # path compiled here and failed first in the release workflow. This
@@ -135,7 +135,7 @@ jobs:
       # the Swift Release configuration, not the dylib's profile.
       - name: swift build (Release)
         working-directory: macos
-        run: swift build -c release
+        run: swift build -c release -Xswiftc -warnings-as-errors
 
   # The glass design system's pre-Liquid Glass fallback. Every other macOS
   # job runs on macos-26, where `GlassMaterial.current` always answers
@@ -170,7 +170,7 @@ jobs:
         run: cargo build -p trace-commons-contributor-ffi
       - name: swift test (TCDesign and the glass shell's source scans)
         working-directory: macos
-        run: swift test --filter 'TCDesignTests|GlassSurfaceRulesTests|MonitorNavigationTests|LegacyShellRetiredTests|TracesParityTests|HistoryParityTests|InferenceParityTests'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'TCDesignTests|GlassSurfaceRulesTests|MonitorNavigationTests|LegacyShellRetiredTests|TracesParityTests|HistoryParityTests|InferenceParityTests'
 
   windows-pipe-acl:
     name: windows named-pipe ACL

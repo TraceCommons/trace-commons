@@ -28,13 +28,13 @@ struct InsightsView: View {
         let router = InsightsServiceRouter(selection: storeSelection)
         var service: InsightsModel.Service = { request in try await router.call(request) }
         var weekReader: InsightsModel.WeekReader? = daemon.map { client in
-            { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
+            { @Sendable isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
         var watchedReader: InsightsSessionsModel.WatchedReader? = daemon.map { client in
-            { cursor in try await client.insightsSessions(before: cursor, limit: InsightsSessionsModel.pageSize) }
+            { @Sendable cursor in try await client.insightsSessions(before: cursor, limit: InsightsSessionsModel.pageSize) }
         }
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
-            { reference in try await client.insightsSessionDrill(sessionRef: reference) }
+            { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
@@ -46,7 +46,7 @@ struct InsightsView: View {
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
-            { _ = try await client.setInsightsRecapCard(false) }
+            { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
                   model: InsightsModel(service: service, weekReader: weekReader),

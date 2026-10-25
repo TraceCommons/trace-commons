@@ -804,7 +804,7 @@ struct TracesTreeView: View, Equatable {
 
     // MARK: Formatting
 
-    static func glassTool(_ kind: SourceKind) -> GlassTool {
+    nonisolated static func glassTool(_ kind: SourceKind) -> GlassTool {
         kind.glassTool
     }
 
