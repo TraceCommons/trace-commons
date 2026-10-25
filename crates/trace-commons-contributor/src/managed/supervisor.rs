@@ -639,14 +639,14 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        near_ai_route, opencode_route_command, opencode_sign_in_command, sign_in_route_command,
-        status_line, stop_asked,
-    };
+    use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
+    #[cfg(unix)]
+    use super::{opencode_route_command, opencode_sign_in_command};
     use crate::config::ConfigStore;
+    #[cfg(unix)]
+    use crate::managed::{ConnectionKind, opencode::OpenCodeSession};
     use crate::managed::{
-        ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
-        sessions::LaunchContext, signin,
+        ManagedError, ToolId, models::ChatModel, sessions::LaunchContext, signin,
     };
     use serde_json::json;
 

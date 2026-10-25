@@ -615,9 +615,11 @@ jobs:
           Write-Host "manifest publisher, logo assets and unpackaged default all check out"
 
       - uses: dtolnay/rust-toolchain@stable
+      # An exact patch makes the installer use the public SDK feeds instead
+      # of aka.ms channel redirects, which can target non-public origin storage.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '8.0.427'
 
       # The WinUI shell is C# over the same C ABI the macOS app uses, so the
       # cdylib has to exist before anything managed builds. The app project
