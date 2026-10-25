@@ -84,10 +84,10 @@ pub fn random_state() -> Result<String> {
 
 /// The page served to the browser at [`CALLBACK_PATH`].
 ///
-/// Deliberately minimal and entirely local: no stylesheet, no font, no image,
-/// no script from anywhere. A page that fetched anything would tell a third
-/// party the moment a contributor signed in, and would do it from a document
-/// whose own URL fragment is a live session token.
+/// Branded but entirely local: styles, artwork and script are embedded,
+/// with no fonts, images or other resources fetched from anywhere. A remote
+/// fetch would tell a third party the moment a contributor signed in, from
+/// a document whose own URL fragment is a live session token.
 ///
 /// `state` is interpolated into a JavaScript string literal. It is always this
 /// module's own base64url output, so it cannot contain a quote or a backslash,
@@ -101,26 +101,10 @@ fn bounce_page(state: &str) -> Result<String> {
     {
         bail!("near_ai_credential_callback_invalid")
     }
-    Ok(format!(
-        "<!doctype html>\n\
-         <meta charset=\"utf-8\">\n\
-         <title>{app}</title>\n\
-         <p id=\"m\">Finishing sign in.</p>\n\
-         <script>\n\
-         var m = document.getElementById(\"m\");\n\
-         var h = location.hash.slice(1);\n\
-         location.hash = \"\";\n\
-         var u = encodeURIComponent(navigator.userAgent);\n\
-         fetch(\"{DEPOSIT_PATH}\", {{ method: \"POST\", body: \"state={state}&ua=\" + u + \"&\" + h }})\n\
-         .then(function (r) {{\n\
-         m.textContent = r.ok\n\
-         ? \"Signed in. Return to {app}.\"\n\
-         : \"{app} could not finish sign-in. Return to the app and try again.\";\n\
-         }})\n\
-         .catch(function () {{ m.textContent = \"{app} could not finish sign-in. Return to the app and try again.\"; }});\n\
-         </script>\n",
-        app = crate::brand::APP_NAME
-    ))
+    Ok(include_str!("sign_in.html")
+        .replace("__APP_NAME__", crate::brand::APP_NAME)
+        .replace("__DEPOSIT_PATH__", DEPOSIT_PATH)
+        .replace("__STATE__", state))
 }
 
 /// One completed browser sign-in: the tokens, and the agent that earned them.
