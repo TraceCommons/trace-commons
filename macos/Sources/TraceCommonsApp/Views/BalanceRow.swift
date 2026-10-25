@@ -91,10 +91,12 @@ struct BalanceRow: View {
             }
             // When the question was put -- not when the service updated
             // anything, which is a claim nothing here supports.
-            if let observed = BalanceSurface.observedLine(
-                status, now: Date(), calls: model.balanceCalls)
-            {
-                Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let observed = BalanceSurface.observedLine(
+                    status, now: context.date, calls: model.balanceCalls)
+                {
+                    Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
+                }
             }
         }
     }

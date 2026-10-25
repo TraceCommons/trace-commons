@@ -194,7 +194,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(card.contains("GlassRefreshButton(refresh.label, size: 12"), "the icon card's refresh is beside its title again")
         XCTAssertTrue(card.contains(
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
-        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, action: refresh.action)"))
+        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)"))
     }
 
     /// Home's small cards draw their icons as watermarks (owner,

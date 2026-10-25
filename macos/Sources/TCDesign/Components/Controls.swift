@@ -285,6 +285,7 @@ public struct GlassRoundButton: View {
     /// the circle's centre rather than its bounding box's (scaled down for
     /// the small size).
     private let opticalOffset: CGSize
+    private let symbolRotation: Angle
     private let action: () -> Void
 
     public init(_ label: String, systemImage: String, small: Bool = false, action: @escaping () -> Void) {
@@ -295,11 +296,12 @@ public struct GlassRoundButton: View {
         self.init(label, icon: icon, small: small, opticalOffset: .zero, action: action)
     }
 
-    init(_ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, action: @escaping () -> Void) {
+    init(_ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, symbolRotation: Angle = .zero, action: @escaping () -> Void) {
         self.label = label
         self.icon = icon
         self.small = small
         self.opticalOffset = opticalOffset
+        self.symbolRotation = symbolRotation
         self.action = action
     }
 
@@ -311,6 +313,7 @@ public struct GlassRoundButton: View {
         let scale = Self.symbolSize(small: small) / Self.symbolSize(small: false)
         Button(action: action) {
             GlassIconView(icon: icon, symbolSize: Self.symbolSize(small: small), weight: .medium)
+                .rotationEffect(symbolRotation)
                 .offset(x: opticalOffset.width * scale, y: opticalOffset.height * scale)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)

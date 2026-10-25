@@ -71,26 +71,55 @@ public struct GlassCard<Content: View>: View {
 public struct GlassRefreshButton: View {
     private let label: String
     private let small: Bool
+    private let isRefreshing: Bool
     private let action: () -> Void
+    @State private var clickedAt: Date?
+    @State private var completingClick = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The refresh glyph.
     public static let systemImage = "arrow.clockwise"
-    /// Where the glyph's weight sits: its arrowhead runs up and right past
-    /// the ring, so centring its box leaves the ring about half a point
-    /// left of and low in the circle (measured at 13pt medium). This moves
-    /// the ring back to the centre (owner, 2026-10-20: "not visually
-    /// centered").
+    /// Align the refresh ring's optical centre with the round control.
     public static let opticalOffset = CGSize(width: 0.5, height: -0.6)
 
-    public init(_ label: String, small: Bool = false, action: @escaping () -> Void) {
+    public init(_ label: String, small: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
         self.label = label
         self.small = small
+        self.isRefreshing = isRefreshing
         self.action = action
     }
 
+    /// A fast cached answer still completes the click's first turn. Longer
+    /// requests keep rotating; Reduce Motion keeps the icon still.
+    static func angle(elapsed: TimeInterval, isRefreshing: Bool, reduceMotion: Bool) -> Double {
+        guard !reduceMotion else { return 0 }
+        let turns = max(0, elapsed) / GlassTokens.Motion.spin
+        return (isRefreshing ? turns.truncatingRemainder(dividingBy: 1) : min(turns, 1)) * 360
+    }
+
+    static func animates(isRefreshing: Bool, completingClick: Bool, reduceMotion: Bool) -> Bool {
+        !reduceMotion && (isRefreshing || completingClick)
+    }
+
     public var body: some View {
-        GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
-                         action: action)
+        GlassAnimationTimeline(minimumInterval: 1 / 30,
+            paused: !Self.animates(isRefreshing: isRefreshing, completingClick: completingClick, reduceMotion: reduceMotion)) { date in
+            let elapsed = clickedAt.map { date.timeIntervalSince($0) } ?? (isRefreshing ? date.timeIntervalSinceReferenceDate : 0)
+            GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
+                symbolRotation: .degrees(Self.angle(elapsed: elapsed, isRefreshing: isRefreshing, reduceMotion: reduceMotion))) {
+                    clickedAt = Date()
+                    completingClick = true
+                    action()
+                }
+                .disabled(isRefreshing)
+        }
+        .task(id: clickedAt) {
+            guard clickedAt != nil else { return }
+            // Only the visual acknowledgement has a minimum duration; the
+            // request and its result are never delayed by the animation.
+            try? await Task.sleep(for: .seconds(GlassTokens.Motion.spin))
+            guard !Task.isCancelled else { return }
+            completingClick = false
+        }
     }
 }
 
@@ -98,11 +127,13 @@ public struct GlassRefreshButton: View {
 public struct GlassCardRefresh {
     let label: String
     let isDisabled: Bool
+    let isRefreshing: Bool
     let action: () -> Void
 
-    public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
+    public init(_ label: String, isDisabled: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
         self.label = label
         self.isDisabled = isDisabled
+        self.isRefreshing = isRefreshing
         self.action = action
     }
 }
@@ -234,7 +265,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                 // The re-read control at the head's trailing end (owner,
                 // 2026-10-20), before whatever else sits there.
                 if let refresh {
-                    GlassRefreshButton(refresh.label, small: true, action: refresh.action)
+                    GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)
                         .disabled(refresh.isDisabled)
                 }
                 accessory
