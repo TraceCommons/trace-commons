@@ -524,12 +524,27 @@ struct HomeSection<Content: View>: View {
 /// Home's Private AI section's reading of the Private AI tab's store.
 @MainActor
 enum HomePrivateAI {
-    /// The Private AI tab's totals (`InferenceTabView.totals`): unknown
-    /// until its calls page has been read and is readable.
+    /// Full-window daemon totals, independent of the shared proxy's calls page.
     static func totals(_ store: InferenceStore?) -> (calls: Int?, verified: Int?) {
-        guard let page = store?.calls, page.readable else { return (nil, nil) }
-        let totals = InferenceTabView.totals(page, summary: store?.summary, destinations: store?.destinations)
-        return (totals.calls, totals.verified)
+        networkTotals(store?.networkSummary)
+    }
+
+    static func networkTotals(_ network: DaemonData.NetworkInferenceSummary?) -> (calls: Int?, verified: Int?) {
+        guard let network, network.readable, let summary = network.summary, summary.enabled else {
+            return (nil, nil)
+        }
+        let routes = [summary.routed, summary.outside, summary.unknown]
+        return (exactTotal(routes.map(\.calls)), exactTotal(routes.map { $0.proof.verified }))
+    }
+
+    private static func exactTotal(_ parts: [UInt64]) -> Int? {
+        var total: UInt64 = 0
+        for part in parts {
+            let sum = total.addingReportingOverflow(part)
+            guard !sum.overflow else { return nil }
+            total = sum.partialValue
+        }
+        return Int(exactly: total)
     }
 }
 

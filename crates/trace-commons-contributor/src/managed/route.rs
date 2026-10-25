@@ -1,10 +1,8 @@
 //! One NEAR AI proxy and host-owned credential source per managed session.
 use super::{ManagedError, ToolId, secrets::ApiKey};
 use crate::config::ConfigStore;
-use ironwire_proxy::embed::{
-    self, EmbedOptions, EmbeddedProxy, HostSecret, StartupProbes, UpdateChecks,
-};
-use std::path::PathBuf;
+use ironwire_proxy::embed::{self, EmbedOptions, HostSecret, StartupProbes, UpdateChecks};
+use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
 /// The route pins the NEAR AI backend only, never a model: a request that
@@ -13,7 +11,9 @@ use uuid::Uuid;
 /// given a listed model of the same tier by IronWire's routing, so every
 /// launcher maps its tool's model names onto [`ManagedRoute::models`].
 pub struct ManagedRoute {
-    proxy: EmbeddedProxy,
+    port: u16,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    owner: tokio::task::JoinHandle<()>,
     home: PathBuf,
     /// NEAR AI's chat models, as read when the route started.
     models: Vec<super::models::ChatModel>,
@@ -113,23 +113,22 @@ impl ManagedRoute {
             super::profiles::private_directory(root)?;
         }
         super::profiles::private_directory(&home)?;
+        let bodies = crate::daemon::settings::DaemonSettings::load(store)
+            .map_err(|_| ManagedError::StorageUnavailable)?
+            .ironwire_attested_bodies;
         let config =
             ConfigStore::open(home.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
         config
             .write_daemon_file(
                 "config.toml",
-                // The call log is on, as the person's record of the session;
-                // the status line does not read it. Bodies are off, so a
-                // completed call is recorded as what it was (models, tokens,
-                // timings, status), never what it said. A refused call's
-                // error column holds IronWire's text for the error, which
-                // includes up to 600 characters of the provider's error
-                // message, and a provider can quote the request there. The
-                // log lives in this home and goes with it at shutdown.
+                // The private ledger retains provider errors locally, including
+                // possible quoted request text. Readers expose only safe fields.
+                // Receipt checking never grants body or token consent.
                 format!(
                     r#"[capture]
 enabled = true
-bodies = false
+bodies = {bodies}
+receipts = true
 [privacy]
 mode = "full"
 trusted_backends = ["nearai"]
@@ -138,17 +137,34 @@ id = "nearai"
 kind = "nearai"
 base_url = {base_url}
 "#,
-                    base_url = toml::Value::String(base_url.into())
+                    base_url = toml::Value::String(base_url.into()),
+                    bodies = bodies
                 )
                 .as_bytes(),
             )
             .map_err(|_| ManagedError::StorageUnavailable)?;
-        let options = EmbedOptions::default()
+        let attestor = crate::daemon::ipc::signer_attestor_for(
+            store,
+            Some(key.expose().to_owned()),
+            Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(store.clone())
+                },
+                &|name| std::env::var(name).ok(),
+            )),
+        );
+        let mut options = EmbedOptions::default()
             .with_update_checks(UpdateChecks::Off)
             .with_startup_probes(StartupProbes::Configured)
             .with_credentials(move |name| {
                 (name == "NEARAI_API_KEY").then(|| HostSecret::from(key.expose().to_owned()))
             });
+        options.token_capture_enabled = Some(false);
+        if let Some(attestor) = attestor {
+            options = options.with_signer_attestor(attestor);
+        }
         let proxy = embed::start_with_options(&home, Some(0), options, |_, _| {})
             .await
             .map_err(|_| ManagedError::LaunchUnknown)?;
@@ -195,8 +211,35 @@ base_url = {base_url}
         if !pinned.status().is_success() {
             return Err(ManagedError::LaunchUnknown);
         }
+        let port = proxy.port();
+        let (shutdown, mut requested) = tokio::sync::oneshot::channel();
+        let consent_store = store.clone();
+        let retained_home = home.clone();
+        let owner = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    // Dropping a route also closes the sender and stops its
+                    // listener. Reenabling consent never revives this route.
+                    _ = &mut requested => break,
+                    _ = interval.tick(), if bodies => {
+                        if !crate::daemon::settings::DaemonSettings::load(&consent_store)
+                            .is_ok_and(|settings| settings.ironwire_attested_bodies)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Stop accepting calls before draining previously consented ones.
+            // Proof workers may stop with pending rows; never invent settlement.
+            proxy.shutdown().await;
+            let _ = std::fs::remove_file(retained_home.join("control.token"));
+        });
         Ok(Self {
-            proxy,
+            port,
+            shutdown,
+            owner,
             home,
             models,
             default_model: selected_model,
@@ -209,7 +252,7 @@ base_url = {base_url}
     }
 
     pub fn port(&self) -> u16 {
-        self.proxy.port()
+        self.port
     }
 
     /// The model a tool starts on. Not a pin: the tool may ask for any of
@@ -225,8 +268,8 @@ base_url = {base_url}
     }
 
     pub async fn shutdown(self) {
-        self.proxy.shutdown().await;
-        let _ = std::fs::remove_dir_all(self.home);
+        let _ = self.shutdown.send(());
+        let _ = self.owner.await;
     }
 }
 
@@ -503,6 +546,30 @@ mod tests {
     /// records the exchange but never a request body.
     #[tokio::test]
     async fn a_route_serves_the_status_line_and_logs_calls_without_bodies() {
+        retained_route_capture(false, None).await;
+    }
+
+    #[tokio::test]
+    async fn a_route_retains_bodies_only_with_attested_body_consent() {
+        retained_route_capture(true, None).await;
+    }
+
+    #[tokio::test]
+    async fn revoking_body_consent_stops_the_route_and_retains_history() {
+        retained_route_capture(true, Some(false)).await;
+    }
+
+    #[tokio::test]
+    async fn unreadable_body_consent_stops_the_route_and_retains_history() {
+        retained_route_capture(true, Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_only_route_stays_live_when_body_consent_is_unreadable() {
+        retained_route_capture(false, Some(true)).await;
+    }
+
+    async fn retained_route_capture(bodies: bool, unreadable_consent: Option<bool>) {
         const MARKER: &str = "statusline-body-marker-5f2c9e";
         async fn completion(Json(body): Json<Value>) -> Json<Value> {
             assert!(body.to_string().contains(MARKER));
@@ -529,6 +596,9 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().into()).unwrap();
+        let mut settings = crate::daemon::settings::DaemonSettings::default();
+        settings.ironwire_attested_bodies = bodies;
+        settings.save(&store).unwrap();
         let id = Uuid::new_v4();
         let route = ManagedRoute::start_at(
             &store,
@@ -540,6 +610,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let exact_session = format!("ses_{}", id.simple());
         // The launcher of a sign-in session computes the daemon's route
         // home from the session id alone.
         assert_eq!(route.home(), home_for(&store, id));
@@ -555,6 +626,7 @@ mod tests {
                 route.port()
             ))
             .header("anthropic-version", "2023-06-01")
+            .header("x-ironwire-session-id", &exact_session)
             .json(&json!({"model":"anthropic/claude-sonnet-5-5","max_tokens":16,"messages":[{"role":"user","content":MARKER}]}))
             .send()
             .await
@@ -579,7 +651,13 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no call logged");
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        // No file anywhere under the home holds the request body.
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(route.home().join("config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(config["capture"]["bodies"].as_bool(), Some(bodies));
+        assert_eq!(config["capture"]["receipts"].as_bool(), Some(true));
+        assert!(config["capture"].get("token_capture").is_none());
+        let mut marker_seen = false;
         let mut pending = vec![route.home().to_path_buf()];
         let mut files = 0;
         while let Some(path) = pending.pop() {
@@ -587,18 +665,108 @@ mod tests {
                 pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
             } else if let Ok(bytes) = std::fs::read(&path) {
                 files += 1;
-                assert!(
-                    !bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
-                    "{}",
-                    path.display()
-                );
+                marker_seen |= bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes());
             }
         }
         assert!(files > 0);
-        assert!(!route.home().join("bodies").exists());
+        assert_eq!(marker_seen, bodies);
+        assert_eq!(route.home().join("bodies").exists(), bodies);
         let home = route.home().to_path_buf();
-        route.shutdown().await;
-        assert!(!home.exists());
+        if let Some(unreadable) = unreadable_consent {
+            let known_good_settings = store
+                .read_daemon_file("daemon-settings.json")
+                .unwrap()
+                .unwrap();
+            if unreadable {
+                store
+                    .write_daemon_file("daemon-settings.json", b"{")
+                    .unwrap();
+            } else {
+                settings.ironwire_attested_bodies = false;
+                settings.save(&store).unwrap();
+            }
+            if bodies {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while home.join("endpoint.json").exists() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "revoked route remained live"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .is_err()
+                );
+                if unreadable {
+                    // Recover the deliberately corrupted fixture explicitly;
+                    // production preference saves correctly reject corruption.
+                    store
+                        .write_daemon_file("daemon-settings.json", &known_good_settings)
+                        .unwrap();
+                }
+                settings.ironwire_attested_bodies = true;
+                settings.save(&store).unwrap();
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .is_err(),
+                    "reenabling needs a fresh route"
+                );
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status()
+                        .is_success()
+                );
+                assert!(home.join("endpoint.json").exists());
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), route.shutdown())
+            .await
+            .expect("explicit shutdown after revocation must finish");
+        assert!(home.join("ledger.sqlite").exists());
+        assert!(!home.join("control.token").exists());
+        assert!(!home.join("endpoint.json").exists());
+        assert!(logged(&home.join("ledger.sqlite")));
+        let db = rusqlite::Connection::open_with_flags(
+            home.join("ledger.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let (session, proof): (Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT client_session_id, proof FROM exchanges",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session.as_deref(), Some(exact_session.as_str()));
+        assert_ne!(
+            proof.as_deref(),
+            Some("verified"),
+            "an unsigned fixture is never verified"
+        );
+        assert_eq!(home.join("bodies").exists(), bodies);
         server.abort();
     }
 

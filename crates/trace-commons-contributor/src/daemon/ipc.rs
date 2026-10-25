@@ -981,6 +981,12 @@ pub struct DaemonShared {
     /// the `Arc` out -- nothing holds it across an await, and nothing holds
     /// it while doing I/O.
     routing: RwLock<RoutingSnapshot>,
+    /// Snapshots of owned managed histories; unreadable is never empty.
+    pub(crate) managed_history:
+        RwLock<Result<Option<Arc<crate::routing::managed_history::ManagedHistory>>, ()>>,
+    pub(crate) managed_history_refresh: tokio::sync::Mutex<()>,
+    pub(crate) managed_history_observed_at: RwLock<Option<chrono::DateTime<Utc>>>,
+    pub(crate) managed_history_checked_at: RwLock<Option<chrono::DateTime<Utc>>>,
     private_inference_endpoint: Mutex<Option<super::private_inference::OwnedEndpoint>>,
     /// Whether the last state this daemon reported for `routing` was
     /// "has rows". Compared against on every refresh so a transition is
@@ -1501,6 +1507,10 @@ impl DaemonShared {
             estimate_in_force: Mutex::new(EstimateInForce::of(EstimateTableSlot::built_in())),
             previews: Arc::new(PreviewScheduler::default()),
             routing,
+            managed_history: RwLock::new(Ok(None)),
+            managed_history_refresh: tokio::sync::Mutex::new(()),
+            managed_history_observed_at: RwLock::new(None),
+            managed_history_checked_at: RwLock::new(None),
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
             gate_held_logged: Mutex::new((0, Vec::new())),
@@ -2172,6 +2182,11 @@ impl DaemonShared {
         // body store is only ever read for a proxy this daemon is actually
         // reading rows from.
         let bodies = bodies.filter(|_| ledger.is_some());
+        let bodies_enabled = self
+            .settings
+            .lock()
+            .is_ok_and(|s| s.ironwire_attested_bodies);
+        let ledger = super::managed_history::combined(self, ledger, bodies.clone(), bodies_enabled);
         roots.with_routing(ledger).with_attested_bodies(bodies)
     }
 
@@ -2241,6 +2256,7 @@ impl DaemonShared {
     /// an error and carries its own short timeout, so awaiting it here
     /// cannot fail or stall the poll tick that calls this.
     pub(crate) async fn refresh_routing(&self) {
+        super::managed_history::refresh(self).await;
         let derived = self.routing.read().is_ok_and(|held| held.derived);
         if derived {
             // The periodic pass previously refreshed before noticing proxy
@@ -9636,7 +9652,7 @@ mod cloud_credential_recovery_tests;
 /// A set that lapses stops earning keys at once. Reconcile therefore never
 /// asks ingest for pins itself. The cost is that IronWire's receipt checks
 /// run for every NEAR AI answer even while nothing is pinned.
-fn signer_attestor_for(
+pub(crate) fn signer_attestor_for(
     store: &ConfigStore,
     key: Option<String>,
     pins: Arc<crate::routing::proof_attestor::PinProvider>,

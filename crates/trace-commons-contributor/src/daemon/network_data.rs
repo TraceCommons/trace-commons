@@ -24,9 +24,24 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
         },
     };
     let ledger = shared.routing_ledger();
-    let mut summary = match ledger.as_ref() {
+    super::managed_history::refresh(shared).await;
+    let primary = match ledger.as_ref() {
         Some(ledger) => ledger.read_summary(since).await,
         None => None,
+    };
+    let primary_unreadable = ledger.is_some() && primary.is_none();
+    let mut summary = match super::managed_history::snapshot(shared) {
+        Ok(history) if !primary_unreadable => match history {
+            Some(history) => match history.summary(since) {
+                Ok(managed) => match primary {
+                    Some(primary) => super::managed_history::merge(primary, managed),
+                    None => Some(managed),
+                },
+                Err(_) => None,
+            },
+            None => primary,
+        },
+        _ => None,
     };
     if let Some(summary) = summary.as_mut() {
         normalize_summary(summary);
@@ -35,7 +50,12 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
         req.id,
         serde_json::json!({
             "readable": summary.is_some(), "window_hours": window_hours,
-            "observed_at": ledger.and_then(|ledger| ledger.last_summary_at()),
+            // Retain the last successful observation on failed refreshes;
+            // readable=false says it is stale, not a fresh empty window.
+            "observed_at": match ledger {
+                Some(ledger) => ledger.last_summary_at(),
+                None => shared.managed_history_observed_at.read().ok().and_then(|at| *at),
+            },
             "summary": summary,
         }),
     )
@@ -297,6 +317,75 @@ mod tests {
             "../../tests/fixtures/ironwire/sample-summary.json"
         ))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_only_histories_count_after_restart_without_a_shared_proxy() {
+        use crate::routing::managed_history::tests::fixture;
+        let (_dir, s) = shared();
+        let root = s.store.dir().join("managed-routes");
+        let a = fixture(&root, "verified");
+        let b = fixture(&root, "gateway_only");
+        for home in [&a, &b] {
+            rusqlite::Connection::open(home.join("ledger.sqlite"))
+                .unwrap()
+                .execute(
+                    "UPDATE exchanges SET started_at = ?1",
+                    [(Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+                )
+                .unwrap();
+        }
+        // Retained evidence remains readable even after it leaves today's window.
+        let old = fixture(&root, "pending");
+        rusqlite::Connection::open(old.join("ledger.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE exchanges SET started_at = ?1",
+                [(Utc::now() - chrono::Duration::days(180)).to_rfc3339()],
+            )
+            .unwrap();
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        for daemon in [&s, &restarted] {
+            assert!(daemon.routing_ledger().is_none());
+            let result =
+                handle_summary(daemon, &request("inference_summary", serde_json::json!({})))
+                    .await
+                    .result
+                    .unwrap();
+            assert_eq!(result["readable"], true);
+            assert_eq!(result["summary"]["routed"]["calls"], 2);
+            assert_eq!(result["summary"]["routed"]["proof"]["verified"], 1);
+            assert_eq!(result["summary"]["routed"]["proof"]["gateway_only"], 1);
+            assert!(result["observed_at"].is_string());
+            let retained = handle_summary(
+                daemon,
+                &request(
+                    "inference_summary",
+                    serde_json::json!({"since":DateTime::<Utc>::UNIX_EPOCH.to_rfc3339()}),
+                ),
+            )
+            .await
+            .result
+            .unwrap();
+            assert_eq!(retained["readable"], true);
+            assert_eq!(retained["summary"]["routed"]["calls"], 3);
+            let wire = result.to_string();
+            assert!(
+                !wire.contains("body_ref")
+                    && !wire.contains("client_session_id")
+                    && !wire.contains("ledger.sqlite")
+            );
+        }
+        let page = super::super::inference_map::handle_calls(
+            &s,
+            &request("inference_calls", serde_json::json!({})),
+        )
+        .result
+        .unwrap();
+        assert_eq!(
+            page["readable"], false,
+            "the shared page cannot gate managed totals"
+        );
     }
 
     #[test]

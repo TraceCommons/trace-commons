@@ -14,6 +14,7 @@ pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
+mod multi_root;
 pub mod opencode;
 pub(crate) mod opencode_db;
 pub mod trajectory;
@@ -830,6 +831,7 @@ impl SourceDeclaration {
 #[derive(Clone, Default)]
 pub struct SourceRoots {
     managed_opencode: Option<PathBuf>,
+    additional_native: BTreeMap<&'static str, Vec<PathBuf>>,
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
     /// A routing overlay to attach to every adapter these roots build.
@@ -862,6 +864,19 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// Add a launched native profile's transcript directory under the same
+    /// per-tool declaration. Off remains authoritative; this grants no upload
+    /// permission and does not enable proxy body capture.
+    pub fn with_additional_native_root(mut self, name: &'static str, root: PathBuf) -> Self {
+        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX) {
+            let paths = self.additional_native.entry(name).or_default();
+            paths.push(root);
+            paths.sort();
+            paths.dedup();
+        }
+        self
+    }
+
     /// Only exports explicitly requested at managed launch enter this folder.
     pub fn with_managed_opencode(mut self, root: PathBuf) -> Self {
         if root.is_dir() {
@@ -887,7 +902,11 @@ impl SourceRoots {
                 },
             };
             if let Some(root) = root {
-                out.insert(spec.name, root.to_string_lossy().to_string());
+                let mut identity = root.to_string_lossy().to_string();
+                if let Some(additional) = self.additional_native.get(spec.name) {
+                    identity.push_str(&format!(" additional:{additional:?}"));
+                }
+                out.insert(spec.name, identity);
             }
         }
         if let Some(managed) = &self.managed_opencode
@@ -1074,17 +1093,31 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
                 continue;
             }
         }
-        match roots.declared.get(spec.name) {
-            Some(SourceDeclaration::Off) => {}
-            Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),
+        let primary = match roots.declared.get(spec.name) {
+            Some(SourceDeclaration::Off) => None,
+            Some(SourceDeclaration::Watch { path }) => Some(path.clone()),
             None => match spec.undeclared {
-                Undeclared::Conventional => {
-                    if let Some(root) = spec.conventional_root {
-                        sources.push((spec.build)(root()));
+                Undeclared::Conventional => spec.conventional_root.map(|root| root()),
+                Undeclared::Nothing => None,
+            },
+        };
+        if let Some(primary) = primary {
+            let mut paths = vec![primary];
+            if let Some(additional) = roots.additional_native.get(spec.name) {
+                for path in additional {
+                    if !paths.contains(path) {
+                        paths.push(path.clone());
                     }
                 }
-                Undeclared::Nothing => {}
-            },
+            }
+            if paths.len() == 1 {
+                sources.push((spec.build)(paths.remove(0)));
+            } else {
+                sources.push(Box::new(multi_root::MultiRootSource::new(
+                    spec.name,
+                    paths.into_iter().map(spec.build).collect(),
+                )));
+            }
         }
     }
 
@@ -1133,6 +1166,57 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn additional_native_roots_share_one_adapter_and_keep_off_authoritative() {
+        for name in [SOURCE_CLAUDE_CODE, SOURCE_CODEX] {
+            let dir = tempfile::tempdir().unwrap();
+            let primary = dir.path().join("primary");
+            let managed = dir.path().join("managed");
+            for root in [&primary, &managed] {
+                let folder = root.join("project");
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = if name == SOURCE_CODEX {
+                    "rollout-native.jsonl"
+                } else {
+                    "native.jsonl"
+                };
+                std::fs::write(folder.join(file), "{\"type\":\"user\",\"cwd\":\"/project\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n").unwrap();
+            }
+            let roots = SourceRoots::new()
+                .declare(name, Some(SourceDeclaration::Watch { path: primary }))
+                .with_additional_native_root(name, managed.clone());
+            let sources = all_sources(&roots);
+            let selected: Vec<_> = sources
+                .iter()
+                .filter(|source| source.name() == name)
+                .collect();
+            assert_eq!(selected.len(), 1);
+            let source = selected[0];
+            let found = source.discover().unwrap();
+            assert_eq!(found.len(), 2);
+            assert_eq!(source.discover_unopened().unwrap().len(), 2);
+            for session in found {
+                assert_eq!(
+                    source.session_for_path(&session.path),
+                    Some(session.path.clone())
+                );
+                assert_eq!(
+                    source.session_at(&session.path).unwrap().unwrap().path,
+                    session.path
+                );
+                assert_eq!(source.load(&session).unwrap().source, name);
+            }
+            let without = SourceRoots::new().declare(name, roots.declared.get(name).cloned());
+            assert_ne!(
+                roots.source_identities().get(name),
+                without.source_identities().get(name)
+            );
+            let off = roots.declare(name, Some(SourceDeclaration::Off));
+            assert!(!all_sources(&off).iter().any(|source| source.name() == name));
+            assert!(!off.source_identities().contains_key(name));
+        }
+    }
 
     /// The streaming hash and the whole-file hash must agree.
     ///

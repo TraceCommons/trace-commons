@@ -20,9 +20,8 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource};
 pub struct RoutingEnrichedSource {
     inner: Box<dyn TraceSource>,
     ledger: Arc<dyn RoutingLedger>,
-    /// The proxy's verbatim body store, when this deployment carries attested
-    /// bodies. `None` -- the default -- attaches routing metadata only, which
-    /// is what every deployment does today.
+    /// The fallback verbatim body store. A source-aware ledger can instead
+    /// resolve an authorized store belonging to the final row.
     bodies_dir: Option<PathBuf>,
 }
 
@@ -38,10 +37,10 @@ impl RoutingEnrichedSource {
 
     /// Also carry the final call's verbatim bodies, read from `dir`.
     ///
-    /// Opt-in and off by default, deliberately. Carrying bodies is the one
-    /// thing this overlay does that puts session *content* into a trace
-    /// rather than metadata about it, so it is never switched on implicitly
-    /// by a ledger being present.
+    /// Opt-in and off by default for ordinary ledgers. A source-aware ledger
+    /// may resolve its own authorized store, or deny this fallback. Carrying
+    /// bodies puts session *content* into a trace, so such a resolver must
+    /// enforce the deployment's body permission.
     #[must_use]
     pub fn with_attested_bodies(mut self, dir: Option<PathBuf>) -> Self {
         self.bodies_dir = dir;
@@ -101,8 +100,18 @@ impl TraceSource for RoutingEnrichedSource {
         // is paid for, and a later surface that wants to name the reason
         // cannot afford to run it again -- see
         // `SessionTranscript::attested_refusal`.
-        match self
-            .bodies_dir
+        // Resolve ownership for the actual final row, even when its cheap
+        // fields are incomplete: attested_final_call retains the refusal and
+        // must never fall back to an earlier, attestable hop.
+        let final_row = transcript
+            .routing
+            .iter()
+            .max_by_key(|row| (row.started_at, row.id));
+        let bodies_dir = match final_row {
+            Some(row) => self.ledger.bodies_dir_for(row, self.bodies_dir.as_deref()),
+            None => self.bodies_dir.clone(),
+        };
+        match bodies_dir
             .as_deref()
             .map(|dir| super::attested::attested_final_call(&transcript.routing, dir))
         {
@@ -260,6 +269,131 @@ mod tests {
             group_member_count: 0,
             declared_source: None,
         }
+    }
+
+    struct OwnedLedger {
+        rows: Vec<RoutedExchange>,
+        stores: Vec<(RoutedExchange, PathBuf)>,
+    }
+
+    impl RoutingLedger for OwnedLedger {
+        fn exchanges_since(&self, _: chrono::DateTime<chrono::Utc>) -> Vec<RoutedExchange> {
+            self.rows.clone()
+        }
+
+        fn bodies_dir_for(&self, row: &RoutedExchange, _: Option<&Path>) -> Option<PathBuf> {
+            self.stores
+                .iter()
+                .find(|(owned, _)| owned == row)
+                .map(|(_, dir)| dir.clone())
+        }
+    }
+
+    fn captured(session: &str, offset: i64, request: &str) -> RoutedExchange {
+        use sha2::{Digest, Sha256};
+        RoutedExchange {
+            id: Some(1),
+            body_ref: Some("1-1".into()),
+            request_sha256: Some(hex::encode(Sha256::digest(request.as_bytes()))),
+            response_sha256: Some(hex::encode(Sha256::digest(b"response"))),
+            upstream_id: Some("provider-id".into()),
+            ..row(Some(session), offset)
+        }
+    }
+
+    fn body_store(request: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1-1.req"), request).unwrap();
+        std::fs::write(dir.path().join("1-1.res"), "response").unwrap();
+        dir
+    }
+
+    fn enriched(ledger: Arc<dyn RoutingLedger>, fallback: &Path) -> SessionTranscript {
+        RoutingEnrichedSource::new(
+            Box::new(StubSource {
+                conversation_id: Some("s-1".into()),
+            }),
+            ledger,
+        )
+        .with_attested_bodies(Some(fallback.to_path_buf()))
+        .load(&a_ref())
+        .unwrap()
+    }
+
+    #[test]
+    fn owned_body_resolution_ignores_colliding_store_local_ids_and_fallback() {
+        let shared = body_store("shared request");
+        let managed = body_store("managed request");
+        let shared_row = captured("s-2", 0, "shared request");
+        let managed_row = captured("s-1", 1, "managed request");
+        assert_eq!(shared_row.id, managed_row.id);
+        assert_eq!(shared_row.body_ref, managed_row.body_ref);
+        let ledger = OwnedLedger {
+            rows: vec![shared_row.clone(), managed_row.clone()],
+            stores: vec![
+                (shared_row, shared.path().into()),
+                (managed_row, managed.path().into()),
+            ],
+        };
+        let t = enriched(Arc::new(ledger), shared.path());
+        assert_eq!(t.attested_call.unwrap().request_body(), "managed request");
+        assert_eq!(t.attested_refusal, None);
+    }
+
+    #[test]
+    fn denied_body_resolution_never_uses_readable_fallback() {
+        let store = body_store("request");
+        let ledger = OwnedLedger {
+            rows: vec![captured("s-1", 0, "request")],
+            stores: vec![],
+        };
+        let t = enriched(Arc::new(ledger), store.path());
+        assert!(t.attested_call.is_none());
+        assert_eq!(t.attested_refusal, None);
+    }
+
+    #[test]
+    fn final_incomplete_or_malformed_row_never_falls_back_to_earlier_call() {
+        use crate::routing::attested::Unattestable;
+        let store = body_store("request");
+        let earlier = captured("s-1", 0, "request");
+        for (body_ref, response_sha256, expected) in [
+            (Some("1-1".into()), None, Unattestable::DigestAbsent),
+            (
+                Some("../escape".into()),
+                earlier.response_sha256.clone(),
+                Unattestable::ReferenceMalformed,
+            ),
+            (
+                None,
+                earlier.response_sha256.clone(),
+                Unattestable::CaptureOff,
+            ),
+        ] {
+            let final_row = RoutedExchange {
+                started_at: at(1),
+                body_ref,
+                response_sha256,
+                ..earlier.clone()
+            };
+            let ledger = OwnedLedger {
+                rows: vec![final_row.clone(), earlier.clone()],
+                stores: vec![(final_row, store.path().into())],
+            };
+            let t = enriched(Arc::new(ledger), store.path());
+            assert!(t.attested_call.is_none());
+            assert_eq!(t.attested_refusal, Some(expected));
+        }
+    }
+
+    #[test]
+    fn fixed_ledger_keeps_explicit_global_body_store() {
+        let store = body_store("request");
+        let t = enriched(
+            Arc::new(FixedLedger::new(vec![captured("s-1", 0, "request")])),
+            store.path(),
+        );
+        assert_eq!(t.attested_call.unwrap().request_body(), "request");
     }
 
     #[test]

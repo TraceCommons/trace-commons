@@ -94,13 +94,13 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertEqual(MissionFormat.count(store.missions), "\u{2014}")
     }
 
-    /// The Private AI inspector's summary is absent, not zero, when the live
-    /// client does not answer it yet.
-    func test_theInferenceStoreKeepsTheSummaryAbsentWhenItIsNotAvailableYet() async {
+    /// A malformed real summary stays absent and records the failed read.
+    func test_theInferenceStoreKeepsMalformedNetworkSummaryAbsent() async {
         let store = InferenceStore(client: LiveDaemonClient(transport: SilentTransport()))
         await store.load()
         XCTAssertNil(store.summary)
-        XCTAssertNil(store.failures["inference_summary"])
+        XCTAssertNil(store.networkSummary)
+        XCTAssertEqual(store.failures["inference_summary"], .undecodable(method: "inference_summary"))
     }
 
     /// M-3: Insights and Mission drafts are reachable only through their
