@@ -103,6 +103,8 @@ pub enum ManagedError {
     ToolUnavailable,
     #[error("unsupported native tool version")]
     UnsupportedVersion,
+    #[error("OpenCode system settings prevent an isolated managed session")]
+    SystemConfiguration,
     #[error("sign in to this account before launching")]
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]

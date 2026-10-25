@@ -167,6 +167,10 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                         | "--fork"
                         | "--config"
                         | "--attach"
+                        | "--server"
+                        | "--standalone"
+                        | "--no-standalone"
+                        | "--directory"
                 ) || ["-s", "-m", "-c"]
                     .iter()
                     .any(|prefix| arg.starts_with(prefix) && !arg.starts_with("--"))

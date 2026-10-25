@@ -98,7 +98,12 @@ impl NativeProfiles {
                     NativeAction::Version => {
                         command.arg("--version");
                     }
-                    NativeAction::Run => {}
+                    NativeAction::Run => {
+                        super::opencode::Version::from_native(
+                            self.native_version(account, native)?,
+                        )?
+                        .interactive(&mut command);
+                    }
                     _ => return Err(ManagedError::InvalidRequest),
                 }
             }
@@ -158,6 +163,8 @@ impl NativeProfiles {
         let version = String::from_utf8_lossy(&version.stdout);
         let numeric = version.split_whitespace().find_map(|part| {
             let numbers: Vec<_> = part
+                .strip_prefix('v')
+                .unwrap_or(part)
                 .split('.')
                 .map(str::parse::<u32>)
                 .collect::<Result<_, _>>()
@@ -176,9 +183,9 @@ impl NativeProfiles {
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
             ToolId::Codex => numeric.is_some_and(|v| v.0 == 0 && v >= (0, 160, 0)),
-            // OpenCode prepares and exports the seeded session before launch,
-            // so command/format compatibility is checked directly there.
-            ToolId::Opencode => true,
+            // Each major has its own CLI/configuration contract. Import/export
+            // validation still checks the selected implementation before launch.
+            ToolId::Opencode => numeric.is_some_and(|v| matches!(v.0, 1 | 2)),
         };
         if !supported {
             return Err(ManagedError::UnsupportedVersion);

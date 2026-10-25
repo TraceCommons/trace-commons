@@ -283,10 +283,12 @@ NEAR AI sign-in offers its model catalogue and default. Enable **Collect trace
 for review** on the folder-selection screen to collect the launched session
 when OpenCode exits.
 
-The launcher requires a successful, bounded startup probe but does not restrict
-OpenCode version numbers. Session preparation checks import/export compatibility
-directly before launch. Trace collection retains its separate format validation;
-launching a newer version does not imply its exports can be collected.
+The launcher detects OpenCode 1.x or 2.x with a bounded `--version` probe and
+selects the corresponding configuration and session commands. Unknown versions
+and major versions are refused. Session preparation also checks exact-ID
+import/export compatibility before launch; format validation remains required
+before any export enters review. Native synthetic-provider round trips cover
+OpenCode 1.19.4 and 2.1.4.
 
 ```sh
 secret-manager-command | near-ai accounts add --tool opencode --connection api-key --label Work --key-stdin
@@ -302,18 +304,23 @@ OpenCode account setup, an explicit model and opt-in collection. The frozen
 Tauri controls are unchanged. Windows and GTK do not currently have a routing
 map; their managed rows show the selected account, model and collection state.
 
-Each launch owns a separate HOME/XDG profile beneath its saved account and
-uses OpenCode's pure mode. Project OpenCode configuration and external plugins
-are disabled for this flow, and the ordinary OpenCode profile is unchanged.
-The selected model also handles OpenCode's small-model calls. The session's
+Each launch owns a separate HOME/XDG profile beneath its saved account.
+OpenCode 1.x uses `--pure` and the legacy provider configuration. OpenCode 2.x
+uses `--standalone`, native provider configuration, and `session import/export`;
+it never joins the shared background service. Project configuration and external
+plugins are disabled. Since v2 cannot bypass overriding system or macOS MDM
+configuration, managed launches refuse when those settings are present or
+cannot be inspected. The ordinary OpenCode profile is unchanged.
+The selected model also handles v1 small-model calls and v2 title/compaction calls. The session's
 provider key is passed through the child environment, never a command argument
 or saved configuration file.
 
 Collection exports the exact seeded session ID, validates the complete export,
 then atomically writes it to `managed-opencode-exports` beneath the contributor
 state directory. These exports and an ordinary chosen export folder share one
-OpenCode source. Explicitly turning that source off pauses discovery of both;
-it does not delete the local files. Existing project policy, review, redaction,
+OpenCode source. Turning automatic OpenCode discovery off pauses ordinary source
+discovery; explicitly collected managed exports still enter review. It does not
+delete the local files. Existing project policy, review, redaction,
 approval and admission rules still apply. Collection itself grants no upload
 permission and creates no attestation evidence.
 
@@ -327,9 +334,12 @@ Only the launched session is collected, not additional sessions created inside
 the TUI. Collection occurs on exit, not continuously while OpenCode is running.
 
 Ordinary, independently launched OpenCode sessions still require export into a
-chosen folder. The importer accepts session versions **1.18.29** and **1.19.0**;
-other versions fail closed. A local synthetic-model qualification covers
-import, exact-ID run, explicit model routing, export, validation and staging.
+chosen folder. The importer accepts v1 session versions **1.18.29** and
+**1.19.0**, plus the v2 typed session-transfer envelope qualified with **2.1.4**.
+V2 exports omit producer version, so collection leaves that field absent.
+Native SQLite v2 discovery is not enabled. A local synthetic-model qualification
+covers import, exact-ID run, selected-model routing, the native session header,
+export, validation and staging for both launch paths.
 It does not certify real provider credentials, NEAR AI receipts, or unattended
 end-to-end contribution without an invite.
 

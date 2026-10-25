@@ -856,12 +856,21 @@ mod tests {
     /// this session, starting on its default model and offering every
     /// model it lists, with a placeholder key. Without the port, the
     /// default or the list there is no command: no run.
+    #[cfg(unix)]
     #[test]
     fn opencode_on_the_sign_in_uses_the_route_port_and_models_or_does_not_run() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let native = home.path().join("opencode");
-        std::fs::write(&native, b"never executed").unwrap();
+        std::fs::write(
+            &native,
+            b"#!/bin/sh\n[ \"$1\" = --version ] || exit 1\necho '1.19.0'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let account = signin::entry(ToolId::Opencode).unwrap();
         let id = uuid::Uuid::new_v4();
         let session = OpenCodeSession::new(&store, &account, &native, id, home.path()).unwrap();
@@ -953,12 +962,21 @@ mod tests {
     /// OpenCode on a saved NEAR AI key runs against the launcher's own
     /// proxy through the same command as the sign-in: every model the
     /// proxy lists is in OpenCode's picker, not only the default.
+    #[cfg(unix)]
     #[test]
     fn opencode_on_a_saved_key_route_offers_every_listed_model() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let native = home.path().join("opencode");
-        std::fs::write(&native, b"never executed").unwrap();
+        std::fs::write(
+            &native,
+            b"#!/bin/sh\n[ \"$1\" = --version ] || exit 1\necho '1.19.0'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let account = signin::entry(ToolId::Opencode).unwrap();
         let session =
             OpenCodeSession::new(&store, &account, &native, uuid::Uuid::new_v4(), home.path())

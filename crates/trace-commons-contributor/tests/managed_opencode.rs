@@ -73,6 +73,7 @@ fn isolated_launch_exports_only_its_owned_session_and_stages_validated_bytes() {
     let native = tmp.path().join("opencode");
     // The fixture importer preserves the seed, and exporter must receive its exact ID.
     std::fs::write(&native, r#"#!/bin/sh
+if [ "$1" = --version ]; then echo '1.19.0'; exit 0; fi
 shift
 case "$1" in
 import) cp "$2" "$HOME/fixture-seed.json";;
@@ -132,17 +133,20 @@ esac
 /// Optional installed-binary qualification. The executable must be a wrapper
 /// that denies external network, e.g. sandbox-exec; never uses real credentials.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires TC_OPENCODE_TEST_BIN pointing to an externally network-denied OpenCode 1.19.0"]
+#[ignore = "requires TC_OPENCODE_TEST_BIN pointing to an externally network-denied OpenCode 1.x or 2.x"]
 async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
     use trace_commons_contributor::managed::opencode::OpenCodeSession;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let observations = seen.clone();
-    let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<serde_json::Value>| {
+    let app = Router::new().route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
         let observations = observations.clone();
         async move {
-            observations.lock().unwrap().push(body["model"].as_str().unwrap().to_owned());
+            observations.lock().unwrap().push((
+                body["model"].as_str().unwrap().to_owned(),
+                headers.get("x-ironwire-session-id").and_then(|v| v.to_str().ok()).map(str::to_owned),
+            ));
             let a = serde_json::json!({"id":"fixture","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Synthetic."},"finish_reason":null}]});
             let b = serde_json::json!({"id":"fixture","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
             ([("content-type", "text/event-stream")], format!("data: {a}\n\ndata: {b}\n\ndata: [DONE]\n\n"))
@@ -173,7 +177,27 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
             "synthetic-key",
         )
         .unwrap();
-    command.args(["run", "--format", "json", "Return the synthetic word."]);
+    if std::env::var("TC_OPENCODE_TEST_MAJOR").as_deref() == Ok("2") {
+        // v2 scopes standalone/session flags to the subcommand. The product
+        // command is interactive; qualify its exact configuration via `run`.
+        let mut run = std::process::Command::new(command.get_program());
+        run.current_dir(command.get_current_dir().unwrap());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => {
+                    run.env(key, value);
+                }
+                None => {
+                    run.env_remove(key);
+                }
+            }
+        }
+        run.arg("run").args(command.get_args());
+        command = run;
+    } else {
+        command.arg("run");
+    }
+    command.args(["--format", "json", "Return the synthetic word."]);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::from(command)
@@ -183,13 +207,17 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     .await
     .unwrap()
     .unwrap();
-    assert!(output.status.success(), "native run failed");
+    assert!(
+        output.status.success(),
+        "native run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!seen.lock().unwrap().is_empty());
     assert!(
         seen.lock()
             .unwrap()
             .iter()
-            .all(|model| model == "fixture-model")
+            .all(|(model, _)| model == "fixture-model")
     );
     run.collect(&store)
         .expect("real native export validates and stages");
@@ -202,7 +230,16 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     assert_eq!(refs.len(), 1);
     let transcript = source.load(&refs[0]).unwrap();
     assert!(transcript.events.len() >= 2);
-    assert_eq!(transcript.agent_version.as_deref(), Some("1.19.0"));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(_, session)| session.as_deref() == transcript.conversation_id.as_deref())
+    );
+    match std::env::var("TC_OPENCODE_TEST_MAJOR").as_deref() {
+        Ok("2") => assert_eq!(transcript.agent_version, None),
+        _ => assert_eq!(transcript.agent_version.as_deref(), Some("1.19.0")),
+    }
     server.abort();
 }
 

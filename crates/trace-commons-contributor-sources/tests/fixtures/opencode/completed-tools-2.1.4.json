@@ -1,0 +1,249 @@
+{
+  "info": {
+    "id": "ses_12345678901234567890123456789012",
+    "projectID": "68e50905f2e53a6f9e95b42cf7ac68b9a03e6975",
+    "model": {
+      "id": "fixture-model",
+      "providerID": "trace-managed",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "outcome": "succeeded",
+    "time": {
+      "created": 0,
+      "updated": 1792957376488,
+      "idle": 1792957376490
+    },
+    "title": "Managed session",
+    "location": {
+      "directory": "/private/tmp/tc-opencode-v2-check/contract"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_174955a5a001PBe8XJMvH6l2Qc",
+      "time": {
+        "created": 1792957307482
+      },
+      "type": "model-switched",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed"
+      }
+    },
+    {
+      "id": "msg_174955a4f001DIRv3tiBC10Wtg",
+      "time": {
+        "created": 1792957307706
+      },
+      "text": "\"Return the synthetic word.\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_174955b4800131tUQs3J3E9XWG",
+      "time": {
+        "created": 1792957307732,
+        "streamed": 1792957307757,
+        "completed": 1792957307759
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Synthetic."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_174955b74001TQIW2E8P373rZ9",
+      "time": {
+        "created": 1792957307764
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_17496056a001IcXGePI0QoT5xp",
+      "time": {
+        "created": 1792957351358
+      },
+      "text": "\"Return the synthetic word.\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_1749605c1001ZIITa5BL7cYCMW",
+      "time": {
+        "created": 1792957351364,
+        "streamed": 1792957351376,
+        "completed": 1792957351377
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Synthetic."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1749605d2001oQInuzVfWPrRyh",
+      "time": {
+        "created": 1792957351378
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_174966720001sop4doA5NSgFs7",
+      "time": {
+        "created": 1792957376424
+      },
+      "text": "\"Return the synthetic word.\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_1749667ae001xqEbfg1xTV47rw",
+      "time": {
+        "created": 1792957376437,
+        "streamed": 1792957376460,
+        "completed": 1792957376467
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_synthetic_read",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "/private/tmp/tc-opencode-v2-check/contract/synthetic.txt"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file /private/tmp/tc-opencode-v2-check/contract/synthetic.txt, lines 1-1\n1: Synthetic local tool output."
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1792957376455,
+            "ran": 1792957376458,
+            "completed": 1792957376465
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1749667db001JGuwh4BshUPffx",
+      "time": {
+        "created": 1792957376480,
+        "streamed": 1792957376488,
+        "completed": 1792957376488
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fixture-model",
+        "providerID": "trace-managed",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Synthetic."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1749667ea001dK53gIWLFZ3mAe",
+      "time": {
+        "created": 1792957376490
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

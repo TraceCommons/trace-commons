@@ -802,6 +802,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::StorageUnavailable => "managed-storage-unavailable",
         ManagedError::ToolUnavailable => "managed-tool-unavailable",
         ManagedError::UnsupportedVersion => "managed-unsupported-version",
+        ManagedError::SystemConfiguration => "managed-system-configuration",
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
