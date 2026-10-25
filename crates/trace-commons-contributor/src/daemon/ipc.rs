@@ -1014,6 +1014,7 @@ pub struct DaemonShared {
     /// What ingest last said about account admission, for the gate's R3.
     /// In memory only; see `account_admission`.
     pub(crate) account_admission: super::account_admission::AccountAdmissionState,
+    pub(crate) upload_allowance: super::upload_allowance::UploadAllowanceState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -1523,6 +1524,7 @@ impl DaemonShared {
             gate_held_logged: Mutex::new((0, Vec::new())),
             gate_held: Mutex::new(GateHeld::default()),
             account_admission: Default::default(),
+            upload_allowance: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -2449,8 +2451,8 @@ impl DaemonShared {
                 .cloned()
                 .collect()
         };
+        let settings = super::upload_allowance::effective_settings(self);
         let state = self.state.lock().expect("state lock");
-        let settings = self.settings.lock().expect("settings lock");
         super::uploader::budget_snapshot(&approved, &state, &settings, now)
     }
 
@@ -8989,6 +8991,10 @@ fn envelope_is_for_enrollment(
 pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
+        // Limit provenance belongs to persisted settings. Clients reset a
+        // cap through its existing key with null, never by echoing flags.
+        obj.remove("max_uploads_per_day_explicit");
+        obj.remove("max_bytes_per_day_explicit");
         let configured = s.near_ai.is_some();
         obj.remove("near_ai");
         obj.insert(
@@ -16097,6 +16103,17 @@ mod tests {
         let s = shared();
         let r = handle_request(&s, &req("set_settings", serde_json::json!({"nonsense": 1})));
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn upload_limit_provenance_is_internal_and_not_echoed_as_settings() {
+        let settings = DaemonSettings::default();
+        let public = redacted_settings(&settings);
+        assert!(public.get("max_uploads_per_day_explicit").is_none());
+        assert!(public.get("max_bytes_per_day_explicit").is_none());
+        let persisted = serde_json::to_value(&settings).unwrap();
+        assert_eq!(persisted["max_uploads_per_day_explicit"], false);
+        assert_eq!(persisted["max_bytes_per_day_explicit"], false);
     }
 
     #[test]

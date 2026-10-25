@@ -110,6 +110,7 @@ pub(crate) mod token_capture;
 mod token_cleanup;
 pub mod unenroll;
 pub mod unsure_spans;
+pub(crate) mod upload_allowance;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
@@ -686,6 +687,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // full pass for the gate's R3. See `account_admission`.
                 // Skipped, and any earlier answer dropped, in a dry run and
                 // when nothing is armed.
+                upload_allowance::refresh(shared, now, dry_run).await;
                 account_admission::refresh(shared, now, dry_run).await;
                 // No usable session: renew an expired one off the pass, so
                 // R3 can lift at the next pass. Not awaited.
@@ -1214,7 +1216,7 @@ async fn drain_approved(
 
         let result = {
             let mut state = shared.state.lock().expect("state lock").clone();
-            let settings = shared.settings.lock().expect("settings lock").clone();
+            let settings = upload_allowance::effective_settings(shared);
             let mut health = shared.health.lock().expect("health lock").clone();
             let mut up = uploader::Uploader {
                 ctx: &mut ctx,

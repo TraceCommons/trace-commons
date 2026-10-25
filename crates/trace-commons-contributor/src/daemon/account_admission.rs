@@ -29,7 +29,10 @@
 //! apply to it), a dry run (which sends nothing), or no armed folder and no
 //! automatic grant that could arm one. Each read keeps the account session
 //! alive on the server, so asking every minute for nothing would also defeat
-//! its idle expiry.
+//! its idle expiry. The sibling upload-allowance refresh shares this armed
+//! intent check, also permits an explicitly approved queue (without the R3
+//! namespace constraint), and skips pause/quiesce/dry-run before using this
+//! module's cached session loader.
 //!
 //! The token is the account session from `account_auth`, the same one
 //! withdrawal presents; the device key gains no new authority here. The
@@ -165,7 +168,7 @@ fn hold_until(now: DateTime<Utc>, retry_after_seconds: i64) -> Option<DateTime<U
 
 /// The tenant a native account session names, or `None` for anything that
 /// is not one.
-fn session_tenant(token: &str) -> Option<String> {
+pub(super) fn session_tenant(token: &str) -> Option<String> {
     use base64::Engine;
     let body = token.strip_prefix(NATIVE_TOKEN_PREFIX)?;
     let (tenant, secret) = body.split_once('.')?;
@@ -181,7 +184,7 @@ fn session_tenant(token: &str) -> Option<String> {
 /// Whether anything could be approved unattended: an armed folder, or an
 /// automatic grant, which can arm a folder during the very pass that finds
 /// it.
-fn anything_armed(shared: &DaemonShared) -> bool {
+pub(super) fn anything_armed(shared: &DaemonShared) -> bool {
     let policy = shared.policy.lock().expect("policy lock");
     policy.automatic_grant.is_some()
         || policy
@@ -263,7 +266,7 @@ impl AccountAdmissionState {
     /// while the local credential snapshot still matches it, and a fresh read
     /// of the OS store otherwise. `None` for no usable session, a store that
     /// cannot be read, or one that did not answer in time.
-    async fn session(&self, shared: &DaemonShared) -> Option<LoadedAccountSession> {
+    pub(super) async fn session(&self, shared: &DaemonShared) -> Option<LoadedAccountSession> {
         let store = shared.store.clone();
         // Local files only, never the OS store.
         let current = super::run_blocking(|| {
@@ -312,7 +315,7 @@ impl AccountAdmissionState {
         self.session_missing.swap(false, Ordering::SeqCst)
     }
 
-    fn drop_session(&self) {
+    pub(super) fn drop_session(&self) {
         *self.session.loaded.lock().expect("session lock") = None;
     }
 

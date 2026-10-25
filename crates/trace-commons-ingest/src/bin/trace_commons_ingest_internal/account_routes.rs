@@ -73,6 +73,7 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
         ("POST", "/v1/account/near-ai/provision/bind/finish", Allowed),
         // Answers `account_identity_unlinked` for an unbound account.
         ("GET", "/v1/account/contribution-status", Allowed),
+        ("GET", "/v1/account/upload-allowance", Refused),
         // Cancel is sign-out.
         ("POST", "/v1/account/logout", Allowed),
         ("POST", "/v1/account/sessions/revoke-all", Allowed),

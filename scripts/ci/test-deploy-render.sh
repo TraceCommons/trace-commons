@@ -1159,6 +1159,128 @@ if run_render settlement-auto-default; then
   fi
 fi
 
+# Earned client upload trust is staging-only and disabled unless explicitly
+# selected. Synthetic JWT-shaped tokens exercise rendering, never token auth.
+upload_trust_keys='^TRACE_COMMONS_(CLIENT_UPLOAD_TRUST_(DATABASE_URL|POLICY_(JSON|VERSION))|ACCOUNT_TRUST_(SHADOW_POLICY_(JSON|VERSION)|SCHEDULER_(ENABLED|TOKEN|INTERVAL_SECONDS|LIMIT)))='
+if grep -Eq "$upload_trust_keys" "$ingest_default"; then
+  fail "the default staging render writes upload trust settings"
+else
+  pass "the default staging render leaves upload trust disabled"
+fi
+upload_trust_token_ok=eyJhbGciOiJFZERTQSJ9.eyJyb2xlIjoiYWNjb3VudF90cnVzdF93b3JrZXIifQ.c3ludGhldGljX3NpZ25hdHVyZQ
+upload_trust_password_ok=dummystaginguploadtrustpassword
+upload_trust_gate_ok=staging-quality-v1
+upload_trust_dedup_ok=events.v2+simhash.v2
+upload_trust_options=(
+  "TC_UPLOAD_TRUST_GATE_POLICY_VERSION=$upload_trust_gate_ok"
+  "TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION=$upload_trust_dedup_ok"
+  "TC_SECRET_tc_staging_account_trust_worker_token=$upload_trust_token_ok"
+  "TC_SECRET_tc_staging_db_upload_trust_password=$upload_trust_password_ok"
+)
+# This independent literal pins the full policy, including count-once/no-bonus
+# controls and no age/week wait, rather than comparing a template to itself.
+upload_trust_policy_want='{"version":"staging-earned-upload-v1","processing_cost_bound":1,"bounded_allowance":100,"period":{"mode":"fixed","seconds":86400},"growth_rule":"tiered-v1","growth":{"window_seconds":7257600,"weekly_cap":10000,"attested_unit_weight":1,"require_gate_pass":true,"q_min_micros":null,"credit_quality_calibration_versions":[],"penalty_cooldown_seconds":7776000,"evaluation_max_age_seconds":172800,"allowance_ceiling":500,"evaluator_versions":["staging-quality-v1"],"dedup_signal_versions":["events.v2+simhash.v2"],"tiers":[{"units":0,"active_weeks":0,"age_seconds":0,"attested_units":0,"multiplier":1},{"units":5,"active_weeks":0,"age_seconds":0,"attested_units":0,"multiplier":2},{"units":20,"active_weeks":0,"age_seconds":0,"attested_units":0,"multiplier":3},{"units":50,"active_weeks":0,"age_seconds":0,"attested_units":0,"multiplier":5}]}}'
+for mode in shadow applied; do
+  if RENDER_XTRACE=1 run_render "upload-trust-$mode" \
+    "TC_CLIENT_UPLOAD_TRUST_MODE=$mode" "${upload_trust_options[@]}"; then
+    if [ "$mode" = shadow ]; then
+      policy_prefix=TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY
+      absent_prefix=TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY
+    else
+      policy_prefix=TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY
+      absent_prefix=TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY
+    fi
+    expect "$out/ingest.env" "${policy_prefix}_VERSION" staging-earned-upload-v1
+    expect "$out/ingest.env" "${policy_prefix}_JSON" "$upload_trust_policy_want"
+    expect "$out/ingest.env" TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL \
+      "postgres://tc_upload_trust_login:$upload_trust_password_ok@127.0.0.1:5432/tracecommons"
+    expect "$out/ingest.env" DATABASE_URL \
+      "postgres://app:dummystagingdbpassword@127.0.0.1:5432/tracecommons"
+    expect "$out/ingest.env" TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED true
+    expect "$out/ingest.env" TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS 300
+    expect "$out/ingest.env" TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT 10000
+    expect "$out/ingest.env" TRACE_COMMONS_ADMISSION_ENABLED false
+    expect "$out/ingest.env" TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED false
+    no_duplicate_keys "$out/ingest.env" "the $mode upload trust render"
+    if grep -q "^${absent_prefix}_" "$out/ingest.env" \
+      || grep -q '^TRACE_COMMONS_WITNESS_' "$out/ingest.env"; then
+      fail "the $mode upload trust render writes another trust mode or witness settings"
+    else
+      pass "the $mode upload trust render keeps the other mode and witness unset"
+    fi
+    if [ "$(value_of "$out/ingest.env" TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN)" = "$upload_trust_token_ok" ] \
+      && [ "$(grep -c -F "$upload_trust_token_ok" "$out/ingest.env")" = 1 ] \
+      && ! grep -q -F "$upload_trust_token_ok" "$out/issuer.env"; then
+      pass "the upload trust worker token is assigned once to ingest alone"
+    else
+      fail "the upload trust worker token was not confined to its ingest setting"
+    fi
+    if [ "$(grep -c -F "$upload_trust_password_ok" "$out/ingest.env")" = 1 ] \
+      && ! grep -q -F "$upload_trust_password_ok" "$out/issuer.env"; then
+      pass "the upload trust database password is confined to its dedicated ingest setting"
+    else
+      fail "the upload trust database password escaped its dedicated setting"
+    fi
+    for secret_value in "$upload_trust_token_ok" "$upload_trust_password_ok"; do
+      if grep -q -F "$secret_value" "$scratch/upload-trust-$mode.out" "$scratch/upload-trust-$mode.err"; then
+        fail "the $mode upload trust render leaked a trust secret under bash -x"
+      else
+        pass "the $mode upload trust render keeps a trust secret out of stdout and xtrace"
+      fi
+    done
+  else
+    fail "the $mode upload trust render failed"
+    cat "$scratch/upload-trust-$mode.err" >&2
+  fi
+done
+upload_trust_refused() {
+  local stem="upload-trust-$1"
+  shift
+  if run_render "$stem" "$@"; then
+    fail "the upload trust render accepted $stem"
+  elif ! refused "$stem"; then
+    fail "the upload trust render failed without a refusal ($stem)"
+  elif [ -e "$out/ingest.env" ] || [ -e "$out/issuer.env" ]; then
+    fail "the refused upload trust render wrote env files ($stem)"
+  else
+    pass "the upload trust render refuses $stem without writing env files"
+  fi
+}
+upload_trust_refused bad-mode TC_CLIENT_UPLOAD_TRUST_MODE=enabled "${upload_trust_options[@]}"
+upload_trust_refused labels-without-mode "${upload_trust_options[@]}"
+upload_trust_refused no-labels TC_CLIENT_UPLOAD_TRUST_MODE=shadow
+upload_trust_refused gate-only TC_CLIENT_UPLOAD_TRUST_MODE=applied \
+  "TC_UPLOAD_TRUST_GATE_POLICY_VERSION=$upload_trust_gate_ok"
+upload_trust_refused dedup-only TC_CLIENT_UPLOAD_TRUST_MODE=applied \
+  "TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION=$upload_trust_dedup_ok"
+for bad in 'has space' 'has/slash' 'has:colon' 'has"quote' 'has$dollar' \
+  $'new\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' \
+  "$(printf 'x%.0s' $(seq 65))"; do
+  upload_trust_refused bad-gate "${upload_trust_options[@]}" TC_CLIENT_UPLOAD_TRUST_MODE=applied \
+    "TC_UPLOAD_TRUST_GATE_POLICY_VERSION=$bad"
+  upload_trust_refused bad-dedup "${upload_trust_options[@]}" TC_CLIENT_UPLOAD_TRUST_MODE=shadow \
+    "TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION=$bad"
+done
+for bad in '' not-a-jwt 'one.two' 'one.two.three.four' 'one.two.three with-space' \
+  $'one.two.three\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' $'one.two.three\r'; do
+  upload_trust_refused bad-token "${upload_trust_options[@]}" TC_CLIENT_UPLOAD_TRUST_MODE=applied \
+    "TC_SECRET_tc_staging_account_trust_worker_token=$bad"
+done
+for bad in '' short 'pass@word/host' 'pass:word' 'password with spaces' \
+  $'validlongpassword\nTRACE_COMMONS_WITNESS_BYPASS_ENABLED=true' $'validlongpassword\r'; do
+  upload_trust_refused bad-password "${upload_trust_options[@]}" TC_CLIENT_UPLOAD_TRUST_MODE=shadow \
+    "TC_SECRET_tc_staging_db_upload_trust_password=$bad"
+done
+# Disabled mode must not read either optional secret, even if malformed.
+if run_render upload-trust-disabled-secret \
+  $'TC_SECRET_tc_staging_account_trust_worker_token=not-a-jwt\nsecond-line' \
+  $'TC_SECRET_tc_staging_db_upload_trust_password=bad/password\nsecond-line' \
+  && cmp -s "$out/ingest.env" "$ingest_default"; then
+  pass "disabled upload trust ignores its secret and leaves the default env byte-identical"
+else
+  fail "disabled upload trust read its secret or changed the default env"
+fi
+
 # 4. caddy adapt, where caddy is installed.
 if command -v caddy >/dev/null 2>&1; then
   for file in "$scratch/pilot-Caddyfile" "$caddyfile"; do

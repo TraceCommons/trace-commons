@@ -22,6 +22,9 @@ pub struct TrustAccount {
 pub enum TrustFactSource {
     /// A submission ID with an `accepted` credit-ledger event.
     AcceptedSubmission(Uuid),
+    /// A server-accepted submission without requiring a monetary credit event.
+    /// Only gate-required policies may qualify this source.
+    AcceptedSubmissionStatus(Uuid),
     /// A gate decision ID.
     GateEvaluation(Uuid),
     /// A submission ID whose `withdrawn_at` is set: a contributor withdrawal.
@@ -41,6 +44,7 @@ impl TrustFactSource {
     pub fn source_id(self) -> Uuid {
         match self {
             Self::AcceptedSubmission(id)
+            | Self::AcceptedSubmissionStatus(id)
             | Self::GateEvaluation(id)
             | Self::SubmissionWithdrawn(id)
             | Self::SubmissionRevoked(id)
@@ -53,6 +57,7 @@ impl TrustFactSource {
     pub fn kind(self) -> &'static str {
         match self {
             Self::AcceptedSubmission(_) => "accepted_submission",
+            Self::AcceptedSubmissionStatus(_) => "accepted_submission_status",
             Self::GateEvaluation(_) => "gate_evaluation",
             Self::SubmissionWithdrawn(_) => "submission_withdrawn",
             Self::SubmissionRevoked(_) => "submission_revoked",
@@ -66,6 +71,7 @@ impl TrustFactSource {
     pub fn from_storage(kind: &str, source_id: Uuid) -> Option<Self> {
         Some(match kind {
             "accepted_submission" => Self::AcceptedSubmission(source_id),
+            "accepted_submission_status" => Self::AcceptedSubmissionStatus(source_id),
             "gate_evaluation" => Self::GateEvaluation(source_id),
             "submission_withdrawn" => Self::SubmissionWithdrawn(source_id),
             "submission_revoked" => Self::SubmissionRevoked(source_id),

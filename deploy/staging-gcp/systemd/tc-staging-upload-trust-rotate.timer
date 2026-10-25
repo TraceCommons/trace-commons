@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the staging upload-trust worker credential daily
+
+[Timer]
+OnCalendar=*-*-* 04:23:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=tc-staging-upload-trust-rotate.service
+
+[Install]
+WantedBy=timers.target

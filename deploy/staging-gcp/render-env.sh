@@ -102,6 +102,18 @@ set +x
 #                       NEAR AI API key; its account pays for scoring). Every
 #                       other NEAR AI setting stays staging. Unset, nothing is
 #                       rendered and the secret is not read.
+#   TC_CLIENT_UPLOAD_TRUST_MODE
+#                       optional shadow or applied; unset stays disabled. Both
+#                       require TC_UPLOAD_TRUST_GATE_POLICY_VERSION and
+#                       TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION from live staging
+#                       decisions, and read tc-staging-account-trust-worker-token
+#                       plus tc-staging-db-upload-trust-password for the dedicated
+#                       non-owner trust login. The main database URL stays as-is.
+#                       Expired/revoked scheduler credentials fail all ingest startup.
+#                       Rotate, rerender/restart and verify before revoking the old jti.
+#                       Runs the scoped trust scheduler every 300 seconds with
+#                       limit 10000. Keeps both admission ledgers off. See
+#                       docs/operator/client-upload-allowance.md for readiness.
 #   TC_RENDER_OUT_DIR   default /etc/tracecommons.
 #   TC_SITE_ROOT        default /var/lib/tracecommons-site.
 #   TC_DEPLOY_DIR       default ~/deploy of the user who ran sudo.
@@ -376,6 +388,52 @@ if [ -n "$award_delta" ]; then
     extra+="TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=$award_settle_from"$'\n'
   fi
 fi
+# A deliberate opt-in only: labels without a mode refuse rather than enabling
+# evaluation accidentally. Label shape matches the tiered policy parser.
+upload_trust_mode="${TC_CLIENT_UPLOAD_TRUST_MODE:-}"
+upload_trust_gate="${TC_UPLOAD_TRUST_GATE_POLICY_VERSION:-}"
+upload_trust_dedup="${TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION:-}"
+case "$upload_trust_mode" in
+  "")
+    [ -z "$upload_trust_gate" ] && [ -z "$upload_trust_dedup" ] \
+      || refuse "TC_CLIENT_UPLOAD_TRUST_MODE is required with upload trust labels"
+    ;;
+  shadow | applied)
+    [[ "$upload_trust_gate" =~ ^[A-Za-z0-9._+-]{1,64}$ ]] \
+      || refuse "TC_UPLOAD_TRUST_GATE_POLICY_VERSION must be a safe 1-64 character label"
+    [[ "$upload_trust_dedup" =~ ^[A-Za-z0-9._+-]{1,64}$ ]] \
+      || refuse "TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION must be a safe 1-64 character label"
+    # The policy is public configuration; only these two checked labels are
+    # substituted. Its labels contain no whitespace, so stripping template
+    # whitespace produces one JSON line without a JSON-tool dependency.
+    export TC_UPLOAD_TRUST_GATE_POLICY_VERSION="$upload_trust_gate"
+    export TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION="$upload_trust_dedup"
+    upload_trust_policy="$(envsubst '${TC_UPLOAD_TRUST_GATE_POLICY_VERSION} ${TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION}' \
+      <"$here/client-upload-trust-policy.json.template" | tr -d '[:space:]')"
+    upload_trust_password="$(secret tc-staging-db-upload-trust-password)"
+    db_password tc-staging-db-upload-trust-password "$upload_trust_password"
+    upload_trust_token="$(secret tc-staging-account-trust-worker-token)"
+    shaped tc-staging-account-trust-worker-token "$upload_trust_token" \
+      '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$' "one JWT-shaped token"
+    if [ "$upload_trust_mode" = shadow ]; then
+      extra+="TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION=staging-earned-upload-v1"$'\n'
+      extra+="TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON=$upload_trust_policy"$'\n'
+    else
+      extra+="TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_VERSION=staging-earned-upload-v1"$'\n'
+      extra+="TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON=$upload_trust_policy"$'\n'
+    fi
+    extra+="TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL=postgres://tc_upload_trust_login:$upload_trust_password@127.0.0.1:5432/tracecommons"$'\n'
+    extra+="TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED=true"$'\n'
+    extra+="TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS=300"$'\n'
+    extra+="TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT=10000"$'\n'
+    extra+="TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN=$upload_trust_token"$'\n'
+    # Independent client caps must not change staging signup or admission.
+    extra+="TRACE_COMMONS_ADMISSION_ENABLED=false"$'\n'
+    extra+="TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED=false"$'\n'
+    ;;
+  *) refuse "TC_CLIENT_UPLOAD_TRUST_MODE must be shadow or applied, or unset" ;;
+esac
+
 case "${TC_CREDIT_SETTLEMENT_ALL_TENANTS:-0}" in
   0) ;;
   1)

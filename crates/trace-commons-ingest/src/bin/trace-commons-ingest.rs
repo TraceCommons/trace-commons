@@ -37,6 +37,8 @@ mod public_run;
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
 mod token_bundles;
+#[path = "trace_commons_ingest_internal/upload_allowance.rs"]
+mod upload_allowance;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -2071,12 +2073,17 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
+    client_upload_allowance: Option<trace_commons_protocol::upload_allowance::DailyUploadAllowance>,
+    /// Independent earned daily upload caps; neither admission ledger is enabled.
+    client_upload_trust_policy: Option<Arc<upload_allowance::ClientUploadTrustPolicy>>,
+    /// Optional narrow nonowner trust pool; the ingest source pool is unchanged.
+    client_upload_trust_database: Option<Arc<dyn Database>>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
     /// read by admission; see `account_trust_growth_routes`.
     account_trust_shadow_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
-    /// The admission policy's own growth rule when it names `tiered-v1`:
-    /// what the evaluator's `applied` mode runs and admission reads.
+    /// The admission policy's `tiered-v1` rule or the independent client
+    /// upload trust rule. Both use the existing evaluator's `applied` mode.
     account_trust_applied_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
     /// `TRACE_COMMONS_NEAR_AI_STARTER_MODE`: whether submissions record the
@@ -4080,7 +4087,7 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let (db_connections, db_source_config) = trace_corpus_db_mirror_from_env().await?;
         let db_mirror = db_connections
             .as_ref()
             .map(|connections| connections.database.clone());
@@ -4700,20 +4707,56 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let client_upload_allowance = upload_allowance::config_from_env()?;
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
+        let client_upload_trust_policy = upload_allowance::trust_policy_from_env()?.map(Arc::new);
+        let account_trust_shadow_policy =
+            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
+        let client_upload_trust_database = account_trust_growth_routes::trust_database_from_env(
+            db_source_config.as_ref(),
+            client_upload_trust_policy.is_some(),
+            account_trust_shadow_policy.is_some(),
+            account_admission.is_some(),
+            admission.is_some(),
+            require_db_mirror_writes,
+        )
+        .await?;
+        account_trust_growth_routes::require_independent_upload_trust_controls(
+            client_upload_trust_policy.is_some(),
+            account_admission.is_some(),
+            admission.is_some(),
+            db_mirror.is_some(),
+            require_db_mirror_writes,
+            require_postgres_trace_rls_ready || client_upload_trust_database.is_some(),
         )?;
         admission::require_legacy_evidence_policy(
             account_admission.is_some(),
             admission.is_some(),
         )?;
-        let account_trust_shadow_policy =
-            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
-        let account_trust_applied_policy =
+        let account_trust_applied_policy = if client_upload_trust_policy.is_some() {
+            account_trust_growth_routes::select_applied_policy(
+                account_admission.as_ref(),
+                client_upload_trust_policy.as_deref(),
+                |key| std::env::var(key),
+            )?
+        } else {
             account_trust_growth_routes::applied_policy_from_env(account_admission.as_ref())?
-                .map(Arc::new);
+        }
+        .map(Arc::new);
         let account_trust_scheduler = account_trust_growth_routes::scheduler_config_from_env()?;
         let near_ai_starter_mode = starter_advance::starter_mode_from_env(db_mirror.is_some())?;
+        if client_upload_trust_policy.is_some() || client_upload_trust_database.is_some() {
+            let db = client_upload_trust_database
+                .as_ref()
+                .or(db_mirror.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("client_upload_trust_database_unavailable"))?;
+            account_trust_growth_routes::require_independent_upload_trust_runtime_ready(
+                db.as_ref(),
+            )
+            .await?;
+        }
         if let Some(account_config) = account_admission.as_ref() {
             let db = db_mirror
                 .as_ref()
@@ -5145,6 +5188,9 @@ impl AppState {
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
+            client_upload_allowance,
+            client_upload_trust_policy,
+            client_upload_trust_database,
             account_trust_shadow_policy,
             near_ai_starter_mode,
             account_trust_applied_policy,
@@ -8232,9 +8278,10 @@ struct TraceCorpusDbConnections {
     postgres: Arc<PgBackend>,
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
+async fn trace_corpus_db_mirror_from_env()
+-> anyhow::Result<(Option<TraceCorpusDbConnections>, Option<DatabaseConfig>)> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let url = std::env::var("DATABASE_URL")
@@ -8255,7 +8302,10 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusD
         .context("failed to migrate Trace Commons DB dual-write mirror")?;
     let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(TraceCorpusDbConnections { database, postgres }))
+    Ok((
+        Some(TraceCorpusDbConnections { database, postgres }),
+        Some(config),
+    ))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -8604,6 +8654,7 @@ fn authenticated_account_surface(
 /// cannot disagree about which routes exist.
 fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
     let general = account_routes::AccountRoutes::new()
+        .get("/v1/account/upload-allowance", upload_allowance::handler)
         .get(
             "/v1/account/contribution-status",
             admission::account_status_handler,
