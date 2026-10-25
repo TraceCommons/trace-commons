@@ -215,7 +215,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging
-          swift test --package-path macos
+          swift test --package-path macos -Xswiftc -warnings-as-errors
 
       # make-release-dmg.sh reads macos/channels/staging.env: the bundle id,
       # name, entitlements and profile, the staging Sparkle key variable, and

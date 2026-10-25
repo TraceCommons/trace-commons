@@ -484,7 +484,7 @@ struct JoinScreen: View {
 
     /// The core's host reader, named so the test reaches the function the
     /// screen uses.
-    static func defaultIssuerHost(_ invite: String) -> String? { TCInvite.issuerHost(invite) }
+    nonisolated static func defaultIssuerHost(_ invite: String) -> String? { TCInvite.issuerHost(invite) }
 
     @State private var draft: String?
     @State private var refused = false

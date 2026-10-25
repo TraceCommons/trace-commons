@@ -63,7 +63,7 @@ struct PrivateAISwitchCard: View {
     let calls: PrivateInferenceCalls
     let busy: Bool
     let refusal: String?
-    let onSet: (Bool) -> Void
+    let onSet: @MainActor @Sendable (Bool) -> Void
     let onDismiss: () -> Void
     /// Re-reads the connection from the refresh control beside its heading.
     var onRefresh: (() -> Void)?
@@ -114,7 +114,7 @@ struct PrivateAISwitchCard: View {
                         credential
                     }
                     GlassHairline(GlassColor.hairline)
-                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
+                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: { onSet($0) }))
                         .toggleStyle(GlassToggleStyle(.settings))
                         .disabled(busy || isOn == nil)
                     // A refused switch: the failed request's red line,

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -8,39 +9,37 @@ import XCTest
 /// A daemon that answers each method from a script: a canned result, a
 /// refusal, or (for `parked`) nothing until the test lets it.
 private final class ScriptedDaemon: DaemonCalling {
-    enum Reply {
+    enum Reply: Sendable {
         case result(String)
         case refused
         case parked(String)
     }
 
-    private let lock = NSLock()
-    private var replies: [String: Reply]
+    private struct State: Sendable {
+        var replies: [String: Reply]
+        var asked: [String] = []
+    }
+    private let state: OSAllocatedUnfairLock<State>
     private let gate = DispatchSemaphore(value: 0)
-    private var asked: [String] = []
 
-    init(_ replies: [String: Reply]) { self.replies = replies }
+    init(_ replies: [String: Reply]) { state = OSAllocatedUnfairLock(initialState: State(replies: replies)) }
 
     var methods: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return asked
+        state.withLock { $0.asked }
     }
 
     func release() { gate.signal() }
 
     /// Changes what `method` answers from the next call on.
     func reply(_ method: String, with reply: Reply) {
-        lock.lock()
-        replies[method] = reply
-        lock.unlock()
+        state.withLock { $0.replies[method] = reply }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        asked.append(method)
-        let reply = replies[method]
-        lock.unlock()
+        let reply = state.withLock {
+            $0.asked.append(method)
+            return $0.replies[method]
+        }
         switch reply {
         case .result(let json):
             return #"{"id":1,"result":"# + json + "}"
@@ -96,6 +95,7 @@ final class SettingsReadStateTests: XCTestCase {
 
     /// The unavailable line is the core's: request-failed with a retry for
     /// a failed read, core-unreachable with none for a core that is down.
+    @MainActor
     func testTheUnavailableLineIsTheCoresAndOnlyAFailedReadOffersRetry() throws {
         let screens = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
         XCTAssertEqual(SettingsUnavailable.line(.failed, screens: screens), screens.requestFailed)

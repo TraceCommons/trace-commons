@@ -23,6 +23,7 @@ final class ThreePaneTests: XCTestCase {
         V(map: false, inspector: true), V(map: true, inspector: true),
     ]
 
+    @MainActor
     func test_theDefaultWidthsAreTheTokens() {
         XCTAssertEqual(main, 440)
         XCTAssertEqual(main, GlassTokens.Size.paneLeftWidth + 40)

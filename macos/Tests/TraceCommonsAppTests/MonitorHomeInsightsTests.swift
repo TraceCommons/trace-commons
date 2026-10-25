@@ -39,7 +39,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
     /// with a Swift-authored word.
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
+        XCTAssertNotNil(home.range(of: #"\bstatic\s+(?:nonisolated\s+)?let\s+insightsCopy\s*=\s*TCInsights\.copy\(\)"#,
+                                  options: .regularExpression))
         // One reading: Home's card and the Insights tab's name both take it
         // from `HomeTabView.insightsHeading` (its own tab since 2026-10-15).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)

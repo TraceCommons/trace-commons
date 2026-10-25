@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -17,28 +18,27 @@ private final class RecordingDaemon: DaemonCalling {
     /// reads `calls` from the main actor. An unsynchronised `Array.append`
     /// under that corrupts the buffer's refcount and segfaults the test
     /// process. See CredentialCancelTests for the crash this prevents.
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var responses: [String: String] = [:]
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var calls: [(method: String, params: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
     /// Answers by method, so one client can be driven through a write and
     /// both probes in the order the card issues them.
-    private var responseTable: [String: String] = [:]
-
     var responses: [String: String] {
-        get { lock.lock(); defer { lock.unlock() }; return responseTable }
-        set { lock.lock(); defer { lock.unlock() }; responseTable = newValue }
+        get { state.withLock { $0.responses } }
+        set { state.withLock { $0.responses = newValue } }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method: method, params: paramsJSON))
-        return responseTable[method] ?? #"{"id":1,"result":{}}"#
+        state.withLock {
+            $0.recorded.append((method: method, params: paramsJSON))
+            return $0.responses[method] ?? #"{"id":1,"result":{}}"#
+        }
     }
 
     /// Never called by these tests. Nil is the honest answer for a

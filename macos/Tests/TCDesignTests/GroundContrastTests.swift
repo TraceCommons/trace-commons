@@ -39,6 +39,7 @@ final class GroundContrastTests: XCTestCase {
 
     /// On a selected row a control's label, the submit pill's and the
     /// kebab's glyph take the row's own ink, whatever their state.
+    @MainActor
     func test_onASelectionControlsTakeTheRowsInk() {
         let rowInk = GlassTokens.Color.textOnAccent
         XCTAssertEqual(GlassGround.selection.controlInk, rowInk)

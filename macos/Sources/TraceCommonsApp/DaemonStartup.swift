@@ -93,10 +93,11 @@ final class DaemonStartup {
         pending?.cancel()
     }
 
-    /// TCDaemon has no Sendable conformance. This box transfers its ownership
-    /// once rather than making that conformance on its behalf: result and
-    /// cancelled are accessed under lock; construction and disposal happen
-    /// on worker; only deliver takes a result onto the main actor. A rejected
+    /// Owns a startup result until it is accepted. TCDaemon protects its
+    /// concurrent calls, while adoption, cancellation and off-main disposal
+    /// still need one owner. Result and cancelled are accessed under lock;
+    /// construction and disposal happen on worker. Only deliver takes a
+    /// result onto the main actor. A rejected
     /// result is retained here before the main-actor reference is released,
     /// so its blocking destructor cannot run there with a live handle.
     private final class Pending: @unchecked Sendable {

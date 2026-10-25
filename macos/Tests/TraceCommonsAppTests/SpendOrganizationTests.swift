@@ -1,4 +1,5 @@
 import XCTest
+import os
 
 import TCBridge
 @testable import TCShellCore
@@ -10,33 +11,40 @@ import TCBridge
 final class SpendOrganizationTests: XCTestCase {
     /// Answers the two spending-organization methods and refuses the rest.
     private final class Daemon: DaemonCalling {
-        struct Call: Equatable {
+        struct Call: Equatable, Sendable {
             let method: String
             let params: String
         }
 
-        private let lock = NSLock()
-        private var recorded: [Call] = []
-        var listing: String
-        var selectReply: String
+        private struct State: Sendable {
+            var recorded: [Call] = []
+            var listing: String
+            var selectReply: String
+        }
+        private let state: OSAllocatedUnfairLock<State>
+
+        var listing: String {
+            get { state.withLock { $0.listing } }
+            set { state.withLock { $0.listing = newValue } }
+        }
+        var selectReply: String {
+            get { state.withLock { $0.selectReply } }
+            set { state.withLock { $0.selectReply = newValue } }
+        }
 
         init(listing: String, selectReply: String = #"{"id":1,"result":{"switched":true,"revoke_pending":false}}"#) {
-            self.listing = listing
-            self.selectReply = selectReply
+            state = OSAllocatedUnfairLock(initialState: State(listing: listing, selectReply: selectReply))
         }
 
         var calls: [Call] {
-            lock.lock()
-            defer { lock.unlock() }
-            return recorded
+            state.withLock { $0.recorded }
         }
 
         func call(_ method: String, params paramsJSON: String) -> String {
-            lock.lock()
-            recorded.append(Call(method: method, params: paramsJSON))
-            let listing = self.listing
-            let selectReply = self.selectReply
-            lock.unlock()
+            let (listing, selectReply) = state.withLock {
+                $0.recorded.append(Call(method: method, params: paramsJSON))
+                return ($0.listing, $0.selectReply)
+            }
             switch method {
             case "near_ai_spend_organizations": return listing
             case "near_ai_spend_organization_select": return selectReply
@@ -206,13 +214,13 @@ final class SpendOrganizationTests: XCTestCase {
 
 /// The daemon's answer, shaped as `near_ai_spend_organizations` sends it.
 enum SpendOrganizationSurfaceFixture {
-    nonisolated(unsafe) static let view: [String: Any] = [
+    static var view: [String: Any] { [
         "title": "TITLE", "what": "WHAT", "picker": "PICKER", "switching": "SWITCHING", "failed": "FAILED",
         "session_expired": "EXPIRED", "refused": "REFUSED", "revoke_pending": "PENDING",
         "prompt_title": "PROMPT-TITLE", "prompt_line": "PROMPT-LINE",
         "prompt_action": "PROMPT-ACTION", "prompt_action_accessibility": "PROMPT-ACTION-AX",
         "prompt_dismiss": "PROMPT-DISMISS", "prompt_dismiss_accessibility": "PROMPT-DISMISS-AX",
-    ]
+    ] }
 
     static func payload(
         organizations: [(String, Bool)], explicit: Bool = false, revokePending: Bool = false

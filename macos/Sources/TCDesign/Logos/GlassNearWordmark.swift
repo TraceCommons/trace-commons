@@ -15,7 +15,7 @@ public struct GlassNearWordmark: View {
     public init() {}
 
     /// The artwork's bounds, and so its aspect.
-    public static let viewBox = CGRect(x: 0, y: 0, width: 730, height: 138)
+    nonisolated public static let viewBox = CGRect(x: 0, y: 0, width: 730, height: 138)
 
     /// The kit's brand blue, "AI" in every colouring.
     static let brandBlue = GlassRGBA(0x0091FD)

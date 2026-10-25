@@ -211,13 +211,7 @@ final class ToolFolderInspectorTests: XCTestCase {
     /// folder inspector, the tree's folder rows and History read that one
     /// copy, so the three can never hold different words.
     func test_theDisclosureBundleIsDecodedOnce() async throws {
-        let walker = try XCTUnwrap(FileManager.default.enumerator(
-            at: ReleaseBuildGateTests.root, includingPropertiesForKeys: nil))
-        var decoders: [String] = []
-        for case let url as URL in walker where url.pathExtension == "swift" {
-            let text = try String(contentsOf: url, encoding: .utf8)
-            if text.contains("contributorDisclosureCopyJSON()") { decoders.append(url.lastPathComponent) }
-        }
+        let decoders = try Self.disclosureDecoders()
         XCTAssertEqual(decoders, ["TracesStore.swift"])
         let (store, _) = try await loaded()
         XCTAssertEqual(store.disclosure, TracesStore.disclosureCopy)
@@ -227,6 +221,19 @@ final class ToolFolderInspectorTests: XCTestCase {
         XCTAssertTrue(tree.contains("modeLabels: store.disclosure?.folderModeLabels"))
         let home = try TracesParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("HistoryList.labels(shell: MonitorWords.table?.shell)"))
+    }
+
+    // Foundation's directory enumerator is synchronous-only. Finish the
+    // source scan before the test awaits loading its UI store.
+    private static func disclosureDecoders() throws -> [String] {
+        let walker = try XCTUnwrap(FileManager.default.enumerator(
+            at: ReleaseBuildGateTests.root, includingPropertiesForKeys: nil))
+        var decoders: [String] = []
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if text.contains("contributorDisclosureCopyJSON()") { decoders.append(url.lastPathComponent) }
+        }
+        return decoders
     }
 }
 

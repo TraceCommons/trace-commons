@@ -374,7 +374,7 @@ public struct GlassMenuBarStrip: View {
     /// The mark drawn: the ring only with no badge on a live strip (no
     /// attention mark, not paused, not unavailable), the halo only around
     /// a badge that is drawn.
-    public static func shownMark(_ mark: Mark, badge: Int?, condition: Condition) -> Mark {
+    nonisolated public static func shownMark(_ mark: Mark, badge: Int?, condition: Condition) -> Mark {
         let badgeShown = shownBadge(badge, condition: condition) != nil
         switch mark {
         case .news: return !badgeShown && condition == .live ? .news : .none
@@ -418,7 +418,7 @@ public struct GlassMenuBarStrip: View {
 
     /// The badge drawn, if any: none when unavailable, since an unknown
     /// count is never a number.
-    static func shownBadge(_ badge: Int?, condition: Condition) -> Int? {
+    nonisolated static func shownBadge(_ badge: Int?, condition: Condition) -> Int? {
         guard condition != .unavailable, let badge, badge > 0 else { return nil }
         return badge
     }
@@ -465,7 +465,7 @@ public struct GlassMenuBarStrip: View {
     static let markGap: CGFloat = 4
     /// A bar's width; a step's two bars touch, and steps are `stepGap`
     /// apart. Whole points, so a 1x display draws them crisp too.
-    static let barWidth: CGFloat = 1
+    nonisolated static let barWidth: CGFloat = 1
     static let stepGap: CGFloat = 1
     /// The graph's height and its centre line's, and its top edge: centred
     /// in the item's height, as the mark is, but half a point high: a 1pt

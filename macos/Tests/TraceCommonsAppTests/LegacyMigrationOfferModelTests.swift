@@ -46,21 +46,13 @@ private func refusal(_ label: String) -> String {
 /// lasts, and how Move ends.
 @MainActor
 final class LegacyMigrationOfferModelTests: XCTestCase {
-    /// Tenants this run used, so their dismiss markers are removed after.
-    private var tenants: [String] = []
-
-    override func tearDown() {
-        for tenant in tenants {
-            if let key = AppModel.legacyMigrationOfferDismissedKey(tenant) {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
-        super.tearDown()
-    }
-
     private func freshTenant(_ prefix: String = "tenant-") -> String {
         let tenant = prefix + UUID().uuidString.lowercased()
-        tenants.append(tenant)
+        // Resolve the actor-owned key now; teardown owns only its immutable
+        // copy and never needs to access this UI-isolated test instance.
+        if let key = AppModel.legacyMigrationOfferDismissedKey(tenant) {
+            addTeardownBlock { UserDefaults.standard.removeObject(forKey: key) }
+        }
         return tenant
     }
 

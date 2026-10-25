@@ -10,6 +10,7 @@ import XCTest
 /// dimmed #7C7C86 was 2.76:1 in dark; the token is that grey lightened the
 /// least that clears the floor.
 final class ToolbarGlyphContrastTests: XCTestCase {
+    @MainActor
     func test_toolbarGlyphsTakeTheReferenceInks() {
         XCTAssertEqual(GlassToolbarButton.glyph(pressed: true), GlassTokens.Color.toolbarGlyph)
         XCTAssertEqual(GlassToolbarButton.glyph(pressed: nil), GlassTokens.Color.toolbarGlyph)
@@ -17,6 +18,7 @@ final class ToolbarGlyphContrastTests: XCTestCase {
         XCTAssertEqual(GlassTokens.Color.toolbarGlyph.rgb, 0xE6E6EC)
     }
 
+    @MainActor
     func test_aDimmedToolbarGlyphClearsTheGlyphFloor() {
         for dark in [true, false] {
             let base = dark ? GlassTokens.Color.paneBase.dark : GlassTokens.Color.paneBase.light
@@ -39,6 +41,7 @@ final class ToolbarGlyphContrastTests: XCTestCase {
     }
 
     /// Lit, the glyph clears text contrast on the control fill.
+    @MainActor
     func test_aLitToolbarGlyphClearsTextContrast() {
         let ground = Self.over(GlassTokens.Gradient.controlFill.stops[0].color, GlassTokens.Color.paneBase)
         let ratio = SwitchContrastTests.contrast(GlassToolbarButton.glyph(pressed: true), ground)

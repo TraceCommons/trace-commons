@@ -84,6 +84,7 @@ final class GlassMaterialTests: XCTestCase {
         }
     }
 
+    @MainActor
     private static func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }

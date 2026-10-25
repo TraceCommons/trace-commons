@@ -54,11 +54,11 @@ struct HomeTabView: View {
     /// The core's Insights copy, read once: it is fixed for the life of the
     /// process, and reading it is a C ABI call and a JSON decode, which
     /// `body` would otherwise repeat on every evaluation.
-    private static let insightsCopy = TCInsights.copy()
+    private nonisolated static let insightsCopy = TCInsights.copy()
 
     /// Insights' heading, the core's: the Insights tab's name and its card
     /// on Home. Nil until the core's copy has arrived.
-    static var insightsHeading: String? { HomeFormat.cardHeading(Self.insightsCopy?["title"]) }
+    nonisolated static var insightsHeading: String? { HomeFormat.cardHeading(Self.insightsCopy?["title"]) }
 
     /// The breadcrumb word for a hosted page: the core's heading, or nil
     /// before its copy has arrived. Mission drafts is #1146's Missions, and
@@ -280,7 +280,6 @@ private struct HomeOverview: View {
     /// waiting opens Traces, contributed opens History, and pending credit
     /// opens Private AI.
     private var stats: some View {
-        let condition = HomeFormat.pendingCondition(freshCredit)
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)

@@ -302,7 +302,7 @@ struct InferenceTabView: View {
 
     /// The tool's name when the shell knows the adapter, the raw id when
     /// it does not, and a dash for a call IronWire could not attribute.
-    static func toolName(_ id: String) -> String {
+    nonisolated static func toolName(_ id: String) -> String {
         if let kind = SourceKind(rawValue: id) { return kind.displayName }
         return id == "unknown" ? "—" : id
     }

@@ -180,7 +180,7 @@ final class MenuPanelStore {
             return
         }
         guard let mode = ProjectMode(rawValue: copy.mode) else { return }
-        await writeOverride { try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
+        await writeOverride { _ = try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
     }
 
     /// The core's clear action, unconfirmed: every folder back on its own

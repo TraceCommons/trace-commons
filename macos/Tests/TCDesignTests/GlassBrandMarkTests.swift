@@ -19,6 +19,7 @@ final class GlassBrandMarkTests: XCTestCase {
     /// The wordmark's six paths parse, "near" and "AI" side by side, and
     /// together they fill the artwork's box; "AI" takes the kit's brand blue
     /// and "near" the kit's single inks.
+    @MainActor
     func test_theWordmarkParsesAndFillsItsBox() throws {
         let near = try XCTUnwrap(GlassNearWordmark.nearPath).boundingRect
         let ai = try XCTUnwrap(GlassNearWordmark.aiPath).boundingRect
@@ -37,6 +38,7 @@ final class GlassBrandMarkTests: XCTestCase {
     /// The edge rail's Traces icon (owner, 2026-10-22): four nodes in a T,
     /// three across the top joined by one line, and one under the middle
     /// joined to it, all inside the square.
+    @MainActor
     func test_theTraceNodesMakeAT() {
         let nodes = GlassTraceNodesGlyph.nodes
         XCTAssertEqual(nodes.count, 4)

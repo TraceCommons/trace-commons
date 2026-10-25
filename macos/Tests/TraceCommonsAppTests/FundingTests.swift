@@ -8,6 +8,7 @@
 
 import AppKit
 import Foundation
+import os
 import SwiftUI
 import TCBridge
 import TCShellCore
@@ -17,7 +18,7 @@ import XCTest
 @testable import TraceCommonsApp
 
 private final class FundingDaemon: DaemonCalling {
-    struct Call {
+    struct Call: Sendable {
         let method: String
         let params: String
     }
@@ -25,31 +26,30 @@ private final class FundingDaemon: DaemonCalling {
     private let condition = NSCondition()
     private let response: String
     private let entered: XCTestExpectation?
-    private var held: Bool
-    private var recorded: [Call] = []
-    private var expired = false
+    private struct State: Sendable {
+        var held: Bool
+        var recorded: [Call] = []
+        var expired = false
+    }
+    private let state: OSAllocatedUnfairLock<State>
 
     init(response: String, held: Bool = false, entered: XCTestExpectation? = nil) {
         self.response = response
-        self.held = held
+        state = OSAllocatedUnfairLock(initialState: State(held: held))
         self.entered = entered
     }
 
     var calls: [Call] {
-        condition.lock()
-        defer { condition.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var timedOut: Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        return expired
+        state.withLock { $0.expired }
     }
 
     func release() {
         condition.lock()
-        held = false
+        state.withLock { $0.held = false }
         condition.broadcast()
         condition.unlock()
     }
@@ -57,15 +57,15 @@ private final class FundingDaemon: DaemonCalling {
     func call(_ method: String, params paramsJSON: String) -> String {
         condition.lock()
         defer { condition.unlock() }
-        recorded.append(Call(method: method, params: paramsJSON))
+        state.withLock { $0.recorded.append(Call(method: method, params: paramsJSON)) }
         guard method == "near_ai_funding" else {
             return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
         }
         entered?.fulfill()
         let deadline = Date().addingTimeInterval(5)
-        while held {
-            if !condition.wait(until: deadline), held {
-                expired = true
+        while state.withLock({ $0.held }) {
+            if !condition.wait(until: deadline), state.withLock({ $0.held }) {
+                state.withLock { $0.expired = true }
                 return #"{"id":1,"error":{"code":"unavailable","message":"test_barrier_timeout"}}"#
             }
         }
@@ -81,47 +81,44 @@ private final class FundingDaemon: DaemonCalling {
 /// Queues one existing bounded daemon barrier per funding reply. A credential
 /// start is refused locally so the real model can publish a busy cycle safely.
 private final class FundingViewDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var replies: [FundingDaemon] = []
-    private var allReplies: [FundingDaemon] = []
-    private var recorded: [FundingDaemon.Call] = []
-    private var credentialStatusReply: String?
+    private struct State: Sendable {
+        var replies: [FundingDaemon] = []
+        var allReplies: [FundingDaemon] = []
+        var recorded: [FundingDaemon.Call] = []
+        var credentialStatusReply: String?
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var calls: [FundingDaemon.Call] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     /// What `near_ai_credential_status` answers; nil keeps the synthetic refusal.
     func answerCredentialStatus(_ response: String?) {
-        lock.lock()
-        defer { lock.unlock() }
-        credentialStatusReply = response
+        state.withLock { $0.credentialStatusReply = response }
     }
 
     func enqueue(_ response: String, held: Bool = false, entered: XCTestExpectation? = nil) -> FundingDaemon {
         let reply = FundingDaemon(response: response, held: held, entered: entered)
-        lock.lock()
-        replies.append(reply)
-        allReplies.append(reply)
-        lock.unlock()
+        state.withLock {
+            $0.replies.append(reply)
+            $0.allReplies.append(reply)
+        }
         return reply
     }
 
     func releaseAll() {
-        lock.lock()
-        let pending = allReplies
-        lock.unlock()
+        let pending = state.withLock { $0.allReplies }
         pending.forEach { $0.release() }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        recorded.append(.init(method: method, params: paramsJSON))
-        let reply = method == "near_ai_funding" && !replies.isEmpty ? replies.removeFirst() : nil
-        let credential = method == "near_ai_credential_status" ? credentialStatusReply : nil
-        lock.unlock()
+        let (reply, credential) = state.withLock {
+            $0.recorded.append(.init(method: method, params: paramsJSON))
+            let reply = method == "near_ai_funding" && !$0.replies.isEmpty ? $0.replies.removeFirst() : nil
+            let credential = method == "near_ai_credential_status" ? $0.credentialStatusReply : nil
+            return (reply, credential)
+        }
         if let credential { return credential }
         return reply?.call(method, params: paramsJSON)
             ?? #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#

@@ -1,4 +1,5 @@
 import Combine
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -6,30 +7,28 @@ import XCTest
 
 /// A daemon whose sign-in the test finishes, cancels or times out by hand.
 private final class SignInDaemon: DaemonCalling {
-    enum Phase { case absent, waiting, signedIn, failedWithRetainedKey, cancelledWithRetainedSession }
+    enum Phase: Sendable { case absent, waiting, signedIn, failedWithRetainedKey, cancelledWithRetainedSession }
 
-    private let lock = NSLock()
-    private var phase: Phase = .absent
-    private var recorded: [String] = []
-    private var holdNextStatus = false
-    private var heldStatus = false
+    private struct State: Sendable {
+        var phase: Phase = .absent
+        var recorded: [String] = []
+        var holdNextStatus = false
+        var heldStatus = false
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
     let releaseStatus = DispatchSemaphore(value: 0)
 
-    var statusHeld: Bool { lock.withLock { heldStatus } }
-    func holdNextStatusReply() { lock.withLock { holdNextStatus = true } }
+    var statusHeld: Bool { state.withLock { $0.heldStatus } }
+    func holdNextStatusReply() { state.withLock { $0.holdNextStatus = true } }
 
     var methods: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     func count(_ method: String) -> Int { methods.filter { $0 == method }.count }
 
     func set(_ next: Phase) {
-        lock.lock()
-        defer { lock.unlock() }
-        phase = next
+        state.withLock { $0.phase = next }
     }
 
     private static func statusReply(_ phase: Phase) -> String {
@@ -49,37 +48,37 @@ private final class SignInDaemon: DaemonCalling {
 
     func call(_ method: String, params paramsJSON: String) -> String {
         if method == "near_ai_credential_status" {
-            let (reply, held) = lock.withLock {
-                recorded.append(method)
-                let held = holdNextStatus
-                holdNextStatus = false
-                heldStatus = held
-                return (Self.statusReply(phase), held)
+            let (reply, held) = state.withLock {
+                $0.recorded.append(method)
+                let held = $0.holdNextStatus
+                $0.holdNextStatus = false
+                $0.heldStatus = held
+                return (Self.statusReply($0.phase), held)
             }
             // Freeze the reply without holding the daemon lock: a newer
             // read can finish the ceremony before this old answer arrives.
             if held {
                 releaseStatus.wait()
-                lock.withLock { heldStatus = false }
+                state.withLock { $0.heldStatus = false }
             }
             return reply
         }
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append(method)
-        switch method {
-        case "near_ai_credential_start":
-            phase = .waiting
-            return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
-        case "near_ai_credential_cancel":
-            phase = .absent
-            return #"{"id":1,"result":{}}"#
-        case "account_session_status":
-            return #"{"id":1,"result":{"state":"known","signed_in":false,"sign_in":"passkey"}}"#
-        case "near_ai_balance":
-            return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
-        default:
-            return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
+        return state.withLock { state in
+            state.recorded.append(method)
+            switch method {
+            case "near_ai_credential_start":
+                state.phase = .waiting
+                return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
+            case "near_ai_credential_cancel":
+                state.phase = .absent
+                return #"{"id":1,"result":{}}"#
+            case "account_session_status":
+                return #"{"id":1,"result":{"state":"known","signed_in":false,"sign_in":"passkey"}}"#
+            case "near_ai_balance":
+                return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
+            default:
+                return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
+            }
         }
     }
 

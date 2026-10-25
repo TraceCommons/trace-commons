@@ -89,7 +89,7 @@ private struct WindowBreadcrumbProbe: NSViewRepresentable {
     private final class Probe: NSView {
         private let scene: WindowBreadcrumb.Scene
         private var throttle = WindowBreadcrumb.Throttle()
-        private var observer: NSObjectProtocol?
+        private var observer: WindowNotificationObservers?
 
         init(scene: WindowBreadcrumb.Scene) {
             self.scene = scene
@@ -101,25 +101,21 @@ private struct WindowBreadcrumbProbe: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let observer { NotificationCenter.default.removeObserver(observer) }
             observer = nil
             guard let window else { return }
-            observer = NotificationCenter.default.addObserver(
+            let token = NotificationCenter.default.addObserver(
                 forName: NSWindow.didResizeNotification, object: window, queue: nil
             ) { [weak self] note in
                 guard let window = note.object as? NSWindow else { return }
                 MainActor.assumeIsolated { self?.noteResize(window.frame.size) }
             }
+            observer = WindowNotificationObservers(center: .default, tokens: [token])
         }
 
         private func noteResize(_ size: CGSize) {
             if let line = throttle.note(at: ProcessInfo.processInfo.systemUptime) {
                 WindowBreadcrumb.log(line, scene: scene, size: size)
             }
-        }
-
-        deinit {
-            if let observer { NotificationCenter.default.removeObserver(observer) }
         }
     }
 }

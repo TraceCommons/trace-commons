@@ -403,7 +403,7 @@ struct FlowMapView: View {
     /// (`FlowMapScene.padHalfWidth`) and the rocket stands on it.
     /// How far above this computer's point the laptop's screen rises: a
     /// contributed trace sets off upward from there on the standard map.
-    static let laptopScreenTop: CGFloat = 36
+    nonisolated static let laptopScreenTop: CGFloat = 36
 
     /// This computer as a laptop on the standard map (owner, 2026-10-19):
     /// its deck as wide as the pad, so the line out lands on its left edge,
@@ -450,14 +450,14 @@ struct FlowMapView: View {
     /// each line's centre sits. In #1146's SVG, type scales with the map;
     /// here it does too, down to a floor that keeps it legible, and the
     /// gaps use the same factor as the type.
-    static func labelType(scale: CGFloat) -> (labelSize: CGFloat, sublabelSize: CGFloat,
+    nonisolated static func labelType(scale: CGFloat) -> (labelSize: CGFloat, sublabelSize: CGFloat,
                                               labelOffset: CGFloat, sublabelOffset: CGFloat) {
         let unit = max(scale, labelFloor)
         return (11 * unit, 10 * unit, 12 * unit, 26.5 * unit)
     }
 
     /// The smallest factor the map's labels are drawn at.
-    static let labelFloor: CGFloat = 0.85
+    nonisolated static let labelFloor: CGFloat = 0.85
 
     /// #1146's credential key: an open bow on the left, a level shaft and
     /// two bits, in the map's units around the node's centre.
@@ -675,7 +675,7 @@ struct FlowMapStillKey: Equatable {
 /// A canvas drawn again only when its key changes. The map's timeline
 /// re-evaluates the views inside it on every tick; compared by key, this
 /// one keeps its last drawing instead of drawing every node again.
-struct FlowMapStillLayer<Key: Equatable>: View, Equatable {
+struct FlowMapStillLayer<Key: Equatable & Sendable>: View, Equatable {
     let key: Key
     let draw: (inout GraphicsContext) -> Void
 
@@ -684,7 +684,7 @@ struct FlowMapStillLayer<Key: Equatable>: View, Equatable {
         self.draw = draw
     }
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.key == rhs.key
     }
 

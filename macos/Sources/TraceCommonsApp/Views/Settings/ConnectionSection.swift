@@ -14,13 +14,13 @@ struct ConnectionSection: View {
     }
 
     private var connection: some View {
-        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle) {
+        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {
             if model.statusRead == .answered {
                 GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady
                                                        : SettingsLegacyWords.connectionLocalOnly,
                           muted: !model.status.loggedIn)
             }
-        } content: {
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.statusRead != .answered {
                     SettingsReadNotice(model.statusRead, retry: model.refreshStatus)

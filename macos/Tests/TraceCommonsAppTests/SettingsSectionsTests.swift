@@ -112,13 +112,13 @@ final class SettingsSectionsTests: XCTestCase {
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
             .general: ("GeneralSection", "GlassEyebrowCard(SettingsWords.appearance)"),
-            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle)"),
+            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {"),
             .startup: ("StartupSection",
-                       "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle)"),
+                       "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle, accessory: {"),
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
             .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
             .watching: ("WatchingSection",
-                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle)"),
+                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {"),
             .consent: ("ConsentSection",
                        "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
@@ -148,7 +148,7 @@ final class SettingsSectionsTests: XCTestCase {
     func test_watchingHasRonsWatcherCard() throws {
         let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
         for needle in ["if model.statusRead == .answered {\n            watcher(paused: model.status.paused, armed: Self.controlsArmed(",
-                       "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle)",
+                       "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle, accessory: {",
                        "GlassChip(glass: paused ? SettingsLegacyWords.watcherPaused : SettingsLegacyWords.watcherWatching,",
                        "Button(SettingsLegacyWords.pauseWatcher) { model.pause(until: nil) }",
                        ".disabled(paused || !armed)", "Button(SettingsLegacyWords.resumeWatcher) { model.resume() }",

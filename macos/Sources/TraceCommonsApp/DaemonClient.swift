@@ -8,7 +8,7 @@ import TCShellCore
 /// Deliberately free of pointers: `TCBridge` owns those. Deliberately free
 /// of UI: the views own that. Calls block (the ABI is synchronous), so
 /// callers run them off the main actor.
-final class DaemonClient {
+final class DaemonClient: Sendable {
     struct Failure: Error, CustomStringConvertible {
         let code: String
         let message: String

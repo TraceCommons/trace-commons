@@ -1417,10 +1417,24 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
         )
         .await
         .expect("principal");
-    superuser
-        .upsert_trace_submission(v90_submission(&tenant, existing, &principal))
+    // This fixture intentionally remains at V89. Current store writes may
+    // require later schema (V135 upload-principal ownership, for example), so
+    // seed the historical row directly. The before/after runtime operations
+    // below still exercise the real store and the real migration runner.
+    db_client
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref,
+                schema_version, consent_policy_version, consent_scopes,
+                allowed_uses, retention_policy_id, status, privacy_risk,
+                redaction_pipeline_version, redaction_hash)
+             VALUES ($1, $2, $3, $4, 'ironclaw.trace_contribution.v1',
+                '2026-04-24', '[\"debugging\"]'::jsonb, '[\"debugging\"]'::jsonb,
+                'standard', 'accepted', 'low', 'deterministic-v1', 'sha256:v90-probe')",
+            &[&tenant, &existing, &uuid::Uuid::new_v4(), &principal],
+        )
         .await
-        .expect("an accepted submission");
+        .expect("an accepted submission at V89");
     let revision = "v90-revision".to_string();
     superuser
         .begin_token_bundle(StoredTokenBundle {
@@ -1531,15 +1545,37 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
                 .map(|pending| pending.len()),
         ),
     ));
+    // Probe the historical claim's first source-session write directly:
+    // current ownership preflight now requires V135, absent at this V89
+    // boundary. This is the INSERT used by claim_trace_source_session; the
+    // post-migration half below continues to call the current store method.
+    let admission_raw = connect(&with_user(&with_database(&url, DB), ADMISSION, "probe")).await;
     before.push((
         "account admission: claiming a source session",
         "permission denied for table trace_source_sessions",
         denial(
-            admission
-                .claim_trace_source_session(&tenant, account, &digest, claimed)
-                .await,
+            async {
+                admission_raw.batch_execute("BEGIN").await?;
+                admission_raw
+                    .query_one(
+                        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                        &[&tenant],
+                    )
+                    .await?;
+                admission_raw
+                    .execute(
+                        "INSERT INTO trace_source_sessions (tenant_id, account_id, session_digest)
+                         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                        &[&tenant, &account, &digest.as_slice()],
+                    )
+                    .await
+            }
+            .await
+            .map_err(trace_commons_server::error::DatabaseError::Postgres),
         ),
     ));
+    let _ = admission_raw.batch_execute("ROLLBACK").await;
+    drop(admission_raw);
     let account_id_writable_before: bool = db_client
         .query_one(
             "SELECT has_column_privilege($1, 'trace_accounts', 'account_id', 'UPDATE')",
