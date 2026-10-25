@@ -1,0 +1,26 @@
+{
+  "version": "staging-earned-upload-v1",
+  "processing_cost_bound": 1,
+  "bounded_allowance": 100,
+  "period": { "mode": "fixed", "seconds": 86400 },
+  "growth_rule": "tiered-v1",
+  "growth": {
+    "window_seconds": 7257600,
+    "weekly_cap": 10000,
+    "attested_unit_weight": 1,
+    "require_gate_pass": true,
+    "q_min_micros": null,
+    "credit_quality_calibration_versions": [],
+    "penalty_cooldown_seconds": 7776000,
+    "evaluation_max_age_seconds": 172800,
+    "allowance_ceiling": 500,
+    "evaluator_versions": ["${TC_UPLOAD_TRUST_GATE_POLICY_VERSION}"],
+    "dedup_signal_versions": ["${TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION}"],
+    "tiers": [
+      { "units": 0, "active_weeks": 0, "age_seconds": 0, "attested_units": 0, "multiplier": 1 },
+      { "units": 5, "active_weeks": 0, "age_seconds": 0, "attested_units": 0, "multiplier": 2 },
+      { "units": 20, "active_weeks": 0, "age_seconds": 0, "attested_units": 0, "multiplier": 3 },
+      { "units": 50, "active_weeks": 0, "age_seconds": 0, "attested_units": 0, "multiplier": 5 }
+    ]
+  }
+}

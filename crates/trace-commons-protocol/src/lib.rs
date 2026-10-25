@@ -24,6 +24,7 @@ pub mod public_run;
 mod redaction;
 pub mod settlement_estimate;
 pub mod trace_contribution;
+pub mod upload_allowance;
 pub mod witness_pacing;
 pub mod witness_provenance;
 

@@ -12,7 +12,9 @@
 //! (`TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_*`) writes `shadow` rows that
 //! admission never reads. When the admission policy itself names
 //! `"growth_rule":"tiered-v1"`, the evaluator also writes `applied` rows under
-//! it, and admission reads the latest fresh one (V114, V126).
+//! it, and admission reads the latest fresh one (V114, V126). An independent
+//! client-upload trust policy also uses the existing `applied` mode, while
+//! both admission ledgers remain disabled.
 
 use super::*;
 use trace_commons_server::account_trust::GrowthSource;
@@ -79,6 +81,175 @@ pub(super) fn applied_policy_from_values(
         .map_err(|_| invalid())
 }
 
+/// The independent mode changes advertised client caps only. Reject a
+/// configured admission ledger rather than silently turning one off.
+pub(super) fn require_independent_upload_trust_controls(
+    independent: bool,
+    account_admission_enabled: bool,
+    legacy_admission_enabled: bool,
+    database_available: bool,
+    durable_writes: bool,
+    forced_rls_ready: bool,
+) -> anyhow::Result<()> {
+    if !independent {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        !account_admission_enabled && !legacy_admission_enabled,
+        "client_upload_trust_admission_conflict"
+    );
+    anyhow::ensure!(
+        database_available,
+        "client_upload_trust_database_unavailable"
+    );
+    anyhow::ensure!(
+        durable_writes,
+        "client_upload_trust_durable_writes_required"
+    );
+    anyhow::ensure!(forced_rls_ready, "client_upload_trust_rls_required");
+    Ok(())
+}
+
+/// Reuse the scheduler's one applied-policy slot. The independent writer and
+/// reader were parsed together; admission-backed deployments retain their
+/// existing policy source when independent upload trust is absent.
+pub(super) fn select_applied_policy(
+    admission: Option<&admission::AccountAdmissionConfig>,
+    independent: Option<&upload_allowance::ClientUploadTrustPolicy>,
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<GrowthPolicy>> {
+    if let Some(independent) = independent {
+        anyhow::ensure!(
+            admission.is_none(),
+            "client_upload_trust_admission_conflict"
+        );
+        return Ok(Some(independent.growth.clone()));
+    }
+    applied_policy_from_values(admission, read)
+}
+
+const CLIENT_UPLOAD_TRUST_DATABASE_URL: &str = "TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL";
+
+/// Optional narrow trust pool, pointed at the same database as the unchanged
+/// ingest source pool. Auxiliary worker credentials never flow into it.
+pub(super) fn trust_database_config_from_values(
+    main: Option<&DatabaseConfig>,
+    configured_url: Option<&str>,
+    independent: bool,
+    shadow: bool,
+    account_admission_enabled: bool,
+    legacy_admission_enabled: bool,
+    durable_writes: bool,
+) -> anyhow::Result<Option<DatabaseConfig>> {
+    let Some(configured_url) = configured_url else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        independent || shadow,
+        "client_upload_trust_database_policy_required"
+    );
+    anyhow::ensure!(
+        !account_admission_enabled && !legacy_admission_enabled,
+        "client_upload_trust_admission_conflict"
+    );
+    let main = main.ok_or_else(|| anyhow::anyhow!("client_upload_trust_database_unavailable"))?;
+    anyhow::ensure!(
+        durable_writes,
+        "client_upload_trust_durable_writes_required"
+    );
+    let parse = |value: &str| -> anyhow::Result<reqwest::Url> {
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| anyhow::anyhow!("client_upload_trust_database_url_invalid"))?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "postgres" | "postgresql")
+                && url.host_str().is_some()
+                && !url.path().is_empty()
+                && url.path() != "/"
+                && url.fragment().is_none()
+                && !url.query_pairs().any(|(key, _)| matches!(
+                    key.as_ref(),
+                    "host" | "hostaddr" | "port" | "dbname" | "service" | "servicefile"
+                )),
+            "client_upload_trust_database_url_invalid"
+        );
+        Ok(url)
+    };
+    let source = parse(main.url.expose_secret())?;
+    let trust = parse(configured_url)?;
+    anyhow::ensure!(
+        source.host_str() == trust.host_str()
+            && source.port().unwrap_or(5432) == trust.port().unwrap_or(5432)
+            && source.path() == trust.path(),
+        "client_upload_trust_database_endpoint_mismatch"
+    );
+    let mut config = main.clone();
+    config.url = configured_url.to_owned().into();
+    config.login_resolver_url = None;
+    config.gate_driver_url = None;
+    config.pii_backstop_driver_url = None;
+    config.invite_registry_url = None;
+    Ok(Some(config))
+}
+
+pub(super) async fn trust_database_from_env(
+    main: Option<&DatabaseConfig>,
+    independent: bool,
+    shadow: bool,
+    account_admission_enabled: bool,
+    legacy_admission_enabled: bool,
+    durable_writes: bool,
+) -> anyhow::Result<Option<Arc<dyn Database>>> {
+    let configured_url = match std::env::var(CLIENT_UPLOAD_TRUST_DATABASE_URL) {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("client_upload_trust_database_url_invalid")
+        }
+    };
+    let Some(config) = trust_database_config_from_values(
+        main,
+        configured_url.as_deref(),
+        independent,
+        shadow,
+        account_admission_enabled,
+        legacy_admission_enabled,
+        durable_writes,
+    )?
+    else {
+        return Ok(None);
+    };
+    // The source pool owns migration. This login must remain a narrow
+    // nonowner worker, and readiness is checked before the server listens.
+    let database = PgBackend::new(&config)
+        .await
+        .map_err(|_| anyhow::anyhow!("client_upload_trust_database_unavailable"))?;
+    Ok(Some(Arc::new(database)))
+}
+
+/// Applied evaluations must be invalidated by gate/outcome changes and
+/// readable/writable through the existing forced-RLS trust seams. This does
+/// not enable admission, witness requirements, or a processing-cost ledger.
+pub(super) async fn require_independent_upload_trust_runtime_ready(
+    db: &dyn Database,
+) -> anyhow::Result<()> {
+    db.enable_external_account_trust_growth()
+        .await
+        .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?;
+    anyhow::ensure!(
+        db.client_upload_trust_runtime_ready()
+            .await
+            .map_err(|_| anyhow::anyhow!("client_upload_trust_readiness_unavailable"))?,
+        "client_upload_trust_contract_not_ready"
+    );
+    anyhow::ensure!(
+        db.tiered_account_trust_runtime_ready()
+            .await
+            .map_err(|_| anyhow::anyhow!("tiered_account_trust_readiness_unavailable"))?,
+        "tiered_account_trust_contract_not_ready"
+    );
+    Ok(())
+}
+
 /// Refusals since process start that the candidate policy would have
 /// admitted. Process-local and label-only; it resets on restart.
 static SHADOW_WOULD_ADMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -95,7 +266,10 @@ pub(super) async fn observe_shadow_would_admit(
 ) {
     let (Some(policy), Some(db)) = (
         state.account_trust_shadow_policy.as_deref(),
-        state.db_mirror.as_ref(),
+        state
+            .client_upload_trust_database
+            .as_ref()
+            .or(state.db_mirror.as_ref()),
     ) else {
         return;
     };
@@ -152,12 +326,16 @@ fn worker_unavailable(
 }
 
 fn require_db(state: &AppState) -> ApiResult<&Arc<dyn Database>> {
-    state.db_mirror.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "earned account trust requires a configured DB mirror",
-        )
-    })
+    state
+        .client_upload_trust_database
+        .as_ref()
+        .or(state.db_mirror.as_ref())
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "earned account trust requires a configured DB mirror",
+            )
+        })
 }
 
 fn require_policy(state: &AppState, mode: EvaluationMode) -> ApiResult<&GrowthPolicy> {
@@ -530,7 +708,7 @@ pub(super) async fn validate_scheduler_config(
     .collect();
     anyhow::ensure!(
         !policies.is_empty(),
-        "invalid Trace Commons account trust scheduler configuration: no tiered-v1 admission policy or shadow policy to evaluate"
+        "invalid Trace Commons account trust scheduler configuration: no applied tiered-v1 policy or shadow policy to evaluate"
     );
     for policy in policies {
         anyhow::ensure!(

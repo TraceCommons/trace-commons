@@ -935,3 +935,85 @@ async fn pg_the_real_router_gates_an_unbound_native_session() {
         .await
         .expect("cleanup");
 }
+
+#[tokio::test]
+async fn upload_allowance_requires_authentication_and_defaults_to_no_allowance() {
+    let (db, _) = gate_db(Some(AccountBindingState::Bound));
+    let (_temp, state) = native_test_state(db);
+    let router = production_account_router(&state);
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/upload-allowance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = router
+        .oneshot(gate_request(
+            "GET",
+            "/v1/account/upload-allowance",
+            Transport::Native,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"allowance":null})
+    );
+}
+
+#[tokio::test]
+async fn upload_allowance_returns_configured_policy_and_refuses_unbound_accounts() {
+    for transport in [Transport::Native, Transport::Cookie] {
+        for binding in [
+            AccountBindingState::Legacy,
+            AccountBindingState::Bound,
+            AccountBindingState::Unbound,
+            AccountBindingState::Closed,
+        ] {
+            let (db, _) = gate_db(Some(binding));
+            let (_temp, mut state) = native_test_state(db);
+            Arc::get_mut(&mut state).unwrap().client_upload_allowance = Some(
+                trace_commons_protocol::upload_allowance::DailyUploadAllowance {
+                    schema_version: 1,
+                    max_uploads_per_day: 200,
+                    max_bytes_per_day: 2_147_483_648,
+                },
+            );
+            let response = production_account_router(&state)
+                .oneshot(gate_request(
+                    "GET",
+                    "/v1/account/upload-allowance",
+                    transport,
+                ))
+                .await
+                .unwrap();
+            if binding.is_gated() {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                let body: trace_commons_protocol::upload_allowance::UploadAllowanceResponse =
+                    serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body.allowance, state.client_upload_allowance);
+            }
+        }
+    }
+}

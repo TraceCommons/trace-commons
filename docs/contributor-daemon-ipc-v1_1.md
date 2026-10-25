@@ -820,6 +820,37 @@ Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
 daily volume caps and, crucially, how much already-approved work they are
 holding back.
 
+These are the effective caps used by upload enforcement. A supporting daemon
+refreshes the authenticated account's upload allowance on the first active
+pass and every five minutes while an armed folder/automatic grant or an
+approved queued session can contribute, including while capped. Idle,
+paused, update-quiesced and dry-run clients make no allowance request or
+OS-credential read. Resuming activity can refresh immediately; skipped
+polls do not consume the cadence. Explicit approvals do not require an
+armed project or an anchored tenant for this refresh. The server scales
+both daily caps by
+the account's validated applied admission `effective_allowance` divided by
+`bounded_allowance`, rounding down and clipping at 1,000 uploads and 5 GiB.
+Operator-configured caps are the base; when absent, earned growth above 1
+uses 50 uploads and 200 MiB. Without a configured base or validated earned
+growth, the server returns null. Existing external and tiered trust modes
+retain their admission validation, freshness, and generation safeguards;
+legacy/invited compatibility paths retain the configured base unchanged.
+
+The allowance can raise untouched count and byte defaults independently;
+explicit local choices remain in force. `get_settings` still returns the
+saved local values, so its caps can differ from `status.daily_budget`.
+Send `null` for either cap in `set_settings` to reset that dimension to its
+shared default and follow server allowances again. Persisted per-cap
+provenance flags are internal: they are omitted from `get_settings` and
+`set_settings` responses, and writing them is rejected as an unknown field.
+Refreshing an allowance never resets `bytes_today` or `uploads_today`.
+A successful null response, including trust fallback with no configured
+base, removes a previous uplift; transient refresh failures retain it for
+the current identity. These daily volume caps do not establish submission
+readiness: server processing-cost admission uses its own period and units.
+See [the operator contract](operator/client-upload-allowance.md).
+
 It is deliberately **not** routed through `health`. The daemon does set
 `daily-cap-reached` when a cap refuses an upload, but that label sits at the
 bottom of the precedence order, so any other condition, including the full
@@ -6151,6 +6182,13 @@ a caller that means the default sends `"automatic"`. A shell renders the choice 
 sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
+
+Each daily cap also accepts `null`: reset the saved value to the shared
+50-upload/200-MiB default for that dimension and follow server allowances
+again. A numeric write remains an explicit local choice, even when equal
+to the default. Resetting one cap preserves the other cap's choice. The
+saved provenance flags are internal and cannot be read or written through
+these IPC methods.
 
 `max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
 validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
