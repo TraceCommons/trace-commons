@@ -370,11 +370,6 @@ final class MenuPanelStore {
         current(.pending) ? buckets.reduce(0) { $0 + $1.kept } : nil
     }
 
-    /// "Worth a second look", from `list_pending`; nil when unknown.
-    var flaggedCount: Int? {
-        current(.pending) ? MenuPanelData.flagged(pending) : nil
-    }
-
     /// Whether the trace bars are current: both of the reads they are
     /// drawn from answered. Otherwise the menu-bar item draws them as
     /// unavailable.
@@ -613,15 +608,6 @@ enum MenuPanelData {
         for date in shared { if let i = index(date) { up[i] += 1 } }
         for date in kept { if let i = index(date) { down[i] += 1 } }
         return (0 ..< span.count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
-    }
-
-    /// Sessions worth a second look: nothing matched in them, or they were
-    /// trimmed to fit (`QueueShieldState`'s attention, counted).
-    static func flagged(_ pending: [DaemonData.QueueEntry]) -> Int {
-        pending.filter { entry in
-            let reasons = entry.secondLook ?? []
-            return reasons.contains("nothing-matched") || reasons.contains("trimmed-to-fit")
-        }.count
     }
 
     /// One recent-activity row.

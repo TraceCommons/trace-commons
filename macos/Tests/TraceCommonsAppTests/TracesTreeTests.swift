@@ -712,23 +712,6 @@ final class TracesQueueStateTests: XCTestCase {
         XCTAssertEqual(named, HealthCopy.core(label: "queue-full", maxQueueEntries: 500).detail)
         XCTAssertNotEqual(named, TracesStore.safeguards(full, maxQueueEntries: nil).first?.body)
     }
-
-    /// The badge pairs with the queue shield: something waiting that is
-    /// worth a second look adds the core's words to its text equivalent.
-    func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {
-        let plain = try recordedEntry(["second_look": [String]()])
-        let flagged = try recordedEntry(["entry_id": "00000000-0000-4000-8000-000000000002", "second_look": ["nothing-matched"]])
-        XCTAssertEqual(TracesStore.shield([]), .clear)
-        XCTAssertEqual(TracesStore.shield([plain]), .waiting)
-        XCTAssertEqual(TracesStore.shield([plain, flagged]), .attention)
-
-        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
-        let said = try XCTUnwrap(MonitorWindowView.tracesDescription(2, shield: .attention, secondLook: words.secondLookWaiting))
-        XCTAssertTrue(said.hasSuffix(words.secondLookWaiting), said)
-        XCTAssertEqual(
-            MonitorWindowView.tracesDescription(2, shield: .waiting, secondLook: words.secondLookWaiting),
-            TCCoreCopy.decisionsOwedText(2))
-    }
 }
 
 /// The first pending entry of the K2 `normalDay` recording, with `fields`

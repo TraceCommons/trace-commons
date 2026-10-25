@@ -8,7 +8,7 @@ import TCShellCore
 /// 2026-10-22: a top row with the NEAR AI wordmark on the left and
 /// Watching, Settings and Quit as icon buttons on the right; Private AI,
 /// with the NEAR AI tools, one button each, for a quick Private AI session;
-/// the traces worth a second look; the suggestion and the estimate; the
+/// the suggestion and the estimate; the
 /// shared/kept legend and the app's bar graph; and the way into the app.
 /// It is the app's only menu-bar item, in every build.
 ///
@@ -38,7 +38,6 @@ struct MenuBarGlassPanel: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             topRow
             privateAI
-            flaggedRow
             nudgeRow
             settlementRow
             graph
@@ -114,24 +113,6 @@ struct MenuBarGlassPanel: View {
                 }
             })
         }
-    }
-
-    // MARK: Worth a second look
-
-    /// The traces worth a second look, under Private AI (owner,
-    /// 2026-10-22: out of the top row, which holds the wordmark now; the
-    /// core's approved heading is kept). It opens Traces.
-    private var flaggedRow: some View {
-        Button { open(.traces(entryId: nil)) } label: {
-            HStack(spacing: GlassTokens.Space.s2) {
-                Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
-            }
-        }
-        .buttonStyle(GlassMenuRowStyle())
-        .padding(.vertical, -GlassTokens.Space.s2)
     }
 
     // MARK: Legend and graph
@@ -860,7 +841,6 @@ enum MenuWords {
     static var shared: String { MonitorWords.table?.shared ?? "" }
     static var kept: String { MonitorWords.table?.kept ?? "" }
     static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
-    static var flagged: String { MonitorWords.table?.flagged ?? "" }
     static var openApp: String { MonitorWords.table?.openApp ?? "" }
     static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
     static var settings: String { MonitorWords.table?.settings ?? "" }

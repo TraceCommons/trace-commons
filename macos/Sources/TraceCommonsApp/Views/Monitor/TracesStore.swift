@@ -912,19 +912,6 @@ final class TracesStore {
         return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
     }
 
-    /// Whether something waiting is worth a second look (nothing matched, or
-    /// trimmed to fit), as the main window's queue shield reads it. The
-    /// badge pairs with it, so it never says only a count.
-    var shield: QueueShieldState { Self.shield(tree.allSessions) }
-
-    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
-        let reasons = sessions.map { Set($0.secondLook ?? []) }
-        return QueueShieldState.state(
-            waiting: sessions.count,
-            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
-            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
-    }
-
     /// A tool's source declaration, from its switch after the core's
     /// explanation was shown: `.off` is "I do not use this tool", `.watch`
     /// names the folder chosen for it. The core's answer is reloaded.
