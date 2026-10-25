@@ -130,8 +130,8 @@ final class DesignRulings20261022Tests: XCTestCase {
         XCTAssertFalse(panel.contains("GlassDayGraph("), "the popover's own graph is back")
         let store = try GlassSurfaceRulesTests.text("Views/Monitor/MenuPanelStore.swift")
         XCTAssertTrue(store.contains("TracesGraphModel.sharedTimes(history, tool: nil)"))
-        XCTAssertTrue(store.contains("TracesGraphModel.keptTimes(kept, tool: nil)"))
-        XCTAssertTrue(store.contains("offset: 0, now: Date(), range: .days)"))
+        XCTAssertTrue(store.contains("TracesGraphModel.keptTimes(pending, tool: nil)"))
+        XCTAssertTrue(store.contains("offset: 0, now: clock(), range: .days)"))
     }
 
     // MARK: Insights, the Private AI tab and the Traces menus

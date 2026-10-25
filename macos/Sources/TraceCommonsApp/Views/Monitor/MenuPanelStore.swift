@@ -23,7 +23,6 @@ final class MenuPanelStore {
     /// override is in force, and whether Auto contribute is partial (#1208).
     private(set) var status: DaemonData.Status?
     private(set) var pending: [DaemonData.QueueEntry] = []
-    private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
     private(set) var calls: [DaemonData.InferenceCall] = []
     /// `inference_activity`: Private AI calls and verified calls per
@@ -299,8 +298,12 @@ final class MenuPanelStore {
         }
         if let value = await read(.status, { try await client.status() }) { status = value }
         if let value = await read(.projects, { try await client.listProjects() }) { projects = value.projects }
-        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) { pending = value }
-        if let value = await read(.kept, { try await client.listKept() }) { kept = value }
+        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) {
+            pending = value
+        } else {
+            // Even an unsupported read is unknown, never a fresh empty queue.
+            failed.insert(.pending)
+        }
         if let value = await read(.history, { try await client.listHistory(limit: HomeStore.historyLimit) }) {
             history = value
         }
@@ -360,9 +363,11 @@ final class MenuPanelStore {
         current(.history) ? buckets.reduce(0) { $0 + $1.shared } : nil
     }
 
-    /// Kept in the graph's days, from `list_kept`; nil when unknown.
+    /// Sessions still waiting here in the graph's days, from `list_pending`,
+    /// as Traces counts them. Explicit Keep decisions are a separate list.
+    /// Nil when the pending read did not answer.
     var keptCount: Int? {
-        current(.kept) ? buckets.reduce(0) { $0 + $1.kept } : nil
+        current(.pending) ? buckets.reduce(0) { $0 + $1.kept } : nil
     }
 
     /// "Worth a second look", from `list_pending`; nil when unknown.
@@ -373,7 +378,7 @@ final class MenuPanelStore {
     /// Whether the trace bars are current: both of the reads they are
     /// drawn from answered. Otherwise the menu-bar item draws them as
     /// unavailable.
-    var columnsCurrent: Bool { current(.history) && current(.kept) }
+    var columnsCurrent: Bool { current(.history) && current(.pending) }
 
     /// The graph's buckets: shared and kept per day over the Traces graph's
     /// default days, counted as that graph counts them (`TracesGraphModel`,
@@ -382,8 +387,8 @@ final class MenuPanelStore {
     var buckets: [TracesGraphModel.Bucket] {
         TracesGraphModel.buckets(
             shared: current(.history) ? TracesGraphModel.sharedTimes(history, tool: nil) : [],
-            kept: current(.kept) ? TracesGraphModel.keptTimes(kept, tool: nil) : [],
-            offset: 0, now: Date(), range: .days)
+            kept: current(.pending) ? TracesGraphModel.keptTimes(pending, tool: nil) : [],
+            offset: 0, now: clock(), range: .days)
     }
 
     /// The menu-bar item's Private AI segments: verified calls (up) over
@@ -401,7 +406,7 @@ final class MenuPanelStore {
     var stripTraces: [GlassDayColumn] {
         MenuPanelData.steps(
             shared: history.compactMap(\.submittedAt),
-            kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
+            kept: current(.pending) ? TracesGraphModel.keptTimes(pending, tool: nil) : [],
             span: stripSpan)
     }
 
@@ -457,7 +462,7 @@ enum MenuPanelData {
     /// The daemon reads the panel makes on each load, each gating only the
     /// values drawn from it (`MenuPanelStore.current(_:)`).
     enum Read: Hashable, Sendable {
-        case status, projects, pending, kept, history, calls, activity
+        case status, projects, pending, history, calls, activity
     }
 
     /// The roll-up of every listed folder's mode, for the mode pill.

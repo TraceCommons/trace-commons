@@ -68,6 +68,72 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertEqual(MenuPanelData.countWord(store.keptCount, unknown: unknown), String(store.keptCount ?? -1))
     }
 
+    /// Traces calls sessions still waiting here "Kept"; explicit Keep decisions
+    /// are a separate daemon list and must not replace that population.
+    func test_keptLegendMatchesTracesWhenNoExplicitKeepDecisionsExist() async throws {
+        let now = Date()
+        let pending = try Self.waitingFixture(now: now)
+        let transport = ScriptedTransport(status: Self.mixedStatus, pendingReply: pending)
+        let client = LiveDaemonClient(transport: transport)
+        let store = MenuPanelStore(client: client)
+        store.clock = { now }
+        await store.load()
+        let sessions = try await client.listPending(projectId: nil)
+        let traces = TracesGraphModel.buckets(
+            shared: [], kept: TracesGraphModel.keptTimes(sessions, tool: nil),
+            offset: 0, now: now, range: .days)
+        XCTAssertEqual(store.keptCount, 464)
+        XCTAssertEqual(store.buckets.map(\.kept), traces.map(\.kept))
+        XCTAssertEqual(MenuPanelData.countWord(store.keptCount, unknown: "unknown"), "464")
+        XCTAssertEqual(store.stripTraces.reduce(0) { $0 + $1.down }, 464,
+                       "the 24-hour strip uses waiting discovery times within its own span")
+        XCTAssertEqual(transport.keptCalls, 0, "explicit Keep decisions are not this graph's input")
+    }
+
+    func test_aFailedPendingReadMakesKeptUnknownWithoutBlankingShared() async throws {
+        let transport = ScriptedTransport(status: Self.mixedStatus, pendingReply: try Self.waitingFixture(now: Date()))
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        XCTAssertEqual(store.keptCount, 464)
+        transport.failing = ["list_pending"]
+        await store.load()
+        XCTAssertFalse(store.stale)
+        XCTAssertNil(store.keptCount, "last waiting sessions cannot look current after failure")
+        XCTAssertNil(store.flaggedCount)
+        XCTAssertNotNil(store.sharedCount)
+        XCTAssertFalse(store.columnsCurrent)
+        transport.failing = []
+        await store.load()
+        XCTAssertEqual(store.keptCount, 464)
+    }
+
+    func test_unusedExplicitKeepReadCannotInvalidateWaitingCounts() async throws {
+        let transport = ScriptedTransport(
+            status: Self.mixedStatus, failing: ["list_kept"], pendingReply: try Self.waitingFixture(now: Date()))
+        let store = MenuPanelStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        XCTAssertEqual(store.keptCount, 464)
+        XCTAssertTrue(store.columnsCurrent)
+        XCTAssertEqual(transport.keptCalls, 0)
+    }
+
+    private static func waitingFixture(now: Date) throws -> String {
+        let formatter = ISO8601DateFormatter()
+        func entry(_ id: String, discovered: Date?, started: Date? = nil) -> [String: Any] {
+            var row: [String: Any] = ["entry_id": id, "source": "codex", "project_id": "project",
+                                      "project_label": "Project", "state": "pending"]
+            row["discovered_at"] = discovered.map(formatter.string)
+            row["started_at"] = started.map(formatter.string)
+            return row
+        }
+        let recent = now.addingTimeInterval(-60)
+        let rows = (0..<464).map { entry("waiting-\($0)", discovered: recent) } + [
+            entry("outside-window", discovered: now.addingTimeInterval(-20 * 86_400)),
+            entry("undated", discovered: nil, started: recent)
+        ]
+        return String(decoding: try JSONSerialization.data(withJSONObject: ["pending": rows]), as: UTF8.self)
+    }
+
     /// Every other read failing still leaves the mode drawn.
     func test_onlyAFailedStatusReadBlanksTheMode() async throws {
         let others = ScriptedTransport(
@@ -217,12 +283,15 @@ final class MenuPanelReadFailureTests: XCTestCase {
 private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     private let lock = NSLock()
     private let status: String
+    private let pendingReply: String?
+    private var _keptCalls = 0
     private var _failing: Set<String>
     private var _unreachable = false
     private var _statusCalls = 0
     private var _activityEnd: Date?
 
-    init(status: String, failing: Set<String> = []) {
+    init(status: String, failing: Set<String> = [], pendingReply: String? = nil) {
+        self.pendingReply = pendingReply
         self.status = status
         self._failing = failing
     }
@@ -238,6 +307,7 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     }
 
     var statusCalls: Int { lock.withLock { _statusCalls } }
+    var keptCalls: Int { lock.withLock { _keptCalls } }
 
     /// When set, `inference_activity` answers with steps ending here, as the
     /// daemon's end at the moment of its read.
@@ -249,11 +319,14 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     func call(_ method: String, params paramsJSON: String) -> String {
         let (down, refused) = lock.withLock { () -> (Bool, Bool) in
             if method == "status" { _statusCalls += 1 }
+            if method == "list_kept" { _keptCalls += 1 }
             return (_unreachable, _failing.contains(method))
         }
         if down { return #"{"id":0,"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
         if refused { return #"{"id":0,"error":{"code":"unavailable","message":"history-read-failed"}}"# }
         if method == "status" { return #"{"id":0,"result":\#(status)}"# }
+        if method == "list_pending", let pendingReply { return #"{"id":0,"result":\#(pendingReply)}"# }
+        if method == "list_kept", pendingReply != nil { return #"{"id":0,"result":{"kept":[]}}"# }
         if method == "inference_activity", let end = activityEnd {
             return #"{"id":0,"result":\#(SampleDaemonData.inferenceActivity(.normalDay, now: end))}"#
         }
