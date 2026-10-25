@@ -294,8 +294,8 @@ final class FlowMapSceneTests: XCTestCase {
     /// The menu's second-look row sets its count apart with a spaced dot,
     /// and an unread count is a dash, as `pair` draws it.
     func test_dotPairSpacesTheCountAndDashesAnUnreadOne() {
-        XCTAssertEqual(FlowMapScene.dotPair("Worth a second look", 3), "Worth a second look · 3")
-        XCTAssertEqual(FlowMapScene.dotPair("Worth a second look", nil), "Worth a second look · —")
+        XCTAssertEqual(FlowMapScene.dotPair("Sessions", 3), "Sessions · 3")
+        XCTAssertEqual(FlowMapScene.dotPair("Sessions", nil), "Sessions · —")
     }
 
     /// An off tool never flows, even with an armed folder under it.

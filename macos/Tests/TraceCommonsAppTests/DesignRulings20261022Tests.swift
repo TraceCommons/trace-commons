@@ -7,7 +7,7 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// The owner's 2026-10-22 menu-bar popover rulings: the NEAR AI wordmark in
-/// the top row's left corner, the traces worth a second look under it,
+/// the top row's left corner,
 /// Private AI just under the top row with its name, On or Off and the tool
 /// buttons, and the app's bar graph in place of the popover's own.
 @MainActor
@@ -35,12 +35,11 @@ final class DesignRulings20261022Tests: XCTestCase {
         return try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
     }
 
-    /// The top row, then Private AI, then the traces worth a second look,
-    /// then the rest in their old order.
-    func test_privateAIAndTheSecondLookSitUnderTheTopRow() throws {
+    /// The top row, then Private AI, then the remaining sections in order.
+    func test_privateAISitsUnderTheTopRow() throws {
         let panel = try Self.panel()
         let body = try XCTUnwrap(panel.range(of: "    var body: some View {"))
-        let order = ["topRow", "privateAI", "flaggedRow", "nudgeRow", "settlementRow", "graph", "glance", "menuItems"]
+        let order = ["topRow", "privateAI", "nudgeRow", "settlementRow", "graph", "glance", "menuItems"]
         var last = body.upperBound
         for name in order {
             let line = try XCTUnwrap(
@@ -51,17 +50,13 @@ final class DesignRulings20261022Tests: XCTestCase {
         XCTAssertFalse(panel.contains("            legend\n"), "the legend is drawn apart from the graph")
     }
 
-    /// The wordmark leads the top row; the traces worth a second look are a
-    /// row of their own that opens Traces.
+    /// The wordmark leads the top row without a second-look category.
     func test_theWordmarkLeadsTheTopRow() throws {
         let panel = try Self.panel()
         let top = try Self.section("    private var topRow: some View {", in: panel)
         XCTAssertTrue(top.contains("GlassNearWordmark()\n                .frame(height: Self.wordmarkHeight)"))
         XCTAssertFalse(top.contains("MenuWords.flagged"), "the second look is back in the top row")
-        let flagged = try Self.section("    private var flaggedRow: some View {", in: panel)
-        XCTAssertTrue(flagged.contains("open(.traces(entryId: nil))"))
-        XCTAssertTrue(flagged.contains("MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown)"))
-        XCTAssertTrue(flagged.contains(".buttonStyle(GlassMenuRowStyle())"))
+        XCTAssertFalse(panel.contains("flaggedRow"))
     }
 
     /// Private AI is drawn only while signed in to NEAR AI, under the core's

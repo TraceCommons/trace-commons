@@ -68,11 +68,8 @@ final class SummaryInspectorTests: XCTestCase {
         XCTAssertEqual(SummaryFacts.waiting(nil), "—")
 
         // Before the tree is read, nothing waiting is known: a dash, not 0.
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: false, sessions: []), "—")
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: true, sessions: []), "0")
         let held = try recordedEntry(["second_look": ["nothing-matched"]])
         let clear = try recordedEntry(["second_look": []])
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: true, sessions: [held, clear]), "1")
         XCTAssertEqual(SummaryFacts.kept(loaded: false, sessions: [held]), "—")
         XCTAssertEqual(SummaryFacts.kept(loaded: true, sessions: [held, clear]), "2")
 

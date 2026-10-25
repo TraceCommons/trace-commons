@@ -724,7 +724,7 @@ struct FlowMapScene: Equatable {
     }
 
     /// A heading and a count the core may not have reported, set apart by
-    /// a spaced dot: "Worth a second look · 3", a dash in place of the count.
+    /// a spaced dot: "Sessions · 3", a dash in place of the count.
     static func dotPair(_ word: String, _ count: Int?) -> String {
         "\(word) · \(count.map(String.init) ?? "—")"
     }

@@ -58,9 +58,9 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         let shell = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).shell
         XCTAssertEqual(shell.watching(tools: 1), "Watching 1 tool")
         XCTAssertEqual(shell.watching(tools: 3), "Watching 3 tools")
-        XCTAssertEqual(shell.waiting(0, secondLook: 2), "Nothing waiting for you")
-        XCTAssertEqual(shell.waiting(1, secondLook: 0), "1 trace waiting for you")
-        XCTAssertEqual(shell.waiting(4, secondLook: 2), "4 traces waiting for you \u{00B7} 2 worth a second look")
+        XCTAssertEqual(shell.waiting(0), "Nothing waiting for you")
+        XCTAssertEqual(shell.waiting(1), "1 trace waiting for you")
+        XCTAssertEqual(shell.waiting(4), "4 traces waiting for you")
         XCTAssertEqual(shell.focusTip(tool: nil, focused: false), "Select a tool, project or trace first")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: false), "Show Codex in the map")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: true), "Back to the whole map")

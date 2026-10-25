@@ -6,7 +6,7 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// The menu-bar panel showed a dash for every value (mode, shared, kept,
-/// both chart chips, "Worth a second look") while the daemon's `status`
+/// both chart chips) while the daemon's `status`
 /// answered `contribution_mode: "mixed"` and the bars still drew. Every one
 /// of those values was gated on one `stale` bit that any of six reads, or
 /// the event stream ending, set; nothing cleared it until a later full read.
@@ -44,11 +44,10 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertEqual(try drawnMode(store), copy.mixed)
         XCTAssertNotNil(store.sharedCount)
         XCTAssertNotNil(store.keptCount)
-        XCTAssertNotNil(store.flaggedCount)
     }
 
     /// One failed read blanks only what comes from it: the mode (status)
-    /// and the waiting count (pending) still draw, and shared, whose read
+    /// and the kept count (pending) still draw, and shared, whose read
     /// failed, reads as the core's unknown word rather than a dash.
     func test_aFailedHistoryReadLeavesTheLocalValuesDrawn() async throws {
         let transport = ScriptedTransport(status: Self.mixedStatus, failing: ["list_history"])
@@ -57,7 +56,6 @@ final class MenuPanelReadFailureTests: XCTestCase {
 
         XCTAssertFalse(store.stale, "a failed history read is not a failed status read")
         XCTAssertEqual(try drawnMode(store), try Self.modeCopy.mixed)
-        XCTAssertNotNil(store.flaggedCount, "the waiting count comes from list_pending, which answered")
         XCTAssertNotNil(store.keptCount)
         XCTAssertNil(store.sharedCount, "shared comes from the history read, which failed")
 
@@ -99,7 +97,6 @@ final class MenuPanelReadFailureTests: XCTestCase {
         await store.load()
         XCTAssertFalse(store.stale)
         XCTAssertNil(store.keptCount, "last waiting sessions cannot look current after failure")
-        XCTAssertNil(store.flaggedCount)
         XCTAssertNotNil(store.sharedCount)
         XCTAssertFalse(store.columnsCurrent)
         transport.failing = []
@@ -144,7 +141,6 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertEqual(try drawnMode(store), try Self.modeCopy.mixed)
         XCTAssertNil(store.sharedCount)
         XCTAssertNil(store.keptCount)
-        XCTAssertNil(store.flaggedCount)
 
         let statusDown = ScriptedTransport(status: Self.mixedStatus, failing: ["status"])
         let down = MenuPanelStore(client: LiveDaemonClient(transport: statusDown))
@@ -261,7 +257,6 @@ final class MenuPanelReadFailureTests: XCTestCase {
         XCTAssertTrue(panel.contains("let kept = store.keptCount.map { shown?.kept ?? $0 }"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(shared, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(kept, unknown: MonitorWords.unknown)"))
-        XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("stale: store.stale || !store.columnsCurrent"))
         XCTAssertFalse(panel.contains("stale ? \"—\""), "a count is never a bare dash")
     }

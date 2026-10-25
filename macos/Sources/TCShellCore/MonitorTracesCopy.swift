@@ -685,14 +685,11 @@ public struct MonitorShellCopy: MonitorWordTable {
         tools == 1 ? watchingToolsOne : watchingTools.replacingOccurrences(of: "{count}", with: String(tools))
     }
 
-    /// Home's second status line: sessions waiting, then how many of them
-    /// are worth a second look, or nothing waiting.
-    public func waiting(_ waiting: Int, secondLook: Int) -> String {
+    /// Home's second status line: sessions waiting, or nothing waiting.
+    public func waiting(_ waiting: Int) -> String {
         guard waiting > 0 else { return nothingWaiting }
-        let head = waiting == 1
+        return waiting == 1
             ? waitingForYouOne : waitingForYou.replacingOccurrences(of: "{count}", with: String(waiting))
-        guard secondLook > 0 else { return head }
-        return head + " \u{00B7} " + worthASecondLook.replacingOccurrences(of: "{count}", with: String(secondLook))
     }
 
     /// The focus button's tip: select first, back to the whole map, or

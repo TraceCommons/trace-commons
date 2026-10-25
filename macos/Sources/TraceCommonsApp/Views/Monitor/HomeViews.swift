@@ -1756,13 +1756,11 @@ enum HomeFormat {
         pendingFigure(pending, condition: pendingCondition(credit))
     }
 
-    /// Ron's #1146 second status line, from the core's decisions owed and
-    /// the waiting sessions' second-look reasons. Nil when the core did not
-    /// say how many are owed: an unknown count is never "nothing waiting".
-    static func waitingLine(_ owed: Int?, sessions: [DaemonData.QueueEntry]) -> String? {
+    /// The core's waiting-decision line. An unknown count is never
+    /// presented as nothing waiting.
+    static func waitingLine(_ owed: Int?) -> String? {
         guard let owed, let shell = MonitorWords.table?.shell else { return nil }
-        let secondLook = sessions.filter { !($0.secondLook ?? []).isEmpty }.count
-        return shell.waiting(owed, secondLook: secondLook)
+        return shell.waiting(owed)
     }
 
     /// History card's "X credit pending", under the same rule as the tile:
