@@ -1895,6 +1895,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "device_upload_ownership",
         include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
     ),
+    (
+        136,
+        "credit_settlement_enumerator",
+        include_str!("../../../../migrations/V136__credit_settlement_enumerator.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.
@@ -1977,6 +1982,46 @@ pub(super) async fn active_strong_authenticator_count(
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn pending_credit_settlement_tenants(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        novelty_settle_from: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, DatabaseError> {
+        if !(1..=1000).contains(&limit) {
+            return Err(DatabaseError::Pool(
+                "credit_settlement_enumerator_invalid_limit".into(),
+            ));
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        tx.batch_execute("SET LOCAL ROLE trace_credit_settlement_enumerator")
+            .await?;
+        // Discovery is deliberately coarse: tenant-scoped settlement repeats
+        // eligibility, policy, hold and account checks before writing anything.
+        // CASE guards numeric conversion even for malformed historical rows.
+        let rows = tx.query(
+            "SELECT DISTINCT l.tenant_id
+             FROM trace_credit_ledger l
+             JOIN trace_submissions s ON s.tenant_id=l.tenant_id AND s.submission_id=l.submission_id
+             WHERE ($1::text IS NULL OR l.tenant_id > $1)
+               AND s.status='accepted'
+               AND CASE WHEN length(l.points_delta)<=128 AND l.points_delta ~ '^[+]?[0-9]*[.]?[0-9]+([eE][+-]?[0-9]{1,2})?$'
+                        THEN l.points_delta::numeric > 0 ELSE FALSE END
+               AND (l.event_type IN ('benchmark_conversion','regression_catch','training_utility','ranking_utility')
+                    OR (l.event_type='novelty_utility' AND $3::timestamptz IS NOT NULL
+                        AND l.occurred_at >= $3 AND left(l.external_ref,16)='novelty_utility:'))
+               AND NOT EXISTS (
+                   SELECT 1 FROM trace_credit_settlement_batches b
+                   WHERE b.tenant_id=l.tenant_id AND b.status='finalized'
+                     AND l.credit_event_id=ANY(b.source_credit_event_ids))
+             ORDER BY l.tenant_id LIMIT $2",
+            &[&after, &(limit as i64), &novelty_settle_from],
+        ).await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
     async fn select_inference_connection(
         &self,
         tenant: &str,

@@ -395,14 +395,30 @@ with the values below.
 |---------------------------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------|
 | `PERPLEXITY_FLOOR_MICROS`             | `0` (disabled)               | All measured AUCs < 0.5 across both bake-off corpora and all four candidates. A positive floor would reject in the wrong direction. |
 | `TAIL_FRACTION_FLOOR_MICROS`          | `0` at launch                | Calibrate post-first-1000-pilot-traces using only the tail-fraction column from `analyze-calibration.sh` output. The aggregate-perplexity column is misleading. |
-| `NOVELTY_FLOOR_MICROS`                | `500000` (cosine novelty 0.5) | Unchanged from A2 deployment guidance. Embedder + vector-index path was not part of the A2.3c/A2.4 invalidation; primary active gate at launch. |
+| `NOVELTY_FLOOR_MICROS`                | `100000` (cosine novelty 0.10) | Provisional holding value adopted September 21 for BGE-large-en-v1.5; replaces the uncalibrated 0.5 launch guidance. See the limitations below. |
 
 The deployment runbook's "at least one of the three floors must be
-positive" invariant is satisfied by `NOVELTY_FLOOR_MICROS=500000`.
+positive" invariant is satisfied by `NOVELTY_FLOOR_MICROS=100000`.
 
 Driver report:
 `docs/superpowers/reports/2026-05-14-gate-floor-recalibration-findings.md`.
 Spec: `docs/superpowers/specs/2026-05-14-gate-floor-recalibration-design.md`.
+
+### Novelty holding value and limits
+
+The [September 21 report](../superpowers/reports/2026-09-21-novelty-floor-calibration.md)
+records the evidence and limitations behind the provisional 0.10 novelty floor.
+It is not a newly fitted threshold for every tenant or corpus. Similarity is
+model-dependent; the BGE model card recommends choosing a threshold from the
+relevant data distribution. Its v1.5 changes alleviate earlier similarity
+concentration, so no universal similarity range should be assumed.
+
+The [October 24 controls](../superpowers/reports/2026-10-24-staging-novelty-controls.md)
+validate this holding value using the staging model artifact in an isolated
+index. Never choose a threshold merely to make pending traces earn credit.
+A full novelty reevaluation against a corpus containing that trace's own vectors
+can self-match; the perplexity-only rescore endpoint does not update novelty.
+Historical consent remains authoritative regardless of floor changes.
 
 ### When the perplexity gate becomes useful
 
@@ -431,7 +447,7 @@ Choosing among these is Phase A.5 work. The findings report
 captures the rationale for parking it; pick after pilot data
 arrives, not before.
 
-Set the novelty floor printed above (`NOVELTY_FLOOR_MICROS=500000`)
+Set the novelty floor printed above (`NOVELTY_FLOOR_MICROS=100000`)
 and the two zero overrides in your env, and proceed to Phase 2.
 
 ## Phase 2 — Closed alpha (zero-credit gating)

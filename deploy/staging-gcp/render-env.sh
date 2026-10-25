@@ -38,6 +38,9 @@ set +x
 # writes nothing. Rotation: add a secret version, rerun this, restart.
 #
 # Settings (environment):
+#   TC_CREDIT_SETTLEMENT_ALL_TENANTS  default 0; explicit 1 enables live internal settlement.
+#   TC_CREDIT_SETTLEMENT_POLICY_VERSION required with automatic settlement; approved policy version.
+#   See docs/operator/automatic-credit-settlement.md for DB role prerequisites.
 #   TC_GCP_REGION       required: the region of the staging KMS key ring.
 #   TC_LE_EMAIL         required: the ACME account email for Caddy.
 #   TC_GCP_PROJECT      default tracecommons-pilot-2026.
@@ -373,6 +376,20 @@ if [ -n "$award_delta" ]; then
     extra+="TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=$award_settle_from"$'\n'
   fi
 fi
+case "${TC_CREDIT_SETTLEMENT_ALL_TENANTS:-0}" in
+  0) ;;
+  1)
+    settlement_policy="${TC_CREDIT_SETTLEMENT_POLICY_VERSION:-}"
+    [[ "$settlement_policy" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+      || refuse "TC_CREDIT_SETTLEMENT_POLICY_VERSION is required for automatic settlement"
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED=true"$'\n'
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE=all_tenants"$'\n'
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION=$settlement_policy"$'\n'
+    extra+="TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN=false"$'\n'
+    ;;
+  *) refuse "TC_CREDIT_SETTLEMENT_ALL_TENANTS must be 0 or 1" ;;
+esac
+
 case "$TC_NEAR_AI_PAYOUT_MODE" in
   disabled) ;;
   dry_run | live)
