@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     @Published var managedSnapshot: ManagedSnapshot? {
         didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
     }
+    @Published var managedCLIOptionsDrafts = ManagedCLIOptionsDrafts()
     @Published var managedBusy = false
     /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
     /// never the daemon's code.
@@ -38,7 +39,7 @@ final class AppModel: ObservableObject {
         return table.compactMapValues { $0 as? String }
     }()
 
-    func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
+    func managedText(_ key: String) -> String { managedCopy[key] ?? Self.bundledManagedCopy[key] ?? "" }
 
     func refreshManagedSessions() {
         perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
@@ -64,12 +65,21 @@ final class AppModel: ObservableObject {
         managedAction("set_managed_terminal", params: ["terminal": id])
     }
 
+    func saveManagedCLIOptions(tool: String) {
+        guard managedCLIOptionsDrafts.isChanged(tool: tool, saved: managedSnapshot?.cliOptions) else { return }
+        managedAction("managed_cli_options_set", params: [
+            "tool": tool,
+            "options": managedCLIOptionsDrafts.value(tool: tool, saved: managedSnapshot?.cliOptions)
+        ])
+    }
+
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
         managedErrorTool = nil
         managedErrorMethod = nil
+        let optionsBeingSaved = method == "managed_cli_options_set" ? params["options"] as? String : nil
         let attemptedTool = params["tool"] as? String
             ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         // Snapshot the untyped parameters before crossing to the worker.
@@ -83,6 +93,10 @@ final class AppModel: ObservableObject {
                     throw CocoaError(.coderInvalidValue)
                 }
                 var response = try client.managedAction(method, params: params)
+                if let optionsBeingSaved,
+                   response["tool"] as? String != attemptedTool || response["options"] as? String != optionsBeingSaved || response["revision"] as? UInt64 == nil {
+                    throw DaemonClient.Failure(code: "unavailable", message: "managed-cli-options-unconfirmed")
+                }
                 if method == "managed_account_add", let accountID = response["id"] as? String {
                     if let key = newAccountKey {
                         response = try client.managedAction("managed_account_set_key", params: ["account_id": accountID, "key": key])
@@ -97,9 +111,17 @@ final class AppModel: ObservableObject {
                     }
                     _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
                 }
+                return response["revision"] as? UInt64
             }
             await MainActor.run {
                 self.managedBusy = false
+                if case .success(let revision) = result, let revision, let optionsBeingSaved, let tool = attemptedTool {
+                    if revision >= (self.managedSnapshot?.revision ?? 0) {
+                        self.managedSnapshot?.cliOptions?[tool] = optionsBeingSaved
+                        self.managedSnapshot?.revision = revision
+                    }
+                    self.managedCLIOptionsDrafts.saved(tool: tool, options: optionsBeingSaved)
+                }
                 if case .failure(let error) = result {
                     let failure = error as? DaemonClient.Failure
                     self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
@@ -4001,6 +4023,8 @@ final class AppModel: ObservableObject {
     /// model some other way; the recorded answer covers a signed-out status
     /// that decodes equal to the placeholder.
     var statusRead: SettingsRead { read("status", answered: status.answered) }
+    /// Managed-session settings, including the saved CLI options.
+    var managedCLIOptionsRead: SettingsRead { read("managed_snapshot", answered: managedSnapshot != nil) }
     /// `get_settings`, or any write that handed back the settings.
     var settingsRead: SettingsRead { read("get_settings", answered: daemonSettings != nil) }
     /// `list_audit`: what "Nothing has been changed." waits on.

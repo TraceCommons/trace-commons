@@ -735,6 +735,11 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub managed_terminal: crate::managed::terminal::TerminalSetting,
 
+    /// Per-agent argv text for new managed coding sessions. Omitted tools
+    /// keep their existing values during partial configuration updates.
+    #[serde(default)]
+    pub managed_cli_options: BTreeMap<crate::managed::ToolId, String>,
+
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
     /// Revision 2's `digest_enabled` is `notify.digest`, and no
@@ -1374,6 +1379,7 @@ impl Default for DaemonSettings {
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
+            managed_cli_options: Default::default(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -2104,6 +2110,20 @@ pub fn apply_settings_object(
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+            }
+            "managed_cli_options" => {
+                let options = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                let mut candidate = settings.managed_cli_options.clone();
+                for (tool, text) in options {
+                    let tool: crate::managed::ToolId =
+                        serde_json::from_value(serde_json::json!(tool))
+                            .map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+                    let text = text.as_str().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                    crate::managed::options::parse(tool, text)
+                        .map_err(|_| "managed-cli-options-invalid")?;
+                    candidate.insert(tool, text.to_owned());
+                }
+                settings.managed_cli_options = candidate;
             }
             // A partial object of kind switches; see `apply_notify_object`.
             // Also reachable as `set_notify_kind`.

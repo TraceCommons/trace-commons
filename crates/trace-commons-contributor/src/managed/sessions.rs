@@ -133,6 +133,9 @@ impl std::fmt::Debug for PreparedLaunch {
 
 #[derive(Serialize, Deserialize)]
 pub struct LaunchContext {
+    /// Saved argv captured when this launch was first prepared.
+    #[serde(default)]
+    pub cli_options: Vec<String>,
     pub session: SessionView,
     pub proof: String,
     /// The loopback port of a proxy the daemon hosts for this session. Set
@@ -193,6 +196,8 @@ where
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
+    #[serde(default)]
+    cli_options: Vec<String>,
     #[serde(default)]
     dismissed: bool,
     /// The daemon opened this session's terminal itself, from its own
@@ -606,7 +611,13 @@ impl SessionRegistry {
             can_stop: false,
             can_start_again: false,
         };
+        let cli_options = if request.purpose == LaunchPurpose::Coding {
+            super::options::arguments(&self.store, request.tool)?
+        } else {
+            vec![]
+        };
         let entry = Entry {
+            cli_options,
             dismissed: false,
             launched: false,
             terminal: None,
@@ -700,6 +711,7 @@ impl SessionRegistry {
         entry.ticket_hash = None;
         entry.proof_hash = Some(digest(&proof));
         entry.last_seen = Utc::now();
+        let cli_options = entry.cli_options.clone();
         let session = entry.view.clone();
         let coding = entry.request.purpose == LaunchPurpose::Coding;
         self.commit(next)?;
@@ -709,6 +721,7 @@ impl SessionRegistry {
             let _ = self.record_launch();
         }
         Ok(LaunchContext {
+            cli_options,
             session,
             proof,
             route_port: None,
