@@ -75,7 +75,10 @@
 //! labels and counts, joined here by the keyed harness-session digest
 //! (owner decision D15, extended to feed T). Never a session or project
 //! digest, a path, a message or session ID, a backend or model name, a price
-//! or a title. Nothing here is logged except fixed labels.
+//! or a title. Each row also carries the same opaque `t{seq}` reference
+//! and resolved folder display label as the Sessions list, plus the latest
+//! recorded event time when available (activity, not completion). Nothing here
+//! is logged except fixed labels.
 //!
 //! The Sessions tab reads the same rows through `insights_sessions` and
 //! `insights_session_drill` (`daemon::insights_sessions`): each listed row
@@ -1023,7 +1026,7 @@ impl CounterPass {
         }
     }
 
-    /// The `insights_week` answer.
+    #[cfg(test)]
     pub(crate) fn week_value(
         &self,
         enabled: bool,
@@ -1033,6 +1036,20 @@ impl CounterPass {
         never_project_keys: &NeverFolders,
         options: WeekOptions,
     ) -> serde_json::Value {
+        self.week_value_with_folders(enabled, week, tz, now, never_project_keys, (options, &[]))
+    }
+
+    /// The `insights_week` answer, with the Sessions list's resolved labels.
+    pub(crate) fn week_value_with_folders(
+        &self,
+        enabled: bool,
+        week: Option<NaiveDate>,
+        tz: FixedOffset,
+        now: DateTime<Utc>,
+        never_project_keys: &NeverFolders,
+        context: (WeekOptions, &[(String, String)]),
+    ) -> serde_json::Value {
+        let (options, folders) = context;
         if !enabled {
             // Owner decision D4, open: nothing is read for Insights.
             return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
@@ -1073,6 +1090,7 @@ impl CounterPass {
         let inputs: Vec<SessionInput> = match (&key, &store) {
             (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
                 let never = never_digests(key, never_project_keys);
+                let labels = folder_labels_by_digest(key, folders);
                 // In the order the pass made the rows. The store is keyed by
                 // a digest of each file's path, so its own order is
                 // arbitrary, and the engine emits `sessions[]` in input
@@ -1093,7 +1111,10 @@ impl CounterPass {
                         joined.insert(
                             input.session_ref.clone(),
                             RowJoin {
+                                session_ref: row.reference(),
+                                folder: labels.get(&row.project).copied(),
                                 started_at: row.first_event_at,
+                                last_event_at: row.latest_event_at,
                                 tally,
                             },
                         );
@@ -1320,13 +1341,10 @@ impl CounterPass {
             }
             _ => Vec::new(),
         };
-        let labels: BTreeMap<KeyedDigest, &str> = match &key {
-            Some(key) => folders
-                .iter()
-                .map(|(project_key, label)| (project_digest(key, project_key), label.as_str()))
-                .collect(),
-            None => BTreeMap::new(),
-        };
+        let labels = key
+            .as_ref()
+            .map(|key| folder_labels_by_digest(key, folders))
+            .unwrap_or_default();
         let stored = rows.len();
         // Recency is the first recorded event, else the time discovery
         // placed the row, else its file's last write; ties go to the row
@@ -2135,24 +2153,44 @@ fn unreadable_value(reason: &str) -> serde_json::Value {
     })
 }
 
+fn folder_labels_by_digest<'a>(
+    key: &DigestKey,
+    folders: &'a [(String, String)],
+) -> BTreeMap<KeyedDigest, &'a str> {
+    folders
+        .iter()
+        .map(|(project, label)| (project_digest(key, project), label.as_str()))
+        .collect()
+}
+
 struct RowJoin<'a> {
+    session_ref: String,
+    folder: Option<&'a str>,
     started_at: Option<DateTime<Utc>>,
+    last_event_at: Option<DateTime<Utc>>,
     tally: Option<&'a RouteTally>,
 }
 
 /// The rollup as it crosses the socket: the per-session rows keep their
-/// figures and coverage, gain `started_at` and `routing`, and lose the
-/// opaque reference.
+/// figures and coverage, gain `started_at`, `last_event_at`, `routing` and the Sessions
+/// list's folder label, and keep the same opaque reference.
 ///
 /// - `started_at` is the transcript's first recorded event
 ///   (`CounterRow::first_event_at`), RFC 3339, or `null`; never discovery's
 ///   file-write time (owner question Q1, default taken: a row may carry it,
 ///   though it matches a queue entry's `started_at`; the shell must still
 ///   not join the two).
+/// - `last_event_at` is the transcript's latest recorded event
+///   (`CounterRow::latest_event_at`), RFC 3339, or `null` for older or missing
+///   metadata. It indicates recorded activity, never session completion,
+///   and never falls back to discovery's file-write time or the current time.
 /// - `routing` is the session's route tally in fixed labels and counts
 ///   (`insights_route_tally::routing_value`), or `null` on every row while
 ///   routing is unavailable.
-/// - Never an id, a digest, a path, a backend, a model, a price or a title.
+/// - `session_ref` is `CounterRow::reference()`, never a native session ID;
+///   `folder` is the Sessions list's resolved display label. Both are null
+///   when no matching metadata is present.
+/// - Never a native ID, a digest, a path, a backend, a model, a price or a title.
 fn rollup_value(
     rollup: &WeekRollup,
     joined: &BTreeMap<String, RowJoin<'_>>,
@@ -2165,10 +2203,25 @@ fn rollup_value(
                 let join = object
                     .remove("session_ref")
                     .and_then(|reference| reference.as_str().and_then(|r| joined.get(r)));
+                object.insert(
+                    "session_ref".to_string(),
+                    serde_json::json!(join.map(|join| &join.session_ref)),
+                );
+                object.insert(
+                    "folder".to_string(),
+                    serde_json::json!(join.and_then(|join| join.folder)),
+                );
                 let started_at = join
                     .and_then(|join| join.started_at)
                     .map(|at| at.to_rfc3339());
                 object.insert("started_at".to_string(), serde_json::json!(started_at));
+                let last_event_at = join
+                    .and_then(|join| join.last_event_at)
+                    .map(|at| at.to_rfc3339());
+                object.insert(
+                    "last_event_at".to_string(),
+                    serde_json::json!(last_event_at),
+                );
                 let routing = if routing_available {
                     routing_value(join.and_then(|join| join.tally))
                 } else {
@@ -2261,11 +2314,21 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     } else {
         NeverFolders::NONE
     };
+    let folders = if enabled {
+        super::insights_sessions::folder_labels(shared)
+    } else {
+        Vec::new()
+    };
     Response::ok(
         req.id,
-        shared
-            .insights_counter
-            .week_value(enabled, week, tz, Utc::now(), &never, options),
+        shared.insights_counter.week_value_with_folders(
+            enabled,
+            week,
+            tz,
+            Utc::now(),
+            &never,
+            (options, &folders),
+        ),
     )
 }
 
@@ -3797,7 +3860,6 @@ mod tests {
             codex.to_str().unwrap(),
             "PRIVATE",
             "/Users",
-            "session_ref",
             "msg_key",
             session.as_str(),
             &session[..16],
@@ -3807,6 +3869,91 @@ mod tests {
         ] {
             assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
         }
+    }
+
+    #[test]
+    fn breakdown_rows_share_the_sessions_reference_and_allow_absent_folder() {
+        let f = Fixture::new();
+        let path = f.write("PRIVATE-SESSION.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let page = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 20);
+        let week = f.week_routed();
+        let row = &sessions_of(&week)[0];
+        assert_eq!(
+            row.get("session_ref"),
+            page["sessions"][0].get("session_ref")
+        );
+        assert_eq!(row.get("folder"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn breakdown_folder_labels_match_sessions_across_weeks_and_never_stays_hidden() {
+        let f = Fixture::new();
+        let path = f.write("PRIVATE-SESSION.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let folders = vec![(PROJECT.to_string(), "My project".to_string())];
+        let page = f
+            .pass
+            .sessions_value(true, &NeverFolders::NONE, &folders, 20);
+        for answer_now in [now(), now() + Duration::weeks(1)] {
+            let week = f.pass.week_value_with_folders(
+                true,
+                Some(monday()),
+                utc(),
+                answer_now,
+                &NeverFolders::NONE,
+                (routed(), &folders),
+            );
+            let row = &sessions_of(&week)[0];
+            assert_eq!(row["folder"], "My project");
+            assert_eq!(row["folder"], page["sessions"][0]["folder"]);
+            assert_eq!(row["session_ref"], page["sessions"][0]["session_ref"]);
+            assert!(!week.to_string().contains(PROJECT));
+        }
+        let hidden = f.pass.week_value_with_folders(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::Every,
+            (routed(), &folders),
+        );
+        assert!(sessions_of(&hidden).is_empty());
+        assert!(!hidden.to_string().contains("My project"));
+    }
+
+    #[test]
+    fn breakdown_last_event_is_recorded_activity_never_file_time() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let week = f.week_routed();
+        assert_eq!(
+            sessions_of(&week)[0]["last_event_at"],
+            "2026-09-14T09:01:00+00:00"
+        );
+    }
+
+    #[test]
+    fn breakdown_metadata_is_null_without_a_join() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let (_, store) = f.pass.visible_store().unwrap();
+        let inputs: Vec<_> = store
+            .unwrap()
+            .rows
+            .values()
+            .map(CounterRow::session_input)
+            .collect();
+        let rollup = week_rollup(Feed::CounterPass, &inputs, monday(), &utc());
+        let value = rollup_value(&rollup, &BTreeMap::new(), false);
+        assert_eq!(value["sessions"][0]["session_ref"], serde_json::Value::Null);
+        assert_eq!(value["sessions"][0]["folder"], serde_json::Value::Null);
+        assert_eq!(
+            value["sessions"][0]["last_event_at"],
+            serde_json::Value::Null
+        );
     }
 
     /// Design section 6, part B item 5: each row carries its first-event
@@ -3851,7 +3998,7 @@ mod tests {
                 "calls_without_counts": 1,
             })
         );
-        assert!(rows[0].get("session_ref").is_none());
+        assert_eq!(rows[0]["session_ref"], "t0");
     }
 
     /// The shells' Sessions drill draws `rollup.sessions[]` in wire order and

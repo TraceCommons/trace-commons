@@ -245,10 +245,16 @@ final class InsightsSessionRouteTests: XCTestCase {
                        "an unknown reason is left out, never shown as its wire label")
     }
 
-    func testARowIsLabelledFromItsFirstEventAndHarness() throws {
+    func testARowWithoutLastActivityIsLabelledFromItsFirstEventAndHarness() throws {
         let copy = try Self.coreCopy()
         let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
-        let rows = try XCTUnwrap(Self.decode(Self.recorded()).rollup?.sessions)
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var recorded = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        for index in recorded.indices { recorded[index].removeValue(forKey: "last_event_at") }
+        rollup["sessions"] = recorded
+        object["rollup"] = rollup
+        let rows = try XCTUnwrap(Self.decode(object).rollup?.sessions)
         let claude = try XCTUnwrap(rows.first { $0.source == "claude_code" })
         let label = InsightsSessionsWords.counterLabel(claude, copy: copy, timeZone: utc)
         let first = try XCTUnwrap(DateComponents(calendar: Calendar(identifier: .gregorian), timeZone: utc,
@@ -266,6 +272,104 @@ final class InsightsSessionRouteTests: XCTestCase {
                            "harness": InsightsOverviewWords.harness("claude_code", copy: copy),
                            "t": InsightsOverviewWords.figure(37235, copy: copy),
                        ]))
+    }
+
+    func testBreakdownUsesFolderAndSessionReference() throws {
+        let copy = try Self.coreCopy()
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["folder"] = "trace-commons-server"
+        rows[0]["session_ref"] = "t42"
+        rows[1]["folder"] = "trace-commons-server"
+        rows[1]["session_ref"] = "t43"
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let sessions = try XCTUnwrap(Self.decode(object).rollup?.sessions)
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(sessions[0], copy: copy),
+                       "trace-commons-server · t42")
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(sessions[1], copy: copy),
+                       "trace-commons-server · t43")
+        XCTAssertEqual(sessions[0].sessionRef, "t42")
+    }
+
+    func testOlderBreakdownPayloadUsesUnknownFolderWithoutInventingAnIdentifier() throws {
+        let copy = try Self.coreCopy()
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        for index in rows.indices {
+            rows[index].removeValue(forKey: "folder")
+            rows[index].removeValue(forKey: "session_ref")
+        }
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(session, copy: copy),
+                       try XCTUnwrap(copy["analytics_folder_unknown"]))
+        XCTAssertNil(session.sessionRef)
+    }
+
+    func testBreakdownShowsLastRecordedActivityInItsTimeRange() throws {
+        let copy = try Self.coreCopy()
+        _ = try XCTUnwrap(copy["analytics_session_label_range"])
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-10-22T13:53:00Z"
+        for end in ["2026-10-22T15:05:00Z", "2026-10-23T01:05:00Z"] {
+            rows[0]["last_event_at"] = end
+            rollup["sessions"] = rows
+            object["rollup"] = rollup
+            let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+            let label = InsightsSessionsWords.counterLabel(session, copy: copy, timeZone: utc)
+            let last = try Date(end, strategy: .iso8601)
+            XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: utc).hour().minute())),
+                          "Last recorded activity must distinguish sessions: \(label)")
+            if end.contains("10-23") {
+                XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: utc)
+                    .month(.abbreviated).day())), "An overnight session must show the end date")
+            }
+        }
+    }
+
+    func testBreakdownTimeRangeUsesEachEventsLocalOffsetAcrossDaylightSaving() throws {
+        let copy = try Self.coreCopy()
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-11-01T08:30:00Z"
+        rows[0]["last_event_at"] = "2026-11-01T10:30:00Z"
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let row = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        let last = try Date("2026-11-01T10:30:00Z", strategy: .iso8601)
+        let label = InsightsSessionsWords.counterLabel(row, copy: copy, timeZone: zone)
+        XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: zone).hour().minute())),
+                      "End time must use its own daylight-saving offset: \(label)")
+    }
+
+    func testBreakdownDoesNotInventAnEndTimeForOlderOrInvalidPayloads() throws {
+        let copy = try Self.coreCopy()
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-10-22T13:53:00Z"
+        rows[0].removeValue(forKey: "last_event_at")
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let older = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        let expected = InsightsSessionsWords.counterLabel(older, copy: copy, timeZone: utc)
+        for end in ["invalid", "2026-10-21T12:00:00Z"] {
+            rows[0]["last_event_at"] = end
+            rollup["sessions"] = rows
+            object["rollup"] = rollup
+            let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+            XCTAssertEqual(InsightsSessionsWords.counterLabel(session, copy: copy, timeZone: utc), expected)
+        }
     }
 
     // MARK: The model

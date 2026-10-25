@@ -408,6 +408,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_session_label",
         "{date} {time} · {harness} · {t} tokens",
     ),
+    // Counter breakdown time span, ending at the latest recorded activity.
+    (
+        "analytics_session_label_range",
+        "{span} · {harness} · {t} tokens",
+    ),
     // The same label for a session with no recorded event time.
     (
         "analytics_session_label_undated",
