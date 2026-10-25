@@ -6973,6 +6973,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         admission: None,
         account_admission: None,
         client_upload_allowance: None,
+        client_upload_trust_policy: None,
+        client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
         account_trust_applied_policy: None,
@@ -31126,6 +31128,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         admission: None,
         account_admission: None,
         client_upload_allowance: None,
+        client_upload_trust_policy: None,
+        client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
         account_trust_applied_policy: None,
@@ -31996,6 +32000,287 @@ fn the_applied_policy_is_read_only_from_a_tiered_admission_policy() {
         "account admission off"
     );
 }
+
+fn independent_upload_trust_policy(version: &str) -> upload_allowance::ClientUploadTrustPolicy {
+    let json = tiered_admission_policy(version, 172800);
+    upload_allowance::ClientUploadTrustPolicy {
+        bounded: trace_commons_server::account_trust::parse_bounded_policy(&json, &[version])
+            .unwrap(),
+        growth: trace_commons_server::account_trust_rule::parse_growth_policy(&json, &[version])
+            .unwrap(),
+    }
+}
+
+#[test]
+fn independent_upload_trust_requires_both_ledgers_off_and_durable_rls_controls() {
+    let validate = account_trust_growth_routes::require_independent_upload_trust_controls;
+    assert!(validate(true, false, false, true, true, true).is_ok());
+    // No independent policy preserves the existing admission-backed startup.
+    assert!(validate(false, true, true, false, false, false).is_ok());
+    for (account, legacy) in [(true, false), (false, true), (true, true)] {
+        assert_eq!(
+            validate(true, account, legacy, true, true, true)
+                .unwrap_err()
+                .to_string(),
+            "client_upload_trust_admission_conflict"
+        );
+    }
+    for (db, writes, rls, label) in [
+        (
+            false,
+            true,
+            true,
+            "client_upload_trust_database_unavailable",
+        ),
+        (
+            true,
+            false,
+            true,
+            "client_upload_trust_durable_writes_required",
+        ),
+        (true, true, false, "client_upload_trust_rls_required"),
+    ] {
+        assert_eq!(
+            validate(true, false, false, db, writes, rls)
+                .unwrap_err()
+                .to_string(),
+            label
+        );
+    }
+}
+
+#[test]
+fn independent_upload_trust_selects_the_same_applied_policy_without_admission_configuration() {
+    let independent = independent_upload_trust_policy("client-upload-v1");
+    let no_environment = |_: &str| -> Result<String, std::env::VarError> {
+        panic!("independent policy must not read admission variables")
+    };
+    let selected = account_trust_growth_routes::select_applied_policy(
+        None,
+        Some(&independent),
+        no_environment,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected.version(), independent.bounded.version());
+    assert_eq!(
+        selected.effective_allowance(1),
+        independent.growth.effective_allowance(1)
+    );
+    let admission = admission::AccountAdmissionConfig {
+        policy: independent.bounded.clone(),
+        lease_seconds: 60,
+        providers: None,
+    };
+    assert_eq!(
+        account_trust_growth_routes::select_applied_policy(
+            Some(&admission),
+            Some(&independent),
+            no_environment
+        )
+        .unwrap_err()
+        .to_string(),
+        "client_upload_trust_admission_conflict"
+    );
+    assert!(
+        account_trust_growth_routes::select_applied_policy(None, None, no_environment)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn independent_upload_trust_refuses_missing_runtime_invalidation_control() {
+    let db = PerUserTestDeviceKeyDb::new();
+    assert_eq!(
+        account_trust_growth_routes::require_independent_upload_trust_runtime_ready(&db)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "external_account_trust_readiness_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn independent_upload_trust_scheduler_accepts_applied_policy_with_both_ledgers_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn Database> = Arc::new(PerUserTestDeviceKeyDb::new());
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let independent = Arc::new(independent_upload_trust_policy("client-upload-v1"));
+    let state_mut = Arc::get_mut(&mut state).unwrap();
+    state_mut.require_db_mirror_writes = true;
+    state_mut.require_postgres_trace_rls_ready = true;
+    state_mut.account_trust_applied_policy = Some(Arc::new(
+        account_trust_growth_routes::select_applied_policy(None, Some(&independent), |_: &str| {
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap()
+        .unwrap(),
+    ));
+    state_mut.client_upload_trust_policy = Some(independent);
+    assert!(state.admission.is_none());
+    assert!(state.account_admission.is_none());
+    let config = account_trust_growth_routes::AccountTrustSchedulerConfig::new(
+        "account-trust-worker-token-a".to_owned(),
+        300,
+        1000,
+    );
+    account_trust_growth_routes::validate_scheduler_config(state.as_ref(), Some(&config))
+        .await
+        .unwrap();
+}
+
+fn client_upload_trust_source_database_config() -> DatabaseConfig {
+    DatabaseConfig {
+        url: "postgres://source:synthetic-secret@db.example/app"
+            .to_owned()
+            .into(),
+        pool_size: 9,
+        ssl_mode: trace_commons_server::config::SslMode::Require,
+        login_resolver_url: Some("postgres://resolver@db.example/app".to_owned().into()),
+        gate_driver_url: Some("postgres://gate@db.example/app".to_owned().into()),
+        pii_backstop_driver_url: Some("postgres://pii@db.example/app".to_owned().into()),
+        invite_registry_url: Some("postgres://invite@db.example/app".to_owned().into()),
+    }
+}
+
+#[test]
+fn client_upload_trust_database_is_optional_same_endpoint_and_has_no_auxiliary_credentials() {
+    let main = client_upload_trust_source_database_config();
+    let parse = account_trust_growth_routes::trust_database_config_from_values;
+    assert!(
+        parse(None, None, false, false, false, false, false)
+            .unwrap()
+            .is_none()
+    );
+    for (independent, shadow) in [(true, false), (false, true), (true, true)] {
+        let url = "postgresql://trust:synthetic-worker-secret@db.example:5432/app?sslmode=require";
+        let trust = parse(
+            Some(&main),
+            Some(url),
+            independent,
+            shadow,
+            false,
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(trust.url.expose_secret(), url);
+        assert_eq!(trust.pool_size, main.pool_size);
+        assert_eq!(trust.ssl_mode, main.ssl_mode);
+        assert!(trust.login_resolver_url.is_none());
+        assert!(trust.gate_driver_url.is_none());
+        assert!(trust.pii_backstop_driver_url.is_none());
+        assert!(trust.invite_registry_url.is_none());
+    }
+    assert!(
+        main.login_resolver_url.is_some(),
+        "the source config is unchanged"
+    );
+}
+
+#[test]
+fn client_upload_trust_database_rejects_malformed_and_cross_database_urls() {
+    let main = client_upload_trust_source_database_config();
+    let parse = |url| {
+        account_trust_growth_routes::trust_database_config_from_values(
+            Some(&main),
+            Some(url),
+            true,
+            false,
+            false,
+            false,
+            true,
+        )
+    };
+    for url in [
+        "",
+        "not-a-url",
+        "postgres://trust@db.example/",
+        "https://trust@db.example/app",
+        "postgres://trust@db.example/app?host=elsewhere",
+        "postgres://trust@db.example/app?hostaddr=127.0.0.2",
+        "postgres://trust@db.example/app?dbname=another",
+        "postgres://trust@db.example/app?port=5433",
+    ] {
+        assert_eq!(
+            parse(url).unwrap_err().to_string(),
+            "client_upload_trust_database_url_invalid"
+        );
+    }
+    for url in [
+        "postgres://trust@elsewhere/app",
+        "postgres://trust@db.example:5433/app",
+        "postgres://trust@db.example/another",
+    ] {
+        assert_eq!(
+            parse(url).unwrap_err().to_string(),
+            "client_upload_trust_database_endpoint_mismatch"
+        );
+    }
+}
+
+#[test]
+fn client_upload_trust_database_refuses_partial_policy_durability_and_ledger_controls() {
+    let main = client_upload_trust_source_database_config();
+    let url = Some("postgres://trust@db.example/app");
+    let parse = account_trust_growth_routes::trust_database_config_from_values;
+    assert_eq!(
+        parse(Some(&main), url, false, false, false, false, true)
+            .unwrap_err()
+            .to_string(),
+        "client_upload_trust_database_policy_required"
+    );
+    assert_eq!(
+        parse(None, url, true, false, false, false, true)
+            .unwrap_err()
+            .to_string(),
+        "client_upload_trust_database_unavailable"
+    );
+    assert_eq!(
+        parse(Some(&main), url, true, false, false, false, false)
+            .unwrap_err()
+            .to_string(),
+        "client_upload_trust_durable_writes_required"
+    );
+    for (account, legacy) in [(true, false), (false, true)] {
+        for (independent, shadow) in [(true, false), (false, true)] {
+            assert_eq!(
+                parse(Some(&main), url, independent, shadow, account, legacy, true)
+                    .unwrap_err()
+                    .to_string(),
+                "client_upload_trust_admission_conflict"
+            );
+        }
+    }
+    // A dedicated pool supplies the narrow RLS runtime check; the unchanged
+    // source still must be present and durable.
+    let dedicated_pool = parse(Some(&main), url, true, false, false, false, true).unwrap();
+    let main_rls_ready = false;
+    assert!(
+        account_trust_growth_routes::require_independent_upload_trust_controls(
+            true,
+            false,
+            false,
+            true,
+            true,
+            main_rls_ready || dedicated_pool.is_some()
+        )
+        .is_ok()
+    );
+}
+
+#[path = "client_upload_trust_scheduler_pg_tests.rs"]
+mod client_upload_trust_scheduler_pg_tests;
 
 /// The scheduler fails closed at startup: a token that is not admin or
 /// `account_trust_worker`, no DB mirror, no policy to evaluate, or an

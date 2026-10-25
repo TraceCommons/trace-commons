@@ -906,6 +906,34 @@ impl PgBackend {
             AND NOT has_table_privilege(current_user,l.oid,'SELECT,INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(e.oid,l.oid,'SELECT,INSERT,UPDATE,DELETE')
             AND NOT i.rolsuper AND NOT i.rolbypassrls AND NOT i.rolcanlogin
+            AND a.rolname IS NOT NULL AND NOT a.rolsuper AND NOT a.rolbypassrls AND NOT a.rolcanlogin
+            AND h.prosecdef AND h.proowner=a.oid
+            AND h.proconfig @> ARRAY['search_path=pg_catalog']::text[]
+            AND has_function_privilege(a.oid,h.oid,'EXECUTE')
+            AND NOT has_function_privilege(current_user,h.oid,'EXECUTE')
+            AND NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(h.proacl,acldefault('f',h.proowner))) acl
+                WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')
+            AND EXISTS (SELECT 1 FROM pg_proc q
+                WHERE q.oid=to_regprocedure('public.trace_account_trust_status_acceptance_outcome(text,uuid,uuid)')
+                  AND q.prosecdef AND q.proowner=a.oid
+                  AND q.proconfig @> ARRAY['search_path=pg_catalog']::text[]
+                  AND has_function_privilege(a.oid,q.oid,'EXECUTE')
+                  AND NOT has_function_privilege(current_user,q.oid,'EXECUTE')
+                  AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(q.proacl,acldefault('f',q.proowner))) acl
+                      WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'))
+            AND NOT EXISTS (
+                SELECT 1 FROM (VALUES
+                    ('public.trace_device_upload_principals','account_trust_upload_alias_frontier'),
+                    ('public.device_keys','account_trust_upload_device_frontier'),
+                    ('public.trace_submissions','account_trust_upload_submission_frontier')
+                ) expected(relation_name,trigger_name)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                    WHERE t.tgrelid=to_regclass(expected.relation_name)
+                      AND t.tgname=expected.trigger_name AND t.tgenabled='O'
+                      AND t.tgfoid=to_regprocedure('public.trace_account_trust_advance_upload_frontiers()')
+                      AND p.prosecdef AND p.proowner=i.oid
+                      AND p.proconfig @> ARRAY['search_path=pg_catalog']::text[]))
             AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
                 WHERE t.tgrelid=to_regclass('public.trace_gate_decisions')
                 AND t.tgname='account_trust_gate_frontier' AND t.tgenabled='O'
@@ -916,6 +944,8 @@ impl PgBackend {
             LEFT JOIN pg_class g ON g.oid=to_regclass('public.trace_account_trust_frontiers')
             LEFT JOIN pg_class l ON l.oid=to_regclass('public.trace_account_trust_dependency_locks')
             LEFT JOIN pg_roles i ON i.rolname='trace_account_trust_input_guard'
+            LEFT JOIN pg_roles a ON a.rolname='trace_account_admission_guard'
+            LEFT JOIN pg_proc h ON h.oid=to_regprocedure('public.trace_account_trust_live_owned_principal(text,uuid,text)')
             WHERE r.rolname=current_user"#, &[]).await.map_err(|_| database_refused())?.get(0);
         Ok(ready == Some(true))
     }

@@ -10,6 +10,44 @@ use trace_commons_protocol::upload_allowance::{
 
 const UPLOADS_ENV: &str = "TRACE_COMMONS_CLIENT_MAX_UPLOADS_PER_DAY";
 const BYTES_ENV: &str = "TRACE_COMMONS_CLIENT_MAX_BYTES_PER_DAY";
+const TRUST_POLICY_JSON: &str = "TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON";
+const TRUST_POLICY_VERSION: &str = "TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_VERSION";
+
+/// Keep the evaluator's full rule and the reader's validated growth metadata
+/// together. GrowthPolicy::base() alone deliberately has growth disabled.
+#[derive(Debug, Clone)]
+pub(super) struct ClientUploadTrustPolicy {
+    pub(super) bounded: trace_commons_server::account_trust::BoundedPolicy,
+    pub(super) growth: trace_commons_server::account_trust_rule::GrowthPolicy,
+}
+
+pub(super) fn trust_policy_from_env() -> anyhow::Result<Option<ClientUploadTrustPolicy>> {
+    trust_policy_from_values(|key| std::env::var(key))
+}
+
+pub(super) fn trust_policy_from_values(
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<ClientUploadTrustPolicy>> {
+    let optional = |key| match read(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(anyhow::anyhow!("client_upload_trust_policy_invalid")),
+    };
+    let json = optional(TRUST_POLICY_JSON)?;
+    let version = optional(TRUST_POLICY_VERSION)?;
+    let (json, version) = match (json, version) {
+        (None, None) => return Ok(None),
+        (Some(json), Some(version)) => (json, version),
+        _ => anyhow::bail!("client_upload_trust_policy_incomplete"),
+    };
+    let growth =
+        trace_commons_server::account_trust_rule::parse_growth_policy(&json, &[version.as_str()])
+            .map_err(|_| anyhow::anyhow!("client_upload_trust_policy_invalid"))?;
+    let bounded =
+        trace_commons_server::account_trust::parse_bounded_policy(&json, &[version.as_str()])
+            .map_err(|_| anyhow::anyhow!("client_upload_trust_policy_invalid"))?;
+    Ok(Some(ClientUploadTrustPolicy { bounded, growth }))
+}
 
 fn config_from_values(
     uploads: Option<&str>,
@@ -89,7 +127,11 @@ async fn account_allowance(
     ctx: &AccountCtx,
 ) -> ApiResult<Option<DailyUploadAllowance>> {
     let base = state.client_upload_allowance;
-    let Some(config) = state.account_admission.as_ref() else {
+    let policy = if let Some(config) = state.account_admission.as_ref() {
+        &config.policy
+    } else if let Some(independent) = state.client_upload_trust_policy.as_deref() {
+        &independent.bounded
+    } else {
         return Ok(base);
     };
     if !trace_commons_protocol::admission::is_anchored_tenant(&ctx.tenant_id) {
@@ -103,7 +145,17 @@ async fn account_allowance(
         )
     };
     let unlinked = || api_error(StatusCode::FORBIDDEN, "account_identity_unlinked");
-    let db = state.db_mirror.as_ref().ok_or_else(unavailable)?;
+    let db = if state.client_upload_trust_policy.is_some() {
+        // Staging's source-ingest role may own tables. Trust reads instead
+        // use the separately checked, narrow nonowner connection when set.
+        state
+            .client_upload_trust_database
+            .as_ref()
+            .or(state.db_mirror.as_ref())
+    } else {
+        state.db_mirror.as_ref()
+    }
+    .ok_or_else(unavailable)?;
     let mut resolved = None;
     for principal in ctx.principal_set.to_vec() {
         if let Ok(account) = trace_commons_server::account_trust::resolve_contribution_account(
@@ -120,13 +172,13 @@ async fn account_allowance(
     }
     let (account, principal) = resolved.ok_or_else(unlinked)?;
     let status = db
-        .account_admission_status(&account, &principal, &config.policy)
+        .account_admission_status(&account, &principal, policy)
         .await
         .map_err(|_| unavailable())?
         .ok_or_else(unlinked)?;
     Ok(match status.effective_allowance {
         Some(effective) if status.authority == "bounded" => {
-            earned_allowance(base, config.policy.bounded_allowance(), Some(effective))
+            earned_allowance(base, policy.bounded_allowance(), Some(effective))
         }
         _ => base,
     })
@@ -213,5 +265,68 @@ mod tests {
         let large = earned_allowance(None, i64::MAX / 2, Some(i64::MAX)).unwrap();
         assert_eq!(large.max_uploads_per_day, 100);
         assert_eq!(large.max_bytes_per_day, 419_430_400);
+    }
+
+    fn independent_json() -> String {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/staging-gcp/client-upload-trust-policy.json.template"
+        ))
+        .replace("${TC_UPLOAD_TRUST_GATE_POLICY_VERSION}", "gate-v1")
+        .replace(
+            "${TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION}",
+            "events.v2+simhash.v2",
+        )
+    }
+
+    #[test]
+    fn independent_upload_trust_requires_a_complete_matching_tiered_policy() {
+        let parse = |json: Option<String>, version: Option<&str>| {
+            trust_policy_from_values(|key| match key {
+                TRUST_POLICY_JSON => json.clone().ok_or(std::env::VarError::NotPresent),
+                TRUST_POLICY_VERSION => version
+                    .map(str::to_owned)
+                    .ok_or(std::env::VarError::NotPresent),
+                _ => Err(std::env::VarError::NotPresent),
+            })
+        };
+        assert!(parse(None, None).unwrap().is_none());
+        assert!(parse(Some(independent_json()), None).is_err());
+        assert!(parse(None, Some("staging-earned-upload-v1")).is_err());
+        assert!(parse(Some("{}".to_owned()), Some("staging-earned-upload-v1")).is_err());
+        assert!(parse(Some(independent_json()), Some("different-version")).is_err());
+        let policy = parse(Some(independent_json()), Some("staging-earned-upload-v1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.growth.version(), "staging-earned-upload-v1");
+        assert!(policy.growth.require_gate_pass());
+        assert_eq!(
+            policy.bounded.external_growth().unwrap().policy_version,
+            policy.growth.version()
+        );
+        assert_eq!(
+            policy.bounded.external_growth().unwrap().allowance_ceiling,
+            500
+        );
+        assert_eq!(policy.bounded.bounded_allowance(), 100);
+        for (tier, count, bytes) in [
+            (0, 50, 209_715_200),
+            (1, 100, 419_430_400),
+            (2, 150, 629_145_600),
+            (3, 250, 1_048_576_000),
+        ] {
+            let cap = earned_allowance(
+                None,
+                policy.bounded.bounded_allowance(),
+                Some(policy.growth.effective_allowance(tier)),
+            );
+            let cap = cap.unwrap_or(DailyUploadAllowance {
+                schema_version: 1,
+                max_uploads_per_day: protocol::DEFAULT_MAX_UPLOADS_PER_DAY,
+                max_bytes_per_day: protocol::DEFAULT_MAX_BYTES_PER_DAY,
+            });
+            assert_eq!(cap.max_uploads_per_day, count);
+            assert_eq!(cap.max_bytes_per_day, bytes);
+        }
     }
 }

@@ -27,6 +27,8 @@ mod reward_participant;
 mod reward_upgrade_tests;
 #[path = "postgres_starter_plausibility.rs"]
 mod starter_plausibility;
+#[cfg(test)]
+mod upload_trust_upgrade_tests;
 
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
@@ -1899,6 +1901,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         136,
         "credit_settlement_enumerator",
         include_str!("../../../../migrations/V136__credit_settlement_enumerator.sql"),
+    ),
+    (
+        137,
+        "account_trust_owned_upload_status",
+        include_str!("../../../../migrations/V137__account_trust_owned_upload_status.sql"),
     ),
 ];
 

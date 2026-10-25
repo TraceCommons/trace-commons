@@ -3102,6 +3102,86 @@ async fn contribution_status_reports_the_accounts_own_growth() {
         "stale earned trust withdraws the daily uplift"
     );
 
+    // Independent client trust can consume the same validated applied rule
+    // while both admission ledgers remain off. It never reserves/debits.
+    let growth =
+        trace_commons_server::account_trust_rule::parse_growth_policy(&tiered, &[version.as_str()])
+            .unwrap();
+    let bounded =
+        trace_commons_server::account_trust::parse_bounded_policy(&tiered, &[version.as_str()])
+            .unwrap();
+    // Optional explicit isolated worker login exercises the operator bootstrap's
+    // real status-read permissions while auth/source storage stays on admin.
+    let independent_database =
+        if let Ok(url) = std::env::var("TRACE_COMMONS_CLIENT_UPLOAD_TRUST_TEST_RUNTIME_URL") {
+            let source_url = std::env::var("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL").unwrap();
+            let source = DatabaseConfig {
+                url: SecretString::from(source_url),
+                pool_size: 4,
+                ssl_mode: trace_commons_server::config::SslMode::Prefer,
+                login_resolver_url: None,
+                gate_driver_url: None,
+                pii_backstop_driver_url: None,
+                invite_registry_url: None,
+            };
+            let config = account_trust_growth_routes::trust_database_config_from_values(
+                Some(&source),
+                Some(&url),
+                true,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+            Some(Arc::new(PgBackend::new(&config).await.unwrap()) as Arc<dyn Database>)
+        } else {
+            None
+        };
+    let mut independent = state.clone();
+    let independent_mut = Arc::make_mut(&mut independent);
+    independent_mut.client_upload_trust_database = independent_database;
+    independent_mut.admission = None;
+    independent_mut.account_admission = None;
+    independent_mut.client_upload_trust_policy =
+        Some(Arc::new(upload_allowance::ClientUploadTrustPolicy {
+            bounded,
+            growth,
+        }));
+    client.execute(
+        "UPDATE trace_account_trust_evaluations SET as_of=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap();
+    assert_eq!(
+        upload_allowance(independent.clone(), token).await,
+        serde_json::json!({"allowance":{"schema_version":1,"max_uploads_per_day":150,"max_bytes_per_day":629145600u64}}),
+        "client upload trust applies while both admission ledgers remain off"
+    );
+    let (code, bytes) = status(independent.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let legacy_status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(legacy_status["authority"], "legacy_evidence");
+    assert!(
+        legacy_status["policy_version"].is_null(),
+        "client trust does not enable account admission"
+    );
+    assert!(independent.admission.is_none() && independent.account_admission.is_none());
+    let unchanged_spend: i64 = client.query_one(
+        "SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap().get(0);
+    assert_eq!(unchanged_spend, 10);
+    client.execute(
+        "UPDATE trace_account_trust_evaluations SET as_of=as_of - interval '2 hours' WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap();
+    assert_eq!(
+        upload_allowance(independent, token).await,
+        serde_json::json!({"allowance":null}),
+        "independent trust retains freshness fallback"
+    );
+
     // A legacy-namespace session is still refused before any read.
     let (code, bytes) = status(state.clone(), legacy_token).await;
     assert_eq!(code, StatusCode::FORBIDDEN);

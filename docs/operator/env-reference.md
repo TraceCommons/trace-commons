@@ -551,6 +551,35 @@ bounded allowance.
 
 See [account trust](./account-trust.md) for the activation and response contract.
 
+## Client daily upload allowances
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_CLIENT_MAX_UPLOADS_PER_DAY` | optional pair | (none) | Base client daily count, 1–1000; set together with the byte cap. Earned trust scales this base. |
+| `TRACE_COMMONS_CLIENT_MAX_BYTES_PER_DAY` | optional pair | (none) | Base client daily bytes, 1–5368709120; set with the count. Without base overrides, earned growth uses 50 uploads/200 MiB. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON` | optional pair | (none) | Independent `tiered-v1` policy for advertised client caps only; no admission debit/enforcement. Mutually exclusive with account-admission configuration; requires durable forced-RLS DB, external invalidation/read and tiered recorder/writer readiness. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_VERSION` | R with JSON | (none) | Must equal the independent policy's `version`; staging template uses `staging-earned-upload-v1`. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL` | optional | main DB pool | Dedicated non-owner trust worker/read connection, available to shadow and independent applied policies. Must name the same endpoint/database as the main DB and satisfy forced-RLS/readiness controls. Staging renderer sets the local `tc_upload_trust_login` URL from its feature-only secret; it leaves `DATABASE_URL` unchanged. |
+
+The staging renderer accepts `TC_CLIENT_UPLOAD_TRUST_MODE=shadow|applied`
+(default unset/disabled), plus required live decision labels
+`TC_UPLOAD_TRUST_GATE_POLICY_VERSION` and
+`TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION`. Each label is 1–64 ASCII
+letters/digits or `._+-`; labels without a mode refuse. Only enabled modes
+read `tc-staging-account-trust-worker-token` and
+`tc-staging-db-upload-trust-password` (16 or more ASCII letters/digits).
+The trust login is non-owner, NOSUPERUSER, NOBYPASSRLS and NOCREATEROLE;
+apply only the reviewed narrow worker/admission-runtime contracts and
+required status SELECT grants. No `app`, guard or evaluator membership or
+direct trust-table writes. Apply migrations through V137; historical
+credits must not be fabricated to qualify recorder history. Shadow uses the existing
+shadow policy pair; applied uses the independent client-upload pair. Both
+render the scoped scheduler at 300 seconds and limit 10000, leave both
+admission switches off and add no witness settings. The renderer validates
+JWT shape; ingest validates the scoped `account_trust_worker` token and DB
+contracts. See [client allowances](client-upload-allowance.md) for approved
+thresholds, qualification, rotation and rollback.
+
 ## Earned account trust
 
 | Var | R? | Default | Description |
@@ -563,7 +592,8 @@ See [account trust](./account-trust.md) for the activation and response contract
 | `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT` | optional | `10000` | Sources per recorder pass, 1 to 10000. A tick makes at most 10 passes, then evaluates. |
 
 Each scheduler tick records missing facts, then evaluates `applied` when the
-admission policy names `tiered-v1` and `shadow` when a shadow policy is set.
+admission policy or independent client-upload policy names `tiered-v1`, and
+`shadow` when a shadow policy is set.
 Startup refuses a scheduler with neither. Its liveness name is
 `account_trust_scheduler`. See [account trust](./account-trust.md#earned-growth-live-tiered-v1).
 
