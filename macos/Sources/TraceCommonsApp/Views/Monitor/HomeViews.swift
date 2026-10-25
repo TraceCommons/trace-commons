@@ -131,6 +131,7 @@ private struct HomeOverview: View {
     @EnvironmentObject private var model: AppModel
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
+    @State private var campaignStore = PrivateAICampaignStore()
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -152,19 +153,22 @@ private struct HomeOverview: View {
         SummaryFacts.fresh(store.glance, unless: store.failures["insights_glance"])
     }
 
-    /// Home's NEAR AI campaign card (owner, 2026-10-12): drawn as a
-    /// promotion, opening Private AI. PLACEHOLDER words from the core until
-    /// a campaign source exists.
+    /// A native promotion, available from compiled copy before its remote refresh.
     @ViewBuilder
     private var campaign: some View {
-        if let words {
-            // A hero promotion (owner, 2026-10-12).
+        if let campaign = campaignStore.campaign {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaign,
-                title: words.campaignTitle, subtitle: words.campaignBody,
-                actionTitle: words.campaignAction, action: openPrivateAI
+                title: campaign.title, subtitle: campaign.body,
+                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) }
             ) {
-                GlassHeroSymbol(Self.campaignHeroSymbol)
+                if let image = campaignStore.image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    GlassHeroSymbol(campaign.symbol)
+                }
             } content: {
                 EmptyView()
             }
@@ -218,6 +222,7 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+        .task { await campaignStore.refresh() }
         .task(id: missionsEnabled) {
             // Hidden missions read nothing: the drafts inbox stays on disk.
             if missionsEnabled { missionDrafts.preview() }
@@ -230,7 +235,6 @@ private struct HomeOverview: View {
     static let insightsIcon = HomeOverviewIcons.insights
     static let catalogueIcon = HomeOverviewIcons.catalogue
     /// The hero promotions' graphics.
-    static let campaignHeroSymbol = "cpu"
     static let missionsHeroSymbol = "scope"
 
     /// A Home card that is a way into a screen, laid out as the Private AI

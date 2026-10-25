@@ -11,6 +11,19 @@ final class HomeViewTests: XCTestCase {
         try HistoryParityTests.text(rel).split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
+    func testCampaignKeepsNativeCardAndOpensItsValidatedURL() throws {
+        let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
+        let start = try XCTUnwrap(home.range(of: "    private var campaign: some View {"))
+        let end = try XCTUnwrap(home.range(of: "\n    var body: some View {", range: start.upperBound..<home.endIndex))
+        let campaign = home[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(home.contains("@State private var campaignStore = PrivateAICampaignStore()"))
+        XCTAssertTrue(home.contains(".task { await campaignStore.refresh() }"))
+        XCTAssertTrue(campaign.contains("GlassHeroCard("))
+        XCTAssertTrue(campaign.contains("openURL(campaign.actionURL)"))
+        XCTAssertFalse(campaign.contains("action: openPrivateAI"))
+        XCTAssertFalse(campaign.contains("words.campaignTitle"))
+    }
+
     /// Ron's "Open Traces": the status card links to the Traces tab, in the
     /// core's words (Ron's status card, which has no waiting line of its
     /// own since the merge of Ron's glass rebuilds), and the window

@@ -75,6 +75,7 @@ cat <<PLIST
          dylib's channel at launch and starts nothing on a mismatch or when
          this key is missing (staging design, section 4.3). -->
     <key>TCChannel</key><string>${TC_CHANNEL}</string>
+    <key>TCPrivateAICampaignURL</key><string>${TC_PRIVATE_AI_CAMPAIGN_URL}</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>

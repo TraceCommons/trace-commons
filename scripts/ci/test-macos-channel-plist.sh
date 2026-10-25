@@ -123,6 +123,7 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   has staging "$s" '<key>CFBundleName</key><string>Near.ai Staging</string>'
   has staging "$s" '<key>CFBundleDisplayName</key><string>Near.ai Staging</string>'
   has staging "$s" '<key>TCChannel</key><string>staging</string>'
+  has staging "$s" '<key>TCPrivateAICampaignURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/private-ai-campaign.json</string>'
   has staging "$s" '<key>CFBundleURLSchemes</key><array><string>tracecommons-staging</string></array>'
   has staging "$s" '<key>CFBundleURLName</key><string>ai.tracecommons.shell.staging.invite</string>'
   has staging "$s" '<key>SUFeedURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/appcast.xml</string>'
