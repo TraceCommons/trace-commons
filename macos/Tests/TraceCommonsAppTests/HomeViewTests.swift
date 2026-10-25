@@ -103,6 +103,7 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
                 + "detail: balance.detail, detailInk: balance.detailInk, "
+                + "supplementaryDetail: HomeFormat.balanceReceived(model.balanceStatus, calls: model.balanceCalls), "
                 + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, "
                 + "action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))

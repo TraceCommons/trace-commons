@@ -186,8 +186,14 @@ impl BalanceReport {
             "observed_at": serde_json::Value::Null,
             // Filled in by `arrivals::balance_value` for a known balance.
             "change_24h_nanos": serde_json::Value::Null,
+            "change_24h_direction": serde_json::Value::Null,
             "change_24h_text": serde_json::Value::Null,
             "received_total_nanos": serde_json::Value::Null,
+            "change_24h_unavailable_text": serde_json::Value::Null,
+            "received_24h_nanos": serde_json::Value::Null,
+            "received_24h_text": serde_json::Value::Null,
+            "received_24h_checked_at": serde_json::Value::Null,
+            "received_24h_unavailable_text": serde_json::Value::Null,
         });
         if let Self::Known(reading) = self
             && let Some(object) = value.as_object_mut()

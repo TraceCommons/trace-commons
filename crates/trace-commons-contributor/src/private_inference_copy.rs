@@ -2038,16 +2038,31 @@ pub fn format_amount(nanos: i64, scale: u8) -> String {
 /// owner review.
 pub const BALANCE_CHANGE_24H: &str = "{amount} in the last 24 hours";
 
-/// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING when
-/// there is nothing to say: no change, a change under a cent, or a scale this
-/// build cannot honour. The magnitude is floored like every amount here, so
+pub const BALANCE_CHANGE_24H_UNAVAILABLE: &str = "24-hour balance change unavailable";
+pub const CREDIT_RECEIVED_24H_UNAVAILABLE: &str = "Amount received in 24 hours unavailable";
+
+/// Incoming transfers only; a known empty ledger is explicitly zero.
+#[must_use]
+pub fn credit_received_24h_line(nanos: i64, scale: u8) -> String {
+    let amount = format_amount(nanos, scale);
+    if nanos < 0 || amount.is_empty() {
+        return String::new();
+    }
+    format!("{amount} received in the last 24 hours")
+}
+
+/// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING for a
+/// scale this build cannot honour. Zero and subcent changes are neutral. The magnitude is floored like every amount here, so
 /// the line never claims more movement, either way, than happened.
 #[must_use]
 pub fn balance_change_line(nanos: i64, scale: u8) -> String {
     let magnitude = i64::try_from(nanos.unsigned_abs()).unwrap_or(i64::MAX);
     let amount = format_amount(magnitude, scale);
-    if nanos == 0 || amount.is_empty() || amount == "$0.00" || !amount.starts_with('$') {
+    if amount.is_empty() {
         return String::new();
+    }
+    if nanos == 0 || amount == "$0.00" || amount == "less than $0.01" {
+        return BALANCE_CHANGE_24H.replace("{amount}", "$0.00");
     }
     let sign = if nanos > 0 { "+" } else { "-" };
     BALANCE_CHANGE_24H.replace("{amount}", &format!("{sign}{amount}"))
@@ -3123,11 +3138,17 @@ mod tests {
     }
 
     #[test]
-    fn no_change_or_under_a_cent_is_not_said() {
-        // The tile says nothing for no change (the Credit tile's rule).
-        assert_eq!(balance_change_line(0, 9), "");
-        assert_eq!(balance_change_line(9_000_000, 9), "");
-        assert_eq!(balance_change_line(-9_000_000, 9), "");
+    fn known_zero_and_under_a_cent_are_neutral_but_not_unknown() {
+        // Known zero differs from a missing day-old sample.
+        assert_eq!(balance_change_line(0, 9), "$0.00 in the last 24 hours");
+        assert_eq!(
+            balance_change_line(9_000_000, 9),
+            "$0.00 in the last 24 hours"
+        );
+        assert_eq!(
+            balance_change_line(-9_000_000, 9),
+            "$0.00 in the last 24 hours"
+        );
         // A scale this build cannot honour is no figure, not a wrong one.
         assert_eq!(balance_change_line(5_000_000_000, 200), "");
         assert!(!balance_change_line(i64::MIN, 9).is_empty());
