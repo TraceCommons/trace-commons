@@ -8,16 +8,17 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
-async fn event(
-    db: &PgBackend,
-    tenant: &str,
-    kind: &str,
-    points: &str,
-    status: &str,
-    external: Option<&str>,
-    at: DateTime<Utc>,
-    settled: bool,
-) {
+type EventFixture<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    DateTime<Utc>,
+    bool,
+);
+
+async fn event(db: &PgBackend, tenant: &str, fixture: EventFixture<'_>) {
+    let (kind, points, status, external, at, settled) = fixture;
     let conn = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     let id = Uuid::new_v4();
     conn.execute(
@@ -53,35 +54,27 @@ async fn discovers_bounded_pending_tenants_without_content_authority() {
     event(
         &db,
         &a,
-        "training_utility",
-        "1",
-        "accepted",
-        None,
-        now,
-        false,
+        ("training_utility", "1", "accepted", None, now, false),
     )
     .await;
     event(
         &db,
         &b,
-        "novelty_utility",
-        "2",
-        "accepted",
-        Some("novelty_utility:gate"),
-        now,
-        false,
+        (
+            "novelty_utility",
+            "2",
+            "accepted",
+            Some("novelty_utility:gate"),
+            now,
+            false,
+        ),
     )
     .await;
     // A tenant can have multiple candidate events and must appear only once.
     event(
         &db,
         &a,
-        "ranking_utility",
-        "1",
-        "accepted",
-        None,
-        now,
-        false,
+        ("ranking_utility", "1", "accepted", None, now, false),
     )
     .await;
     for (kind, points, status, external, at, settled) in [
@@ -110,17 +103,12 @@ async fn discovers_bounded_pending_tenants_without_content_authority() {
         ),
         ("training_utility", "1", "accepted", None, now, true),
     ] {
-        event(&db, &c, kind, points, status, external, at, settled).await;
+        event(&db, &c, (kind, points, status, external, at, settled)).await;
     }
     event(
         &db,
         &d,
-        "regression_catch",
-        "3",
-        "accepted",
-        None,
-        now,
-        false,
+        ("regression_catch", "3", "accepted", None, now, false),
     )
     .await;
     assert_eq!(

@@ -38,9 +38,32 @@ fn multitenant_settlement_explicit_config_needs_no_tenant_bearer() {
 #[tokio::test]
 async fn multitenant_settlement_pg_rotates_failed_tenants_without_bearers_and_replays_safely() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
-    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+    let Some(test_server) = required_postgres_backend_for_ingest_test().await else {
         return;
     };
+    // Wraparound must run against a private candidate set: a shared suite DB
+    // can contain payable events belonging to unrelated tests.
+    let admin = test_server
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let database_name = format!("admission_test_scheduler_{}", Uuid::new_v4().simple());
+    admin
+        .batch_execute(&format!("CREATE DATABASE {database_name}"))
+        .await
+        .unwrap();
+    let configured_url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap();
+    let mut isolated_url = reqwest::Url::parse(&configured_url).unwrap();
+    isolated_url.set_path(&database_name);
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(isolated_url.as_str(), 4))
+            .await
+            .unwrap(),
+    );
+    backend.run_migrations().await.unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state_with_options(
         temp.path().to_path_buf(),
@@ -67,12 +90,6 @@ async fn multitenant_settlement_pg_rotates_failed_tenants_without_bearers_and_re
                 auth.tenant_id = b.clone();
             }
         }
-        insert_token(
-            Arc::make_mut(&mut s.tokens),
-            &b,
-            "admin-token-b",
-            TokenRole::Admin,
-        );
     }
     let mut submissions = Vec::new();
     for (token, worker) in [
@@ -218,4 +235,11 @@ async fn multitenant_settlement_pg_rotates_failed_tenants_without_bearers_and_re
         assert_eq!(row.get::<_, i64>(0), 1);
         assert_eq!(row.get::<_, Option<i64>>(1), Some(1));
     }
+    drop(conn);
+    drop(state);
+    drop(backend);
+    admin
+        .batch_execute(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
+        .await
+        .unwrap();
 }
