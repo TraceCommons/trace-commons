@@ -1665,6 +1665,7 @@ enum HomeFormat {
         }
         guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil, nil) }
         switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
+        case .unavailable: return ("—", nil, nil, nil)
         case .figure(let amount):
             let change = balanceChange(status)
             return (amount, nil, change?.text, change?.ink)

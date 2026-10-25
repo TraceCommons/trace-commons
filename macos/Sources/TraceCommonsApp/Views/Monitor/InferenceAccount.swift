@@ -43,18 +43,14 @@ struct InferenceAccountSection: View {
     }
 }
 
-/// The NEAR AI balance and, under it, billing (owner, 2026-10-19: moved to
-/// the top of the Private AI tab, under the Private AI switch). Nothing is
-/// drawn until the core's Private AI words arrive.
+/// The NEAR AI balance near the top of Private AI. Billing lives in Settings.
+/// Nothing is drawn until the core's Private AI words arrive.
 struct InferenceBalanceSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                PrivateAIBalanceCard(copy: copy)
-                FundingRow(copy: copy)
-            }
+            PrivateAIBalanceCard(copy: copy)
         }
     }
 }
@@ -210,17 +206,17 @@ struct PrivateAIBalanceCard: View {
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
-    /// icon, what the figures cover, and the state or the figures under it.
+    /// icon and the state or the figures under it.
     var body: some View {
         GlassIconCard(
-            systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
+            systemImage: "dollarsign.circle", title: copy.balanceTitle,
             refresh: .init(
                 copy.panelBalanceRefreshAccessibility,
                 isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
                 action: { model.refreshNearAiBalanceFromButton() }),
             content: {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    BalanceRow(copy: copy, showsScope: false)
+                    BalanceRow(copy: copy)
                     NearAiSignInControl(copy: copy)
                 }
             })

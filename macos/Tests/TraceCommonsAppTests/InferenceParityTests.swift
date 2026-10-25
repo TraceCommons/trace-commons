@@ -203,8 +203,8 @@ final class InferenceParityTests: XCTestCase {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         // Each card under its icon (owner, 2026-10-10); the billing card
         // draws its own.
-        for needle in ["PrivateAIBalanceCard(copy: copy)", "                FundingRow(copy: copy)\n",
-                       "BalanceRow(copy: copy, showsScope: false)", "action: { model.refreshNearAiBalanceFromButton() })",
+        for needle in ["PrivateAIBalanceCard(copy: copy)",
+                       "BalanceRow(copy: copy)", "action: { model.refreshNearAiBalanceFromButton() })",
                        "systemImage: \"dollarsign.circle\"", "systemImage: \"gearshape\""] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
@@ -240,9 +240,14 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
         for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
-                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)", "Text(copy.balanceWhat)"] {
+                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)"] {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }
+        XCTAssertFalse(balance.contains("Text(copy.balanceWhat)"))
+        XCTAssertFalse(account.contains("subtitle: [copy.balanceWhat]"))
+        XCTAssertFalse(account.contains("FundingRow(copy: copy)"))
+        let settings = try Self.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertEqual(settings.components(separatedBy: "FundingRow(copy: copy)").count - 1, 1)
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
@@ -450,7 +455,7 @@ final class InferenceParityTests: XCTestCase {
     /// P24, as the owner revised it on 2026-10-09, 2026-10-10, 2026-10-12
     /// and 2026-10-19: the page leads with the Private AI switch (it was the
     /// status row), then the managed cards, then the calls, then balance
-    /// and funding, and last the card that opens Settings. The offer and
+    /// and last the card that opens Settings. Billing lives in Settings. The offer and
     /// the NEAR AI sign-in are popover notices over the tab, not cards in
     /// it (`MonitorNotices`). No subtitle and no Inference access / Runtime
     /// pair. The "Standard settings" heading, the tools, the switch and
@@ -464,7 +469,6 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(account.contains("PrivateAIStatCard("), "the Inference access / Runtime pair is drawn again")
         let order = ["PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
                      "struct InferenceBalanceSection", "PrivateAIBalanceCard(copy: copy)",
-                     "FundingRow(copy: copy)",
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
