@@ -9,16 +9,16 @@ enum NearAiSignInOffer {
     /// The balance card: the balance answered that no sign-in is kept or that
     /// NEAR AI did not accept it, or the daemon's renewal found NEAR AI
     /// refusing the stored login. NEAR AI being unreachable is not a
-    /// sign-in problem and offers nothing.
-    static func balanceOffers(state: String, renewalFailure: String?) -> Bool {
-        state == "session_expired" || state == "no_session"
+    /// sign-in problem. Keep retry available after an unfinished sign-in.
+    static func balanceOffers(state: String, renewalFailure: String?, failed: Bool = false) -> Bool {
+        failed || state == "session_expired" || state == "no_session"
             || renewalFailure == "near_ai_sign_in_required"
     }
 
     /// The billing card: the funding read answered that there is no usable
-    /// sign-in.
-    static func billingOffers(state: String?) -> Bool {
-        state == "no_session" || state == "session_expired"
+    /// sign-in, or a previous attempt needs a retry.
+    static func billingOffers(state: String?, failed: Bool = false) -> Bool {
+        failed || state == "no_session" || state == "session_expired"
     }
 
     /// The button's label: the payout section's "Sign in again" (the same
@@ -47,7 +47,8 @@ struct NearAiSignInControl: View {
 
     var body: some View {
         let offered = NearAiSignInOffer.balanceOffers(
-            state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure)
+            state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
+            failed: model.nearAiSignInFailed)
         if offered || model.nearAiSigningIn {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 Button(NearAiSignInOffer.label(copy)) {

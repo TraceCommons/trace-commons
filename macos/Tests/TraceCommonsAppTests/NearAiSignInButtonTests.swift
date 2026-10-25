@@ -38,6 +38,14 @@ final class NearAiSignInButtonTests: XCTestCase {
         }
     }
 
+    func test_aFailedSignInKeepsRetryAvailableWhenTheNextReadIsUnavailable() {
+        XCTAssertTrue(NearAiSignInOffer.balanceOffers(state: "unavailable", renewalFailure: nil, failed: true))
+        XCTAssertTrue(NearAiSignInOffer.billingOffers(state: "unavailable", failed: true))
+        XCTAssertTrue(NearAiSignInOffer.billingOffers(state: nil, failed: true))
+        XCTAssertFalse(NearAiSignInOffer.balanceOffers(state: "unavailable", renewalFailure: nil, failed: false))
+        XCTAssertFalse(NearAiSignInOffer.billingOffers(state: "unavailable", failed: false))
+    }
+
     // MARK: - The flow
 
     @MainActor
@@ -55,6 +63,38 @@ final class NearAiSignInButtonTests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertTrue(condition(), what)
+    }
+
+    /// A Commons session does not prove the separate NEAR AI login works.
+    @MainActor
+    func test_expiredNearAiLoginOpensBrowserEvenWithAValidAccountSession() async throws {
+        let daemon = NearAiAccountDaemon()
+        daemon.signedIn = true
+        daemon.balanceState = "session_expired"
+        let (model, opened) = model(daemon)
+        model.refreshNearAiBalance(fresh: true)
+        try await waitFor("expired NEAR AI balance read") { model.balanceStatus.state == "session_expired" }
+        let generation = model.accountSessionGeneration
+
+        let signIn = Task { await model.signInToNearAI() }
+        try await waitFor("browser opened despite valid Commons session") { !opened().isEmpty }
+        guard !opened().isEmpty else {
+            signIn.cancel()
+            await signIn.value
+            return
+        }
+        XCTAssertEqual(daemon.count("near_ai_credential_start"), 1)
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 0, "refresh NEAR AI before reusing the Commons session")
+        try await Task.sleep(for: .milliseconds(1_200))
+        XCTAssertTrue(model.nearAiSigningIn, "the stored session must not finish a fresh browser attempt")
+        XCTAssertEqual(model.accountSessionGeneration, generation)
+
+        daemon.finishBrowserSignIn()
+        await signIn.value
+        XCTAssertFalse(model.nearAiSignInFailed)
+        XCTAssertEqual(model.accountSession, .signedIn)
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
+        XCTAssertEqual(model.accountSessionGeneration, generation + 1)
     }
 
     /// Refused login: the browser opens, the wait is on that attempt, the
@@ -78,7 +118,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertFalse(model.nearAiSignInFailed)
         XCTAssertEqual(model.accountSession, .signedIn)
         XCTAssertEqual(daemon.count("near_ai_credential_start"), 1)
-        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 2)
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
         XCTAssertEqual(daemon.count("account_sign_in"), 0, "never the passkey path for a NEAR AI account")
         XCTAssertEqual(model.accountSessionGeneration, generation + 1, "billing and payout read again")
         try await waitFor("balance read again") { daemon.count("near_ai_balance") > 0 }
@@ -90,17 +130,20 @@ final class NearAiSignInButtonTests: XCTestCase {
         let daemon = NearAiAccountDaemon()
         daemon.loginRefused = true
         daemon.attemptFails = true
-        let (model, _) = model(daemon)
+        let (model, opened) = model(daemon)
 
         await model.signInToNearAI()
 
         XCTAssertTrue(model.nearAiSignInFailed)
         XCTAssertFalse(model.nearAiSigningIn)
-        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1, "no retry of the ceremony without a login")
+        XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 0, "do not renew Commons without a refreshed NEAR AI login")
 
         daemon.attemptFails = false
         daemon.loginRefused = false
-        await model.signInToNearAI()
+        let retry = Task { await model.signInToNearAI() }
+        try await waitFor("retry opens a fresh browser") { opened().count == 2 }
+        daemon.finishBrowserSignIn()
+        await retry.value
         XCTAssertFalse(model.nearAiSignInFailed, "a new attempt clears the failure line")
         XCTAssertEqual(model.accountSession, .signedIn)
     }

@@ -15,6 +15,7 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     /// NEAR AI refuses the stored login until the browser sign-in finishes.
     var loginRefused = false
     var signedIn = false
+    var balanceState = "ready"
     /// How long `near_ai_account_sign_in` blocks its thread, as a ceremony
     /// waiting on the network does.
     var signInDelay: TimeInterval = 0
@@ -40,6 +41,8 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
         switch method {
         case "hello":
             return Self.ok(["methods": ["account_session_status", "account_sign_in", "near_ai_account_sign_in"]])
+        case "near_ai_balance":
+            return Self.ok(["state": balanceState])
         case "account_session_status":
             let now = lock.withLock { signedIn }
             return Self.ok(["state": "known", "signed_in": now, "expires_at": NSNull(),
@@ -125,6 +128,8 @@ final class SignInAgainTests: XCTestCase {
     @MainActor
     func test_aNearAiAccountSignsInAgainWithItsNearAiLogin() async {
         let daemon = NearAiAccountDaemon()
+        daemon.signedIn = false
+        daemon.loginRefused = false
         let (model, opened) = model(daemon)
         let generation = model.accountSessionGeneration
 
@@ -136,6 +141,7 @@ final class SignInAgainTests: XCTestCase {
         XCTAssertEqual(daemon.count("account_sign_in"), 0, "a NEAR AI account has no passkey sign-in")
         XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
         XCTAssertEqual(daemon.calls.last, "account_session_status", "the session is read again after")
+        XCTAssertEqual(daemon.count("near_ai_credential_start"), 0, "Trace-only sign-in reuses the healthy NEAR AI login")
         XCTAssertTrue(opened().isEmpty, "a usable NEAR AI login needs no browser")
         XCTAssertEqual(model.accountSessionGeneration, generation + 1, "the sections that said Sign in again read again")
     }
