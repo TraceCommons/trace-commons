@@ -10877,7 +10877,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let s = shared();
+        let s = std::sync::Arc::new(shared());
         *s.private_inference_state.lock().unwrap() =
             crate::daemon::private_inference::PrivateInferenceState::Running { port };
         s.routing.write().unwrap().ledger = Some(Arc::new(
