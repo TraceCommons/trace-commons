@@ -910,6 +910,10 @@ extension DaemonData {
     /// in `DaemonDataKeyCoverageTests.notModeled`, so a key the daemon adds
     /// fails that test until someone decides.
     public struct Settings: Codable, Equatable, Sendable {
+        /// Canonical saved arguments, also projected by managed_snapshot.
+        public let managedCLIOptions: [String: String]?
+        /// Only returned by a write that changed managed-session options.
+        public let managedRevision: UInt64?
         public let quiescenceSecs: Int?
         public let approvalHoldSecs: Int?
         // digest and notifications.
@@ -982,6 +986,8 @@ extension DaemonData {
         public let missionsEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
+            case managedCLIOptions = "managed_cli_options"
+            case managedRevision = "managed_revision"
             case quiescenceSecs = "quiescence_secs"
             case approvalHoldSecs = "approval_hold_secs"
             case digestIntervalSecs = "digest_interval_secs"

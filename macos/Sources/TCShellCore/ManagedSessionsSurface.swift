@@ -124,9 +124,10 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
     }
+    public var cliOptions: [String: String]?
     public let tools: [ManagedToolAvailability]?
     public let copy: [String: String]?
-    public let revision: UInt64
+    public var revision: UInt64
     public let accounts: [ManagedAccount]
     /// One entry per tool, derived from the NEAR AI sign-in and never
     /// saved. Empty, or absent from an older daemon, without one.
@@ -139,6 +140,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     /// or the command line (#1408). Absent from an older daemon.
     public let hasLaunched: Bool?
     enum CodingKeys: String, CodingKey {
+        case cliOptions = "cli_options"
         case tools, copy, revision, accounts, defaults, generations, sessions, capabilities
         case signInAccounts = "sign_in_accounts", hasLaunched = "has_launched"
     }
@@ -233,6 +235,7 @@ public enum ManagedSurface {
     /// else is the general failure. A missing tool is said on its account
     /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
+        if code == "managed-cli-options-invalid" || message == "managed-cli-options-invalid" { return "cli_options_invalid" }
         if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
@@ -436,5 +439,28 @@ public extension ManagedSnapshot {
             "connection": entry.connection, "account_id": entry.id, "cwd": cwd,
             "expected_generation": generations[entry.tool] ?? 0, "save_default": false,
         ]
+    }
+}
+
+/// Drafts belong to the model so refreshes and navigation cannot erase typing.
+public struct ManagedCLIOptionsDrafts: Equatable, Sendable {
+    private var values: [String: String] = [:]
+    public init() {}
+
+    public func value(tool: String, saved: [String: String]?) -> String {
+        values[tool] ?? saved?[tool] ?? ""
+    }
+
+    public func isChanged(tool: String, saved: [String: String]?) -> Bool {
+        guard let stored = saved?[tool] else { return false }
+        return value(tool: tool, saved: saved) != stored
+    }
+
+    public mutating func edit(tool: String, options: String) {
+        values[tool] = options
+    }
+
+    public mutating func saved(tool: String, options: String) {
+        if values[tool] == options { values.removeValue(forKey: tool) }
     }
 }

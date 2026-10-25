@@ -149,6 +149,30 @@ Use existing account/session commands rather than treating credentials as settin
 "$TC_CLI" launch --help
 ```
 
+Managed-session agent options are also discoverable in `config schema` as
+`managed_cli_options`. They share the values edited in **Settings → Tools**:
+
+```sh
+cat > /tmp/trace-commons-agent-options.json <<'JSON'
+{
+  "managed_cli_options": {
+    "codex": "-c model_reasoning_effort=high --sandbox workspace-write",
+    "claude": "--model sonnet"
+  }
+}
+JSON
+"$TC_CLI" --config-dir "$TC_DIR" --json config preview --file /tmp/trace-commons-agent-options.json
+"$TC_CLI" --config-dir "$TC_DIR" --json config apply --file /tmp/trace-commons-agent-options.json
+"$TC_CLI" --config-dir "$TC_DIR" --json config show
+```
+
+Omitted agents keep their options; use an empty string to reset one. These values
+apply to new managed coding sessions only. Quote values containing spaces.
+Arguments are passed literally without shell expansion. Account routing, profile
+and session identity remain managed by Trace Commons; overriding their flags is
+refused. Select OpenCode’s model in its launch dialog. For Codex model selection,
+use `--model`; the launcher’s route default takes precedence over `-c model=...`.
+
 Keep account operations within the user's requested scope. Do not read credential files, copy tokens into patch files, or treat a sign-in button as proof that login completed.
 
 ## Errors and compatibility
