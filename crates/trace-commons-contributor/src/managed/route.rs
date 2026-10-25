@@ -815,8 +815,10 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().into()).unwrap();
-        let mut settings = crate::daemon::settings::DaemonSettings::default();
-        settings.ironwire_attested_bodies = bodies;
+        let mut settings = crate::daemon::settings::DaemonSettings {
+            ironwire_attested_bodies: bodies,
+            ..Default::default()
+        };
         settings.save(&store).unwrap();
         let id = Uuid::new_v4();
         let route = ManagedRoute::start_at(
