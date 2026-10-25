@@ -435,6 +435,12 @@ pub struct DaemonSettings {
     pub max_reuploads: u32,
     pub max_uploads_per_day: u32,
     pub max_bytes_per_day: u64,
+    /// A local choice is preserved even when it equals the default. Missing
+    /// provenance belongs to an older settings file and is inferred per cap.
+    #[serde(default)]
+    pub max_uploads_per_day_explicit: Option<bool>,
+    #[serde(default)]
+    pub max_bytes_per_day_explicit: Option<bool>,
     pub max_queue_entries: usize,
     pub history_poll_secs: u64,
     /// How often the public community roster is fetched. `#[serde(default)]`
@@ -1338,6 +1344,8 @@ impl Default for DaemonSettings {
             max_reuploads: DEFAULT_MAX_REUPLOADS,
             max_uploads_per_day: DEFAULT_MAX_UPLOADS_PER_DAY,
             max_bytes_per_day: DEFAULT_MAX_BYTES_PER_DAY,
+            max_uploads_per_day_explicit: Some(false),
+            max_bytes_per_day_explicit: Some(false),
             max_queue_entries: DEFAULT_MAX_QUEUE_ENTRIES,
             history_poll_secs: DEFAULT_HISTORY_POLL_SECS,
             community_poll_secs: DEFAULT_COMMUNITY_POLL_SECS,
@@ -1384,6 +1392,17 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
+    /// Legacy files could only record a choice by differing from the default.
+    pub(super) fn upload_count_is_explicit(&self) -> bool {
+        self.max_uploads_per_day_explicit
+            .unwrap_or(self.max_uploads_per_day != DEFAULT_MAX_UPLOADS_PER_DAY)
+    }
+
+    pub(super) fn upload_bytes_is_explicit(&self) -> bool {
+        self.max_bytes_per_day_explicit
+            .unwrap_or(self.max_bytes_per_day != DEFAULT_MAX_BYTES_PER_DAY)
+    }
+
     /// May prompt for OS storage. Call on a blocking worker before starting
     /// Cloud consumers.
     pub fn load_with_cloud_credentials(store: &ConfigStore) -> Result<Self> {
@@ -1461,6 +1480,10 @@ impl DaemonSettings {
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
         let stored: serde_json::Value = serde_json::from_slice(&body)?;
+        // Freeze the legacy inference before any later setting write. A
+        // chosen default was indistinguishable from an untouched legacy cap.
+        settings.max_uploads_per_day_explicit = Some(settings.upload_count_is_explicit());
+        settings.max_bytes_per_day_explicit = Some(settings.upload_bytes_is_explicit());
         settings.scrub_check_defaulted_on_upgrade |= stored
             .get("scrub_check")
             .is_none_or(serde_json::Value::is_null);
@@ -1975,9 +1998,11 @@ pub fn apply_settings_object(
             // condition on every single upload attempt.
             "max_uploads_per_day" => {
                 settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
+                settings.max_uploads_per_day_explicit = Some(true);
             }
             "max_bytes_per_day" => {
                 settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
+                settings.max_bytes_per_day_explicit = Some(true);
             }
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
@@ -2381,6 +2406,77 @@ fn parse_digest_schedule(
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    #[test]
+    fn daily_limit_choices_record_each_dimension_and_survive_reload() {
+        let (_dir, store) = temp_store();
+        let mut settings = DaemonSettings::default();
+        let defaults = serde_json::to_value(&settings).unwrap();
+        assert_eq!(defaults["max_uploads_per_day_explicit"], false);
+        assert_eq!(defaults["max_bytes_per_day_explicit"], false);
+
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({
+                "max_uploads_per_day": DEFAULT_MAX_UPLOADS_PER_DAY,
+            }),
+        )
+        .unwrap();
+        settings.save(&store).unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        let stored = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(stored["max_uploads_per_day_explicit"], true);
+        assert_eq!(stored["max_bytes_per_day_explicit"], false);
+
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({
+                "max_bytes_per_day": DEFAULT_MAX_BYTES_PER_DAY,
+            }),
+        )
+        .unwrap();
+        settings.save(&store).unwrap();
+        let stored = serde_json::to_value(DaemonSettings::load(&store).unwrap()).unwrap();
+        assert_eq!(stored["max_uploads_per_day_explicit"], true);
+        assert_eq!(stored["max_bytes_per_day_explicit"], true);
+    }
+
+    #[test]
+    fn daily_limit_legacy_nondefaults_become_explicit_independently() {
+        for (count, bytes, count_explicit, bytes_explicit) in [
+            (7, DEFAULT_MAX_BYTES_PER_DAY, true, false),
+            (DEFAULT_MAX_UPLOADS_PER_DAY, 1_024, false, true),
+            (
+                DEFAULT_MAX_UPLOADS_PER_DAY,
+                DEFAULT_MAX_BYTES_PER_DAY,
+                false,
+                false,
+            ),
+        ] {
+            let (_dir, store) = temp_store();
+            let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("max_uploads_per_day_explicit");
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("max_bytes_per_day_explicit");
+            legacy["max_uploads_per_day"] = count.into();
+            legacy["max_bytes_per_day"] = bytes.into();
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+                .unwrap();
+            let settings = DaemonSettings::load(&store).unwrap();
+            settings.save(&store).unwrap();
+            let stored = serde_json::to_value(DaemonSettings::load(&store).unwrap()).unwrap();
+            assert_eq!(stored["max_uploads_per_day_explicit"], count_explicit);
+            assert_eq!(stored["max_bytes_per_day_explicit"], bytes_explicit);
+            assert_eq!(stored["max_uploads_per_day"], count);
+            assert_eq!(stored["max_bytes_per_day"], bytes);
+        }
+    }
 
     fn credential() -> NearAiInferenceCredential {
         NearAiInferenceCredential {

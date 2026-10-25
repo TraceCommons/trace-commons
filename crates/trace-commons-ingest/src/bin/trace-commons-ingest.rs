@@ -37,6 +37,8 @@ mod public_run;
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
 mod token_bundles;
+#[path = "trace_commons_ingest_internal/upload_allowance.rs"]
+mod upload_allowance;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -2071,6 +2073,7 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
+    client_upload_allowance: Option<trace_commons_protocol::upload_allowance::DailyUploadAllowance>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
     /// read by admission; see `account_trust_growth_routes`.
     account_trust_shadow_policy:
@@ -4700,6 +4703,7 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let client_upload_allowance = upload_allowance::config_from_env()?;
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
@@ -5145,6 +5149,7 @@ impl AppState {
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
+            client_upload_allowance,
             account_trust_shadow_policy,
             near_ai_starter_mode,
             account_trust_applied_policy,
@@ -8604,6 +8609,7 @@ fn authenticated_account_surface(
 /// cannot disagree about which routes exist.
 fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
     let general = account_routes::AccountRoutes::new()
+        .get("/v1/account/upload-allowance", upload_allowance::handler)
         .get(
             "/v1/account/contribution-status",
             admission::account_status_handler,

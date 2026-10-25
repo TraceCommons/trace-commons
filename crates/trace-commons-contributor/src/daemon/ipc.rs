@@ -1007,6 +1007,7 @@ pub struct DaemonShared {
     /// What ingest last said about account admission, for the gate's R3.
     /// In memory only; see `account_admission`.
     pub(crate) account_admission: super::account_admission::AccountAdmissionState,
+    pub(crate) upload_allowance: super::upload_allowance::UploadAllowanceState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -1516,6 +1517,7 @@ impl DaemonShared {
             gate_held_logged: Mutex::new((0, Vec::new())),
             gate_held: Mutex::new(GateHeld::default()),
             account_admission: Default::default(),
+            upload_allowance: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -2442,8 +2444,8 @@ impl DaemonShared {
                 .cloned()
                 .collect()
         };
+        let settings = super::upload_allowance::effective_settings(self);
         let state = self.state.lock().expect("state lock");
-        let settings = self.settings.lock().expect("settings lock");
         super::uploader::budget_snapshot(&approved, &state, &settings, now)
     }
 

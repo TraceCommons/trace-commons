@@ -817,6 +817,15 @@ Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
 daily volume caps and, crucially, how much already-approved work they are
 holding back.
 
+These are the effective caps used by upload enforcement. A supporting daemon
+refreshes the authenticated server's upload allowance at startup and every
+five minutes, including while capped. The allowance can raise untouched
+count and byte defaults independently; explicit local choices remain in
+force. `get_settings` still returns the saved local values, so its caps can
+differ from `status.daily_budget`. Refreshing an allowance never resets
+`bytes_today` or `uploads_today`. See
+[the operator contract](operator/client-upload-allowance.md).
+
 It is deliberately **not** routed through `health`. The daemon does set
 `daily-cap-reached` when a cap refuses an upload, but that label sits at the
 bottom of the precedence order, so any other condition, including the full
