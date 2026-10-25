@@ -1674,6 +1674,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
     }
 }
 
+/// The default Private AI promotion, shared by the native app and the
+/// separately published campaign feed. It is compiled into the contributor
+/// so a failed network read never makes the promotion disappear.
+pub fn private_ai_campaign_json() -> &'static str {
+    include_str!("private_ai_campaign.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

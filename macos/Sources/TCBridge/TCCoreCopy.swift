@@ -218,6 +218,11 @@ public enum TCCoreCopy {
         take(tc_monitor_screens_copy_json())
     }
 
+    /// The compiled default for the remotely editable campaign card.
+    public static func privateAICampaignJSON() -> String? {
+        take(tc_private_ai_campaign_json())
+    }
+
     /// `tc_shell_words_copy_json`: the words this shell used to write in
     /// Swift (withdrawal, the public profile, the legacy queue and History
     /// words, the scrubbing caveat, Settings). Decoded by

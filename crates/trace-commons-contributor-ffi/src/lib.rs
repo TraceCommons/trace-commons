@@ -5967,6 +5967,17 @@ pub extern "C" fn tc_monitor_screens_copy_json() -> *mut c_char {
     })
 }
 
+/// The compiled fallback for the remotely editable Private AI campaign.
+/// Returns an owned JSON string; free it with [`tc_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_private_ai_campaign_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            trace_commons_contributor::preview_copy::private_ai_campaign_json(),
+        ))
+    })
+}
+
 /// The words the macOS shell used to write in Swift
 /// (`shell_words_copy::shell_words_copy`): withdrawal, the public profile,
 /// the queue's and History's legacy words, the scrubbing caveat and the

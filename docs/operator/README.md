@@ -267,6 +267,7 @@ Every runbook in this directory, with a one-line description.
 - [`./staging-pin-signing.md`](./staging-pin-signing.md) — the staging NEAR AI
   pin-signing key (creating it, who may read it) and re-signing the pin set a
   staging app trusts with `trace-commons-staging-pins`.
+- [`./private-ai-campaigns.md`](./private-ai-campaigns.md) — publish the native app campaign JSON and artwork without an app release.
 - [`./staging-runbook.md`](./staging-runbook.md) — the staging environment
   for the operator: making a staging macOS build, checking it published, the
   update feed, and pointers to pin re-signing. Server bring-up and the first
