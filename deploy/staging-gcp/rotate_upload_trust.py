@@ -38,6 +38,51 @@ def require(ok, label):
     if not ok:
         raise RotationError(label)
 
+def load_issuer_private_key(pem):
+    """Load Ed25519 PKCS8, including the issuer's exact RFC5958 v2 encoding.
+
+    Older OpenSSL/cryptography reject OneAsymmetricKey with its public-key
+    field. The fallback accepts only its 83-byte canonical Ed25519 shape;
+    it never implements a permissive/general ASN.1 parser.
+    """
+    require(isinstance(pem, bytes) and len(pem) <= 4096, 'issuer_key_format_invalid')
+    lines = pem.strip().splitlines()
+    require(len(lines) >= 3 and lines[0] == b'-----BEGIN PRIVATE KEY-----' and lines[-1] == b'-----END PRIVATE KEY-----', 'issuer_key_format_invalid')
+    body = b''.join(lines[1:-1])
+    require(all(re.fullmatch(rb'[A-Za-z0-9+/]+={0,2}', line) for line in lines[1:-1]), 'issuer_key_format_invalid')
+    try:
+        der = base64.b64decode(body, validate=True)
+    except Exception:
+        raise RotationError('issuer_key_format_invalid') from None
+    require(base64.b64encode(der) == body and 2 <= len(der) <= 4096 and der[0] == 0x30, 'issuer_key_format_invalid')
+    # Check the whole canonical DER envelope even on the library path so a
+    # parser that tolerates trailing data cannot silently accept it.
+    if der[1] < 0x80:
+        header_length, content_length = 2, der[1]
+    else:
+        require(der[1] in [0x81, 0x82], 'issuer_key_format_invalid')
+        count = der[1] & 0x7f
+        header_length = 2+count
+        require(len(der) >= header_length and der[2] != 0, 'issuer_key_format_invalid')
+        content_length = int.from_bytes(der[2:header_length], 'big')
+        require(content_length >= 128 and (content_length.bit_length()+7)//8 == count, 'issuer_key_format_invalid')
+    require(header_length+content_length == len(der), 'issuer_key_format_invalid')
+    try:
+        private = serialization.load_pem_private_key(pem, password=None)
+    except Exception:
+        private = None
+    if private is not None:
+        require(isinstance(private, Ed25519PrivateKey), 'issuer_key_algorithm_invalid')
+        return private
+    # SEQUENCE(81), INTEGER(version=1), SEQUENCE(OID 1.3.101.112),
+    # OCTET STRING(34 containing OCTET STRING(32 seed)), [1](33: 0 unused bits
+    # followed by exactly 32 public-key bytes). No attributes/trailing fields.
+    require(len(der) == 83 and der[:16] == bytes.fromhex('3051020101300506032b657004220420') and der[48:51] == bytes.fromhex('812100'), 'issuer_key_format_invalid')
+    private = Ed25519PrivateKey.from_private_bytes(der[16:48])
+    public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    require(public == der[51:83], 'issuer_key_public_mismatch')
+    return private
+
 def parse_env(text, strict=True):
     result = {}
     for line in text.splitlines():
@@ -202,7 +247,7 @@ class Operations:
         require(issuer.get('TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_ISSUER') == ISSUER and issuer.get('TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_AUDIENCE') == AUDIENCE, 'issuer_token_target_changed')
         key_path = issuer.get('TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_SIGNING_PRIVATE_KEY_FILE')
         require(key_path == '/etc/tracecommons/issuer-signing-v1.pem', 'issuer_key_path_changed')
-        private = serialization.load_pem_private_key(self.safe_read(key_path).encode(), password=None)
+        private = load_issuer_private_key(self.safe_read(key_path).encode())
         require(isinstance(private, Ed25519PrivateKey), 'issuer_key_algorithm_invalid')
         keyset_url = main['TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL']
         url = urllib.parse.urlsplit(keyset_url)

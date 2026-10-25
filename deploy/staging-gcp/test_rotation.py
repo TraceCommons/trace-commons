@@ -131,4 +131,37 @@ class WorkerVerificationTests(unittest.TestCase):
  def test_http_200_with_failed_evaluation_does_not_pass_readiness(self):
   with self.assertRaises(r.RotationError):self.run_verification('applied',1)
 
+
+
+class IssuerKeyFormatTests(unittest.TestCase):
+ def setUp(self):
+  from cryptography.hazmat.primitives import serialization
+  self.serialization=serialization
+  self.seed=bytes(range(32))
+  self.key=Ed25519PrivateKey.from_private_bytes(self.seed)
+  self.public=self.key.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+  self.der=bytes.fromhex('3051020101300506032b657004220420')+self.seed+bytes.fromhex('812100')+self.public
+ def pem(self,der):
+  return b'-----BEGIN PRIVATE KEY-----\n'+base64.b64encode(der)+b'\n-----END PRIVATE KEY-----\n'
+ def test_standard_and_rfc5958_v2_sign_identically(self):
+  normal=self.key.private_bytes(self.serialization.Encoding.PEM,self.serialization.PrivateFormat.PKCS8,self.serialization.NoEncryption())
+  one=r.load_issuer_private_key(normal);two=r.load_issuer_private_key(self.pem(self.der))
+  self.assertIsInstance(one,Ed25519PrivateKey);self.assertIsInstance(two,Ed25519PrivateKey)
+  message=b'offline issuer key format regression'
+  self.assertEqual(one.sign(message),two.sign(message));self.key.public_key().verify(two.sign(message),message)
+ def test_rfc5958_v2_rejects_malformed_der_and_public_mismatch(self):
+  mutations=[(0,0x31),(1,0x50),(2,0x03),(4,0x00),(11,0x71),(12,0x05),(13,0x21),(14,0x05),(15,0x1f),(48,0xa1),(49,0x20),(50,0x01),(51,self.der[51]^1)]
+  for offset,value in mutations:
+   der=bytearray(self.der);der[offset]=value
+   with self.subTest(offset=offset),self.assertRaises(r.RotationError):r.load_issuer_private_key(self.pem(bytes(der)))
+  for der in [self.der+b'\x00',self.der[:-1],self.der[:16]+self.seed[:-1]+self.der[48:]]:
+   with self.subTest(length=len(der)),self.assertRaises(r.RotationError):r.load_issuer_private_key(self.pem(der))
+ def test_rejects_invalid_base64_wrong_pem_label_and_trailing_material(self):
+  valid=self.pem(self.der)
+  for pem in [valid.replace(b'PRIVATE KEY',b'EC PRIVATE KEY'),valid.replace(b'MFEC',b'!FEC'),valid+b'extra',valid+valid,b'x'*4097]:
+   with self.subTest(size=len(pem)),self.assertRaises(r.RotationError):r.load_issuer_private_key(pem)
+ def test_standard_pkcs8_rejects_appended_der_bytes(self):
+  der=self.key.private_bytes(self.serialization.Encoding.DER,self.serialization.PrivateFormat.PKCS8,self.serialization.NoEncryption())
+  with self.assertRaises(r.RotationError):r.load_issuer_private_key(self.pem(der+b'\x00'))
+
 if __name__=='__main__':unittest.main()
