@@ -88567,6 +88567,21 @@ impl_ingest_test_corpus_store! {
 
 #[async_trait::async_trait]
 impl Database for PerUserTestDeviceKeyDb {
+    // This account-resolution fixture models claim issuance, while the real
+    // ownership persistence boundary is covered by PostgreSQL regressions.
+    async fn bind_device_upload_principal(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        self.get_device_key(tenant_id, device_key_id)
+            .await?
+            .filter(|key| key.revoked_at.is_none())
+            .ok_or_else(|| DatabaseError::Pool("unknown or revoked fixture device".into()))?;
+        Ok(())
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         Ok(())
     }
