@@ -183,6 +183,18 @@ final class MonitorNoticeDismissalTests: XCTestCase {
         }
     }
 
+    func testScopeTransitionsDiscardOnlyUnscopedSafeguardCloses() {
+        let first = MonitorNoticeDismissals.Scope(configDirectory: "/state", channel: "staging", account: "first")!
+        let second = MonitorNoticeDismissals.Scope(configDirectory: "/state", channel: "staging", account: "second")!
+        let other: Set<String> = ["health:Other warning", "arming-offer:project", "action-notice"]
+        let closed = other.union(MonitorNoticeDismissals.Kind.allCases.map(\.closeID))
+        XCTAssertEqual(MonitorNotices.closedAfterScopeChange(closed, from: nil, to: first), other,
+                       "A close before identity was known must not hide the identified account's safeguard")
+        XCTAssertEqual(MonitorNotices.closedAfterScopeChange(closed, from: first, to: second), other)
+        XCTAssertEqual(MonitorNotices.closedAfterScopeChange(closed, from: first, to: first), closed)
+        XCTAssertEqual(MonitorNotices.closedAfterScopeChange(closed, from: nil, to: nil), closed)
+    }
+
     func testScopeSeparatesAccountsConfigurationsAndChannelsWithoutStoringThem() {
         withStore { defaults, scope in
             let store = MonitorNoticeDismissals(defaults: defaults)

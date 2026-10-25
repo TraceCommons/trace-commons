@@ -79,7 +79,8 @@ struct MonitorNotices: View {
         .onChange(of: currentHealthIDs) { _, current in
             closed = Self.prunedClosed(closed, currentHealth: current)
         }
-        .onChange(of: dismissalSnapshot, initial: true) { _, snapshot in
+        .onChange(of: dismissalSnapshot, initial: true) { previous, snapshot in
+            closed = Self.closedAfterScopeChange(closed, from: previous.scope, to: snapshot.scope)
             dismissals.reconcile(snapshot.conditions, scope: snapshot.scope)
         }
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -110,6 +111,15 @@ struct MonitorNotices: View {
     /// day's upload limit, say). Other closed cards are left as they are.
     static func prunedClosed(_ closed: Set<String>, currentHealth: Set<String>) -> Set<String> {
         closed.filter { !$0.hasPrefix("health:") || currentHealth.contains($0) }
+    }
+
+    /// A close made before the account was known is window-local. It must
+    /// not hide the same condition for a subsequently identified account.
+    static func closedAfterScopeChange(
+        _ closed: Set<String>, from previous: MonitorNoticeDismissals.Scope?, to current: MonitorNoticeDismissals.Scope?
+    ) -> Set<String> {
+        guard previous != current else { return closed }
+        return closed.subtracting(MonitorNoticeDismissals.Kind.allCases.map(\.closeID))
     }
 
     /// Where a tab's notices go: History is the Traces tab's other page.
