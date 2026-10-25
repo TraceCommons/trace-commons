@@ -243,11 +243,16 @@ the test suite.
 
 ## OpenCode sessions
 
-OpenCode **1.19.0** is supported for managed launches using an OpenAI API key
+OpenCode managed launches use an OpenAI API key
 (`api-key`) or NEAR AI key (`near-ai`). OpenCode subscription sign-in is not
 supported. The native macOS Add account dialog includes OpenCode; select an
 account, project, and explicit **Model ID** when launching. Enable **Collect
 this session** to collect the launched session when OpenCode exits.
+
+The launcher requires a successful, bounded startup probe but does not restrict
+OpenCode version numbers. Session preparation checks import/export compatibility
+directly before launch. Trace collection retains its separate format validation;
+launching a newer version does not imply its exports can be collected.
 
 ```sh
 secret-manager-command | near-ai accounts add --tool opencode --connection api-key --label Work --key-stdin

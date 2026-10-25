@@ -152,25 +152,24 @@ impl NativeProfiles {
             return Err(ManagedError::UnsupportedVersion);
         }
         let version = String::from_utf8_lossy(&version.stdout);
-        let numeric = version
-            .split_whitespace()
-            .find_map(|part| {
-                let numbers: Vec<_> = part
-                    .split('.')
-                    .map(str::parse::<u32>)
-                    .collect::<Result<_, _>>()
-                    .ok()?;
-                if numbers.len() == 3 {
-                    Some((numbers[0], numbers[1], numbers[2]))
-                } else {
-                    None
-                }
-            })
-            .ok_or(ManagedError::UnsupportedVersion)?;
+        let numeric = version.split_whitespace().find_map(|part| {
+            let numbers: Vec<_> = part
+                .split('.')
+                .map(str::parse::<u32>)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            if numbers.len() == 3 {
+                Some((numbers[0], numbers[1], numbers[2]))
+            } else {
+                None
+            }
+        });
         let supported = match account.tool {
-            ToolId::Claude => numeric.0 == 2 && numeric >= (2, 1, 289),
-            ToolId::Codex => numeric.0 == 0 && numeric >= (0, 160, 0),
-            ToolId::Opencode => numeric == (1, 19, 0),
+            ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
+            ToolId::Codex => numeric.is_some_and(|v| v.0 == 0 && v >= (0, 160, 0)),
+            // OpenCode prepares and exports the seeded session before launch,
+            // so command/format compatibility is checked directly there.
+            ToolId::Opencode => true,
         };
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
