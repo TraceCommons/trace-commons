@@ -60,6 +60,10 @@ name: staging-macos
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: New staging release version (for example 0.21.0)
+        type: string
+        required: true
       ref:
         description: Branch, tag or commit to build (default main); dispatch from main
         type: string
@@ -147,26 +151,42 @@ jobs:
       - name: The release check passes at this commit
         run: scripts/ci/check-release-staging-feature.sh check build
 
-      # CFBundleShortVersionString is the next production version with a
-      # -staging.<run number> suffix; CFBundleVersion only rises, so Sparkle
-      # orders staging builds (6.1). The run number is this workflow's own,
-      # monotonic across branches and dispatches.
+      # Each published staging release gets a new explicit version rather
+      # than inheriting an unchanged crate version. The run suffix identifies
+      # the build; CFBundleVersion stays monotonic for Sparkle (6.1).
       - id: v
         env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_VERSION: ${{ inputs.version }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           SHA="$(git -C build rev-parse HEAD)"
-          MANIFEST=build/crates/trace-commons-contributor-gtk/Cargo.toml
-          BASE="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
-          if ! printf '%s' "$BASE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "refusing to build: $MANIFEST version '$BASE' is not three-part numeric" >&2
+          if ! printf '%s' "$STAGING_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "refusing to build: staging version must be three-part numeric (for example 0.21.0)" >&2
             exit 1
           fi
+          # Fail closed if release history cannot be read. Concurrency keeps
+          # another staging publisher from racing this check.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | .name' \
+            > "$RUNNER_TEMP/staging-release-names"
+          python3 - "$STAGING_VERSION" "$RUNNER_TEMP/staging-release-names" <<'PY'
+          import pathlib, re, sys
+          version = tuple(map(int, sys.argv[1].split(".")))
+          published = []
+          for name in pathlib.Path(sys.argv[2]).read_text().splitlines():
+              match = re.fullmatch(r"Staging (\d+)\.(\d+)\.(\d+)-staging\.\d+", name)
+              if match:
+                  published.append(tuple(map(int, match.groups())))
+          if published and version <= max(published):
+              latest = ".".join(map(str, max(published)))
+              sys.exit(f"refusing to build: choose a staging version newer than {latest}")
+          PY
           {
             echo "sha=$SHA"
-            echo "short=$BASE-staging.$RUN_NUMBER"
+            echo "short=$STAGING_VERSION-staging.$RUN_NUMBER"
             echo "build=$(( RUN_NUMBER * 100 + RUN_ATTEMPT ))"
             echo "tag=staging-$(date -u +%Y%m%d)-${SHA:0:7}-$RUN_NUMBER"
           } >> "$GITHUB_OUTPUT"
