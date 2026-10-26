@@ -47,6 +47,14 @@ enum JoinScreenLayout {
         }
     }
 
+    /// An authenticated last step may resolve a sole cloud organization.
+    /// The org read itself decides whether selection can be skipped.
+    static func canPrepareOrganization(
+        _ state: FirstRunState, isCommitting: Bool, completed: Bool
+    ) -> Bool {
+        state.step == .join && canForward(state) && !isCommitting && !completed
+    }
+
     /// Always "Start sharing": Join is the last step and has no Skip
     /// (owner, 2026-10-12: sign-in required). It stays off until a NEAR AI
     /// account is signed in (`canStart`).
@@ -92,6 +100,16 @@ enum JoinScreenLayout {
         canForward(state)
             && UsesScreenLayout.canStart(
                 readyToStart(state), uses: uses, requiredScope: requiredScope, grant: grant, isCommitting: isCommitting)
+    }
+
+    static func canAutomaticallyStart(
+        _ state: FirstRunState, organizationReady: Bool, attempted: Bool, starting: Bool,
+        uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
+        isCommitting: Bool, completed: Bool
+    ) -> Bool {
+        organizationReady && !attempted && !starting
+            && canPrepareOrganization(state, isCommitting: isCommitting, completed: completed)
+            && canStart(state, uses: uses, requiredScope: requiredScope, grant: grant, isCommitting: isCommitting)
     }
 
     /// The state Start commits: a held near.ai enrollment with no account
@@ -497,13 +515,99 @@ struct JoinScreen: View {
     @State private var starting = false
     @State private var signedInAt: Date?
     @State private var onboarding = TCOnboardingCopy.load()
+    @State private var checkedOrganization = false
+    @State private var checkingOrganization = false
+    @State private var automaticallyStarting = false
+    @State private var singleOrganizationReady = false
+    @State private var automaticStartAttempted = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var privateAI: PrivateInferenceCopy? { model.privateInferenceCopy }
 
+    private var canPrepareOrganization: Bool {
+        JoinScreenLayout.canPrepareOrganization(
+            runner.state, isCommitting: runner.isCommitting, completed: runner.completed)
+    }
+
+    private var shouldAutomaticallyStart: Bool {
+        JoinScreenLayout.canAutomaticallyStart(
+            runner.state, organizationReady: singleOrganizationReady, attempted: automaticStartAttempted,
+            starting: starting, uses: copy.uses,
+            requiredScope: UsesScreenLayout.requiredScope(model.consentScopes),
+            grant: grant, isCommitting: runner.isCommitting, completed: runner.completed)
+    }
+
     var body: some View {
+        Group {
+            if checkingOrganization || automaticallyStarting
+                || (canPrepareOrganization && !checkedOrganization)
+            {
+                GlassSpinner(standalone: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                joinFrame
+            }
+        }
+        .onChange(of: runner.state.signedIn) { _, signedIn in
+            if signedIn { signedInAt = Date() }
+        }
+        .task {
+            // `enroll` re-reads the route, not status; the grant's
+            // `connected` is read from status, so it is refreshed here.
+            model.refreshStatus()
+            model.refreshConsentOptions()
+            model.refreshWitness()
+            if !grantRead {
+                grant = AutomaticGrantCopy.decode(
+                    fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
+                grantRead = true
+            }
+        }
+        .glassModal(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
+            if let grant {
+                SharingDisclosureSheet(copy: copy, grant: grant, flow: $disclosure, onFinish: finish)
+                    .environmentObject(model)
+            }
+        }
+        .task(id: canPrepareOrganization && grantRead) {
+            guard canPrepareOrganization, grantRead, !checkedOrganization else { return }
+            checkedOrganization = true
+            checkingOrganization = true
+            let outcome = await model.prepareSingleOrganizationOnboarding()
+            guard !Task.isCancelled, canPrepareOrganization else {
+                checkingOrganization = false
+                return
+            }
+            checkingOrganization = false
+            if case .ready = outcome { singleOrganizationReady = true }
+        }
+        .task(id: shouldAutomaticallyStart) {
+            guard shouldAutomaticallyStart else { return }
+            // Metadata can arrive after the org read. Start once it is ready,
+            // and leave retries or a cancelled disclosure to the person.
+            automaticStartAttempted = true
+            automaticallyStarting = true
+            start()
+        }
+        .onChange(of: JoinScreenLayout.canForward(runner.state)) { _, ready in
+            if !ready {
+                checkedOrganization = false
+                checkingOrganization = false
+                automaticallyStarting = false
+                singleOrganizationReady = false
+                automaticStartAttempted = false
+            }
+        }
+        .onChange(of: disclosure == nil) { _, closed in
+            if closed && !starting && !runner.isCommitting {
+                automaticallyStarting = false
+            }
+        }
+    }
+
+    private var joinFrame: some View {
         let required = UsesScreenLayout.requiredScope(model.consentScopes)
-        FirstRunFrame(
+        return FirstRunFrame(
             copy: copy,
             state: $runner.state,
             isCommitting: runner.isCommitting,
@@ -553,27 +657,6 @@ struct JoinScreen: View {
             }
             .frame(maxWidth: 520)
             .scrollBounceBehavior(.basedOnSize)
-        }
-        .onChange(of: runner.state.signedIn) { _, signedIn in
-            if signedIn { signedInAt = Date() }
-        }
-        .task {
-            // `enroll` re-reads the route, not status; the grant's
-            // `connected` is read from status, so it is refreshed here.
-            model.refreshStatus()
-            model.refreshConsentOptions()
-            model.refreshWitness()
-            if !grantRead {
-                grant = AutomaticGrantCopy.decode(
-                    fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
-                grantRead = true
-            }
-        }
-        .glassModal(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
-            if let grant {
-                SharingDisclosureSheet(copy: copy, grant: grant, flow: $disclosure, onFinish: finish)
-                    .environmentObject(model)
-            }
         }
     }
 
@@ -849,6 +932,7 @@ struct JoinScreen: View {
         Task {
             pendingRefusal = await commit(pendingRefusal)
             starting = false
+            automaticallyStarting = false
         }
     }
 }

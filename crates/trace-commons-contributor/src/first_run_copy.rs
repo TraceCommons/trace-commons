@@ -556,8 +556,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Get started",
         },
         join: JoinCopy {
-            title_light: "Get started on ",
-            title_bold: "your terms",
+            title_light: "Sign in and choose an org for ",
+            title_bold: "payment and inference",
             body: "Sign in with your NEAR AI account to get started.",
             invite_eyebrow: "Invite link",
             invite_placeholder: crate::channel::INVITE_PLACEHOLDER,
@@ -848,6 +848,15 @@ pub fn traces_estimate_line_json(request: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_names_sign_in_and_the_organization_choice() {
+        let join = first_run_copy().join;
+        assert_eq!(
+            format!("{}{}", join.title_light, join.title_bold),
+            "Sign in and choose an org for payment and inference"
+        );
+    }
 
     #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {

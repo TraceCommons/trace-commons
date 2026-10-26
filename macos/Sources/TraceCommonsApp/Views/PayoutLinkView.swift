@@ -9,7 +9,8 @@ import TCShellCore
 /// out. There is no passkey step: the person's click on Choose, after the
 /// consent for the selected organization is on screen, is the confirmation.
 ///
-/// Nothing is preselected, even with one organization.
+/// This standalone picker starts without a selection. First-run onboarding
+/// configures a verified sole organization before showing this picker.
 struct PayoutLinkView: View {
     @EnvironmentObject private var app: AppModel
     @StateObject private var model = PayoutLinkModel()
@@ -101,9 +102,6 @@ struct PayoutLinkView: View {
             }
             if let consent = model.picker.consent(copy: surface.copy) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    Text(consent.body)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .fixedSize(horizontal: false, vertical: true)
                     Text(consent.scope)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)

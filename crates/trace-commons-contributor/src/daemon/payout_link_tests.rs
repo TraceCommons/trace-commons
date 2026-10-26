@@ -548,6 +548,7 @@ async fn status_flags_a_recipient_ref_mismatch() {
     let before = status(&f).await;
     assert_eq!(before["rails"][0]["linked"], false);
     assert_eq!(before["rails"][0]["recipient_ref_check"], Value::Null);
+    assert_eq!(before["rails"][0]["organization_id"], Value::Null);
 
     link(&f, &cloud, ORG_A).await;
     let matched = status(&f).await;
@@ -557,6 +558,7 @@ async fn status_flags_a_recipient_ref_mismatch() {
     assert_eq!(rail["version"], 1);
     assert_eq!(rail["recipient_ref_check"], "match");
     assert_eq!(rail["organization_name"], "Synthetic org A");
+    assert_eq!(rail["organization_id"], ORG_A);
 
     // The commons now reports another org's ref.
     f.ingest.stub.lock().unwrap().recipient_ref = Some(near_ai_recipient_ref(
@@ -565,6 +567,7 @@ async fn status_flags_a_recipient_ref_mismatch() {
     ));
     let mismatched = status(&f).await;
     assert_eq!(mismatched["rails"][0]["recipient_ref_check"], "mismatch");
+    assert_eq!(mismatched["rails"][0]["organization_id"], Value::Null);
     assert_eq!(
         mismatched["rails"][0]["organization_name"],
         Value::Null,
@@ -578,6 +581,7 @@ async fn status_flags_a_recipient_ref_mismatch() {
         .unwrap();
     let unknown = status(&f).await;
     assert_eq!(unknown["rails"][0]["recipient_ref_check"], "unknown");
+    assert_eq!(unknown["rails"][0]["organization_id"], Value::Null);
 }
 
 #[tokio::test]
