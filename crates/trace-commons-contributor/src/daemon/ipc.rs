@@ -342,6 +342,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
     "managed_snapshot",
+    "managed_tool_setup",
     "managed_cli_options_set",
     "managed_folder_settings_get",
     "managed_folder_settings_reset",
@@ -3796,6 +3797,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // One arm per method: `every_advertised_method_is_dispatched_and_the_reverse`
         // counts one arm per string literal, and an or-pattern hides all but its last.
         "managed_snapshot" => super::managed::handle(shared, req),
+        "managed_tool_setup" => super::managed::handle(shared, req),
         "managed_cli_options_set" => handle_set_managed_cli_options(shared, req),
         "managed_folder_settings_get" => handle_managed_folder_settings(shared, req),
         "managed_folder_settings_reset" => handle_managed_folder_settings(shared, req),
@@ -18537,7 +18539,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 99, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 100, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 77, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

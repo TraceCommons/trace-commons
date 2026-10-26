@@ -69,7 +69,8 @@
         "name": "Ghostty"
       }
     ],
-    "near_ai_signin": true
+    "near_ai_signin": true,
+    "tool_setup": true
   },
   "copy": {
     "title": "Managed sessions",
@@ -192,7 +193,9 @@
     "stop": "Stop",
     "stop_question": "Stop this session?",
     "stop_description": "{tool} stops what it's doing in {folder}.",
-    "start_again": "Start again"
+    "start_again": "Start again",
+    "install_in_terminal": "Open {terminal} and run the official installer for {tool}.",
+    "update_in_terminal": "Open {terminal} and update {tool}."
   },
   "tools": [
     {

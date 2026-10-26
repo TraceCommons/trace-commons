@@ -26,6 +26,9 @@ struct ManagedSessionsSection: View {
                 signInCard(snapshot)
             }
             if let snapshot = model.managedSnapshot {
+                if !snapshot.nearAiSignedIn, !snapshot.missingInstallTools.isEmpty {
+                    setupOnlyButtons(snapshot)
+                }
                 sessionsCard(snapshot)
             } else {
                 connectingCard
@@ -89,8 +92,8 @@ struct ManagedSessionsSection: View {
     }
 
     /// What the NEAR AI card holds at its foot: the tool buttons; in their
-    /// place, the no-terminal notice, or Install for each tool while none
-    /// is installed. Only one, and only while it applies.
+    /// place, the no-terminal notice. Missing tools retain Install beside
+    /// installed tools' launch buttons.
     enum ToolArea: Equatable {
         case buttons
         case noTerminal
@@ -104,10 +107,10 @@ struct ManagedSessionsSection: View {
     }
 
     /// Whether a failure is said on the NEAR AI card, under the button that
-    /// was pressed: a launch, while the card is drawn. Anything else (a
-    /// stop, a dismiss, a start again) is said on the sessions card.
+    /// was pressed: a launch or tool setup while the card is drawn. A stop,
+    /// dismiss, or start again is said on the sessions card.
     static func failureOnSignInCard(method: String?, signInCardShown: Bool) -> Bool {
-        signInCardShown && method == "managed_launch_prepare"
+        signInCardShown && ["managed_launch_prepare", "managed_tool_setup"].contains(method ?? "")
     }
 
     /// The card's foot (`toolArea`), then a launch that failed.
@@ -115,25 +118,41 @@ struct ManagedSessionsSection: View {
     private func toolButtons(_ snapshot: ManagedSnapshot) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             switch Self.toolArea(snapshot) {
-            case .buttons:
-                HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
-                    ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                        ManagedToolButton(tool: tool) { start(tool) }
-                    }
-                }
-                .disabled(model.managedBusy)
             case .noTerminal:
                 GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
             case .install:
                 ManagedNote(text: model.managedText("tools_empty"))
-                HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
-                    ForEach((snapshot.tools ?? []).filter { ManagedSurface.signInTools.contains($0.tool) }) { tool in
-                        ManagedInstallLink(tool: tool, copy: model.managedText, includeToolName: true)
+            case .buttons:
+                EmptyView()
+            }
+            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                if Self.toolArea(snapshot) == .buttons {
+                    ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                        ManagedToolButton(tool: tool) { start(tool) }
                     }
                 }
+                ForEach(snapshot.missingInstallTools) { tool in
+                    ManagedInstallLink(tool: tool, copy: model.managedText, includeToolName: true)
+                }
             }
+            .disabled(model.managedBusy)
             if let key = model.managedErrorKey,
                Self.failureOnSignInCard(method: model.managedErrorMethod, signInCardShown: true) {
+                actionFailure(key)
+            }
+        }
+    }
+
+    /// Tool installation can be requested before a NEAR AI sign-in.
+    private func setupOnlyButtons(_ snapshot: ManagedSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                ForEach(snapshot.missingInstallTools) { tool in
+                    ManagedInstallLink(tool: tool, copy: model.managedText, includeToolName: true)
+                }
+            }
+            .disabled(model.managedBusy)
+            if model.managedErrorMethod == "managed_tool_setup", let key = model.managedErrorKey {
                 actionFailure(key)
             }
         }
@@ -204,7 +223,10 @@ struct ManagedSessionsSection: View {
     @ViewBuilder
     private func sessionsCard(_ snapshot: ManagedSnapshot) -> some View {
         let failure = model.managedErrorKey.flatMap { key in
-            Self.failureOnSignInCard(method: model.managedErrorMethod, signInCardShown: snapshot.nearAiSignedIn) ? nil : key
+            let setupRowShown = !snapshot.nearAiSignedIn && !snapshot.missingInstallTools.isEmpty
+            let setupFailure = setupRowShown && model.managedErrorMethod == "managed_tool_setup"
+            return Self.failureOnSignInCard(method: model.managedErrorMethod, signInCardShown: snapshot.nearAiSignedIn)
+                || setupFailure ? nil : key
         }
         if snapshot.sessions.isEmpty && failure == nil {
             GlassIconCard(
@@ -479,6 +501,10 @@ struct ManagedLaunchSheet: View {
                         ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
                     }
                 }
+                if let account = selectedAccount, model.managedErrorMethod == "managed_tool_setup",
+                   model.managedErrorTool == account.tool, let key = model.managedErrorKey {
+                    GlassAlert(model.managedText(key))
+                }
                 if let account = selectedAccount {
                     ManagedFolderOptions(tool: account.tool, connection: account.connection, draft: $folderDraft,
                         catalogue: catalogue, supportsFolderSettings: supportsFolderSettings,
@@ -729,18 +755,30 @@ struct ManagedStopSheet: View {
     }
 }
 
-/// Installation recovery uses the core's official links and words.
+/// Current daemons run the named setup action in Terminal. Older daemons
+/// retain the official setup-guide link instead of guessing command support.
 struct ManagedInstallLink: View {
+    @EnvironmentObject private var model: AppModel
     let tool: ManagedToolAvailability
     let copy: (String) -> String
-    /// The link's copy key: `install`, or `update` after an unsupported-version
-    /// refusal, with the tool's name appended when `includeToolName` is set.
     var labelKey: String = "install"
-    var includeToolName = false
+    var includeToolName = true
     private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
     private var label: String { includeToolName ? actionLabel + " " + copy(tool.tool) : actionLabel }
+    private var terminalHint: String {
+        ManagedSurface.fillTerminal(
+            copy(labelKey == "update" ? "update_in_terminal" : "install_in_terminal"),
+            terminal: model.managedSnapshot?.capabilities.terminalDestination, fallback: copy("terminal"))
+            .replacingOccurrences(of: "{tool}", with: copy(tool.tool))
+    }
     var body: some View {
-        if let url = tool.url {
+        if model.managedSnapshot?.capabilities.toolSetup == true {
+            Button(label) { model.setupManagedTool(tool.tool, action: labelKey) }
+                .accessibilityLabel(actionLabel + " " + copy(tool.tool))
+                .help(terminalHint)
+                .buttonStyle(GlassButtonStyle(.glass, small: true))
+                .disabled(model.managedBusy)
+        } else if let url = tool.url {
             Link(label, destination: url)
                 .accessibilityLabel(actionLabel + " " + copy(tool.tool))
                 .buttonStyle(GlassButtonStyle(.glass, small: true))

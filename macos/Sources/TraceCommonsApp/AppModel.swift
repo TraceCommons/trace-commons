@@ -81,6 +81,14 @@ final class AppModel: ObservableObject {
         managedAction("set_managed_terminal", params: ["terminal": id])
     }
 
+    /// Only a named tool and setup action cross the RPC boundary. Setup needs
+    /// no sign-in, managed account, profile, session, or working directory.
+    func setupManagedTool(_ tool: String, action: String) {
+        guard managedSnapshot?.capabilities.toolSetup == true,
+              ManagedSurface.supportedTools.contains(tool), ["install", "update"].contains(action) else { return }
+        managedAction("managed_tool_setup", params: ["tool": tool, "action": action])
+    }
+
     func saveManagedCLIOptions(tool: String) {
         guard managedCLIOptionsDrafts.isChanged(tool: tool, saved: managedSnapshot?.cliOptions) else { return }
         managedAction("managed_cli_options_set", params: [
@@ -109,6 +117,9 @@ final class AppModel: ObservableObject {
                     throw CocoaError(.coderInvalidValue)
                 }
                 var response = try client.managedAction(method, params: params)
+                if method == "managed_tool_setup", response["opened"] as? Bool != true {
+                    throw DaemonClient.Failure(code: "unavailable", message: "managed-tool-setup-unconfirmed")
+                }
                 if let optionsBeingSaved,
                    response["tool"] as? String != attemptedTool || response["options"] as? String != optionsBeingSaved || response["revision"] as? UInt64 == nil {
                     throw DaemonClient.Failure(code: "unavailable", message: "managed-cli-options-unconfirmed")
