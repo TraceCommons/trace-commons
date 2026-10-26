@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import TCBridge
+import TCShellCore
 
 /// Debug builds only: `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from a
 /// fixed sample week, so a design review can see every chart and section in
@@ -12,10 +13,11 @@ import TCBridge
 /// The week is shaped as the core sends it: a watched-folder week (feed T)
 /// with goals, the lever and the weekly summary, and the saved traces,
 /// summary and group Analyze shows (`InsightsSampleAnalyze.swift`), which
-/// Sessions drills into. Sample figures, never a pilot's. Every word is
-/// still the core's copy: the answers are sampled, only the core's copy and
-/// two Overview reads go to the real store, and a write is answered here
-/// and kept nowhere, or refused. No write reaches the store.
+/// Sessions drills into, and the week's counted sessions behind Overview's
+/// Sessions breakdown, split by day. Sample figures, never a pilot's. Every
+/// word is still the core's copy: the answers are sampled, only the core's
+/// copy and two Overview reads go to the real store, and a write is
+/// answered here and kept nowhere, or refused. No write reaches the store.
 enum InsightsSampleWeek {
     static var enabled: Bool {
         ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
@@ -117,6 +119,78 @@ enum InsightsSampleWeek {
             "by_tool": [["source": "claude_code", "tokens": 45_000_000], ["source": "codex", "tokens": 6_200_000]],
             "by_project": "not_available_for_analyzed_files", "weeks": weeks,
         ]
+    }
+
+    /// Feed T's counted sessions for the Sessions breakdown, newest first:
+    /// 30 Claude Code sessions whose days sum exactly to `by_day`, one with
+    /// no known figure, and six Codex sessions, which are split by no day.
+    /// Coverage as `coverage` says: 34 known, 2 partial, 1 unknown.
+    static var counterSessions: InsightsCounterSessions {
+        get throws {
+            let rows = try decode([DaemonData.InsightsWeekSession].self, sessionRows)
+            return InsightsCounterSessions(sessions: rows, column: .hidden)
+        }
+    }
+
+    private static func claude(_ folder: String, _ start: String, _ end: String, _ days: [Int],
+                               partial: Bool = false) -> [String: Any] {
+        ["source": "claude_code", "folder": folder, "tokens": days.reduce(0, +), "by_day": days,
+         "state": partial ? "partial" : "known", "reasons": partial ? ["some_turns_unknown"] : [String](),
+         "started_at": start, "last_event_at": end]
+    }
+
+    private static func codex(_ folder: String, _ start: String, _ end: String, _ tokens: Int,
+                              partial: Bool = false) -> [String: Any] {
+        ["source": "codex", "folder": folder, "tokens": tokens,
+         "state": partial ? "partial" : "known", "reasons": partial ? ["codex_baseline_excluded"] : [String](),
+         "started_at": start, "last_event_at": end]
+    }
+
+    static var sessionRows: [[String: Any]] {
+        let rows: [[String: Any]] = [
+            claude("infra", "2026-10-11T14:09:00Z", "2026-10-11T16:57:00Z", [0, 0, 0, 0, 0, 0, 960_000]),
+            claude("scripts", "2026-10-11T10:23:00Z", "2026-10-11T12:19:00Z", [0, 0, 0, 0, 0, 0, 390_000]),
+            claude("design-system", "2026-10-11T09:16:00Z", "2026-10-11T10:08:00Z", [0, 0, 0, 0, 0, 0, 580_000]),
+            claude("website", "2026-10-10T16:55:00Z", "2026-10-10T18:35:00Z", [0, 0, 0, 0, 0, 490_000, 0]),
+            claude("notes", "2026-10-10T11:02:00Z", "2026-10-10T12:46:00Z", [0, 0, 0, 0, 0, 330_000, 0]),
+            codex("website", "2026-10-09T17:40:00Z", "2026-10-09T18:25:00Z", 700_000),
+            claude("trace-commons", "2026-10-09T15:48:00Z", "2026-10-09T16:24:00Z", [0, 0, 0, 0, 620_000, 0, 0]),
+            claude("scripts", "2026-10-09T13:41:00Z", "2026-10-09T15:13:00Z", [0, 0, 0, 0, 1_240_000, 0, 0]),
+            claude("design-system", "2026-10-09T10:34:00Z", "2026-10-09T11:02:00Z", [0, 0, 0, 0, 1_860_000, 0, 0]),
+            claude("infra", "2026-10-09T09:27:00Z", "2026-10-10T01:51:00Z", [0, 0, 0, 0, 2_480_000, 250_000, 0],
+                   partial: true),
+            codex("trace-commons", "2026-10-09T08:20:00Z", "2026-10-09T09:07:00Z", 900_000),
+            ["source": "claude_code", "folder": "notes", "tokens": NSNull(), "by_day": NSNull(),
+             "state": "unknown", "reasons": ["no_usage_counters"],
+             "started_at": "2026-10-08T19:05:00Z", "last_event_at": "2026-10-08T19:40:00Z"],
+            claude("trace-commons", "2026-10-08T16:06:00Z", "2026-10-08T17:18:00Z", [0, 0, 0, 1_510_000, 0, 0, 0]),
+            claude("scripts", "2026-10-08T15:59:00Z", "2026-10-08T17:07:00Z", [0, 0, 0, 1_810_000, 0, 0, 0]),
+            claude("notes", "2026-10-08T14:20:00Z", "2026-10-08T15:40:00Z", [0, 0, 0, 750_000, 0, 0, 0]),
+            claude("design-system", "2026-10-08T13:52:00Z", "2026-10-08T14:56:00Z", [0, 0, 0, 2_260_000, 0, 0, 0]),
+            claude("website", "2026-10-08T11:13:00Z", "2026-10-08T13:29:00Z", [0, 0, 0, 1_210_000, 0, 0, 0]),
+            codex("infra", "2026-10-08T09:30:00Z", "2026-10-08T10:45:00Z", 1_000_000, partial: true),
+            claude("scripts", "2026-10-07T16:17:00Z", "2026-10-07T18:01:00Z", [0, 0, 2_200_000, 0, 0, 0, 0]),
+            claude("design-system", "2026-10-07T15:10:00Z", "2026-10-08T01:50:00Z", [0, 0, 3_600_000, 800_000, 0, 0, 0]),
+            claude("website", "2026-10-07T14:31:00Z", "2026-10-07T16:23:00Z", [0, 0, 1_200_000, 0, 0, 0, 0]),
+            claude("trace-commons", "2026-10-07T11:24:00Z", "2026-10-07T12:12:00Z", [0, 0, 1_430_000, 0, 0, 0, 0]),
+            claude("infra", "2026-10-07T10:45:00Z", "2026-10-07T12:45:00Z", [0, 0, 650_000, 0, 0, 0, 0]),
+            claude("notes", "2026-10-07T09:38:00Z", "2026-10-07T10:34:00Z", [0, 0, 900_000, 0, 0, 0, 0]),
+            codex("trace-commons", "2026-10-07T08:41:00Z", "2026-10-07T09:58:00Z", 1_200_000),
+            claude("trace-commons", "2026-10-06T14:42:00Z", "2026-10-06T15:06:00Z", [0, 2_360_000, 0, 0, 0, 0, 0]),
+            claude("infra", "2026-10-06T13:03:00Z", "2026-10-06T15:39:00Z", [0, 950_000, 0, 0, 0, 0, 0]),
+            claude("scripts", "2026-10-06T11:35:00Z", "2026-10-07T01:55:00Z", [0, 3_310_000, 500_000, 0, 0, 0, 0]),
+            claude("notes", "2026-10-06T10:56:00Z", "2026-10-06T11:28:00Z", [0, 1_130_000, 0, 0, 0, 0, 0]),
+            claude("website", "2026-10-06T09:49:00Z", "2026-10-06T11:17:00Z", [0, 1_700_000, 0, 0, 0, 0, 0]),
+            codex("scripts", "2026-10-05T18:10:00Z", "2026-10-05T19:20:00Z", 1_300_000),
+            claude("design-system", "2026-10-05T16:28:00Z", "2026-10-05T17:44:00Z", [710_000, 0, 0, 0, 0, 0, 0]),
+            claude("infra", "2026-10-05T15:21:00Z", "2026-10-05T17:33:00Z", [1_070_000, 0, 0, 0, 0, 0, 0]),
+            claude("notes", "2026-10-05T13:14:00Z", "2026-10-05T14:22:00Z", [1_420_000, 0, 0, 0, 0, 0, 0]),
+            claude("website", "2026-10-05T10:07:00Z", "2026-10-05T12:11:00Z", [1_780_000, 0, 0, 0, 0, 0, 0]),
+            codex("notes", "2026-10-05T09:40:00Z", "2026-10-05T10:20:00Z", 1_100_000),
+            claude("trace-commons", "2026-10-05T09:00:00Z", "2026-10-06T01:00:00Z", [2_140_000, 300_000, 0, 0, 0, 0, 0]),
+        ]
+        // The counter pass's short names, in its order.
+        return rows.enumerated().map { index, row in row.merging(["session_ref": "t\(index + 1)"]) { $1 } }
     }
 
     /// Six weeks, oldest first; `nil` is a week with no figure.
