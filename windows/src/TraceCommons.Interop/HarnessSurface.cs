@@ -64,6 +64,8 @@ public enum HarnessPlanOutcome
     NotInstalled,
     EntryUnusable,
     NoConfigPath,
+    UnsupportedVersion,
+    ModelsUnavailable,
 }
 
 /// <summary>
@@ -511,6 +513,8 @@ public static class HarnessSurface
             AbiPlanNotInstalled => HarnessPlanOutcome.NotInstalled,
             AbiPlanEntryUnusable => HarnessPlanOutcome.EntryUnusable,
             AbiPlanNoConfigPath => HarnessPlanOutcome.NoConfigPath,
+            AbiPlanUnsupportedVersion => HarnessPlanOutcome.UnsupportedVersion,
+            AbiPlanModelsUnavailable => HarnessPlanOutcome.ModelsUnavailable,
             _ => HarnessPlanOutcome.Unknown,
         };
 
@@ -820,4 +824,6 @@ public static class HarnessSurface
     private const int AbiPlanNotInstalled = 44;
     private const int AbiPlanEntryUnusable = 45;
     private const int AbiPlanNoConfigPath = 46;
+    private const int AbiPlanUnsupportedVersion = 47;
+    private const int AbiPlanModelsUnavailable = 48;
 }

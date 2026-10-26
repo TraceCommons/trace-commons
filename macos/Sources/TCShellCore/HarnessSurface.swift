@@ -305,6 +305,8 @@ public enum HarnessPlanOutcome: Equatable, Sendable {
     case notInstalled
     case entryUnusable
     case noConfigPath
+    case unsupportedVersion
+    case modelsUnavailable
 
     public static func fromABI(_ value: Int32) -> HarnessPlanOutcome {
         switch value {
@@ -314,6 +316,8 @@ public enum HarnessPlanOutcome: Equatable, Sendable {
         case 44: return .notInstalled
         case 45: return .entryUnusable
         case 46: return .noConfigPath
+        case 47: return .unsupportedVersion
+        case 48: return .modelsUnavailable
         default: return .unknown
         }
     }

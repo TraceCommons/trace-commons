@@ -819,7 +819,7 @@ pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 /// a tool is the unit a contributor can decide about. Answering model calls
 /// at all is a consequence of connecting one, not a question to be settled
 /// first.
-pub const HARNESSES_TITLE: &str = "Your tools";
+pub const HARNESSES_TITLE: &str = "Default tool connections";
 
 /// The one line under that heading.
 ///
@@ -829,8 +829,7 @@ pub const HARNESSES_TITLE: &str = "Your tools";
 /// unqualified list reads as the second, and a contributor whose tool is
 /// missing from it would conclude their tool cannot be connected rather than
 /// that this app has not been taught about it yet.
-pub const HARNESSES_WHAT: &str =
-    "Pick which tools send their AI calls through this app. Only supported tools are listed.";
+pub const HARNESSES_WHAT: &str = "Choose supported tools to send AI requests through this app by default. Project settings or environment overrides can take precedence.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -858,16 +857,15 @@ pub const HARNESSES_SPEND_SCOPE: &str =
 /// was looked for.
 ///
 /// It must be rendered INSTEAD of [`HARNESS_NOT_CONNECTED`] and never
-/// beside it. That sentence says a tool's own settings still send its calls
-/// somewhere, which is a claim about settings belonging to something that is
-/// not on this computer at all.
+/// beside it. A missing executable and an inactive proxy connection are
+/// different facts; the row needs the installation status in that case.
 pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer.";
 
 /// A tool whose own settings still send its calls wherever they went before.
 ///
 /// Said as a fact about the tool's settings rather than as a fault. Nothing
 /// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Uses its own settings.";
+pub const HARNESS_NOT_CONNECTED: &str = "Not connected to this app.";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -943,7 +941,7 @@ pub const HARNESSES_NONE_FOUND: &str = "No supported tools found on this compute
 /// say the right thing or nothing at all; either way it is refused, so that
 /// somebody's own mistake in their own file never comes back looking like
 /// this app's.
-pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Edit the file or run the command shown.";
+pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Review the settings file, then try again.";
 
 /// A plan that found the file already saying what the action wanted.
 ///
@@ -951,7 +949,7 @@ pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings,
 /// plan with nothing in it opened a preview holding a title, a path and
 /// nothing else, which reads as this app having lost the change rather than
 /// as there being none to make.
-pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "Nothing to change. Its settings already match.";
+pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "No changes were prepared.";
 
 /// This app's own description of a tool did not survive checking.
 ///
@@ -968,7 +966,15 @@ pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str =
 /// shown on the row does by hand exactly what this app could not work out
 /// how to do.
 pub const HARNESS_PLAN_NO_CONFIG_PATH: &str =
-    "Couldn't find this tool's settings file. Run the command shown instead.";
+    "Couldn't find this tool's settings file. Check its configuration directory, then try again.";
+
+/// OpenCode's installed major version could not be qualified.
+pub const HARNESS_PLAN_UNSUPPORTED_VERSION: &str =
+    "Couldn't identify a supported OpenCode version. Check its installation, then try again.";
+
+/// No actual model can be selected for a persistent provider configuration.
+pub const HARNESS_PLAN_MODELS_UNAVAILABLE: &str =
+    "No models are available from Private AI. Check its connection, then try again.";
 
 /// Why a tool this app hosts the answering for cannot be connected yet.
 ///
@@ -1088,6 +1094,8 @@ pub fn harness_outcome_line(outcome: &str) -> &'static str {
         Some(PlanOutcome::NotInstalled) => HARNESS_NOT_INSTALLED,
         Some(PlanOutcome::EntryUnusable) => HARNESS_PLAN_ENTRY_UNUSABLE,
         Some(PlanOutcome::NoConfigPath) => HARNESS_PLAN_NO_CONFIG_PATH,
+        Some(PlanOutcome::UnsupportedVersion) => HARNESS_PLAN_UNSUPPORTED_VERSION,
+        Some(PlanOutcome::ModelsUnavailable) => HARNESS_PLAN_MODELS_UNAVAILABLE,
     }
 }
 
@@ -3782,6 +3790,8 @@ mod tests {
             PlanOutcome::NotInstalled,
             PlanOutcome::EntryUnusable,
             PlanOutcome::NoConfigPath,
+            PlanOutcome::UnsupportedVersion,
+            PlanOutcome::ModelsUnavailable,
         ] {
             assert!(!outcome.is_committable(), "{outcome:?} became committable");
             let line = harness_outcome_line(outcome.label());
@@ -5350,6 +5360,8 @@ mod tests {
             "not_installed",
             "entry_unusable",
             "no_config_path",
+            "unsupported_version",
+            "models_unavailable",
             "an_outcome_from_a_later_daemon",
         ] {
             strings.push(harness_outcome_line(outcome).to_string());

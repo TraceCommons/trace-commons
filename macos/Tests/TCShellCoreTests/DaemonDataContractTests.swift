@@ -219,7 +219,7 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertNotNil(projects.projects.first?.sessionCount)
         XCTAssertNotNil(projects.projects.first?.lastSessionAt)
         let harness = try await client.harnessList()
-        XCTAssertEqual(harness.harnesses.map(\.answersAt), ["Anthropic", "OpenAI"])
+        XCTAssertEqual(harness.harnesses.map(\.answersAt), ["Anthropic", "OpenAI", nil])
         let settings = try await client.settings()
         XCTAssertEqual(settings.digestSchedule, .evening(hour: 18))
         XCTAssertEqual(settings.localNotifications, true)

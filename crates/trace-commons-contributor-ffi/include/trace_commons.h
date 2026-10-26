@@ -1466,6 +1466,8 @@ int32_t     tc_private_inference_write_confirmed(int32_t requested_on, int32_t e
 #define TC_HARNESS_PLAN_NOT_INSTALLED  44
 #define TC_HARNESS_PLAN_ENTRY_UNUSABLE 45
 #define TC_HARNESS_PLAN_NO_CONFIG_PATH 46
+#define TC_HARNESS_PLAN_UNSUPPORTED_VERSION 47
+#define TC_HARNESS_PLAN_MODELS_UNAVAILABLE 48
 
 /* One harness_list row's state field, as a TC_HARNESS_STATE_* code.
  *

@@ -6760,6 +6760,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         return super::managed::handle_async(shared, req).await;
     }
     match req.method.as_str() {
+        "harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
@@ -18612,7 +18613,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 102, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 77, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 78, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -18679,7 +18680,7 @@ mod tests {
             .iter()
             .map(|h| h["id"].as_str().expect("an id"))
             .collect();
-        assert_eq!(ids, vec!["claude", "codex"]);
+        assert_eq!(ids, vec!["claude", "codex", "opencode"]);
         // Every row carries a state, and with no ledger no row may claim a
         // call arrived.
         for row in harnesses {

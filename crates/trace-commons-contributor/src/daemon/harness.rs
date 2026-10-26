@@ -81,6 +81,8 @@ use crate::harness_state::{
     self, HarnessAction, HarnessEvidence, HarnessState, PlanOutcome, built_in_family,
 };
 
+mod opencode;
+
 /// How long the window looked at for "has a call actually arrived".
 ///
 /// The ledger's own refresh window is 24 hours, so nothing longer can be
@@ -264,6 +266,7 @@ impl ClaudeEdit {
 enum Edit {
     Upstream(tools::Planned),
     Claude(ClaudeEdit),
+    OpenCode(opencode::OpenCodeEdit),
 }
 
 impl Edit {
@@ -271,6 +274,7 @@ impl Edit {
         match self {
             Self::Upstream(planned) => &planned.path,
             Self::Claude(edit) => &edit.path,
+            Self::OpenCode(edit) => &edit.path,
         }
     }
 
@@ -278,6 +282,7 @@ impl Edit {
         match self {
             Self::Upstream(planned) => &planned.changes,
             Self::Claude(edit) => &edit.changes,
+            Self::OpenCode(edit) => &edit.changes,
         }
     }
 
@@ -285,6 +290,7 @@ impl Edit {
         match self {
             Self::Upstream(planned) => &planned.occupied,
             Self::Claude(edit) => &edit.occupied,
+            Self::OpenCode(edit) => &edit.occupied,
         }
     }
 
@@ -296,6 +302,7 @@ impl Edit {
         match self {
             Self::Upstream(planned) => tools::commit_if_unchanged(planned),
             Self::Claude(edit) => edit.commit_if_unchanged(),
+            Self::OpenCode(edit) => edit.commit_if_unchanged(),
         }
     }
 }
@@ -319,6 +326,20 @@ fn tools_now(catalog: &Catalog) -> Vec<tools::Tool> {
         tool.wired = claude_settings::is_wired(&contents);
         tool.config_path = path;
     }
+    // The same filesystem-only executable resolution managed sessions use
+    // also finds app-installed tools outside a GUI daemon's inherited PATH.
+    #[cfg(not(test))]
+    for tool in &mut found {
+        let id = match tool.id.as_str() {
+            "claude" => Some(crate::managed::ToolId::Claude),
+            "codex" => Some(crate::managed::ToolId::Codex),
+            _ => None,
+        };
+        if let Some(id) = id {
+            tool.installed |= crate::managed::profiles::find_native(id).is_ok();
+        }
+    }
+    found.push(opencode::tool());
     found
 }
 
@@ -422,6 +443,16 @@ fn points_at_our_port(path: Option<&PathBuf>, port: Option<u16>) -> bool {
     std::fs::read_to_string(path)
         .map(|text| text.contains(&format!("127.0.0.1:{port}")))
         .unwrap_or(false)
+}
+
+fn connected_here(tool: &tools::Tool, port: Option<u16>) -> bool {
+    if tool.id == opencode::ID {
+        tool.config_path
+            .as_deref()
+            .is_some_and(|path| opencode::connected(path, port))
+    } else {
+        tool.wired && points_at_our_port(tool.config_path.as_ref(), port)
+    }
 }
 
 /// One tool, as the wire describes it.
@@ -529,7 +560,7 @@ pub fn list(
         // Ours, not merely wired: a tool pointed at somebody else's local
         // proxy did not make the call and must not blur the attribution of
         // one that did.
-        if !(tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port)) {
+        if !connected_here(tool, destination_port) {
             continue;
         }
         let Some(family) = built_in_family(&tool.id) else {
@@ -554,8 +585,7 @@ pub fn list(
                     .any(|(name, count)| *name == f && *count > 1)
             });
             let saw_call = family.is_some_and(|f| activity.last_call_for(f).is_some());
-            let ours =
-                tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port);
+            let ours = connected_here(&tool, destination_port);
             let state = harness_state::harness_state(HarnessEvidence {
                 connected: ours,
                 activity_readable: activity.readable,
@@ -625,6 +655,18 @@ pub fn plan(
     action: HarnessAction,
     port: Option<u16>,
     credentialed: bool,
+) -> Result<PlanView, &'static str> {
+    plan_with_opencode(store, catalog, tool_id, action, port, credentialed, None)
+}
+
+fn plan_with_opencode(
+    store: &PlanStore,
+    catalog: &Catalog,
+    tool_id: &str,
+    action: HarnessAction,
+    port: Option<u16>,
+    credentialed: bool,
+    opencode_context: Option<&opencode::Context>,
 ) -> Result<PlanView, &'static str> {
     let rows = tools_now(catalog);
     let Some(row) = rows.iter().find(|t| t.id == tool_id) else {
@@ -702,7 +744,10 @@ pub fn plan(
     // Reading it ourselves is the whole fix: `fs::read_to_string` fails where
     // upstream's `.ok()` discards the error, and a path that exists but will
     // not decode is refused with the outcome the copy already describes.
-    if let Some(path) = row.config_path.as_ref()
+    // OpenCode's editor validates file type and bounded UTF-8 itself. The
+    // legacy reader here would defeat that bound or block on a FIFO first.
+    if tool_id != opencode::ID
+        && let Some(path) = row.config_path.as_ref()
         && path.exists()
         && std::fs::read_to_string(path).is_err()
     {
@@ -727,6 +772,17 @@ pub fn plan(
         };
         match ClaudeEdit::plan(port) {
             Ok(edit) => Edit::Claude(edit),
+            Err(outcome) => return Ok(refuse(outcome)),
+        }
+    } else if tool_id == opencode::ID {
+        if matches!(action, HarnessAction::Connect) && opencode_context.is_none() {
+            return Ok(refuse(PlanOutcome::ModelsUnavailable));
+        }
+        let port = matches!(action, HarnessAction::Connect)
+            .then_some(port)
+            .flatten();
+        match opencode::OpenCodeEdit::plan(port, opencode_context) {
+            Ok(edit) => Edit::OpenCode(edit),
             Err(outcome) => return Ok(refuse(outcome)),
         }
     } else {
@@ -811,7 +867,13 @@ pub fn plan(
         id,
         tool_id: tool_id.to_string(),
         action,
-        digest: config_digest(&path),
+        // OpenCode keeps bounded exact preimages for BOTH files internally.
+        // Do not re-read its config with the legacy unbounded digest helper.
+        digest: if matches!(&planned, Edit::OpenCode(_)) {
+            None
+        } else {
+            config_digest(&path)
+        },
         planned,
         minted: Instant::now(),
     });
@@ -843,7 +905,9 @@ pub struct CommitView {
 /// [`ERR_COMMIT_FAILED`] when the write itself failed.
 pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static str> {
     let held = store.take(plan_id).ok_or(ERR_PLAN_UNKNOWN)?;
-    if config_digest(held.planned.path()) != held.digest {
+    if !matches!(&held.planned, Edit::OpenCode(_))
+        && config_digest(held.planned.path()) != held.digest
+    {
         return Err(ERR_CONFIG_CHANGED);
     }
 
@@ -1288,11 +1352,10 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                 // The vendor this tool answers at by default, from the same
                 // fixed table `source::discovery` draws its rows'
                 // `answers_at` from -- see `source::vendor_label`. Derived
-                // from `family` rather than a second lookup by `id`, so the
-                // two surfaces cannot name a family and its vendor
-                // differently. `None` for a catalog-described tool, which
-                // has no family and therefore no claimed default either.
-                "answers_at": row.family.and_then(crate::source::vendor_label),
+                // from `family` for tools with a fixed native vendor.
+                // OpenCode's OpenAI-compatible wire protocol says nothing
+                // about the vendor selected in its own settings.
+                "answers_at": if row.id == opencode::ID { None } else { row.family.and_then(crate::source::vendor_label) },
                 "state": row.state.label(),
                 // The time that makes "answering" mean something. Present
                 // only where the family belongs to this tool alone; a shared
@@ -1360,6 +1423,55 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
 
 /// `harness_plan`: work out one tool's edit and write nothing.
 pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
+    handle_plan_with_opencode(shared, req, None)
+}
+
+/// OpenCode needs the serving proxy's actual model list before a persistent
+/// default can be selected. Every transport uses the async dispatcher; the
+/// synchronous fallback refuses that connect rather than inventing a model.
+pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response {
+    if req.params.get("id").and_then(serde_json::Value::as_str) != Some(opencode::ID)
+        || req.params.get("action").and_then(serde_json::Value::as_str) != Some("connect")
+    {
+        return handle_plan(shared, req);
+    }
+    if !shared.destination_credentialed() {
+        return handle_plan(shared, req);
+    }
+    let Some(port) = shared.destination_port() else {
+        return handle_plan(shared, req);
+    };
+    let major = match tokio::task::spawn_blocking(opencode::native_major).await {
+        Ok(Ok(major)) => major,
+        _ => return opencode_refusal(req, PlanOutcome::UnsupportedVersion),
+    };
+    let models = match opencode::live_models(port).await {
+        Ok(models) => models,
+        Err(_) => return opencode_refusal(req, PlanOutcome::ModelsUnavailable),
+    };
+    // Do not preview a different destination if it changed during the probe.
+    if shared.destination_port() != Some(port) || !shared.destination_credentialed() {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NO_DESTINATION);
+    }
+    handle_plan_with_opencode(shared, req, Some(&opencode::Context { major, models }))
+}
+
+fn opencode_refusal(req: &Request, outcome: PlanOutcome) -> Response {
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "id": opencode::ID, "action": "connect", "outcome": outcome.label(),
+            "plan_id": null, "path": path_value(opencode::tool().config_path.as_deref()),
+            "changes": [], "occupied": [],
+        }),
+    )
+}
+
+fn handle_plan_with_opencode(
+    shared: &DaemonShared,
+    req: &Request,
+    context: Option<&opencode::Context>,
+) -> Response {
     let Some(id) = req.params.get("id").and_then(serde_json::Value::as_str) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "id-required");
     };
@@ -1372,13 +1484,14 @@ pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "action-invalid");
     };
 
-    match plan(
+    match plan_with_opencode(
         &shared.harness_plans,
         &catalog(),
         id,
         action,
         shared.destination_port(),
         shared.destination_credentialed(),
+        context,
     ) {
         Ok(view) => Response::ok(
             req.id,
@@ -2331,12 +2444,31 @@ mod tests {
     /// With no catalog the list is the two built-in tools, and every row is
     /// still a full row -- installed or not.
     #[test]
-    fn the_list_degrades_to_the_two_built_in_tools() {
+    fn the_list_includes_the_three_built_in_tools() {
         let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["claude", "codex"]);
+        assert_eq!(ids, vec!["claude", "codex", "opencode"]);
         assert_eq!(rows[0].family, Some("anthropic"));
         assert_eq!(rows[1].family, Some("openai"));
+        assert_eq!(rows[2].family, Some("openai"));
+    }
+
+    #[test]
+    fn opencodes_protocol_family_does_not_claim_a_default_vendor_on_the_wire() {
+        let shared = daemon_shared();
+        let request = Request {
+            id: 1,
+            method: "harness_list".into(),
+            params: serde_json::json!({}),
+        };
+        let response = handle_list(&shared, &request);
+        let result = response.result.expect("list result");
+        let rows = result["harnesses"].as_array().unwrap();
+        let opencode = rows.iter().find(|row| row["id"] == "opencode").unwrap();
+        assert_eq!(opencode["family"], "openai");
+        assert!(opencode["answers_at"].is_null());
+        let codex = rows.iter().find(|row| row["id"] == "codex").unwrap();
+        assert_eq!(codex["answers_at"], "OpenAI");
     }
 
     /// Every row carries a state, and with no readable ledger a connected

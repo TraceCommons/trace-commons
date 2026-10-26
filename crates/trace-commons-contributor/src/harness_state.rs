@@ -182,6 +182,10 @@ pub enum PlanOutcome {
     EntryUnusable,
     /// This build could not work out where the tool keeps its config.
     NoConfigPath,
+    /// The installed tool's major version has no qualified config contract.
+    UnsupportedVersion,
+    /// The serving proxy did not return usable model identifiers.
+    ModelsUnavailable,
 }
 
 impl PlanOutcome {
@@ -194,6 +198,8 @@ impl PlanOutcome {
             Self::NotInstalled => "not_installed",
             Self::EntryUnusable => "entry_unusable",
             Self::NoConfigPath => "no_config_path",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::ModelsUnavailable => "models_unavailable",
         }
     }
 
@@ -206,6 +212,8 @@ impl PlanOutcome {
             "not_installed" => Some(Self::NotInstalled),
             "entry_unusable" => Some(Self::EntryUnusable),
             "no_config_path" => Some(Self::NoConfigPath),
+            "unsupported_version" => Some(Self::UnsupportedVersion),
+            "models_unavailable" => Some(Self::ModelsUnavailable),
             _ => None,
         }
     }
@@ -233,7 +241,7 @@ impl PlanOutcome {
 pub fn built_in_family(id: &str) -> Option<&'static str> {
     match id {
         "claude" => Some("anthropic"),
-        "codex" => Some("openai"),
+        "codex" | "opencode" => Some("openai"),
         _ => None,
     }
 }
@@ -347,6 +355,8 @@ mod tests {
             PlanOutcome::NotInstalled,
             PlanOutcome::EntryUnusable,
             PlanOutcome::NoConfigPath,
+            PlanOutcome::UnsupportedVersion,
+            PlanOutcome::ModelsUnavailable,
         ] {
             assert!(!outcome.is_committable(), "{outcome:?}");
         }
@@ -362,6 +372,8 @@ mod tests {
             PlanOutcome::NotInstalled,
             PlanOutcome::EntryUnusable,
             PlanOutcome::NoConfigPath,
+            PlanOutcome::UnsupportedVersion,
+            PlanOutcome::ModelsUnavailable,
         ] {
             assert_eq!(PlanOutcome::from_label(outcome.label()), Some(outcome));
         }
@@ -372,6 +384,7 @@ mod tests {
     fn the_two_built_in_families_are_the_two_facades_the_ledger_records() {
         assert_eq!(built_in_family("claude"), Some("anthropic"));
         assert_eq!(built_in_family("codex"), Some("openai"));
+        assert_eq!(built_in_family("opencode"), Some("openai"));
         assert_eq!(built_in_family("something-from-a-catalog"), None);
     }
 
