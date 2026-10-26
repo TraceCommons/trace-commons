@@ -51,11 +51,19 @@ struct InsightsSessionsTab: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Group {
-                    if let watched = model.watched {
-                        feed(watched)
-                    } else {
-                        saved
+                VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+                    // What the tab is for, in one line (owner, 2026-10-26:
+                    // it was not clear what Sessions shows).
+                    Text(text(model.watched == nil ? "analytics_sessions_explainer_saved"
+                                                   : "analytics_sessions_explainer_watched"))
+                        .insightsNote()
+                        .fixedSize(horizontal: false, vertical: true)
+                    Group {
+                        if let watched = model.watched {
+                            feed(watched)
+                        } else {
+                            saved
+                        }
                     }
                 }
                 .padding(.vertical, GlassTokens.Space.s7)
