@@ -1014,6 +1014,7 @@ mod tests {
                 state: CoverageState::Known,
                 reasons: Vec::new(),
                 cache_share: None,
+                by_day: None,
             }],
         }
     }
