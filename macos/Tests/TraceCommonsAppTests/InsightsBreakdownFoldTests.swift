@@ -3,6 +3,7 @@ import XCTest
 
 /// The Breakdown card opens on its first five sessions; Show all shows
 /// every one (owner, 2026-10-26).
+@MainActor
 final class InsightsBreakdownFoldTests: XCTestCase {
     func testFoldedShowsTheFirstFiveAndShowAllShowsEvery() {
         let rows = Array(0..<12)

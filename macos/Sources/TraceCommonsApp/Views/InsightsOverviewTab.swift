@@ -489,13 +489,13 @@ struct InsightsOverviewTab: View {
 /// link under them to show every row and to fold them again.
 struct InsightsBreakdownFold: View {
     /// Rows shown while folded.
-    nonisolated static let folded = 5
+    static let folded = 5
 
     let count: Int
     @Binding var showAll: Bool
     let copy: [String: String]
 
-    nonisolated static func shown<Row>(_ rows: [Row], all: Bool) -> [Row] {
+    static func shown<Row>(_ rows: [Row], all: Bool) -> [Row] {
         all ? rows : Array(rows.prefix(folded))
     }
 
@@ -553,14 +553,9 @@ struct InsightsShareBar: View {
 struct InsightsCounterSessionsView: View {
     let sessions: InsightsCounterSessions
     let copy: [String: String]
-    @State private var showAll: Bool
-
-    /// `showAll` opens the list unfolded (the responder-scale tests).
-    init(sessions: InsightsCounterSessions, copy: [String: String], showAll: Bool = false) {
-        self.sessions = sessions
-        self.copy = copy
-        _showAll = State(initialValue: showAll)
-    }
+    /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
+    /// every row, as the responder-scale tests do.
+    @State var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private var routed: Bool { sessions.column == .shown }
@@ -630,15 +625,9 @@ struct InsightsCardInputsView: View {
     let inputs: InsightsCardInputs
     let snapshots: [LocalInsight]
     let copy: [String: String]
-    @State private var showAll: Bool
-
-    /// `showAll` opens the list unfolded (the responder-scale tests).
-    init(inputs: InsightsCardInputs, snapshots: [LocalInsight], copy: [String: String], showAll: Bool = false) {
-        self.inputs = inputs
-        self.snapshots = snapshots
-        self.copy = copy
-        _showAll = State(initialValue: showAll)
-    }
+    /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
+    /// every row, as the responder-scale tests do.
+    @State var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 

@@ -7,6 +7,9 @@ import TCShellCore
 
 /// A bounded viewport must not instantiate selectable platform text views
 /// for an entire week's sessions. Those views participate in every focus walk.
+///
+/// The two Breakdown lists open folded to five rows (#1648); they are
+/// measured with Show all on, where the whole week is in the list.
 @MainActor
 final class InsightsResponderScaleTests: XCTestCase {
     func testSavedSessionsKeepPlatformViewsBounded() throws {
