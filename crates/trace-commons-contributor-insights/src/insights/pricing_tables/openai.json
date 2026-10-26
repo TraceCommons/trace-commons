@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "table_id": "sha256:4db3deaea1a0cc607167214169643e036e23c70dfe236ac5964cb0b3da62cec9",
+  "table_id": "sha256:174b7e4fe9d1299f7f3f96e0a9335a44cbbfb19e629a6f3e44810868c77160fe",
   "version": 2,
   "currency": "usd",
-  "published_at": "2026-10-21T15:16:38Z",
+  "published_at": "2026-10-26T10:56:33Z",
   "provenance": {
     "publisher": "OpenAI",
     "source_url": "https://developers.openai.com/api/docs/pricing",
-    "retrieved_at": "2026-10-21T15:16:38Z",
-    "content_sha256": "sha256:2ccc6e9aeb9a63d1f836bab538e23862bd4faad1072f1027b6b656ab8441110a",
-    "reviewed_by": "Pending owner review",
-    "reviewed_at": "2026-10-21T15:16:38Z",
-    "effective_from_basis": "No effective dates on the page: effective_from is the Monday 00:00 UTC starting the 13-week Insights window before retrieved_at. gpt-5.6-sol is promotional through 2026-11-21 (effective_until). A '-' write is priced at input.",
-    "source_notes": "Page and script bytes change on every site build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Rates above 272K are in https://developers.openai.com/_astro/pricing.vcA1md2o.js (sha256 3d1f5fb6927c464777277f3c555df7fb15fde439ce945c2e5e5e9b990d73a55d), fetched 15:16:46Z; its URL changes per build too. The tier labels are in PricingContextSelector.react.D4RpN-zJ.js."
+    "retrieved_at": "2026-10-26T10:53:52Z",
+    "content_sha256": "sha256:cf734fcb60d01a595dd95d8d60fb9a491cc9c76d41a08ee998b7277b6de65694",
+    "reviewed_by": "Kristi Poldsam (poldsam)",
+    "reviewed_at": "2026-10-26T10:56:33Z",
+    "effective_from_basis": "No effective dates on the page: effective_from is the Monday 00:00 UTC starting the 13-week Insights window before the first fetch, 2026-10-21. gpt-5.6-sol is promotional through 2026-11-21 (effective_until). A '-' write is priced at input.",
+    "source_notes": "Page and script bytes change on every site build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Rates above 272K are in https://developers.openai.com/_astro/pricing.BRxkzBWq.js (sha256 4b01a03c6bc038e906e57a390ac2c37a135994ae83df7b1216eb04835db434d0), fetched 10:54:49Z; its URL changes per build too. The tier labels are in PricingContextSelector.react.Bav9OpW6.js, which PricingContextSelector.react.DfR41lUi.js loads. The owner-review refetch at retrieved_at found every rate unchanged from the first fetch, 2026-10-21T15:16:38Z."
   },
   "entries": [
     {
