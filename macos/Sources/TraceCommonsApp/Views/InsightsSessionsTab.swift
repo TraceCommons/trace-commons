@@ -31,6 +31,12 @@ struct InsightsSessionsTab: View {
     /// Why watched-folder counting is not showing (the window's week, or
     /// this tab's own list), as Overview says it; `nil` otherwise.
     var notice: String? = nil
+    /// Analyze & save on the open watched row (Insights PM, 2026-10-21):
+    /// the model that asks the daemon and shows the snapshot; `nil` draws
+    /// no action (no daemon, or a custom store).
+    var analysis: InsightsModel? = nil
+    /// Opens Analyze once the saved snapshot is its detail.
+    var openAnalysis: () -> Void = {}
     /// The turn being read; `nil` reads the whole session.
     @State private var readTurn: Int?
     /// The feed row the arrow keys are on (Full Keyboard Access).
@@ -92,6 +98,9 @@ struct InsightsSessionsTab: View {
     private func feed(_ rows: [DaemonData.InsightsWatchedSession]) -> some View {
         LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(rows) { row in
+                #if DEBUG
+                let _ = OtherCollectionRowBodies.record("insightsWatchedFeed", row.sessionRef)
+                #endif
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     feedRow(row)
                     if model.selected == row.sessionRef { expanded(row) }
@@ -103,6 +112,9 @@ struct InsightsSessionsTab: View {
             }
             feedFoot(empty: rows.isEmpty)
         }
+        // Rows are built as they scroll in, each with its label menus: the
+        // responder-scale tests measure the feed by this name.
+        .accessibilityIdentifier("insightsWatchedFeed")
         .scrollTargetLayout()
         // Full Keyboard Access: focus the feed, then up and down move
         // between rows and Return opens or closes the row.
@@ -125,7 +137,12 @@ struct InsightsSessionsTab: View {
     }
 
     /// One watched trace: its harness tile, its label and tokens, and its
-    /// sparkline. VoiceOver reads it as one button, the sparkline in words.
+    /// sparkline, then its own labels' controls. The whole card is the
+    /// row's button, padding and all, as every other interactive row's is;
+    /// the controls are drawn over it where the label keeps their room, so
+    /// their menus take their own clicks and a click anywhere else on the
+    /// card opens the row. VoiceOver reads the trace as one button, the
+    /// sparkline in words; each control after it names the trace it labels.
     private func feedRow(_ row: DaemonData.InsightsWatchedSession) -> some View {
         let open = model.selected == row.sessionRef
         return Button {
@@ -133,20 +150,24 @@ struct InsightsSessionsTab: View {
             keyRow = row.sessionRef
             model.toggle(row.sessionRef)
         } label: {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                InsightsHarnessTile(source: row.source)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(InsightsSessionsWords.watchedLabel(row, copy: copy))
-                        .insightsNote()
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                    Text(InsightsSessionsWords.rowTokens(row, copy: copy)).insightsCaption()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+                    InsightsHarnessTile(source: row.source)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(InsightsSessionsWords.watchedLabel(row, copy: copy))
+                            .insightsNote()
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                        Text(InsightsSessionsWords.rowTokens(row, copy: copy)).insightsCaption()
+                    }
+                    Spacer(minLength: GlassTokens.Space.s4)
+                    if let sparkline = row.sparkline {
+                        InsightsSparkline(points: sparkline.points)
+                            .frame(width: InsightsSparkline.width, height: InsightsSparkline.height)
+                    }
                 }
-                Spacer(minLength: GlassTokens.Space.s4)
-                if let sparkline = row.sparkline {
-                    InsightsSparkline(points: sparkline.points)
-                        .frame(width: InsightsSparkline.width, height: InsightsSparkline.height)
-                }
+                // The controls' room; they are drawn over it below.
+                if model.canLabel { labelControls(row).hidden() }
             }
             .padding(.vertical, GlassTokens.Space.s3)
             .padding(.horizontal, GlassTokens.Space.s4)
@@ -163,12 +184,63 @@ struct InsightsSessionsTab: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(InsightsSessionsWords.rowAccessibilityLabel(row, copy: copy))
         .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
+        .overlay(alignment: .bottomLeading) {
+            if model.canLabel {
+                labelControls(row)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .padding(.horizontal, GlassTokens.Space.s4)
+            }
+        }
     }
 
-    /// The open row's drill, beneath it: the drill once read, the
-    /// unavailable line if it could not be, a spinner meanwhile.
+    /// A row's own labels (Insights PM request, 2026-10-21): its task,
+    /// pre-filled from the inferred one and marked so until the person
+    /// takes it (one click on Confirm) or picks another, and its outcome,
+    /// unset until they say. Kept on this Mac only. A label that could not
+    /// be saved shows as it was, with the core's line under it.
+    private func labelControls(_ row: DaemonData.InsightsWatchedSession) -> some View {
+        let reference = row.sessionRef
+        let shown = InsightsSessionsWords.shownTask(row)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                InsightsLabelMenu(
+                    title: InsightsSessionsWords.taskTitle(row, copy: copy),
+                    name: InsightsSessionsWords.labelAccessibility("analytics_label_task_a11y", row, copy: copy),
+                    choices: InsightsSessionsWords.taskChoices(copy: copy),
+                    chosen: row.userTask,
+                    inferred: shown?.inferred ?? false,
+                    unset: text("analytics_task_use_inferred")
+                ) { model.setTask(reference, to: $0) }
+                if InsightsSessionsWords.confirmableTask(row) != nil {
+                    Button(text("analytics_task_confirm")) { model.confirmTask(reference) }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
+                            "analytics_task_confirm_a11y", row, copy: copy))
+                }
+                InsightsLabelMenu(
+                    title: InsightsSessionsWords.outcomeTitle(row, copy: copy),
+                    name: InsightsSessionsWords.labelAccessibility("analytics_label_outcome_a11y", row, copy: copy),
+                    choices: InsightsSessionsWords.outcomeChoices(copy: copy),
+                    chosen: row.userOutcome,
+                    inferred: false,
+                    unset: text("analytics_outcome_clear")
+                ) { model.setOutcome(reference, to: $0) }
+                Spacer(minLength: 0)
+            }
+            if model.labelFailed.contains(reference) {
+                Text(text("analytics_label_save_failed")).insightsError()
+            }
+        }
+        // Lined up under the label, past the harness tile.
+        .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
+    }
+
+    /// The open row's Analyze & save, then its drill beneath it: the drill
+    /// once read, the unavailable line if it could not be, a spinner
+    /// meanwhile.
     @ViewBuilder
     private func expanded(_ row: DaemonData.InsightsWatchedSession) -> some View {
+        if let analysis { analyzeAction(row, analysis) }
         if let drill = model.drill, drill.session_ref == row.sessionRef {
             drillContent(drill)
         } else if model.failed {
@@ -176,6 +248,45 @@ struct InsightsSessionsTab: View {
         } else {
             GlassSpinner()
         }
+    }
+
+    /// The open row's one action: the daemon analyzes the trace it found
+    /// and saves the snapshot, which then opens in Analyze. A spinner while
+    /// it is asked, and the core's line if it could not be; a row no longer
+    /// listed under its reference reads the list again. A row the daemon
+    /// says it cannot analyze shows why in place of the action.
+    @ViewBuilder
+    private func analyzeAction(_ row: DaemonData.InsightsWatchedSession, _ analysis: InsightsModel) -> some View {
+        let reference = row.sessionRef
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            if row.canAnalyze {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Button(text("analytics_analyze_save")) {
+                        Task {
+                            if await analysis.analyzeAndSave(session: reference) {
+                                openAnalysis()
+                            } else if analysis.sessionAnalyzeFailure?.key == InsightsModel.sessionUnknownKey {
+                                model.rowNoLongerListed()
+                            }
+                        }
+                    }
+                    .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                    .disabled(analysis.busy)
+                    .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
+                        "analytics_analyze_save_a11y", row, copy: copy))
+                    if analysis.analyzingSession == reference { GlassSpinner() }
+                    Spacer(minLength: 0)
+                }
+                if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
+                    Text(text(failure.key)).insightsError()
+                }
+            } else {
+                Text(text("analytics_analyze_not_analyzable")).insightsCaption()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        // Lined up under the label, past the harness tile, as the labels are.
+        .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
     }
 
     /// The foot of the feed: the loading row while the next page is read,
@@ -429,6 +540,58 @@ struct InsightsSessionsTab: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+    }
+}
+
+/// A row's label control: a native menu dressed as a compact glass pill, in
+/// the feed row's caption type on the control tier, with the system's check
+/// beside the chosen word and, while one is chosen, the item that unsets
+/// it. `inferred` draws the words in the secondary ink, so a value the
+/// rules inferred never reads as one the person set. Every word is the
+/// caller's, from the core's copy.
+struct InsightsLabelMenu: View {
+    let title: String
+    /// What VoiceOver calls the control, naming its row.
+    let name: String
+    let choices: [(value: String, title: String)]
+    /// The person's own value; `nil` while unset.
+    let chosen: String?
+    let inferred: Bool
+    /// The item that unsets the value, shown while one is chosen.
+    let unset: String
+    let choose: (String?) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(choices, id: \.value) { choice in
+                Toggle(choice.title, isOn: Binding(
+                    get: { chosen == choice.value },
+                    set: { if $0 { choose(choice.value) } }))
+            }
+            if chosen != nil {
+                Divider()
+                Button(unset) { choose(nil) }
+            }
+        } label: {
+            HStack(spacing: GlassTokens.Space.s1) {
+                Text(title).lineLimit(1)
+                GlassGlyphView(.chevronDown)
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
+            .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
+            .foregroundStyle(inferred ? GlassColor.textSecondary : GlassColor.textPrimary)
+            .padding(.horizontal, GlassTokens.Space.s3)
+            .frame(minHeight: GlassTokens.Size.submitPill)
+            .glassSurface(.control, hover: GlassTokens.Color.controlHover)
+        }
+        // As `GlassSelect`: a button-style menu keeps the pill as drawn,
+        // and `GlassPressStyle` darkens it while pressed.
+        .menuStyle(.button)
+        .buttonStyle(GlassPressStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(name)
+        .accessibilityValue(title)
     }
 }
 

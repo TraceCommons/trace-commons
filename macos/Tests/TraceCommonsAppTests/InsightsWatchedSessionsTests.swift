@@ -670,6 +670,302 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         XCTAssertTrue(copy["analytics_sparkline_peak", default: ""].contains("{n}"))
     }
 
+    // MARK: The person's own labels
+
+    static let labelWords: [String: String] = words.merging([
+        "analytics_label_task": "TASK",
+        "analytics_label_outcome": "OUTCOME",
+        "analytics_task_bug_fix": "BUG FIX",
+        "analytics_task_refactor": "REFACTOR",
+        "analytics_task_tests": "TESTS",
+        "analytics_task_docs": "DOCS",
+        "analytics_task_other": "OTHER",
+        "analytics_task_inferred": "{label} (INFERRED)",
+        "analytics_outcome_kept": "KEPT",
+        "analytics_outcome_partly_kept": "PARTLY KEPT",
+        "analytics_outcome_thrown_away": "THROWN AWAY",
+        "analytics_label_task_a11y": "TASK FOR {label}",
+    ]) { $1 }
+
+    static func labelledRow(inferred: String?, task: String?, outcome: String?,
+                            reference: String = "t7") throws -> DaemonData.InsightsWatchedSession {
+        let word = { (value: String?) in value.map { "\"\($0)\"" } ?? "null" }
+        let json = #"{"session_ref":"\#(reference)","source":"claude_code","started_at":null,"turns":3,"tokens":30,"sparkline":null,"folder":"f","inferred_task":\#(word(inferred)),"user_task":\#(word(task)),"user_outcome":\#(word(outcome))}"#
+        return try JSONDecoder().decode(DaemonData.InsightsWatchedSession.self, from: Data(json.utf8))
+    }
+
+    /// The task control shows the person's task, else the inferred one
+    /// marked as inferred, else its own name; only an inferred task can be
+    /// confirmed, and "no edits" is never offered.
+    func testTheTaskControlSaysWhetherItsValueIsInferredOrSet() throws {
+        let copy = Self.labelWords
+        let inferred = try Self.labelledRow(inferred: "bug_fix", task: nil, outcome: nil)
+        XCTAssertEqual(InsightsSessionsWords.taskTitle(inferred, copy: copy), "BUG FIX (INFERRED)")
+        XCTAssertEqual(InsightsSessionsWords.confirmableTask(inferred), "bug_fix")
+        XCTAssertTrue(try XCTUnwrap(InsightsSessionsWords.shownTask(inferred)).inferred)
+
+        let set = try Self.labelledRow(inferred: "bug_fix", task: "refactor", outcome: "partly_kept")
+        XCTAssertEqual(InsightsSessionsWords.taskTitle(set, copy: copy), "REFACTOR")
+        XCTAssertNil(InsightsSessionsWords.confirmableTask(set), "already the person's")
+        XCTAssertEqual(InsightsSessionsWords.outcomeTitle(set, copy: copy), "PARTLY KEPT")
+
+        let none = try Self.labelledRow(inferred: "no_edits", task: nil, outcome: nil)
+        XCTAssertEqual(InsightsSessionsWords.taskTitle(none, copy: copy), "TASK")
+        XCTAssertNil(InsightsSessionsWords.confirmableTask(none))
+        XCTAssertEqual(InsightsSessionsWords.outcomeTitle(none, copy: copy), "OUTCOME")
+        XCTAssertEqual(InsightsSessionsWords.taskChoices(copy: copy).map(\.title),
+                       ["BUG FIX", "REFACTOR", "TESTS", "DOCS", "OTHER"])
+        XCTAssertEqual(InsightsSessionsWords.outcomeChoices(copy: copy).map(\.value),
+                       ["kept", "partly_kept", "thrown_away"])
+        // Each row's control names its row for VoiceOver, never by reference.
+        let name = InsightsSessionsWords.labelAccessibility("analytics_label_task_a11y", inferred, copy: copy)
+        XCTAssertTrue(name.hasPrefix("TASK FOR f | Undated"), name)
+        XCTAssertFalse(name.contains("t7"), name)
+    }
+
+    /// A label shows at once, then as the daemon answers; a failed write
+    /// puts the row back as the daemon last said it and marks the row.
+    @MainActor
+    func testALabelShowsAtOnceAndRollsBackWhenItFails() async throws {
+        let daemon = WatchedRecorder(answer: .json(Self.rowsJSON([7, 5], next: nil)))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        XCTAssertTrue(model.canLabel)
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        XCTAssertNil(model.watched?.first?.userTask)
+
+        await labels.hold()
+        model.setTask("t7", to: "docs")
+        XCTAssertEqual(model.watched?.first?.userTask, "docs", "shown before the daemon answers")
+        XCTAssertTrue(model.savingLabels)
+        await labels.release()
+        await settleLabels(model)
+        XCTAssertEqual(model.watched?.first?.userTask, "docs")
+        XCTAssertEqual(model.watched?.first?.userOutcome, nil)
+        var writes = await labels.writes
+        XCTAssertEqual(writes, ["t7 set(docs) keep"])
+
+        model.setOutcome("t7", to: "kept")
+        await settleLabels(model)
+        XCTAssertEqual(model.watched?.first?.userOutcome, "kept")
+
+        await labels.fail(with: .unreachable)
+        model.setOutcome("t7", to: "thrown_away")
+        XCTAssertEqual(model.watched?.first?.userOutcome, "thrown_away")
+        await settleLabels(model)
+        XCTAssertEqual(model.watched?.first?.userOutcome, "kept", "put back as the daemon last said it")
+        XCTAssertEqual(model.watched?.first?.userTask, "docs")
+        XCTAssertTrue(model.labelFailed.contains("t7"))
+
+        // The next label clears the mark; clearing the task sends null.
+        await labels.fail(with: nil)
+        model.setTask("t7", to: nil)
+        XCTAssertFalse(model.labelFailed.contains("t7"))
+        await settleLabels(model)
+        XCTAssertNil(model.watched?.first?.userTask)
+        writes = await labels.writes
+        XCTAssertEqual(writes.last, "t7 clear keep")
+        // The other row was never touched.
+        XCTAssertNil(model.watched?.last?.userOutcome)
+        model.close()
+    }
+
+    /// Confirm takes the inferred task as the person's own in one call.
+    @MainActor
+    func testConfirmTakesTheInferredTask() async throws {
+        let list = Self.rowsJSON([7], next: nil)
+            .replacingOccurrences(of: #""folder":"f"}"#, with: #""folder":"f","inferred_task":"tests"}"#)
+        let daemon = WatchedRecorder(answer: .json(list))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        XCTAssertEqual(model.watched?.first?.inferredTask, "tests")
+        model.confirmTask("t7")
+        await settleLabels(model)
+        let writes = await labels.writes
+        XCTAssertEqual(writes, ["t7 set(tests) keep"])
+        XCTAssertEqual(model.watched?.first?.userTask, "tests")
+        // Nothing more to confirm.
+        model.confirmTask("t7")
+        await settleLabels(model)
+        let again = await labels.writes
+        XCTAssertEqual(again.count, 1)
+        model.close()
+    }
+
+    /// A list read under way while a label is saved never puts the old
+    /// label back: the label shown is put over the rows it brings. A read
+    /// that starts after is the daemon's word again.
+    @MainActor
+    func testARefreshUnderWayNeverPutsAnOldLabelBack() async throws {
+        let daemon = WatchedRecorder(pages: [
+            nil: Self.pageJSON(first: 9, count: 3, next: "c1"),
+            "c1": Self.pageJSON(first: 6, count: 3, next: nil),
+        ])
+        let labels = LabelRecorder()
+        var saved = 0
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.labelSaved = { saved += 1 }
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        XCTAssertEqual(model.watched?.count, 6)
+
+        // Both pages are read again; the first is held until the label is
+        // saved.
+        await daemon.holdFirstPage()
+        model.rowNoLongerListed()
+        model.setOutcome("t8", to: "kept")
+        await settleLabels(model)
+        XCTAssertEqual(saved, 1, "a saved label asks the Models answers to be read again")
+        await daemon.releaseFirstPage()
+        await settle(model)
+        XCTAssertEqual(model.watched?.count, 6)
+        XCTAssertEqual(model.watched?.first { $0.sessionRef == "t8" }?.userOutcome, "kept",
+                       "the read under way does not put the unlabelled row back")
+
+        // This recorder's list never carries labels, so a read that
+        // starts now shows what it lists.
+        model.reload()
+        await settle(model)
+        XCTAssertNil(model.watched?.first { $0.sessionRef == "t8" }?.userOutcome)
+        model.close()
+    }
+
+    /// Writes to one row reach the daemon one at a time, in the order they
+    /// were made, so a later choice is never overwritten by an earlier one.
+    @MainActor
+    func testLabelWritesReachTheDaemonInOrder() async throws {
+        let daemon = WatchedRecorder(answer: .json(Self.rowsJSON([7, 5], next: nil)))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        await labels.hold()
+        model.setTask("t7", to: "docs")
+        model.setTask("t7", to: "tests")
+        model.setOutcome("t7", to: "kept")
+        for _ in 0..<20 { await Task.yield(); try await Task.sleep(for: .milliseconds(5)) }
+        var started = await labels.started
+        XCTAssertEqual(started, 1, "the second write waits for the first")
+        await labels.release()
+        await settleLabels(model)
+        started = await labels.started
+        XCTAssertEqual(started, 3)
+        let writes = await labels.writes
+        XCTAssertEqual(writes, ["t7 set(docs) keep", "t7 set(tests) keep", "t7 keep set(kept)"])
+        XCTAssertEqual(model.watched?.first?.userTask, "tests")
+        XCTAssertEqual(model.watched?.first?.userOutcome, "kept")
+        model.close()
+    }
+
+    /// A row's "couldn't be saved" mark goes once the list no longer lists
+    /// the row (made again under a new reference, or gone).
+    @MainActor
+    func testAFailedLabelsMarkGoesWithItsRow() async throws {
+        let daemon = WatchedRecorder(answer: .json(Self.rowsJSON([7, 5], next: nil)))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        await labels.fail(with: .unreachable)
+        model.setOutcome("t7", to: "kept")
+        await settleLabels(model)
+        XCTAssertEqual(model.labelFailed, ["t7"])
+        await daemon.setPage(nil, Self.rowsJSON([9, 5], next: nil, revision: 11))
+        model.reload()
+        await settle(model)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t5"])
+        XCTAssertEqual(model.labelFailed, [], "no mark is kept for a row no longer listed")
+        model.close()
+    }
+
+    /// The whole card is the row's button, padding and all, as every other
+    /// interactive row's is: the card is inside the button's label, and the
+    /// label controls are drawn over it, outside the button, where the
+    /// label keeps their room, so their menus take their own clicks.
+    @MainActor
+    func testTheWholeRowCardIsTheButtonAndTheLabelMenusSitOverIt() throws {
+        let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        let start = try XCTUnwrap(tab.range(of: "private func feedRow("))
+        let end = try XCTUnwrap(tab.range(of: "\n    }\n", range: start.upperBound..<tab.endIndex))
+        let body = String(tab[start.upperBound..<end.lowerBound])
+        func at(_ text: String) throws -> String.Index { try XCTUnwrap(body.range(of: text), text).lowerBound }
+        XCTAssertLessThan(try at("} label: {"), try at(".padding(.vertical, GlassTokens.Space.s3)"))
+        XCTAssertLessThan(try at("labelControls(row).hidden()"), try at(".insightsRowCard()"))
+        XCTAssertLessThan(try at(".insightsRowCard()"), try at(".buttonStyle(GlassPressStyle())"),
+                          "the card is in the button's label")
+        XCTAssertLessThan(try at(".buttonStyle(GlassPressStyle())"), try at(".overlay(alignment: .bottomLeading)"),
+                          "the controls sit over the button, not in it")
+    }
+
+    /// Without a daemon client the rows draw no label controls.
+    @MainActor
+    func testNoLabelControlsWithoutTheDaemon() {
+        XCTAssertFalse(InsightsSessionsModel(service: { try await SavedRecorder().call($0) }).canLabel)
+    }
+
+    @MainActor
+    func testTheLabelWordsAreCoreCopyAndTheTabDrawsThem() throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        for word in InsightsSessionsWords.taskWords {
+            XCTAssertFalse(copy["analytics_task_" + word, default: ""].isEmpty, word)
+        }
+        for word in InsightsSessionsWords.outcomeWords {
+            XCTAssertFalse(copy["analytics_outcome_" + word, default: ""].isEmpty, word)
+        }
+        for key in ["analytics_label_task", "analytics_label_outcome", "analytics_task_confirm",
+                    "analytics_task_use_inferred", "analytics_outcome_clear", "analytics_label_save_failed",
+                    "analytics_label_task_a11y", "analytics_label_outcome_a11y", "analytics_task_confirm_a11y"] {
+            XCTAssertFalse(copy[key, default: ""].isEmpty, key)
+        }
+        XCTAssertTrue(copy["analytics_task_inferred", default: ""].contains("{label}"))
+        let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        XCTAssertTrue(tab.contains("InsightsLabelMenu("))
+        XCTAssertTrue(tab.contains("model.confirmTask(reference)"))
+        XCTAssertTrue(tab.contains("model.setOutcome(reference, to: $0)"))
+        XCTAssertTrue(tab.contains("analytics_label_save_failed"))
+        let view = try MonitorNavigationTests.text("Views/InsightsView.swift")
+        XCTAssertTrue(view.contains("client.insightsSessionLabel(sessionRef: reference, task: task, outcome: outcome)"))
+    }
+
+    @MainActor
+    private func settleLabels(_ model: InsightsSessionsModel) async {
+        for _ in 0..<500 {
+            await Task.yield()
+            if !model.savingLabels { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     @MainActor
     private func settle(_ model: InsightsSessionsModel) async {
         for _ in 0..<500 {
@@ -733,6 +1029,58 @@ private actor WatchedRecorder {
         if let failure { throw failure }
         return try JSONDecoder().decode(DaemonData.InsightsSessionDrillAnswer.self,
                                         from: Data(InsightsWatchedSessionsTests.drillJSON(reference).utf8))
+    }
+}
+
+/// The daemon's `insights_session_label`: keeps each row's labels and
+/// answers the row with them, or throws while failing.
+private actor LabelRecorder {
+    var writes: [String] = []
+    /// Writes that have reached the recorder, held or not.
+    var started = 0
+    private var labels: [String: (task: String?, outcome: String?)] = [:]
+    private var failure: DaemonDataError?
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    func fail(with error: DaemonDataError?) { failure = error }
+    func hold() { holding = true }
+    func release() {
+        holding = false
+        held.forEach { $0.resume() }; held = []
+    }
+
+    private static func word(_ change: DaemonData.InsightsLabelChange) -> String {
+        switch change {
+        case .keep: return "keep"
+        case .clear: return "clear"
+        case .set(let word): return "set(\(word))"
+        }
+    }
+
+    func write(_ reference: String, _ task: DaemonData.InsightsLabelChange,
+               _ outcome: DaemonData.InsightsLabelChange) async throws -> DaemonData.InsightsSessionLabelAnswer {
+        started += 1
+        if holding { await withCheckedContinuation { held.append($0) } }
+        if let failure { throw failure }
+        writes.append("\(reference) \(Self.word(task)) \(Self.word(outcome))")
+        var current = labels[reference] ?? (nil, nil)
+        switch task {
+        case .keep: break
+        case .clear: current.task = nil
+        case .set(let word): current.task = word
+        }
+        switch outcome {
+        case .keep: break
+        case .clear: current.outcome = nil
+        case .set(let word): current.outcome = word
+        }
+        labels[reference] = current
+        let row = try InsightsWatchedSessionsTests.labelledRow(
+            inferred: nil, task: current.task, outcome: current.outcome, reference: reference)
+        let data = try JSONEncoder().encode(row)
+        let json = #"{"enabled":true,"feed":"counter_pass","readable":true,"session":"#
+            + String(decoding: data, as: UTF8.self) + "}"
+        return try JSONDecoder().decode(DaemonData.InsightsSessionLabelAnswer.self, from: Data(json.utf8))
     }
 }
 

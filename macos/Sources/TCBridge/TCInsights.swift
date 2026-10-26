@@ -26,23 +26,47 @@ public enum TCInsights {
             throw InsightsError.service(code)
         }
         guard let result, let text = String(validatingCString: result) else { throw InsightsError.operationFailed }
+        return try decode(Data(text.utf8), for: request.operation)
+    }
+
+    /// The service's answer to `operation`, decoded and checked exactly as
+    /// `call` checks the core's: a debug build's sample answers come through
+    /// here too, so neither shows an answer the other would refuse.
+    public static func decode(_ data: Data, for operation: InsightsRequest.Operation) throws -> InsightsResponse {
         do {
-            let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
+            let response = try JSONDecoder().decode(InsightsResponse.self, from: data)
             try response.insight?.validateSupportedEvidence()
             for snapshot in response.insights ?? [] { try snapshot.validateSupportedEvidence() }
             try response.task?.validateSupportedSchema()
-            try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: request.operation.id)
+            try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: operation.id)
             for task in response.tasks ?? [] { try task.validateSupportedSchema() }
             try response.specification?.validateStructure()
             for specification in response.specifications ?? [] { try specification.validateStructure() }
             try response.comparisonResult?.validateStructure(expectedSpecification: response.specification)
-            if request.operation.type == "question_cards" {
+            if operation.type == "question_cards" {
                 guard response.type == "question_cards", let result = response.result,
-                      response.text != nil, let questions = request.operation.questions else {
+                      response.text != nil, let questions = operation.questions else {
                     throw InsightsError.invalidResponse
                 }
                 try result.validateSupportedSchema(expectedQuestions: questions)
             }
+            return response
+        }
+        catch { throw InsightsError.invalidResponse }
+    }
+
+    /// An `analyze` response that reached the app another way: the
+    /// daemon's `insights_analyze_session` runs the same core operation on a
+    /// watched trace and passes its answer through. Decoded and checked as
+    /// `call` checks its own, so neither path shows an insight the other
+    /// would refuse.
+    public static func analysis(_ data: Data) throws -> InsightsResponse {
+        do {
+            let response = try JSONDecoder().decode(InsightsResponse.self, from: data)
+            guard response.type == "analyze", let insight = response.insight else {
+                throw InsightsError.invalidResponse
+            }
+            try insight.validateSupportedEvidence()
             return response
         }
         catch { throw InsightsError.invalidResponse }

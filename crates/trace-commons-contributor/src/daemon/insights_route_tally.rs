@@ -12,11 +12,25 @@
 //! - Owner decision D3, settled 2026-10-09: `insights_ledger_feed` is on by
 //!   default, so the fold runs by default; nothing is folded while a
 //!   contributor has turned it off.
-//! - Owner decision D5, open: `cost_usd` is never read.
+//! - Owner decision D5, settled 2026-10-20: a call's `cost_usd` is read
+//!   only for calls through the NEAR AI route (proof labels `verified`,
+//!   `gateway_only`, `unattested`, `pending`, `unavailable` and `failed`),
+//!   and kept as that session's one NEAR AI charge, in integer USD micros,
+//!   with the one model its calls named as served, if they named one; held
+//!   (`LEDGER_MONEY_IN_INSIGHTS` false) none is taken. The ledger keeps a
+//!   call for 24 hours, so the charge is taken when the call is folded or
+//!   not at all. `outside` calls and calls with no proof label add no
+//!   charge: an `outside` call is not NEAR AI's, and the proxy prices it
+//!   whether or not anyone was billed; an unlabelled call's route is
+//!   unknown. No list
+//!   price is kept here; the answers price stored tokens when they are
+//!   built. A session in a Never folder keeps no tally at all
+//!   (`insights_week::NeverSessions`).
 //!
-//! Every label here comes from IronWire's proof label and never from a
-//! backend or model name. Only `verified` is proof; `gateway_only` names the
-//! relay, not the model. A session with no tally is `unobserved`, never
+//! Every category label here comes from IronWire's proof label and never
+//! from a backend or model name; the one model name a tally keeps is its
+//! charge's served model, and no backend is kept. Only `verified` is proof;
+//! `gateway_only` names the relay, not the model. A session with no tally is `unobserved`, never
 //! "outside": no proxy record is not evidence of where a call went.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,8 +96,98 @@ impl RouteBuckets {
     }
 }
 
-/// One session's tally. Counts and one time only: never an id, a digest of
-/// one, a backend, a model, a price or a body reference.
+/// One session's NEAR AI charge, summed from the ledger's `cost_usd` as
+/// each call through the NEAR AI route is folded: one per tally, whatever
+/// models served the calls.
+///
+/// Known only when every call counted here carried a valid charge and the
+/// sum never overflowed: a call with no charge makes the whole session's
+/// charge unknown, never zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NearAiCharge {
+    /// The sum of the charged calls, in integer USD micros.
+    pub usd_micros: u64,
+    /// Calls whose charge is in `usd_micros`.
+    pub charged_calls: u64,
+    /// Calls with no charge, or one that is not a finite, non-negative
+    /// amount below `u64::MAX` micros.
+    pub calls_without_charge: u64,
+    /// The sum overflowed `u64`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overflowed: bool,
+    /// The one model every call counted here named as served, normalized
+    /// as the answers normalize labels (`served_label`): the only thing the
+    /// Models answers attribute a charge to a model by. `None` once any
+    /// call named none, or two calls named different ones; it stays `None`
+    /// after that. Never the requested model: that is not who served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
+}
+
+impl NearAiCharge {
+    /// The charge, or `None` when it is unknown.
+    #[must_use]
+    pub(crate) fn known(&self) -> Option<u64> {
+        (self.calls_without_charge == 0 && !self.overflowed).then_some(self.usd_micros)
+    }
+
+    fn add(&mut self, usd: Option<f64>, served: Option<String>) {
+        if self.charged_calls == 0 && self.calls_without_charge == 0 {
+            self.served_model = served;
+        } else if self.served_model != served {
+            self.served_model = None;
+        }
+        match usd.and_then(usd_micros) {
+            Some(micros) => {
+                self.charged_calls = self.charged_calls.saturating_add(1);
+                match self.usd_micros.checked_add(micros) {
+                    Some(sum) => self.usd_micros = sum,
+                    None => self.overflowed = true,
+                }
+            }
+            None => self.calls_without_charge = self.calls_without_charge.saturating_add(1),
+        }
+    }
+}
+
+/// A ledger amount in integer USD micros, rounded to the nearest; `None`
+/// when it is not finite, is negative, or does not fit.
+fn usd_micros(usd: f64) -> Option<u64> {
+    if !usd.is_finite() || usd < 0.0 {
+        return None;
+    }
+    let micros = (usd * 1_000_000.0).round();
+    // `u64::MAX as f64` rounds up to 2^64, so `<` keeps the cast exact.
+    (micros < u64::MAX as f64).then_some(micros as u64)
+}
+
+/// The model a call names as served, normalized as the answers normalize
+/// labels; `None` when it names none.
+fn served_label(row: &RoutedExchange) -> Option<String> {
+    row.served_model
+        .as_deref()
+        .and_then(crate::insights::session_pricing::normalize_model_label)
+}
+
+/// A session's NEAR AI charge for the Models answers: `None` when it had
+/// no call through the NEAR AI route. Its `usd_micros` is `None` when the
+/// charge is unknown (a call without one, or an overflow).
+#[must_use]
+pub(crate) fn session_charge(
+    tally: &RouteTally,
+) -> Option<crate::insights::model_answers::SessionCharge> {
+    tally
+        .charge
+        .as_ref()
+        .map(|charge| crate::insights::model_answers::SessionCharge {
+            usd_micros: charge.known(),
+            served_model: charge.served_model.clone(),
+        })
+}
+
+/// One session's tally. Counts, one time and the NEAR AI charge only: never
+/// an id, a digest of one, a backend, a list price or a body reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RouteTally {
@@ -101,6 +205,12 @@ pub(crate) struct RouteTally {
     pub calls_without_counts: RouteBuckets,
     /// The latest call folded, for ageing the tally out.
     pub last_call_at: DateTime<Utc>,
+    /// The NEAR AI charge of the calls through the NEAR AI route, one per
+    /// session. `None` when no such call was folded, and then left out of
+    /// the file, so a store written before charges loads with none and a
+    /// tally with none is written as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge: Option<NearAiCharge>,
 }
 
 /// Where a session's calls went, checked in this order, first match wins.
@@ -312,11 +422,15 @@ pub(crate) fn fold_plan(window: &[RoutedExchange], cursor: FoldCursor) -> FoldPl
 /// `routing::enriched` applies before any join), or when no single tool can
 /// be named for it, or the tool is not one feed T counts. The tool is never
 /// guessed.
+///
+/// `ledger_money` is `LEDGER_MONEY_IN_INSIGHTS` (owner decision D5): held,
+/// no charge is taken, so no money and no served model reach the store.
 pub(crate) fn fold_into(
     routing: &mut BTreeMap<KeyedDigest, RouteTally>,
     key: &DigestKey,
     plan: &FoldPlan<'_>,
     speakers: &Speakers,
+    ledger_money: bool,
 ) -> FoldSummary {
     let mut summary = FoldSummary::default();
     for row in &plan.rows {
@@ -335,6 +449,7 @@ pub(crate) fn fold_into(
             tokens: RouteBuckets::default(),
             calls_without_counts: RouteBuckets::default(),
             last_call_at: row.started_at,
+            charge: None,
         });
         let calls = tally.calls.slot(row.proof);
         *calls = calls.saturating_add(1);
@@ -347,6 +462,12 @@ pub(crate) fn fold_into(
                 let bucket = tally.calls_without_counts.slot(row.proof);
                 *bucket = bucket.saturating_add(1);
             }
+        }
+        if ledger_money && through_near_ai(row.proof) {
+            tally
+                .charge
+                .get_or_insert_with(NearAiCharge::default)
+                .add(row.cost_usd, served_label(row));
         }
         tally.last_call_at = tally.last_call_at.max(row.started_at);
         summary.folded += 1;
@@ -379,6 +500,22 @@ pub(crate) fn prune(
     for (_, digest) in oldest.into_iter().take(excess) {
         routing.remove(&digest);
     }
+}
+
+/// Whether a call went through the NEAR AI route: the buckets
+/// `RouteBuckets::routed` sums.
+fn through_near_ai(proof: Option<ProofStatus>) -> bool {
+    matches!(
+        proof,
+        Some(
+            ProofStatus::Verified
+                | ProofStatus::GatewayOnly
+                | ProofStatus::Unattested
+                | ProofStatus::Pending
+                | ProofStatus::Unavailable
+                | ProofStatus::Failed
+        )
+    )
 }
 
 /// The session id a row carries; an empty one is none.
@@ -435,7 +572,7 @@ mod tests {
         window: &[RoutedExchange],
     ) -> FoldSummary {
         let plan = fold_plan(window, *cursor);
-        let summary = fold_into(routing, &key(), &plan, &Vec::new());
+        let summary = fold_into(routing, &key(), &plan, &Vec::new(), true);
         *cursor = plan.next;
         summary
     }
@@ -557,7 +694,13 @@ mod tests {
         row.path = None;
         let plan = fold_plan(std::slice::from_ref(&row), FoldCursor::default());
         let mut routing = BTreeMap::new();
-        let summary = fold_into(&mut routing, &key(), &plan, &vec![(SOURCE_CODEX, "openai")]);
+        let summary = fold_into(
+            &mut routing,
+            &key(),
+            &plan,
+            &vec![(SOURCE_CODEX, "openai")],
+            true,
+        );
         assert_eq!(summary.folded, 1);
         only(&routing);
     }
@@ -676,6 +819,7 @@ mod tests {
             tokens: RouteBuckets::default(),
             calls_without_counts: RouteBuckets::default(),
             last_call_at: at(0),
+            charge: None,
         }
     }
 
@@ -687,6 +831,200 @@ mod tests {
             outside: o,
             unrecorded: n,
         }
+    }
+
+    /// The NEAR AI charge of the one session: `None` with no NEAR AI call,
+    /// `Some(None)` when unknown.
+    fn charge(routing: &BTreeMap<KeyedDigest, RouteTally>) -> Option<Option<u64>> {
+        session_charge(only(routing)).map(|charge| charge.usd_micros)
+    }
+
+    fn served(routing: &BTreeMap<KeyedDigest, RouteTally>) -> Option<String> {
+        session_charge(only(routing)).and_then(|charge| charge.served_model)
+    }
+
+    #[test]
+    fn a_fold_captures_the_near_ai_charge_and_a_later_fold_adds_to_it() {
+        let mut first = codex(1, Some(ProofStatus::Verified));
+        first.served_model = Some("GLM-4.6".to_string());
+        first.cost_usd = Some(0.0125);
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        fold(&mut routing, &mut cursor, std::slice::from_ref(&first));
+        assert_eq!(charge(&routing), Some(Some(12_500)));
+        assert_eq!(
+            only(&routing).charge,
+            Some(NearAiCharge {
+                usd_micros: 12_500,
+                charged_calls: 1,
+                calls_without_charge: 0,
+                overflowed: false,
+                served_model: Some("glm-4.6".to_string()),
+            })
+        );
+
+        // A later fold adds the new calls only, into the one charge.
+        let mut second = codex(2, Some(ProofStatus::GatewayOnly));
+        second.served_model = Some("GLM-4.6".to_string());
+        second.cost_usd = Some(0.5);
+        fold(&mut routing, &mut cursor, &[first, second.clone()]);
+        assert_eq!(charge(&routing), Some(Some(512_500)));
+        assert_eq!(served(&routing).as_deref(), Some("glm-4.6"));
+        assert_eq!(only(&routing).charge.as_ref().unwrap().charged_calls, 2);
+    }
+
+    /// A tally keeps one charge, and a served model only while every call
+    /// named the same one: a call that names another, or none (the
+    /// requested model is not who served), leaves it unnamed for good.
+    #[test]
+    fn a_charge_names_a_served_model_only_while_every_call_names_the_same_one() {
+        let named = |id: i64, model: Option<&str>| {
+            let mut row = codex(id, Some(ProofStatus::Verified));
+            row.served_model = model.map(str::to_owned);
+            row.requested_model = Some("Requested-Model".to_string());
+            row.cost_usd = Some(0.25);
+            row
+        };
+        for (calls, expected) in [
+            (vec![named(1, Some("A")), named(2, Some("a"))], Some("a")),
+            (vec![named(1, Some("A")), named(2, Some("B"))], None),
+            (vec![named(1, Some("A")), named(2, None)], None),
+            (vec![named(1, None), named(2, Some("A"))], None),
+            (
+                vec![
+                    named(1, Some("A")),
+                    named(2, Some("B")),
+                    named(3, Some("A")),
+                ],
+                None,
+            ),
+        ] {
+            let mut routing = BTreeMap::new();
+            fold(&mut routing, &mut FoldCursor::default(), &calls);
+            assert_eq!(served(&routing).as_deref(), expected, "{calls:?}");
+            assert_eq!(charge(&routing), Some(Some(250_000 * calls.len() as u64)));
+        }
+    }
+
+    /// `LEDGER_MONEY_IN_INSIGHTS` held: the fold counts calls and tokens
+    /// as before and takes no charge, so no money or served model is kept.
+    #[test]
+    fn held_ledger_money_takes_no_charge() {
+        let mut row = codex(1, Some(ProofStatus::Verified));
+        row.served_model = Some("GLM-4.6".to_string());
+        let window = [row];
+        let plan = fold_plan(&window, FoldCursor::default());
+        let mut held = BTreeMap::new();
+        let mut shown = BTreeMap::new();
+        fold_into(&mut held, &key(), &plan, &Vec::new(), false);
+        fold_into(&mut shown, &key(), &plan, &Vec::new(), true);
+        assert!(only(&shown).charge.is_some());
+        assert_eq!(only(&held).charge, None);
+        assert_eq!(session_charge(only(&held)), None);
+        assert_eq!(only(&held).calls, only(&shown).calls);
+        assert_eq!(only(&held).tokens, only(&shown).tokens);
+        let text = serde_json::to_string(&held).unwrap().to_lowercase();
+        assert!(
+            !text.contains("usd_micros") && !text.contains("glm"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn only_calls_through_the_near_ai_route_are_charged() {
+        let mut routing = BTreeMap::new();
+        fold(
+            &mut routing,
+            &mut FoldCursor::default(),
+            &[codex(1, Some(ProofStatus::Outside)), codex(2, None)],
+        );
+        assert_eq!(only(&routing).charge, None);
+        assert_eq!(charge(&routing), None, "no NEAR AI traffic, no charge");
+    }
+
+    #[test]
+    fn a_call_without_a_charge_makes_the_sessions_charge_unknown_never_zero() {
+        let mut missing = codex(2, Some(ProofStatus::Verified));
+        missing.cost_usd = None;
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        fold(
+            &mut routing,
+            &mut cursor,
+            &[codex(1, Some(ProofStatus::Verified)), missing],
+        );
+        let entry = only(&routing).charge.clone().unwrap();
+        assert_eq!((entry.charged_calls, entry.calls_without_charge), (1, 1));
+        assert_eq!(charge(&routing), Some(None));
+        // A later priced call does not make it known again.
+        fold(
+            &mut routing,
+            &mut cursor,
+            &[codex(3, Some(ProofStatus::Verified))],
+        );
+        assert_eq!(charge(&routing), Some(None));
+
+        // A charge that is not a finite, non-negative amount is unknown too.
+        for bad in [f64::NAN, f64::INFINITY, -0.01, 1e20] {
+            let mut row = codex(1, Some(ProofStatus::Verified));
+            row.cost_usd = Some(bad);
+            let mut routing = BTreeMap::new();
+            fold(&mut routing, &mut FoldCursor::default(), &[row]);
+            assert_eq!(charge(&routing), Some(None), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_charge_that_overflows_is_unknown() {
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        fold(
+            &mut routing,
+            &mut cursor,
+            &[codex(1, Some(ProofStatus::Verified))],
+        );
+        routing.values_mut().next().unwrap().charge = Some(NearAiCharge {
+            usd_micros: u64::MAX,
+            charged_calls: 1,
+            ..NearAiCharge::default()
+        });
+        fold(
+            &mut routing,
+            &mut cursor,
+            &[codex(2, Some(ProofStatus::Verified))],
+        );
+        assert!(only(&routing).charge.as_ref().unwrap().overflowed);
+        assert_eq!(charge(&routing), Some(None));
+    }
+
+    /// The ledger keeps a call for 24 hours; the charge stays in the tally
+    /// after the call has left the window.
+    #[test]
+    fn the_charge_outlives_the_ledger_window() {
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        let window: Vec<RoutedExchange> = (1..=2)
+            .map(|id| codex(id, Some(ProofStatus::Verified)))
+            .collect();
+        fold(&mut routing, &mut cursor, &window);
+        assert_eq!(charge(&routing), Some(Some(2_000_000)));
+        // Every row aged out of the ledger.
+        assert_eq!(fold(&mut routing, &mut cursor, &[]).folded, 0);
+        assert_eq!(charge(&routing), Some(Some(2_000_000)));
+    }
+
+    #[test]
+    fn a_tally_without_a_charge_loads_and_writes_as_before() {
+        let old = serde_json::json!({
+            "calls": buckets(1, 0, 0, 0, 0),
+            "tokens": buckets(110, 0, 0, 0, 0),
+            "calls_without_counts": RouteBuckets::default(),
+            "last_call_at": at(0),
+        });
+        let tally: RouteTally = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(tally.charge, None);
+        assert_eq!(session_charge(&tally), None);
+        assert_eq!(serde_json::to_value(&tally).unwrap(), old);
     }
 
     #[test]
@@ -747,8 +1085,10 @@ mod tests {
         );
     }
 
+    /// The tally holds no id, no backend and no list price. The one money
+    /// figure is the NEAR AI charge, as integer USD micros.
     #[test]
-    fn a_tally_holds_no_id_backend_or_price() {
+    fn a_tally_holds_no_id_backend_or_list_price() {
         let mut routing = BTreeMap::new();
         fold(
             &mut routing,
@@ -756,9 +1096,10 @@ mod tests {
             &[codex(1, Some(ProofStatus::Verified))],
         );
         let text = serde_json::to_string(only(&routing)).unwrap();
-        for leak in [SESSION, "SECRET-BACKEND", "cost", "1.0"] {
+        for leak in [SESSION, "SECRET-BACKEND", "cost", "price", "1.0"] {
             assert!(!text.contains(leak), "{leak} in {text}");
         }
+        assert!(text.contains("\"usd_micros\":1000000"), "{text}");
     }
 
     #[test]

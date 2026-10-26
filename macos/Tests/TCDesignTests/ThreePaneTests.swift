@@ -305,6 +305,58 @@ final class ThreePaneTests: XCTestCase {
         }
     }
 
+    /// A drag on the divider resizes the panes and never moves the window
+    /// (Kristi, 2026-10-21): the window is movable by its background, so
+    /// the handle under the gap must refuse to move it. It reports the drag
+    /// from where it began, and takes the pointer a little into each pane.
+    @MainActor
+    func test_theDividerHandleNeverMovesTheWindow() throws {
+        let handle = GlassDividerHandleView(frame: CGRect(x: 0, y: 0, width: 18, height: 400))
+        XCTAssertFalse(handle.mouseDownCanMoveWindow)
+        XCTAssertTrue(handle.acceptsFirstMouse(for: nil))
+        XCTAssertGreaterThan(GlassPaneLayout.dividerReach, 0)
+        XCTAssertLessThan(GlassPaneLayout.dividerReach, gap)
+
+        var dragged: [CGFloat] = []
+        var ended: CGFloat?
+        handle.onDrag = { dragged.append($0) }
+        handle.onEnd = { ended = $0 }
+        func event(_ type: NSEvent.EventType, x: CGFloat) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: CGPoint(x: x, y: 10), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseDragged(with: try event(.leftMouseDragged, x: 430))
+        handle.mouseDragged(with: try event(.leftMouseDragged, x: 380))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 460))
+        XCTAssertEqual(dragged, [30, -20])
+        XCTAssertEqual(ended, 60)
+
+        // A bare click, the one that activates the window included, ends
+        // no drag, so it never writes the width the layout happens to show.
+        ended = nil
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 400))
+        XCTAssertNil(ended)
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 402))
+        XCTAssertNil(ended, "only a drag that moved ends one")
+    }
+
+    /// The handle reaches into the map only, never over the main pane's
+    /// scroller beside the gap, and the pane ends a drag only when one
+    /// began.
+    @MainActor
+    func test_theDividerLeavesTheMainPanesEdgeAlone() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Components/ThreePane.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains(".padding(.trailing, -GlassPaneLayout.dividerReach)"))
+        XCTAssertFalse(source.contains(".padding(.horizontal, -GlassPaneLayout.dividerReach)"))
+        XCTAssertTrue(source.contains("guard let start = dragStart else { return }"))
+    }
+
     /// A window that opens with a main pane the divider widened is that
     /// much wider, so the map keeps its kept width.
     func test_theKeptMainWidthWidensTheOpeningWindow() {

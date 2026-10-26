@@ -258,6 +258,30 @@ public protocol DaemonDataClient: Sendable {
     /// `insights_session_drill`: one listed watched trace turn by turn, by
     /// its `sessionRef`, at the local UTC offset.
     func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
+    /// `insights_model_answers`: the Models card's six answers over the
+    /// counter pass's last 13 weeks, while feed T shows. Answers `enabled:
+    /// false` while the setting is off; an older daemon refuses it as
+    /// `unknown_method`. Either way, and on any failed read, no card is
+    /// drawn.
+    func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
+
+    /// `insights_session_label`: set or clear the person's own task and
+    /// outcome on one listed watched trace, by its `sessionRef`. Kept in
+    /// the daemon's counter store only; never sent anywhere. Answers the
+    /// row as the list now gives it. An older daemon refuses it as
+    /// `unknown_method`.
+    func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
+                              outcome: DaemonData.InsightsLabelChange) async throws
+        -> DaemonData.InsightsSessionLabelAnswer
+    /// `insights_analyze_session`: analyze one listed watched trace by its
+    /// `sessionRef`, from the file the daemon's watcher finds (the app never
+    /// names one), and with `save` store it as a dated snapshot in the
+    /// standard Insights store. Read and written on this Mac only. An
+    /// unknown or remade reference is refused as `insights-session-unknown`,
+    /// a file that has gone as `insights-session-file-gone`; an older daemon
+    /// refuses it as `unknown_method`.
+    func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
+        -> DaemonData.InsightsAnalyzeSessionAnswer
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older

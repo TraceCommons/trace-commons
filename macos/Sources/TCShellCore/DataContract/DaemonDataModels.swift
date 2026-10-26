@@ -2282,14 +2282,69 @@ extension DaemonData {
         /// Tokens per turn for the row; `nil` for Codex, for a trace with no
         /// known turn, and from a daemon that predates it.
         public let sparkline: InsightsSessionSparkline?
+        /// The task the daemon's rules infer: `bug_fix`, `refactor`,
+        /// `tests`, `docs`, `other` or `no_edits`; `nil` with no facts and
+        /// from a daemon that predates the labels.
+        public let inferredTask: String?
+        /// The person's own task (`insights_session_label`), one of the five
+        /// task words; `nil` while unset. Settable, so the model can show a
+        /// change before the daemon answers.
+        public var userTask: String?
+        /// The person's own outcome: `kept`, `partly_kept` or
+        /// `thrown_away`; `nil` while unset.
+        public var userOutcome: String?
+        /// Whether `insights_analyze_session` can analyze the trace: `false`
+        /// when its file is over the core's size limit, or is a Codex file
+        /// without exactly one session in it. Absent from a daemon before
+        /// the flag; read as `true` then, and the daemon's refusal says why.
+        public let analyzable: Bool?
 
         public var id: String { sessionRef }
+        /// `analyzable`, `true` from a daemon that predates it.
+        public var canAnalyze: Bool { analyzable ?? true }
 
         public enum CodingKeys: String, CodingKey {
-            case source, turns, folder, tokens, sparkline
+            case source, turns, folder, tokens, sparkline, analyzable
             case sessionRef = "session_ref"
             case startedAt = "started_at"
+            case inferredTask = "inferred_task"
+            case userTask = "user_task"
+            case userOutcome = "user_outcome"
         }
+    }
+
+    /// One `insights_session_label` param: absent (`keep`), `null`
+    /// (`clear`) or a closed word (`set`).
+    public enum InsightsLabelChange: Equatable, Sendable {
+        case keep
+        case clear
+        case set(String)
+    }
+
+    /// `insights_session_label`: the labelled row as `insights_sessions` now
+    /// lists it (`session`). The same three shapes as the list: off,
+    /// unreadable, and the row.
+    public struct InsightsSessionLabelAnswer: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        public let readable: Bool?
+        public let reason: String?
+        public let session: InsightsWatchedSession?
+    }
+
+    /// `insights_analyze_session`: one listed watched trace analyzed by the
+    /// daemon from the file its watcher found, and with `save` stored as a
+    /// dated snapshot in the standard Insights store. `analysis` is the
+    /// core's own `analyze` response, kept as the JSON it came as so the app
+    /// decodes it with the same `TCBridge` type the in-process call returns.
+    /// The same three shapes as the list: off, unreadable, and the analysis.
+    /// No path crosses.
+    public struct InsightsAnalyzeSessionAnswer: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        public let readable: Bool?
+        public let reason: String?
+        public let analysis: CoreJSON?
     }
 
     /// `insights_session_drill`: one watched trace turn by turn, in the
@@ -2302,6 +2357,258 @@ extension DaemonData {
         public let readable: Bool?
         public let reason: String?
         public let session: CoreJSON?
+    }
+
+    /// `insights_model_answers`: the Models card's six answers over the
+    /// daemon's counter pass (feed T), gated as `insights_week` is. Use it
+    /// only when `showsCounterPass`; otherwise no card is drawn, never an
+    /// empty one. Declared model labels, counts and fixed snake_case words:
+    /// no session reference, path or backend crosses. Money crosses only on
+    /// the `docs_cost` row, as integer USD micros, either at API list
+    /// prices (`figure`) or as what NEAR AI charged (`nearAiCharge`), never
+    /// summed.
+    public struct InsightsModelAnswers: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when the store, key or folder rules
+        /// could not be read, which is never drawn as rows short of traces.
+        public let readable: Bool?
+        public let reason: String?
+        public let updatedAt: String?
+        /// The 13 weeks ending when the answer was built, RFC 3339; the
+        /// week on screen does not move it.
+        public let windowStart: String?
+        public let windowEnd: String?
+        public let pricing: InsightsModelPricing?
+        /// Six, in the daemon's order: `bug_fix_rejected`,
+        /// `refactor_rejected`, `tests_rejected`, `docs_cost`,
+        /// `rejected_across_tasks`, `finish_time`.
+        public let rows: [InsightsModelAnswerRow]?
+
+        /// Enabled, readable, from the counter pass, and carrying rows.
+        public var showsCounterPass: Bool {
+            enabled && readable == true && feed == "counter_pass" && rows != nil
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, reason, pricing, rows
+            case updatedAt = "updated_at"
+            case windowStart = "window_start"
+            case windowEnd = "window_end"
+        }
+    }
+
+    /// How the answer's money is priced: `basis` is `api_list` (published
+    /// API list prices, applied when the answer is built), and `tables`
+    /// names each shipped price table used. No table carries a date.
+    public struct InsightsModelPricing: Codable, Equatable, Sendable {
+        public let basis: String
+        public let tables: [InsightsPricingTable]
+    }
+
+    public struct InsightsPricingTable: Codable, Equatable, Sendable {
+        /// The table's content digest, the one digest on this wire.
+        public let tableId: String
+        public let version: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case version
+            case tableId = "table_id"
+        }
+    }
+
+    /// One of the six answers. `state` is `not_enough_sessions`,
+    /// `not_priced`, `no_clear_difference` or `answered`; with
+    /// `no_clear_difference` both figures are present and neither leads.
+    public struct InsightsModelAnswerRow: Codable, Equatable, Sendable, Identifiable {
+        public let question: String
+        public let state: String
+        /// `rejected` or `undone` on a rejection row comparing two models,
+        /// else `nil`.
+        public let basis: String?
+        /// `prompting` or `not_prompting` on `finish_time`, else `nil`.
+        public let editMode: String?
+        public let leader: InsightsModelFigure?
+        public let next: InsightsModelFigure?
+        /// Each model's traces in the question, in the daemon's order.
+        public let sessionsByModel: [InsightsModelCount]
+        public let leftOut: InsightsModelLeftOut
+        /// On `docs_cost` only, and only when a Docs trace in the window
+        /// went through NEAR AI.
+        public let nearAiCharge: InsightsNearAiCharge?
+        /// On the rejection rows: each model whose traces in the row the
+        /// person gave an outcome, by label, whatever the row's state.
+        /// Empty elsewhere; absent from a daemon before the labels.
+        public let keptByModel: [InsightsModelKept]?
+
+        public var id: String { question }
+
+        public enum CodingKeys: String, CodingKey {
+            case question, state, basis, leader, next
+            case editMode = "edit_mode"
+            case sessionsByModel = "sessions_by_model"
+            case leftOut = "left_out"
+            case nearAiCharge = "near_ai_charge"
+            case keptByModel = "kept_by_model"
+        }
+    }
+
+    /// The outcomes the person gave one model's traces in a row (their
+    /// Outcome labels): beside the rejection figure, never folded into it.
+    /// The three counts sum to `labelled`; `keptPermille` is `kept /
+    /// labelled`, partly kept not counted as kept.
+    public struct InsightsKeptFigure: Codable, Equatable, Sendable {
+        public let labelled: Int
+        public let kept: Int
+        public let partlyKept: Int
+        public let thrownAway: Int
+        public let keptPermille: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case labelled, kept
+            case partlyKept = "partly_kept"
+            case thrownAway = "thrown_away"
+            case keptPermille = "kept_permille"
+        }
+    }
+
+    /// `[label, kept figure]`, as the daemon sends a pair.
+    public struct InsightsModelKept: Codable, Equatable, Sendable {
+        public let label: String
+        public let figure: InsightsKeptFigure
+
+        public init(label: String, figure: InsightsKeptFigure) {
+            self.label = label; self.figure = figure
+        }
+
+        public init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            label = try pair.decode(String.self)
+            figure = try pair.decode(InsightsKeptFigure.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var pair = encoder.unkeyedContainer()
+            try pair.encode(label)
+            try pair.encode(figure)
+        }
+    }
+
+    /// One model's figure on a row. `label` is the label the trace
+    /// declared, not a verified serving identity. `sessions` is the
+    /// figure's sample: priced traces for a cost, finished ones for a time.
+    public struct InsightsModelFigure: Codable, Equatable, Sendable {
+        public let label: String
+        public let sessions: Int
+        public let edits: Int?
+        public let figure: InsightsModelFigureValue
+        /// Shown beside a rejection figure, never added to it.
+        public let interruptsPerSessionPermille: Int?
+        /// On a `docs_cost` figure only: this model's traces through NEAR AI.
+        public let nearAiCharge: InsightsNearAiCharge?
+        /// On a rejection figure only, and only when the person gave one of
+        /// this model's traces in the row an outcome; the same figure as
+        /// the row's `keptByModel` entry for this label.
+        public let kept: InsightsKeptFigure?
+
+        public enum CodingKeys: String, CodingKey {
+            case label, sessions, edits, figure, kept
+            case interruptsPerSessionPermille = "interrupts_per_session_permille"
+            case nearAiCharge = "near_ai_charge"
+        }
+    }
+
+    /// `{kind: "rate_permille", value}`, `{kind: "usd_micros", value}` or
+    /// `{kind: "finish_time", median_active_secs, median_user_turns}`. A
+    /// kind this build does not know is drawn as the dash.
+    public struct InsightsModelFigureValue: Codable, Equatable, Sendable {
+        public let kind: String
+        public let value: UInt64?
+        public let medianActiveSecs: UInt64?
+        public let medianUserTurns: UInt64?
+
+        public init(kind: String, value: UInt64? = nil, medianActiveSecs: UInt64? = nil,
+                    medianUserTurns: UInt64? = nil) {
+            self.kind = kind; self.value = value
+            self.medianActiveSecs = medianActiveSecs; self.medianUserTurns = medianUserTurns
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case kind, value
+            case medianActiveSecs = "median_active_secs"
+            case medianUserTurns = "median_user_turns"
+        }
+    }
+
+    /// What NEAR AI charged, from the proxy ledger (`basis:
+    /// near_ai_ledger`): the median per trace over the traces with a known
+    /// charge, `nil` when none is known, never zero.
+    public struct InsightsNearAiCharge: Codable, Equatable, Sendable {
+        public let basis: String
+        public let median: InsightsModelFigureValue?
+        public let routedSessions: Int
+        public let chargeUnknown: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, median
+            case routedSessions = "routed_sessions"
+            case chargeUnknown = "charge_unknown"
+        }
+    }
+
+    /// `[label, sessions]`, as the daemon sends a pair.
+    public struct InsightsModelCount: Codable, Equatable, Sendable {
+        public let label: String
+        public let sessions: Int
+
+        public init(label: String, sessions: Int) {
+            self.label = label; self.sessions = sessions
+        }
+
+        public init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            label = try pair.decode(String.self)
+            sessions = try pair.decode(Int.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var pair = encoder.unkeyedContainer()
+            try pair.encode(label)
+            try pair.encode(sessions)
+        }
+    }
+
+    /// The traces left out of one answer, per reason.
+    public struct InsightsModelLeftOut: Codable, Equatable, Sendable {
+        public let unknownFacts: Int
+        public let automated: Int
+        public let delegated: Int
+        public let capped: Int
+        public let routed: Int
+        public let reviewer: Int
+        public let noMajority: Int
+        public let unpriced: Int
+        /// Absent from a daemon before the shared-type comparison: read as 0.
+        public let tooFewSessions: Int?
+        public let tooFewEdits: Int
+        public let mixTooDifferent: Int
+
+        /// Every reason by its wire name, in the daemon's order.
+        public var reasons: [(reason: String, sessions: Int)] {
+            [("unknown_facts", unknownFacts), ("automated", automated), ("delegated", delegated),
+             ("capped", capped), ("routed", routed), ("reviewer", reviewer), ("no_majority", noMajority),
+             ("unpriced", unpriced), ("too_few_sessions", tooFewSessions ?? 0), ("too_few_edits", tooFewEdits),
+             ("mix_too_different", mixTooDifferent)]
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case automated, delegated, capped, routed, reviewer, unpriced
+            case unknownFacts = "unknown_facts"
+            case noMajority = "no_majority"
+            case tooFewSessions = "too_few_sessions"
+            case tooFewEdits = "too_few_edits"
+            case mixTooDifferent = "mix_too_different"
+        }
     }
 
     /// `insights_glance`: today's routed calls per tool from the proxy ledger

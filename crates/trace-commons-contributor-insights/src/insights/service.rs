@@ -8,9 +8,13 @@
 //! `analyze` returns the SHA-256 of the exact bytes of any path the daemon
 //! user can read, `open` is a recursive private-directory create at any path,
 //! and any sufficiently private directory is adopted as a store, `~/.ssh`
-//! among them. No daemon method forwards here today, and none may without an
-//! authorization gate and an allow-list of store directories first. The same
-//! constraint is stated in both copies of the C header.
+//! among them. So no daemon method forwards a caller's request here. One
+//! daemon method builds its own: `insights_analyze_session` runs `analyze`
+//! on a file its own watcher found, matched to a row the caller names by an
+//! opaque reference, into the standard store, so the caller chooses neither
+//! the file nor the directory. Any other forwarding needs an authorization
+//! gate and an allow-list of store directories first. The same constraint is
+//! stated in both copies of the C header.
 use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
@@ -1910,12 +1914,15 @@ mod tests {
             assert!(!copy.contains_key(key), "{key} was removed");
         }
         // User-facing copy says "trace", not "session", with two exceptions:
-        // the Sessions tab (with its card title and drill-down column
-        // header) and the context tip's "current session".
+        // the Sessions tab (with its card title, drill-down column header
+        // and Analyze's lines that send the person to it) and the context
+        // tip's "current session".
         let exceptions = [
             "analytics_tab_sessions",
             "analytics_card_sessions",
             "analytics_drill_session",
+            "analytics_analyze_empty",
+            "analytics_analyze_how",
             "analytics_tip_context",
         ];
         for (key, words) in ANALYTICS_COPY {
@@ -1940,6 +1947,31 @@ mod tests {
             copy["analytics_tip_context"],
             "Context is at {ctx} in your current session."
         );
+    }
+
+    /// Every value a Sessions row's own labels can take has its words, so
+    /// a shell never shows a wire label, and the inferred task says so.
+    #[test]
+    fn every_session_label_has_its_words() {
+        use super::super::session_labels::{LabelledTask, SessionOutcome};
+        let copy = ui_copy();
+        for task in LabelledTask::ALL {
+            let key = format!("analytics_task_{}", task.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        for outcome in SessionOutcome::ALL {
+            let key = format!("analytics_outcome_{}", outcome.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        assert!(!copy.contains_key("analytics_task_no_edits"));
+        assert_eq!(copy["analytics_task_inferred"], "{label} · inferred");
+        for key in [
+            "analytics_label_task_a11y",
+            "analytics_label_outcome_a11y",
+            "analytics_task_confirm_a11y",
+        ] {
+            assert!(copy[key].contains("{label}"), "{key} names its row");
+        }
     }
 
     /// Owner decision 2026-10-20: a Patterns card whose estimate rounds to
@@ -1984,6 +2016,77 @@ mod tests {
             ("analytics_pattern_long_context_headline_other", "{n} turns"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+    }
+
+    /// The Models card (model answers spec section 8): a row name and a
+    /// fact for every question the engine answers, on either basis; a word
+    /// for every left-out reason it counts; and no ranking word anywhere
+    /// on the card.
+    #[test]
+    fn the_models_card_has_words_for_every_answer_and_no_ranking_word() {
+        use super::super::model_answers::{LeftOut, ModelQuestion};
+        let copy = ui_copy();
+        for question in ModelQuestion::ALL {
+            let wire = serde_json::to_value(question).unwrap();
+            let name = wire.as_str().unwrap();
+            for key in [
+                format!("analytics_models_row_{name}"),
+                format!("analytics_models_lead_{name}"),
+            ] {
+                assert!(copy.contains_key(&key), "missing {key}");
+            }
+            if name.contains("rejected") {
+                let key = format!("analytics_models_lead_{name}_undone");
+                assert!(copy[&key].contains("undone"), "{key}");
+                // The figure is a share of the model's edits, so the
+                // model with the lowest share can still have the most
+                // rejected edits: the fact names a share, never a count.
+                for key in [format!("analytics_models_lead_{name}"), key] {
+                    let words = &copy[&key];
+                    assert!(words.starts_with("Lowest share of edits"), "{key}");
+                    assert!(!words.to_lowercase().contains("fewest"), "{key}");
+                }
+            }
+        }
+        let left_out = serde_json::to_value(LeftOut::default()).unwrap();
+        for reason in left_out.as_object().unwrap().keys() {
+            let key = format!("analytics_models_left_out_{reason}");
+            assert!(copy.get(&key).is_some_and(|w| w.contains("{n}")), "{key}");
+        }
+        for (key, words) in [
+            ("analytics_card_models", "Models"),
+            (
+                "analytics_models_scope",
+                "In your traces \u{b7} labels as recorded \u{b7} task type yours, else inferred",
+            ),
+            ("analytics_models_cost", "{x} at API prices"),
+            ("analytics_models_basis_undone", "Undone edits we could see"),
+            ("analytics_models_not_enough", "Not enough traces yet"),
+            (
+                "analytics_models_no_clear_difference",
+                "No clear difference",
+            ),
+            ("analytics_models_not_priced", "Not priced"),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        for (key, words) in &copy {
+            if key.starts_with("analytics_models_") || key == "analytics_card_models" {
+                let lower = words.to_lowercase();
+                for banned in ["best", "better", "fastest", "winner", "benchmark"] {
+                    assert!(!lower.contains(banned), "{key} says {banned}");
+                }
+            }
+        }
+        // Money is never a figure on its own: each `{x}` that holds an
+        // amount sits in a sentence naming which price it is.
+        for key in ["analytics_models_cost", "analytics_models_charge"] {
+            let words = &copy[key];
+            assert!(
+                words.contains("API prices") || words.contains("Charged through Private AI"),
+                "{key}"
+            );
         }
     }
 

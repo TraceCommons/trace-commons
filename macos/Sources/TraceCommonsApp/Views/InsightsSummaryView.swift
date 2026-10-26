@@ -31,10 +31,16 @@ struct InsightsSummaryView: View {
                     categories
                     outcomes
                 }
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    InsightsGroupHeading(text("summary_metrics"))
-                    ForEach(summary.metrics) { metric in
-                        metricView(metric)
+                // Only the metrics a saved snapshot recorded (Kristi,
+                // 2026-10-21): a list of "Observed total: Unknown" says
+                // nothing. With none, no heading either.
+                let metrics = InsightsSummaryFormatting.recorded(summary.metrics)
+                if !metrics.isEmpty {
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        InsightsGroupHeading(text("summary_metrics"))
+                        ForEach(metrics) { metric in
+                            metricView(metric)
+                        }
                     }
                 }
                 LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
@@ -131,5 +137,16 @@ private struct SummaryCountRow: View {
 enum InsightsSummaryFormatting {
     static func value(_ value: UInt64?, unknown: String) -> String {
         value?.formatted() ?? unknown
+    }
+
+    /// The saved history's metrics that at least one snapshot recorded.
+    /// A recorded zero stays: zero is a value, unknown is not.
+    static func recorded(_ metrics: [SavedInsightsSummary.Metric]) -> [SavedInsightsSummary.Metric] {
+        metrics.filter { $0.observed_value_sum != nil || $0.available_snapshots > 0 }
+    }
+
+    /// One result's metrics whose value is known, zero included.
+    static func known(_ metrics: [LocalInsight.Metric]) -> [LocalInsight.Metric] {
+        metrics.filter { $0.value != nil }
     }
 }

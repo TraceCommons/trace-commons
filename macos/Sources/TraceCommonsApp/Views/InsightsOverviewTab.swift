@@ -27,6 +27,9 @@ struct InsightsOverviewTab: View {
     var notice: String?
     /// The same week's patterns, for "Where tokens went"; `nil` hides it.
     var patterns: InsightsWeekPatterns?
+    /// The daemon's model answers (feed T), for the Models card; `nil`
+    /// hides it.
+    var models: DaemonData.InsightsModelAnswers?
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -79,6 +82,9 @@ struct InsightsOverviewTab: View {
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
                 }
+                // The Models card covers the last 13 weeks whatever week is
+                // on screen, so it follows the week's cards.
+                if let models { InsightsModelsCard(answers: models, copy: copy) }
                 if model.busy { GlassSpinner() }
             }
             .padding(.vertical, GlassTokens.Space.s7)

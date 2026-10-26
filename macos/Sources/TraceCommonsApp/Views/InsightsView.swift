@@ -36,24 +36,44 @@ struct InsightsView: View {
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
+        let modelAnswersReader: InsightsModel.ModelAnswersReader? = daemon.map { client in
+            { @Sendable in try await client.insightsModelAnswers() }
+        }
+        let watchedLabel: InsightsSessionsModel.WatchedLabelWriter? = daemon.map { client in
+            { @Sendable reference, task, outcome in
+                try await client.insightsSessionLabel(sessionRef: reference, task: task, outcome: outcome)
+            }
+        }
+        // The daemon saves to the standard store only: with a custom store
+        // its snapshot would never show here, so the action is not offered.
+        var sessionAnalyzer: InsightsModel.SessionAnalyzer? = storeSelection.storeDirectory != nil
+            ? nil
+            : daemon.map { client in
+                { @Sendable reference in try await client.insightsAnalyzeSession(sessionRef: reference, save: true) }
+            }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
-        // the store's analytics answers (`InsightsSampleWeek`).
+        // the store's answers, Analyze's saved traces included
+        // (`InsightsSampleWeek`). Analyze & save is not offered: it would
+        // save to the real store.
         if InsightsSampleWeek.enabled {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
             watchedReader = nil
+            sessionAnalyzer = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
-                  model: InsightsModel(service: service, weekReader: weekReader),
+                  model: InsightsModel(service: service, weekReader: weekReader,
+                                       modelAnswersReader: modelAnswersReader,
+                                       sessionAnalyzer: sessionAnalyzer),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
-                                                       watchedDrill: watchedDrill),
+                                                       watchedDrill: watchedDrill, watchedLabel: watchedLabel),
                   turnOffRecapCard: turnOff)
     }
 
@@ -126,6 +146,7 @@ struct InsightsView: View {
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
+                    models: model.modelAnswers,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -133,12 +154,17 @@ struct InsightsView: View {
                     },
                     showReads: { tab = .patterns },
                     showPatterns: { tab = .patterns })
+                // Each time, so labels set on Sessions since show, and one
+                // failed read hides the card only until the next.
+                .onAppear { model.refreshModelAnswers() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
-                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text))
+                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
+                                    analysis: model.canAnalyzeSessions ? model : nil,
+                                    openAnalysis: { tab = .analyze })
             case .analyze: content
             }
         }
@@ -148,6 +174,8 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        // A saved label changes the Models answers.
+        .onAppear { sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() } }
         .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
@@ -169,8 +197,9 @@ struct InsightsView: View {
         }
     }
 
-    /// Debug builds: the sample week as the daemon's week (feed T) and one
-    /// sample trace for Sessions, when `TRACE_COMMONS_INSIGHTS_SAMPLE=1`.
+    /// Debug builds: the sample week as the daemon's week (feed T), when
+    /// `TRACE_COMMONS_INSIGHTS_SAMPLE=1`. Sessions shows one sample trace
+    /// until the sample's saved list arrives.
     private func showSampleWeekIfAsked() {
         #if DEBUG
         guard InsightsSampleWeek.enabled,
@@ -230,24 +259,39 @@ struct InsightsView: View {
                         .insightsSection()
                     InsightCardsView(model: model)
                         .insightsSection()
-                    savedSection
+                    // While none is saved, the head says how to save one.
+                    if !model.snapshots.isEmpty { savedSection }
                 }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
-            .onChange(of: model.selected?.id) { _, id in
+            // Initial too: Analyze & save sets the detail while Sessions
+            // still shows, so Analyze appears with it already set.
+            .onChange(of: model.selected?.id, initial: true) { _, id in
                 if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
             }
         }
     }
 
-    /// Choose a trace file to analyze. What analysis is and keeps, and that
-    /// closing discards late results, are behind the title's "i".
+    /// Sessions offers Analyze & save on its open watched row: a daemon
+    /// that writes the store shown here, and its watched list on screen.
+    private var offersSessionAnalyze: Bool {
+        model.canAnalyzeSessions && model.weekFeed == .counterPass
+    }
+
+    /// Analyze's head: a trace file to analyze, and while Sessions offers
+    /// Analyze & save (Insights PM, 2026-10-21: terminal users never see
+    /// their trace files), that too. The file stays the one way in without
+    /// it: counting off, no daemon, a custom store or sample data. The line
+    /// under the title names a button on screen. What analysis keeps, and
+    /// that closing discards late results, are behind the title's "i".
     private var analyzeSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // Refresh at the title's trailing end, as every refresh is
             // (owner, 2026-10-20).
             InsightsSectionTitle(title: model.text("analytics_tab_analyze"), info: [
-                model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
+                model.text("intro"), model.text("snapshot_notice"),
+            ] + (offersSessionAnalyze ? [model.text("analytics_analyze_intro")] : []) + [
+                model.text("cancellation_notice"),
             ]) {
                 if model.busy { GlassSpinner() }
                 GlassRefreshButton(model.text("refresh_accessibility")) { model.refresh() }
@@ -257,6 +301,9 @@ struct InsightsView: View {
                 if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
                     Text(location)
                         .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
+                }
+                if let head = Self.analyzeHeadKey(empty: model.snapshots.isEmpty, sessions: offersSessionAnalyze) {
+                    Text(model.text(head)).insightsNote()
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
                     GlassSelect(model.text("source"), selection: $source, options: [
@@ -285,6 +332,19 @@ struct InsightsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+    }
+
+    /// The line under Analyze's title: how to add a trace, naming only
+    /// buttons on screen. Choose file always is; Analyze & save only while
+    /// Sessions offers it. Without it, nothing once a trace is saved, as
+    /// before Sessions had the action.
+    static func analyzeHeadKey(empty: Bool, sessions: Bool) -> String? {
+        switch (empty, sessions) {
+        case (true, true): return "analytics_analyze_empty"
+        case (false, true): return "analytics_analyze_how"
+        case (true, false): return "empty"
+        case (false, false): return nil
+        }
     }
 
     /// The saved-history summary, its loading line, or its failure.
@@ -345,7 +405,6 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsSectionTitle(model.text("saved"))
             LazyVStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
                 ForEach(model.snapshots) { insight in
                     Button { model.explain(insight.id) } label: {
                         VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
@@ -423,7 +482,10 @@ struct InsightDetail: View {
                 }
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                     InsightsGroupHeading(text("summary_metrics"))
-                    ForEach(insight.report.metrics) { metric in
+                    // Only the metrics this trace recorded (Kristi,
+                    // 2026-10-21); what a result cannot say stays in the
+                    // title's "i".
+                    ForEach(InsightsSummaryFormatting.known(insight.report.metrics)) { metric in
                         VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
                             Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
                             Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")

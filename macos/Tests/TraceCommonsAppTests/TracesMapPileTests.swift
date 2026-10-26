@@ -146,6 +146,34 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertEqual(kept.end, kept.allArrived + MapTransferRun.keptLinger, accuracy: 0.0001)
     }
 
+    /// The rocket reads as a rocket, not a drop of water (Kristi,
+    /// 2026-10-21): a straight body to a nose at the right, a porthole on
+    /// the body, fins above and below it, and a nozzle behind the tail
+    /// where the flame leaves, all in the shape's 30 by 18 box.
+    func test_theRocketIsDrawnLikeARocket() {
+        let body = MapTransferDrawing.bodyPath.boundingRect
+        let fins = MapTransferDrawing.finsPath.boundingRect
+        let nozzle = MapTransferDrawing.nozzlePath.boundingRect
+        let flame = MapTransferDrawing.flamePath.boundingRect
+        let box = CGRect(x: 0, y: 0, width: 30, height: 18)
+        for shape in [body, fins, nozzle, flame, MapTransferDrawing.nosePath.boundingRect] {
+            XCTAssertTrue(box.contains(shape), "\(shape)")
+        }
+        // The nose is the right-most point, on the centre line.
+        XCTAssertGreaterThan(body.maxX, 29)
+        XCTAssertTrue(MapTransferDrawing.bodyPath.contains(CGPoint(x: 29, y: 9)))
+        XCTAssertFalse(MapTransferDrawing.bodyPath.contains(CGPoint(x: 29, y: 7)))
+        // A straight body: as tall ahead of the porthole as at the tail.
+        XCTAssertTrue(MapTransferDrawing.bodyPath.contains(CGPoint(x: 10.5, y: 6)))
+        XCTAssertTrue(MapTransferDrawing.bodyPath.contains(CGPoint(x: 19.5, y: 6)))
+        XCTAssertTrue(body.contains(MapTransferDrawing.porthole))
+        XCTAssertLessThan(fins.minY, body.minY)
+        XCTAssertGreaterThan(fins.maxY, body.maxY)
+        // The nozzle sits between the body's tail and the flame.
+        XCTAssertLessThan(nozzle.minX, body.minX)
+        XCTAssertLessThanOrEqual(nozzle.minX, flame.maxX)
+    }
+
     /// A trace's tool moves to the front of the pile as it sets off; its
     /// coin is grown only while the rim light goes round.
     func test_aTracesCoinShufflesToTheFrontAndGrows() {

@@ -122,7 +122,10 @@ pub struct RoutedExchange {
     ///
     /// Priced, not billed: work served on a subscription is priced at what it
     /// *would* have cost on the meter. No surface may render it as money the
-    /// contributor spent.
+    /// contributor spent, with one exception: owner decision D5 (settled
+    /// 2026-10-20) shows it as a NEAR AI charge, labelled so, for calls
+    /// through the NEAR AI route only (the Insights Models answers, via the
+    /// route tally). It is never shown as a charge for any other backend.
     #[serde(default)]
     pub cost_usd: Option<f64>,
     pub status: i64,

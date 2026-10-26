@@ -9,6 +9,7 @@ pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
 pub mod claude_task_attribution;
+pub mod codex_series;
 #[cfg(test)]
 pub(crate) mod comparison_estimator;
 pub(crate) mod comparison_exact;
@@ -23,6 +24,7 @@ pub mod goals;
 pub mod ledger_series;
 pub mod lever;
 pub mod markers;
+pub mod model_answers;
 pub mod models;
 pub mod outcomes;
 pub mod patterns;
@@ -31,10 +33,14 @@ pub mod provider;
 pub mod recap;
 pub mod service;
 pub mod session_drill;
+pub mod session_facts;
 pub mod session_identity;
+pub mod session_labels;
+pub mod session_pricing;
 pub mod session_sparkline;
 pub mod summary;
 pub mod task_attribution;
+pub mod task_classifier;
 pub mod time_evidence;
 pub mod turn_series;
 pub mod usage;
@@ -61,7 +67,9 @@ use trace_commons_protocol::insights::{
 };
 use trace_commons_protocol::insights_usage_series::DigestKeyStore;
 
-const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// The most bytes one file's analysis reads; a larger file is refused
+/// (`insights_source_too_large`).
+pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
 // without one here lets an older client accept the store and then reject
 // individual snapshots, with no diagnosable event and no downgrade path.

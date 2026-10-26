@@ -1,0 +1,630 @@
+{
+  "schema_version": 2,
+  "table_id": "sha256:be28771d884edcf6a26a3a5147dcc05cc01a7001d24141be756676a43273d184",
+  "version": 1,
+  "currency": "usd",
+  "published_at": "2026-10-26T10:56:33Z",
+  "provenance": {
+    "publisher": "Anthropic",
+    "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "retrieved_at": "2026-10-26T10:53:51Z",
+    "content_sha256": "sha256:98eccce13453cddbebf8cabffd33a430ab2ec5e1a0c22ce258d7797838380a41",
+    "reviewed_by": "Kristi Poldsam (poldsam)",
+    "reviewed_at": "2026-10-26T10:56:33Z",
+    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before the first fetch, 2026-10-21.",
+    "source_notes": "Page bytes change on every docs build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Model ids come from the models overview (current models) and model deprecations (older, dated ids) pages. The owner-review refetch at retrieved_at found every rate unchanged from the first fetch, 2026-10-21T15:16:38Z."
+  },
+  "entries": [
+    {
+      "provider": "anthropic",
+      "model": "claude-3-5-haiku",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 800000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 80000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 1600000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 4000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 12500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 20000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 50000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 12500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 20000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 50000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 100000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 1250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 5000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 100000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 100000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 10000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 125000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 500000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 100000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 50000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 625000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 2500000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-mythos-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 12500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 20000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 50000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-mythos-5-1",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 12500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 20000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 50000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 15000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 1500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 18750000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 30000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 75000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-1",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 15000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 1500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 18750000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 30000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 75000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 6250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 25000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 6250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 25000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-7",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 6250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 25000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 6250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 25000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 6250000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 25000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 8000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 20000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 3000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 300000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 3750000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 6000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 3000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 300000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 3750000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 6000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 3000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 300000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 3750000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 6000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "accounting": "claude_code",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cache_read_input",
+          "usd_nanos_per_million_tokens": 100000000
+        },
+        {
+          "category": "cache_write_five_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "cache_write_one_hour_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    }
+  ]
+}

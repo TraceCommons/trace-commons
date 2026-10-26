@@ -1,0 +1,223 @@
+{
+  "enabled": true,
+  "feed": "counter_pass",
+  "readable": true,
+  "updated_at": "2026-09-20T12:00:00+00:00",
+  "window_start": "2026-06-21T12:00:00+00:00",
+  "window_end": "2026-09-20T12:00:00+00:00",
+  "pricing": {
+    "basis": "api_list",
+    "tables": [
+      {
+        "table_id": "sha256:be28771d884edcf6a26a3a5147dcc05cc01a7001d24141be756676a43273d184",
+        "version": 1
+      }
+    ]
+  },
+  "rows": [
+    {
+      "question": "bug_fix_rejected",
+      "state": "not_enough_sessions",
+      "basis": null,
+      "edit_mode": null,
+      "leader": null,
+      "next": null,
+      "sessions_by_model": [],
+      "left_out": {
+        "unknown_facts": 0,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 0,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 0,
+        "too_few_edits": 0,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": null,
+      "kept_by_model": []
+    },
+    {
+      "question": "refactor_rejected",
+      "state": "not_enough_sessions",
+      "basis": null,
+      "edit_mode": null,
+      "leader": null,
+      "next": null,
+      "sessions_by_model": [],
+      "left_out": {
+        "unknown_facts": 0,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 0,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 0,
+        "too_few_edits": 0,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": null,
+      "kept_by_model": []
+    },
+    {
+      "question": "tests_rejected",
+      "state": "not_enough_sessions",
+      "basis": null,
+      "edit_mode": null,
+      "leader": null,
+      "next": null,
+      "sessions_by_model": [],
+      "left_out": {
+        "unknown_facts": 0,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 0,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 0,
+        "too_few_edits": 0,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": null,
+      "kept_by_model": []
+    },
+    {
+      "question": "docs_cost",
+      "state": "answered",
+      "basis": null,
+      "edit_mode": null,
+      "leader": {
+        "label": "claude-sonnet-5-5",
+        "sessions": 5,
+        "edits": null,
+        "figure": {
+          "kind": "usd_micros",
+          "value": 1900
+        },
+        "interrupts_per_session_permille": null,
+        "near_ai_charge": {
+          "basis": "near_ai_ledger",
+          "median": {
+            "kind": "usd_micros",
+            "value": 30000
+          },
+          "routed_sessions": 6,
+          "charge_unknown": 1
+        },
+        "kept": null
+      },
+      "next": {
+        "label": "claude-opus-5-5",
+        "sessions": 5,
+        "edits": null,
+        "figure": {
+          "kind": "usd_micros",
+          "value": 85400
+        },
+        "interrupts_per_session_permille": null,
+        "near_ai_charge": null,
+        "kept": null
+      },
+      "sessions_by_model": [
+        [
+          "claude-opus-5-5",
+          5
+        ],
+        [
+          "claude-sonnet-5-5",
+          5
+        ]
+      ],
+      "left_out": {
+        "unknown_facts": 0,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 7,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 0,
+        "too_few_edits": 0,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": {
+        "basis": "near_ai_ledger",
+        "median": {
+          "kind": "usd_micros",
+          "value": 33750
+        },
+        "routed_sessions": 7,
+        "charge_unknown": 1
+      },
+      "kept_by_model": []
+    },
+    {
+      "question": "rejected_across_tasks",
+      "state": "not_enough_sessions",
+      "basis": null,
+      "edit_mode": null,
+      "leader": null,
+      "next": null,
+      "sessions_by_model": [
+        [
+          "claude-fixture-model",
+          1
+        ],
+        [
+          "claude-opus-5-5",
+          5
+        ],
+        [
+          "claude-sonnet-5-5",
+          12
+        ]
+      ],
+      "left_out": {
+        "unknown_facts": 0,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 0,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 1,
+        "too_few_edits": 17,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": null,
+      "kept_by_model": []
+    },
+    {
+      "question": "finish_time",
+      "state": "not_enough_sessions",
+      "basis": null,
+      "edit_mode": "prompting",
+      "leader": null,
+      "next": null,
+      "sessions_by_model": [],
+      "left_out": {
+        "unknown_facts": 18,
+        "automated": 0,
+        "delegated": 0,
+        "capped": 0,
+        "routed": 0,
+        "reviewer": 0,
+        "no_majority": 0,
+        "unpriced": 0,
+        "too_few_sessions": 0,
+        "too_few_edits": 0,
+        "mix_too_different": 0
+      },
+      "near_ai_charge": null,
+      "kept_by_model": []
+    }
+  ]
+}

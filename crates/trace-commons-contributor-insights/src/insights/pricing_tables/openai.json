@@ -1,0 +1,687 @@
+{
+  "schema_version": 2,
+  "table_id": "sha256:174b7e4fe9d1299f7f3f96e0a9335a44cbbfb19e629a6f3e44810868c77160fe",
+  "version": 2,
+  "currency": "usd",
+  "published_at": "2026-10-26T10:56:33Z",
+  "provenance": {
+    "publisher": "OpenAI",
+    "source_url": "https://developers.openai.com/api/docs/pricing",
+    "retrieved_at": "2026-10-26T10:53:52Z",
+    "content_sha256": "sha256:cf734fcb60d01a595dd95d8d60fb9a491cc9c76d41a08ee998b7277b6de65694",
+    "reviewed_by": "Kristi Poldsam (poldsam)",
+    "reviewed_at": "2026-10-26T10:56:33Z",
+    "effective_from_basis": "No effective dates on the page: effective_from is the Monday 00:00 UTC starting the 13-week Insights window before the first fetch, 2026-10-21. gpt-5.6-sol is promotional through 2026-11-21 (effective_until). A '-' write is priced at input.",
+    "source_notes": "Page and script bytes change on every site build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Rates above 272K are in https://developers.openai.com/_astro/pricing.BRxkzBWq.js (sha256 4b01a03c6bc038e906e57a390ac2c37a135994ae83df7b1216eb04835db434d0), fetched 10:54:49Z; its URL changes per build too. The tier labels are in PricingContextSelector.react.Bav9OpW6.js, which PricingContextSelector.react.DfR41lUi.js loads. The owner-review refetch at retrieved_at found every rate unchanged from the first fetch, 2026-10-21T15:16:38Z."
+  },
+  "entries": [
+    {
+      "provider": "openai",
+      "model": "gpt-5",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 1250000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 125000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 1250000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 25000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 2000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-nano",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 50000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 5000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 50000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 400000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 1250000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 125000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 1250000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.2",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 1750000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 175000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 1750000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 14000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 1750000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 175000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 1750000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 14000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 22500000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 750000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 75000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 750000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 4500000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4-nano",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 20000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 1250000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 30000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 45000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 20000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 1200000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 400000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 40000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 1800000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": "2026-11-22T00:00:00Z",
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 400000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 20000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": "2026-11-22T00:00:00Z",
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 8000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 800000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 30000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 12000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 400000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 18000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 10000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 1000000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 12500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 50000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 20000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 25000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 75000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 100000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 10000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 125000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 500000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 20000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 250000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 750000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 400000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_at_most": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 2000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 100000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 2500000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 10000000000
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6.1-sol",
+      "accounting": "codex",
+      "effective_from": "2026-07-20T00:00:00Z",
+      "effective_until": null,
+      "prompt_tokens_above": 272000,
+      "rates": [
+        {
+          "category": "uncached_input",
+          "usd_nanos_per_million_tokens": 4000000000
+        },
+        {
+          "category": "cached_input",
+          "usd_nanos_per_million_tokens": 200000000
+        },
+        {
+          "category": "cache_write_thirty_minute_input",
+          "usd_nanos_per_million_tokens": 5000000000
+        },
+        {
+          "category": "output",
+          "usd_nanos_per_million_tokens": 15000000000
+        }
+      ]
+    }
+  ]
+}
