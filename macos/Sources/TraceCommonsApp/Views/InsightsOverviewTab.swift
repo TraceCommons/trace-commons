@@ -428,8 +428,42 @@ struct InsightsOverviewTab: View {
             }
             .frame(height: 120)
             .insightsPlot()
-            .accessibilityHidden(true)
+            // The keyboard and VoiceOver pick a day too: the arrow keys and
+            // the adjustable action step through the days, Escape and the
+            // last step past either end put the week back.
+            .focusable()
+            .onMoveCommand { direction in
+                switch direction {
+                case .left: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
+                case .right: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                default: break
+                }
+            }
+            .onExitCommand { pickedDay = nil }
+            .accessibilityElement()
+            .accessibilityLabel(text("analytics_card_tokens_by_day"))
+            .accessibilityValue(picked?.label ?? "")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .decrement: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
+                case .increment: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                @unknown default: break
+                }
+            }
+            .accessibilityActions {
+                ForEach(days) { day in
+                    Button(day.label) { pickedDay = pickedDay == day.id ? nil : day.id }
+                }
+            }
         }
+    }
+
+    /// The day `by` steps from `current` among `ids`: from the week, the
+    /// first or the last day; past either end, the week again.
+    nonisolated static func step(_ ids: [String], from current: String?, by: Int) -> String? {
+        guard let current, let index = ids.firstIndex(of: current) else { return by > 0 ? ids.first : ids.last }
+        let next = index + by
+        return ids.indices.contains(next) ? ids[next] : nil
     }
 
     /// The same week's patterns, by name and figure, in the core's order.
@@ -623,10 +657,12 @@ struct InsightsCounterSessionsView: View {
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+        // A picked day, or the week again, opens folded.
+        .onChange(of: day) { _, _ in showAll = false }
     }
 
-    /// One session; `figure` is its week's tokens, or its tokens on the
-    /// picked day.
+    /// One session; `figure`, on the right and in its label, is its week's
+    /// tokens, or its tokens on the picked day.
     private func row(_ row: InsightsCounterSessions.Row, figure: UInt64?) -> some View {
         #if DEBUG
         let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
@@ -634,7 +670,7 @@ struct InsightsCounterSessionsView: View {
         return InsightsDrillRow(
             title: InsightsSessionsWords.counterTitle(row.session, copy: copy),
             figure: InsightsOverviewWords.figure(figure, copy: copy),
-            label: InsightsSessionsWords.counterLabel(row.session, copy: copy),
+            label: InsightsSessionsWords.counterLabel(row.session, tokens: figure, copy: copy),
             state: InsightsOverviewWords.state(row.session.state, copy: copy),
             reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
                 .joined(separator: " \u{b7} ")
@@ -699,7 +735,8 @@ struct InsightsCardInputsView: View {
                 if let dayRows {
                     LazyVStack(spacing: 0) {
                         ForEach(InsightsBreakdownFold.shown(dayRows, all: showAll)) { row in
-                            self.row(row.session, figure: InsightsOverviewWords.figure(row.tokens, copy: copy))
+                            self.row(row.session, figure: InsightsOverviewWords.figure(row.tokens, copy: copy),
+                                     tokens: row.tokens)
                         }
                     }
                     InsightsBreakdownFold(count: dayRows.count, showAll: $showAll, copy: copy)
@@ -710,7 +747,8 @@ struct InsightsCardInputsView: View {
                         ForEach(InsightsBreakdownFold.shown(inputs.sessions, all: showAll)) { session in
                             row(session, figure: inputs.card == "cache_share"
                                 ? fraction(session.cache_share)
-                                : InsightsOverviewWords.figure(session.tokens, copy: copy))
+                                : InsightsOverviewWords.figure(session.tokens, copy: copy),
+                                tokens: session.tokens)
                         }
                     }
                     InsightsBreakdownFold(count: inputs.sessions.count, showAll: $showAll, copy: copy)
@@ -721,16 +759,20 @@ struct InsightsCardInputsView: View {
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+        // A picked day, or the week again, opens folded.
+        .onChange(of: day) { _, _ in showAll = false }
     }
 
-    private func row(_ session: InsightsCardSession, figure: String) -> some View {
+    /// One session; `tokens`, in its label, is its week's tokens or its
+    /// tokens on the picked day.
+    private func row(_ session: InsightsCardSession, figure: String, tokens: UInt64?) -> some View {
         #if DEBUG
         let _ = OtherCollectionRowBodies.record("insightsSavedSessions", session.session_ref)
         #endif
         return InsightsDrillRow(
             title: InsightsOverviewWords.harness(session.source, copy: copy),
             figure: figure,
-            label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: session.tokens,
+            label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: tokens,
                                                   snapshots: snapshots, copy: copy),
             state: InsightsOverviewWords.state(session.state, copy: copy),
             reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }

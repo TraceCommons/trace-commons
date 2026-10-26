@@ -4819,7 +4819,15 @@ sessions on disk. Otherwise:
     ],
     "by_day": [
       { "date": "2026-10-05", "uncached": 1200, "cache_read": 402000,
-        "cache_write": 31000, "output": 9100 }
+        "cache_write": 31000, "output": 9100 },
+      { "date": "2026-10-06", "uncached": 1000, "cache_read": 590000,
+        "cache_write": 30000, "output": 19000 },
+      { "date": "2026-10-07", "uncached": 6800, "cache_read": 618000,
+        "cache_write": 110000, "output": 22120 },
+      { "date": "2026-10-08", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-09", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-10", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-11", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 }
     ],
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
