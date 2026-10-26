@@ -610,13 +610,19 @@ struct UsesScreen: View {
     private func list(options: [ConsentScope], required: ConsentScope?) -> some View {
         let optional = UsesScreenLayout.optionalScopes(options)
         return VStack(alignment: .leading, spacing: 0) {
+            if !optional.isEmpty {
+                Text(copy.uses.rewardOpportunities ?? "")
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, GlassTokens.Space.s3)
+            }
             if let required {
                 HStack(spacing: GlassTokens.Space.s2) {
-                    // Required for participation, so state it once.
+                    // The baseline permission is required for sharing.
                     Text(required.title)
                         .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    // Ron's inline "required" in the on colour, not a tag
-                    // (Ron's review of #1235, item 15).
+                    // Keep the required-sharing label inline rather than as a tag.
                     Text(copy.uses.required)
                         .glassType(GlassTokens.TypeScale.mono)
                         .foregroundStyle(GlassTokens.Color.statusOnText.color)
@@ -628,11 +634,6 @@ struct UsesScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !optional.isEmpty {
-                Text(copy.uses.rewardOpportunities ?? "")
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, GlassTokens.Space.s3)
                 ForEach(optional) { option in
                     scopeRow(option)
                 }
