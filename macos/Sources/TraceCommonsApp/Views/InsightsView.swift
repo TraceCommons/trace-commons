@@ -175,7 +175,12 @@ struct InsightsView: View {
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
         // A saved label changes the Models answers.
-        .onAppear { sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() } }
+        .onAppear {
+            // Bound first, so the callback's weak capture is of this local and
+            // not of the closure's implicit strong one (Swift 6.4 refuses that).
+            let model = model
+            sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() }
+        }
         .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
