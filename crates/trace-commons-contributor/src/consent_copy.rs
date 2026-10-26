@@ -186,7 +186,7 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// that must not be. It is the whole difference between contributing
 /// automatically and reviewing each session. Do not shorten it for layout;
 /// change the layout.
-pub const AUTO_NO_REVIEW: &str = "No one looks at a trace before it is sent, including you.";
+pub const AUTO_NO_REVIEW: &str = "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled.";
 
 /// The one sentence the Contribution rule card says under Automatic when
 /// no privacy model is confirmed to have run (`Disclosure::PatternsOnly`).
@@ -603,7 +603,7 @@ pub fn void_notice_for_wire_with_regrant(
 /// Detailed token-format heuristics belong in redactor documentation, while
 /// the adjacent limit keeps missed secrets and personal information visible.
 pub const AUTO_PATTERNS_ONLY_SCOPE: &str =
-    "Known secret formats and some file paths and email addresses are removed automatically.";
+    "Recognized secrets and some file paths and email addresses are removed automatically.";
 
 /// The limit of the patterns, for the same route as
 /// [`AUTO_PATTERNS_ONLY_SCOPE`].
@@ -1512,10 +1512,10 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 
 /// The route line with no witness configured.
 ///
-/// With no witness the redactor runs in this process
-/// (`envelope::build_redactor`), before the envelope is uploaded. What an
-/// attached filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer before upload.";
+/// The local redactor runs before upload; the hosted service applies its
+/// own privacy-filter pass at ingest. This does not promise complete PII
+/// removal. What an attached local filter receives is the next sentence's job.
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -1531,7 +1531,7 @@ pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
     "This app could not read its settings, so nothing is sent.";
 
 /// Local route, no model privacy filter attached.
-pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Only fixed redaction patterns run.";
+pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Local redaction uses fixed patterns.";
 
 /// Local route, NEAR AI's hosted privacy filter attached.
 ///
@@ -3217,7 +3217,7 @@ mod tests {
         );
         assert_eq!(
             AUTO_NO_REVIEW,
-            "No one looks at a trace before it is sent, including you."
+            "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled."
         );
         // Approved 2026-10-12 (owner), word for word.
         assert_eq!(
@@ -3362,8 +3362,12 @@ mod tests {
     /// grant a different act from the one described.
     #[test]
     fn no_review_is_stated_without_qualification() {
-        assert!(AUTO_NO_REVIEW.starts_with("No one looks at a trace before it is sent"));
-        assert!(AUTO_NO_REVIEW.contains("including you"));
+        assert!(
+            AUTO_NO_REVIEW
+                .starts_with("Submissions are automatically queued and sent without review.")
+        );
+        assert!(AUTO_NO_REVIEW.contains("withdraw them from future use"));
+        assert!(AUTO_NO_REVIEW.contains("distributed copies cannot be recalled"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
         }
