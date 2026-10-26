@@ -553,7 +553,9 @@ struct InsightsShareBar: View {
 struct InsightsCounterSessionsView: View {
     let sessions: InsightsCounterSessions
     let copy: [String: String]
-    @State private var showAll = false
+    /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
+    /// every row, as the responder-scale tests do.
+    @State var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private var routed: Bool { sessions.column == .shown }
@@ -623,7 +625,9 @@ struct InsightsCardInputsView: View {
     let inputs: InsightsCardInputs
     let snapshots: [LocalInsight]
     let copy: [String: String]
-    @State private var showAll = false
+    /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
+    /// every row, as the responder-scale tests do.
+    @State var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
