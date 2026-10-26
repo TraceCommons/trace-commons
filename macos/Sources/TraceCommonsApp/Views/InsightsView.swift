@@ -264,7 +264,9 @@ struct InsightsView: View {
                 }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
-            .onChange(of: model.selected?.id) { _, id in
+            // Initial too: Analyze & save sets the detail while Sessions
+            // still shows, so Analyze appears with it already set.
+            .onChange(of: model.selected?.id, initial: true) { _, id in
                 if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
             }
         }

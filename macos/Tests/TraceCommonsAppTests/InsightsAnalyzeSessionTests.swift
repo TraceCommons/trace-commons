@@ -185,6 +185,9 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
         XCTAssertTrue(view.contains("client.insightsAnalyzeSession(sessionRef: reference, save: true)"))
         XCTAssertTrue(view.contains("storeSelection.storeDirectory != nil"))
         XCTAssertTrue(view.contains("openAnalysis: { tab = .analyze }"))
+        // Analyze appears with the saved snapshot already its detail, so
+        // the scroll to it runs on the initial value too.
+        XCTAssertTrue(view.contains(".onChange(of: model.selected?.id, initial: true)"))
     }
 
     /// A row the daemon says it cannot analyze shows why in place of the
