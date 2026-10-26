@@ -71,7 +71,7 @@ final class MonitorNoticeDismissalTests: XCTestCase {
         return try decoder.decode(DaemonData.Status.self, from: Data(json.utf8))
     }
 
-    func testQueueDismissalSurvivesFailuresMaskingAndLowPendingCountsUntilExplicitHealthyRead() throws {
+    func testQueueDismissalSurvivesHealthResetsCapacityChurnAndRestartUntilQueueEmpties() throws {
         try withStore { defaults, scope in
             let store = MonitorNoticeDismissals(defaults: defaults)
             let queue = MonitorNoticeDismissals.Incident(kind: .queueFull)
@@ -83,14 +83,39 @@ final class MonitorNoticeDismissalTests: XCTestCase {
                 (try status(#"{"health":{"last_error_label":"privacy-filter-canary-failed"},"queue_depth":0}"#), true),
                 (try status(#"{"health":{"last_error_label":"witness-saturated"},"queue_depth":0}"#), true),
                 (try status(#"{"queue_depth":0}"#), true),
+                (try status(#"{"health":{"last_error_label":null},"queue_depth":0}"#), true),
+                (try status(#"{"health":{"last_error_label":null},"queue_at_capacity":true,"queue_capacity_used":500}"#), true),
+                (try status(#"{"health":{"last_error_label":null},"queue_at_capacity":false,"queue_capacity_used":499}"#), true),
+                (try status(#"{"queue_at_capacity":false}"#), true),
+                (try status(#"{"queue_at_capacity":false,"queue_capacity_used":-1}"#), true),
                 (full, true)
             ] {
                 store.reconcile(MonitorNoticeDismissals.conditions(status: read, loaded: loaded), scope: scope)
-                XCTAssertTrue(store.isDismissed(queue, scope: scope), "An unread or masked health slot is not proof of spare queue capacity")
+                XCTAssertTrue(store.isDismissed(queue, scope: scope), "The same backlog must remain dismissed across health resets and capacity churn")
             }
-            let healthy = try status(#"{"health":{"last_error_label":null},"queue_depth":0}"#)
-            store.reconcile(MonitorNoticeDismissals.conditions(status: healthy, loaded: true), scope: scope)
-            XCTAssertFalse(store.isDismissed(queue, scope: scope))
+            let restarted = MonitorNoticeDismissals(defaults: defaults)
+            XCTAssertTrue(restarted.isDismissed(queue, scope: scope))
+            let empty = try status(#"{"health":{"last_error_label":null},"queue_at_capacity":false,"queue_capacity_used":0}"#)
+            restarted.reconcile(MonitorNoticeDismissals.conditions(status: empty, loaded: true), scope: scope)
+            XCTAssertFalse(restarted.isDismissed(queue, scope: scope))
+            restarted.reconcile(MonitorNoticeDismissals.conditions(status: full, loaded: true), scope: scope)
+            XCTAssertFalse(restarted.isDismissed(queue, scope: scope), "A new backlog after the queue empties may show its warning")
+        }
+    }
+
+    func testQueueConditionUsesCapacityEvidenceWithLegacyFallback() throws {
+        let incident = MonitorNoticeDismissals.Incident(kind: .queueFull)
+        let cases: [(String, MonitorNoticeDismissals.Condition)] = [
+            (#"{"queue_at_capacity":true,"health":{"last_error_label":null}}"#, .active(incident)),
+            (#"{"queue_at_capacity":false,"queue_capacity_used":0,"health":{"last_error_label":"queue-full"}}"#, .clear),
+            (#"{"queue_at_capacity":false,"queue_capacity_used":499,"health":{"last_error_label":"queue-full"}}"#, .unknown),
+            (#"{"health":{"last_error_label":"queue-full"}}"#, .active(incident)),
+            (#"{"health":{"last_error_label":null}}"#, .unknown),
+            (#"{"queue_at_capacity":false}"#, .unknown),
+            (#"{"queue_at_capacity":false,"queue_capacity_used":-1}"#, .unknown)
+        ]
+        for (json, expected) in cases {
+            XCTAssertEqual(MonitorNoticeDismissals.conditions(status: try status(json), loaded: true)[.queueFull], expected, json)
         }
     }
 

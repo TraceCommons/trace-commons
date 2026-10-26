@@ -8463,6 +8463,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_at_capacity_keeps_authoritative_status_full_when_health_clears() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .health
+            .lock()
+            .unwrap()
+            .fail(health::LABEL_QUEUE_FULL, at("2030-01-01T00:00:01Z"));
+        f.append_to_session(&path, "proj", name);
+        let counter = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &counter);
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 1);
+        let status = f.shared.status_value();
+        assert!(
+            status["health"]["last_error_label"].is_null(),
+            "replacement clears the single health slot"
+        );
+        assert_eq!(status["queue_capacity_used"], 1);
+        assert_eq!(
+            status["queue_at_capacity"], true,
+            "a null health slot is not evidence of available queue space"
+        );
+    }
+
+    #[tokio::test]
     async fn a_queue_with_room_still_loads_and_offers_every_session() {
         // The other side of the check: below the cap nothing changes, and a
         // second session is read once and queued.
