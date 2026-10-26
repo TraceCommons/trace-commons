@@ -161,9 +161,10 @@ The attestation is a compact JWS, EdDSA (Ed25519), with `kid` in the header.
    A verifier must reject an unknown `schema_version`, and must reject an
    unknown `coverage_state` (step 5) — but it must not reject a document for
    carrying a top-level key it has never seen. Additive top-level fields are
-   how this contract grows without a version bump; `pending` and `unknown`
-   (see "Scoping an attestation") are the first two, and a verifier written
-   before they existed keeps working precisely because of this rule. The rule
+   how this contract grows without a version bump; `pending`, `unknown` and
+   `scored_without_perplexity` (see "Scoping an attestation") are the first
+   three, and a verifier written before they existed keeps working precisely
+   because of this rule. The rule
    is deliberately narrow: it does not extend to new fields inside
    `submissions` entries or inside `coverage`, where a silently ignored field
    could change what an existing field means.
@@ -223,18 +224,20 @@ the caller.
 A scoped response is:
 
 ```json
-{ "attestation": "<compact JWS>", "scored": 2, "pending": 1, "unknown": 0 }
+{ "attestation": "<compact JWS>", "scored": 2, "pending": 1, "unknown": 0,
+  "scored_without_perplexity": 0 }
 ```
 
 The counts are a convenience. The signed payload is the contract, and it
-carries two top-level fields the unscoped document does not:
+carries top-level fields the unscoped document does not:
 
 ```json
 {
   "schema_version": "trace_commons.score_attestation.v2",
   "submissions": [ { "submission_id": "...", "...": "..." } ],
   "pending": ["..."],
-  "unknown": ["..."]
+  "unknown": ["..."],
+  "scored_without_perplexity": ["..."]
 }
 ```
 
@@ -247,19 +250,31 @@ carries two top-level fields the unscoped document does not:
 - `unknown` — asked about, and not this contributor's. It says nothing about
   whether the id exists at all, deliberately: this route cannot be used to
   probe for someone else's submission ids.
+- `scored_without_perplexity` — asked about, owned by this contributor, and
+  scored, but no gate decision for it holds a perplexity. A Score policy that
+  measures no perplexity (substance) scored it. A `submissions` entry
+  requires `perplexity_micros`, so this document cannot carry that score;
+  `GET /v1/contributors/me/pipeline-score-attestation` signs it, as
+  `trace_commons.pipeline_score_attestation.v1`. It is not pending, so a
+  client that waits for `pending` to drain does not wait for it.
 
 `schema_version` **stays `trace_commons.score_attestation.v2`**. These fields
 are additive and appear only in a scoped response. An unscoped request
-returns the document it always did, with no `pending` key and no `unknown`
-key — not empty arrays, absent. That is what the forward-compatibility rule
-above buys: a verifier built against the unscoped document keeps working, and
-sees the new fields only once it opts in by asking a scoped question.
+returns the document it always did, with no `pending` key, no `unknown` key
+and no `scored_without_perplexity` key — not empty arrays, absent. A scoped
+response always carries `pending` and `unknown`, as lists that can be empty,
+but carries `scored_without_perplexity` only when the list is not empty, so a
+scoped document with no such submission is the one issued before the key
+existed. That is what the forward-compatibility rule above buys: a verifier
+built against the unscoped document keeps working, and sees the new fields
+only once it opts in by asking a scoped question.
 
 The contributor CLI can produce a scoped attestation as part of a submit run:
 `trace-commons-contributor submit --attest-out attestation.jws` requests one
 over exactly the traces that run uploaded, waits a bounded time for `pending`
 to drain, and writes it either way, reporting `N of M traces scored, K
-pending` rather than failing. When a run uploads more than 500 traces the
+pending` rather than failing. N, and the `scored` count in its `--json`
+output, include the traces listed in `scored_without_perplexity`. When a run uploads more than 500 traces the
 file holds one signed document per line.
 
 ## Reading scores for ids you already hold
@@ -287,7 +302,9 @@ At most 500 ids per request (`413` past that). Ids with no gate decision are
 **omitted from the response** — this route has no `pending` signal, so treat
 an absent id as "still unscored, ask again later" rather than as a refusal.
 Ask again rather than assuming: a submission can also exhaust its scoring
-attempts, in which case it never appears here.
+attempts, in which case it never appears here. An id whose gate decisions
+hold no perplexity is omitted too, and never appears here; a scoped
+attestation lists it in `scored_without_perplexity`.
 
 The credential is a token with role `competition_read_worker`, issued by the
 operator running the ingest deployment. It is scoped to this read: it cannot
@@ -363,5 +380,5 @@ accepting it from the participant later.
 | `attest` returns 503 | Server signing key unconfigured. An operator problem; do not proceed with unsigned data. |
 | Scoped attestation returns `413` | More than 500 ids in one request. Chunk them. |
 | Attestation `pending` never empties | Scoring is asynchronous and can be disabled or backlogged. Take the attestation as it is and resolve the ids later via `POST /v1/admin/scores-by-submission`. |
-| `scores-by-submission` omits an id | No gate decision yet, or scoring exhausted its attempts. Not a refusal; retry, then escalate to the operator. |
+| `scores-by-submission` omits an id | No gate decision yet, scoring exhausted its attempts, or no decision holds a perplexity (a scoped attestation then lists the id in `scored_without_perplexity`). Not a refusal; retry, then escalate to the operator. |
 | `scores-by-submission` returns `403` | Token is neither `admin` nor `competition_read_worker`. |

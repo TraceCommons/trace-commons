@@ -2392,7 +2392,8 @@ pub struct ContributorCapSignalRow {
 /// Only a decision row that holds a perplexity is read: a row with none (a
 /// substance Settle row, migration V139) is not a score these reads report,
 /// so `perplexity_micros` is always a measured value. A submission whose only
-/// decision has no perplexity reads as one with no decision.
+/// decision has no perplexity reads as one with no decision, except in the
+/// scoped read, which says so in `OwnSubmissionScoreRow::has_gate_decision`.
 ///
 /// Note that `submission_id` is derived from session content, so the same
 /// session uploaded by two contributors in different tenants shares one id
@@ -2419,17 +2420,30 @@ pub struct TraceScoreBySubmissionRow {
 /// One asked-about submission that the requesting principal actually owns,
 /// with its latest gate-decision score when there is one.
 ///
-/// The scoped score-attestation read returns one of these per owned id.
-/// `score: None` is the "submitted, not scored yet" state that had no
-/// representation anywhere before: the unscoped enumeration inner-joins the
-/// decision table, so a submission awaiting the gate driver is simply absent
-/// and indistinguishable from one that was never uploaded. Ids the principal
-/// does not own are not returned at all, and the caller reports them as
-/// `unknown` without saying whether they exist elsewhere.
+/// The scoped score-attestation read returns one of these per owned id, in
+/// one of three states:
+///
+/// - `score: Some(_)`: the latest decision that holds a perplexity.
+/// - `score: None` and `has_gate_decision: true`: the submission has gate
+///   decisions, but none holds a perplexity (a substance Settle row,
+///   migration V139). It was scored, but `trace_commons.score_attestation.v2`
+///   cannot sign that score; `trace_commons.pipeline_score_attestation.v1`
+///   does.
+/// - `score: None` and `has_gate_decision: false`: the "submitted, not scored
+///   yet" state that had no representation anywhere before. The unscoped
+///   enumeration inner-joins the decision table, so a submission awaiting the
+///   gate driver is simply absent there and indistinguishable from one that
+///   was never uploaded.
+///
+/// Ids the principal does not own are not returned at all, and the caller
+/// reports them as `unknown` without saying whether they exist elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnSubmissionScoreRow {
     pub submission_id: Uuid,
     pub score: Option<TraceScoreBySubmissionRow>,
+    /// True when the submission has at least one gate decision, with or
+    /// without a perplexity. Always true when `score` is `Some`.
+    pub has_gate_decision: bool,
 }
 
 /// The credit-bearing slice of a submission's latest gate decision, as the

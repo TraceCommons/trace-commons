@@ -5497,8 +5497,9 @@ async fn insert_substance_gate_decision(
 /// reports. Each read filters it out before choosing the latest row per
 /// submission: a submission whose only decision is a substance row reads as
 /// one with no decision (absent, or `score: None` in the scoped LEFT JOIN
-/// form), and one with an older row that has a perplexity reads that row.
-/// Runs on the narrow `trace_gate_driver` pool, as production does.
+/// form, where `has_gate_decision` still says it has one), and one with an
+/// older row that has a perplexity reads that row. Runs on the narrow
+/// `trace_gate_driver` pool, as production does.
 #[tokio::test]
 async fn pg_store_score_reads_skip_decisions_with_no_perplexity() {
     let Some(backend) = gate_driver_backend().await else {
@@ -5577,7 +5578,7 @@ async fn pg_store_score_reads_skip_decisions_with_no_perplexity() {
         "the attestation signs no entry for a submission whose only decision has no perplexity"
     );
 
-    let scoped: BTreeMap<Uuid, Option<i64>> = backend
+    let scoped: BTreeMap<Uuid, (Option<i64>, bool)> = backend
         .list_own_gate_decision_scores_for_submissions(&tenant, mine, &asked)
         .await
         .expect("scoped score attestation read")
@@ -5585,22 +5586,114 @@ async fn pg_store_score_reads_skip_decisions_with_no_perplexity() {
         .map(|row| {
             (
                 row.submission_id,
-                row.score.map(|score| score.perplexity_micros),
+                (
+                    row.score.map(|score| score.perplexity_micros),
+                    row.has_gate_decision,
+                ),
             )
         })
         .collect();
     assert_eq!(
         scoped,
         BTreeMap::from([
-            (substance_only, None),
-            (duplicate_only, None),
-            (rescored, Some(2_000_000)),
-            (legacy, Some(1_500_000)),
+            (substance_only, (None, true)),
+            (duplicate_only, (None, true)),
+            (rescored, (Some(2_000_000), true)),
+            (legacy, (Some(1_500_000), true)),
         ]),
-        "a submission whose only decision has no perplexity reads as owned and unscored"
+        "a submission whose only decision has no perplexity reads with no score, \
+         and as one that has a gate decision"
     );
 
     cleanup_tenant(&backend, &tenant).await;
+}
+
+/// SQ-11, spec 8.1, V139: the scoped read tells the three states of an owned
+/// submission apart, which the handler sorts into `submissions`,
+/// `scored_without_perplexity` and `pending`: a decision with a perplexity
+/// (`score: Some`), decisions but none with a perplexity (`score: None`,
+/// `has_gate_decision: true`), and no decision (`score: None`,
+/// `has_gate_decision: false`). An unowned id is absent.
+///
+/// `has_gate_decision` is read on the cross-tenant `trace_gate_driver` pool,
+/// so the pending submission's id is also given a substance decision in a
+/// second tenant: the EXISTS must not see it, or a submission another tenant
+/// scored would read as scored here.
+#[tokio::test]
+async fn pg_store_scoped_scores_tell_scored_without_perplexity_from_pending() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant = format!("pg-scoped-substance-{}", Uuid::new_v4());
+    let other_tenant = format!("pg-scoped-substance-other-{}", Uuid::new_v4());
+    let mine = "principal:test-user";
+    let now = Utc::now();
+
+    let legacy_id = Uuid::new_v4();
+    let substance_id = Uuid::new_v4();
+    let pending_id = Uuid::new_v4();
+    let unowned_id = Uuid::new_v4();
+    for id in [legacy_id, substance_id, pending_id] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant, id))
+            .await
+            .expect("insert own submission");
+    }
+    let mut unowned = sample_submission(&tenant, unowned_id);
+    unowned.auth_principal_ref = "principal:somebody-else".to_string();
+    backend
+        .upsert_trace_submission(unowned)
+        .await
+        .expect("insert the other principal's submission");
+
+    backend
+        .insert_trace_gate_decision(&tenant, sample_gate_decision(legacy_id))
+        .await
+        .expect("insert the legacy decision");
+    insert_substance_gate_decision(&backend, &tenant, substance_id, Some(4), now).await;
+    insert_substance_gate_decision(&backend, &tenant, unowned_id, Some(4), now).await;
+
+    // The same submission id as `pending_id`, decided in another tenant.
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant, pending_id))
+        .await
+        .expect("insert the other tenant's copy");
+    insert_substance_gate_decision(&backend, &other_tenant, pending_id, Some(4), now).await;
+
+    let rows = backend
+        .list_own_gate_decision_scores_for_submissions(
+            &tenant,
+            mine,
+            &[legacy_id, substance_id, pending_id, unowned_id],
+        )
+        .await
+        .expect("scoped score read");
+    let by_id: BTreeMap<Uuid, (Option<i64>, bool)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.submission_id,
+                (
+                    row.score.map(|score| score.perplexity_micros),
+                    row.has_gate_decision,
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_id,
+        BTreeMap::from([
+            (legacy_id, (Some(1_500_000), true)),
+            (substance_id, (None, true)),
+            (pending_id, (None, false)),
+        ]),
+        "scored, scored without a perplexity, and pending are three states; \
+         an unowned id is absent"
+    );
+
+    cleanup_tenant(&backend, &tenant).await;
+    cleanup_tenant(&backend, &other_tenant).await;
 }
 
 /// The contributor status surface's credit read, against a real database.

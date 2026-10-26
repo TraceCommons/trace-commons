@@ -2288,13 +2288,19 @@ struct ScopedAttestationBody {
     attestation: String,
     scored: usize,
     pending: usize,
+    /// Absent from a server that predates the list, which then reports none.
+    #[serde(default)]
+    scored_without_perplexity: usize,
 }
 
 /// A scoped attestation over one submit run's ids.
 ///
-/// `scored + pending` need not equal `requested`: an id the server does not
-/// recognise as this principal's lands in the signed document's `unknown`
-/// list and in neither count.
+/// `scored` counts every scored trace: the signed document's `submissions`
+/// and its `scored_without_perplexity` list, a score with no perplexity (a
+/// substance score) that the document names but cannot carry. `scored +
+/// pending` need not equal `requested`: an id the server does not recognise
+/// as this principal's lands in the signed document's `unknown` list and in
+/// neither count.
 #[derive(Debug, Clone)]
 pub struct ScopedAttestation {
     /// One compact JWS per request chunk, in request order. Usually one.
@@ -2305,6 +2311,13 @@ pub struct ScopedAttestation {
 }
 
 impl ScopedAttestation {
+    /// Add one request chunk's answer to the run's totals.
+    fn absorb(&mut self, body: ScopedAttestationBody) {
+        self.attestations.push(body.attestation);
+        self.scored += body.scored + body.scored_without_perplexity;
+        self.pending += body.pending;
+    }
+
     /// The line `submit` prints when the bounded wait ran out with traces
     /// still unscored. Counts only -- no ids, no paths.
     pub fn progress_line(&self) -> String {
@@ -2348,9 +2361,7 @@ async fn scoped_attestation_round(
             )
             .await
             .context("fetching scoped score attestation")?;
-        collected.attestations.push(body.attestation);
-        collected.scored += body.scored;
-        collected.pending += body.pending;
+        collected.absorb(body);
     }
     Ok(collected)
 }
@@ -2431,7 +2442,9 @@ pub fn submitted_ids(outcomes: &[SubmitOutcome]) -> Vec<Uuid> {
 ///
 /// `scored` and `pending` ride alongside it because a collector reading this
 /// programmatically needs to know the document is partial without parsing the
-/// JWS to find out.
+/// JWS to find out. `scored` includes a trace scored without a perplexity,
+/// which the document lists in `scored_without_perplexity` rather than in
+/// `submissions` (see [`ScopedAttestation`]).
 pub fn attach_attestation_to_json(document: &mut serde_json::Value, attested: &ScopedAttestation) {
     if let Some(map) = document.as_object_mut() {
         map.insert(
@@ -5283,6 +5296,41 @@ mod tests {
             "1 of 2 traces scored, 1 pending",
             "the timeout line names the shortfall without failing the submit"
         );
+    }
+
+    /// A substance score has no perplexity, so the signed v2 document lists
+    /// it in `scored_without_perplexity`, not in `submissions`. The run still
+    /// reports it as scored, and an older server that sends no such count
+    /// reads as none.
+    #[test]
+    fn a_trace_scored_without_perplexity_counts_as_scored() {
+        let mut attested = ScopedAttestation {
+            attestations: Vec::new(),
+            requested: 3,
+            scored: 0,
+            pending: 0,
+        };
+        let body: ScopedAttestationBody = serde_json::from_value(serde_json::json!({
+            "attestation": "jws",
+            "scored": 1,
+            "pending": 0,
+            "unknown": 0,
+            "scored_without_perplexity": 2,
+        }))
+        .expect("a current response parses");
+        attested.absorb(body);
+        assert_eq!(attested.scored, 3);
+        assert_eq!(attested.pending, 0);
+        assert_eq!(attested.attestations, vec!["jws".to_string()]);
+        assert_eq!(attested.progress_line(), "3 of 3 traces scored, 0 pending");
+
+        let older: ScopedAttestationBody = serde_json::from_value(serde_json::json!({
+            "attestation": "jws",
+            "scored": 1,
+            "pending": 1,
+        }))
+        .expect("a response without the count parses");
+        assert_eq!(older.scored_without_perplexity, 0);
     }
 
     /// A failed attestation fetch is a warning, not a submit failure: the

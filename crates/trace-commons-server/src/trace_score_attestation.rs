@@ -331,9 +331,26 @@ pub struct ScoreAttestationClaims {
     /// Present ONLY in a scoped response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown: Option<Vec<Uuid>>,
+    /// Asked-for submissions this principal owns that have a gate decision,
+    /// but none with a perplexity (a substance Settle row, migration V139).
+    /// They are scored, and `trace_commons.pipeline_score_attestation.v1`
+    /// signs their score; this document cannot, because a `submissions`
+    /// entry requires a perplexity. Present ONLY in a scoped response, and
+    /// only when the list is non-empty, so a scoped document with no such
+    /// submission is byte-identical to one issued before the key existed.
+    #[serde(default, skip_serializing_if = "is_none_or_empty")]
+    pub scored_without_perplexity: Option<Vec<Uuid>>,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub nonce: String,
+}
+
+/// `scored_without_perplexity` is omitted when absent and when empty: unlike
+/// `pending` and `unknown`, whose empty list is a claim a scoped response
+/// always makes, it is newer than the scoped form, and a verifier written
+/// before it must see the document it always saw.
+fn is_none_or_empty(list: &Option<Vec<Uuid>>) -> bool {
+    list.as_ref().is_none_or(Vec::is_empty)
 }
 
 /// The signed payload of a versioned-pipeline score attestation.
@@ -348,18 +365,21 @@ pub struct VersionedScoreAttestationClaims {
     pub nonce: String,
 }
 
-/// The two extra statements a SCOPED attestation makes, over and above the
+/// The extra statements a SCOPED attestation makes, over and above the
 /// scored `submissions` an unscoped one carries.
 ///
-/// This is an `Option` at the call site rather than two empty vectors
-/// because "no pending submissions" and "I was not asked a scoped question"
-/// are different claims, and only the second may omit the keys. Emitting
+/// This is an `Option` at the call site rather than empty vectors because
+/// "no pending submissions" and "I was not asked a scoped question" are
+/// different claims, and only the second may omit the keys. Emitting
 /// `pending: []` on an unscoped document would be a schema change to every
 /// verifier pinned to `trace_commons.score_attestation.v2`.
+/// `scored_without_perplexity` is the exception: its key is omitted when
+/// the list is empty (see `ScoreAttestationClaims`).
 #[derive(Debug, Clone, Default)]
 pub struct ScoreAttestationScope {
     pub pending: Vec<Uuid>,
     pub unknown: Vec<Uuid>,
+    pub scored_without_perplexity: Vec<Uuid>,
 }
 
 /// Sign a score attestation for `(tenant_id, auth_principal_ref)` as of
@@ -412,7 +432,8 @@ pub fn sign_versioned_score_attestation(
 /// As `sign_score_attestation`, but for a request that named a specific set
 /// of submissions. `scope` carries what the caller asked about and did not
 /// get a score for; `None` reproduces the unscoped document byte for byte,
-/// including the ABSENCE of the `pending` and `unknown` keys.
+/// including the ABSENCE of the `pending`, `unknown` and
+/// `scored_without_perplexity` keys.
 ///
 /// The same non-negotiable applies: `tenant_id` and `auth_principal_ref`
 /// MUST come from the authenticated request context. A scoped request adds
@@ -430,9 +451,13 @@ pub fn sign_scoped_score_attestation(
     let expires_at = now
         .checked_add_signed(Duration::seconds(state.ttl_seconds))
         .context("attestation ttl_seconds overflow")?;
-    let (pending, unknown) = match scope {
-        Some(scope) => (Some(scope.pending), Some(scope.unknown)),
-        None => (None, None),
+    let (pending, unknown, scored_without_perplexity) = match scope {
+        Some(scope) => (
+            Some(scope.pending),
+            Some(scope.unknown),
+            Some(scope.scored_without_perplexity),
+        ),
+        None => (None, None, None),
     };
     let claims = ScoreAttestationClaims {
         schema_version: SCORE_ATTESTATION_SCHEMA_VERSION.to_string(),
@@ -441,6 +466,7 @@ pub fn sign_scoped_score_attestation(
         submissions,
         pending,
         unknown,
+        scored_without_perplexity,
         issued_at: now,
         expires_at,
         nonce: Uuid::new_v4().to_string(),
@@ -628,6 +654,129 @@ mod tests {
         assert_ne!(
             decoded.claims.submissions[0].coverage, decoded.claims.submissions[2].coverage,
             "a fully scored trace must not be confusable with an unknown denominator"
+        );
+    }
+
+    /// `scored_without_perplexity` is absent unless the list is non-empty, so
+    /// a scoped document with no substance-scored submission, and every
+    /// unscoped one, serialize byte for byte as before the key existed. The
+    /// pinned string is that earlier document.
+    #[test]
+    fn scored_without_perplexity_is_absent_unless_non_empty() {
+        use chrono::TimeZone;
+        let claims = |scored_without_perplexity| ScoreAttestationClaims {
+            schema_version: SCORE_ATTESTATION_SCHEMA_VERSION.to_string(),
+            tenant_id: "tenant-a".to_string(),
+            auth_principal_ref: "principal:abc".to_string(),
+            submissions: Vec::new(),
+            pending: Some(vec![Uuid::from_u128(1)]),
+            unknown: Some(Vec::new()),
+            scored_without_perplexity,
+            issued_at: Utc.timestamp_opt(1_800_000_000, 0).unwrap(),
+            expires_at: Utc.timestamp_opt(1_800_003_600, 0).unwrap(),
+            nonce: "nonce-1".to_string(),
+        };
+        let before_the_key = concat!(
+            r#"{"schema_version":"trace_commons.score_attestation.v2","#,
+            r#""tenant_id":"tenant-a","auth_principal_ref":"principal:abc","#,
+            r#""submissions":[],"pending":["00000000-0000-0000-0000-000000000001"],"#,
+            r#""unknown":[],"issued_at":"2027-01-15T08:00:00Z","#,
+            r#""expires_at":"2027-01-15T09:00:00Z","nonce":"nonce-1"}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&claims(None)).unwrap(),
+            before_the_key,
+            "absent: the document is byte-identical to the earlier one"
+        );
+        assert_eq!(
+            serde_json::to_string(&claims(Some(Vec::new()))).unwrap(),
+            before_the_key,
+            "empty: the key is omitted, not written as []"
+        );
+        let listed =
+            serde_json::to_value(claims(Some(vec![Uuid::from_u128(2)]))).expect("serializes");
+        assert_eq!(
+            listed["scored_without_perplexity"],
+            serde_json::json!(["00000000-0000-0000-0000-000000000002"])
+        );
+        // A verifier that deserializes the claims reads a document without
+        // the key as `None`, and one with the key as the list.
+        let parsed: ScoreAttestationClaims = serde_json::from_str(before_the_key).unwrap();
+        assert_eq!(parsed.scored_without_perplexity, None);
+        let parsed: ScoreAttestationClaims = serde_json::from_value(listed).unwrap();
+        assert_eq!(
+            parsed.scored_without_perplexity,
+            Some(vec![Uuid::from_u128(2)])
+        );
+    }
+
+    /// Through the signer: an unscoped document and a scoped one with an
+    /// empty `scored_without_perplexity` carry no such key; a scoped one
+    /// with a substance-scored submission lists it.
+    #[test]
+    fn signed_scoped_attestation_lists_scored_without_perplexity_only_when_non_empty() {
+        let keypair = generate_test_keypair();
+        let state = AttestationSigningState::build(&AttestationConfig {
+            signing_private_key_pem: keypair.private_key_pem.clone(),
+            signing_public_key_pem: keypair.public_key_pem.clone(),
+            signing_kid: "attestation-key-1".to_string(),
+            ttl_seconds: 60,
+        })
+        .unwrap();
+        let decoding_key = DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        let payload = |scope: Option<ScoreAttestationScope>| {
+            let token = sign_scoped_score_attestation(
+                &state,
+                "tenant-a",
+                "principal:abc",
+                Vec::new(),
+                scope,
+                Utc::now(),
+            )
+            .unwrap();
+            jsonwebtoken::decode::<serde_json::Value>(&token, &decoding_key, &validation)
+                .unwrap()
+                .claims
+        };
+
+        let unscoped = payload(None);
+        for key in ["pending", "unknown", "scored_without_perplexity"] {
+            assert!(unscoped.get(key).is_none(), "unscoped carries no {key}");
+        }
+
+        let pending_id = Uuid::new_v4();
+        let scoped_empty = payload(Some(ScoreAttestationScope {
+            pending: vec![pending_id],
+            unknown: Vec::new(),
+            scored_without_perplexity: Vec::new(),
+        }));
+        assert_eq!(
+            scoped_empty["pending"],
+            serde_json::json!([pending_id.to_string()])
+        );
+        assert_eq!(scoped_empty["unknown"], serde_json::json!([]));
+        assert!(
+            scoped_empty.get("scored_without_perplexity").is_none(),
+            "an empty list is omitted: {scoped_empty}"
+        );
+
+        let substance_id = Uuid::new_v4();
+        let scoped_listed = payload(Some(ScoreAttestationScope {
+            pending: Vec::new(),
+            unknown: Vec::new(),
+            scored_without_perplexity: vec![substance_id],
+        }));
+        assert_eq!(
+            scoped_listed["scored_without_perplexity"],
+            serde_json::json!([substance_id.to_string()])
+        );
+        assert_eq!(scoped_listed["pending"], serde_json::json!([]));
+        assert_eq!(
+            scoped_listed["schema_version"],
+            serde_json::json!(SCORE_ATTESTATION_SCHEMA_VERSION)
         );
     }
 

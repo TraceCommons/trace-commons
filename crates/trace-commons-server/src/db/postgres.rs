@@ -6456,8 +6456,10 @@ impl Database for PgBackend {
         // A decision with no perplexity (a substance Settle row, V139) is
         // left out in the JOIN condition, not in WHERE: a submission whose
         // only decision is such a row still comes back, with NULL score
-        // columns, exactly as one with no decision does, and one that also
-        // has a row with a perplexity reads the latest of those.
+        // columns, as one with no decision does, and one that also has a row
+        // with a perplexity reads the latest of those. `has_gate_decision`
+        // tells the first two apart: it counts every decision, with or
+        // without a perplexity.
         let rows = client
             .query(
                 "SELECT DISTINCT ON (s.submission_id)
@@ -6470,7 +6472,12 @@ impl Database for PgBackend {
                     d.novelty_passed,
                     d.chunk_count,
                     d.total_chunk_count,
-                    d.chunks_capped
+                    d.chunks_capped,
+                    EXISTS (
+                        SELECT 1 FROM trace_gate_decisions any_d
+                         WHERE any_d.tenant_id = s.tenant_id
+                           AND any_d.submission_id = s.submission_id
+                    ) AS has_gate_decision
                  FROM trace_submissions s
                  LEFT JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
@@ -6507,6 +6514,7 @@ impl Database for PgBackend {
                 crate::trace_corpus_storage::OwnSubmissionScoreRow {
                     submission_id,
                     score,
+                    has_gate_decision: row.get("has_gate_decision"),
                 }
             })
             .collect())

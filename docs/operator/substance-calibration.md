@@ -187,8 +187,11 @@ The readers of these columns read only rows that hold a value:
 
 - The score attestation (`GET` and `POST /v1/contributors/me/score-attestation`)
   and the admin read-back (`POST /v1/admin/scores-by-submission`) read the
-  latest row with a perplexity. A submission whose only row is a substance
-  row reads as a submission with no gate decision.
+  latest row with a perplexity. A submission whose only rows are substance
+  rows gets no entry in the `GET` document or the read-back. The scoped `POST`
+  document lists it in `scored_without_perplexity`, not in `pending`, so the
+  contributor CLI does not wait for it. Its score is in the pipeline score
+  attestation (`GET /v1/contributors/me/pipeline-score-attestation`).
 - `trace-commons-gate-calibrate tail-floor` and the export query in
   `scripts/operator/analyze-gate-outcome.py` skip a row with NULL in the
   column they read.
