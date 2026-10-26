@@ -2,29 +2,22 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-// Assert that a compiled Icon Composer icon carries the mark.
+// Assert that a compiled Icon Composer icon carries the NEAR AI "N" on the
+// tile, and that only a staging icon carries the staging ribbon.
 //
-// # Why this is not verify-icns.swift
+// Usage: verify-icon.swift <icns> <expected-representations> <production|staging>
 //
-// verify-icns.swift matches pixels against the exact light-scheme inks with a
-// small tolerance. That works for the flat .icns the CoreGraphics renderer
-// produces, where the ink lands on the canvas unmodified.
+// # Why classes of colour, not exact inks
 //
-// It does not work here, and weakening its tolerance until it passed would
-// have thrown away the check. macOS 26 composites a .icon as glass: it
-// lightens, desaturates and adds a specular highlight, so #315FBA arrives as
-// a pale periwinkle far outside any tolerance that still means anything.
-// Measured against a correct icon, the exact-ink check reports "no blue
-// bracket" on every representation.
+// macOS composites a .icon as glass: it lightens, adds a specular rim and lets
+// the tile show through the N, so #F3F3F2 arrives as anything from white to a
+// pale blue and no exact-ink match survives. So each pixel is sorted into a
+// class the glass treatment cannot erase -- blue-dominant tile, bright paper,
+// amber ribbon -- and the classes are checked where the mark puts them.
 //
-// So this asks the question the glass treatment cannot erase: is there a
-// green-dominant mass where the green bracket belongs, and a blue-dominant
-// mass where the blue one belongs. Channel dominance survives lightening;
-// absolute colour does not.
-//
-// This still fails the things that matter -- a blank icon, a flat one, one
-// bracket missing, both brackets the same colour, or the mark drawn in the
-// wrong corner.
+// This fails the things that matter: a blank or flat icon, a missing N, an N
+// with half of it gone, an N in the tile's colour, a production icon that
+// ships the staging ribbon, and a staging icon that lost it.
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("FATAL: \(message)\n".utf8))
@@ -32,22 +25,19 @@ func fail(_ message: String) -> Never {
 }
 
 let args = CommandLine.arguments
-guard args.count >= 2 else { fail("usage: verify-icon.swift <icns> [expected-representations]") }
+guard args.count == 4, let expected = Int(args[2]), ["production", "staging"].contains(args[3]) else {
+    fail("usage: verify-icon.swift <icns> <expected-representations> <production|staging>")
+}
 let path = args[1]
-let expected = args.count >= 3 ? Int(args[2]) : nil
+let staging = args[3] == "staging"
 
 guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else {
     fail("\(path) does not open as an image source")
 }
 let count = CGImageSourceGetCount(source)
-guard count > 0 else { fail("\(path) has no representations") }
-if let expected, count != expected {
+guard count == expected else {
     fail("\(path) has \(count) representations, expected \(expected)")
 }
-
-// A bracket has to occupy a real share of its quadrant. One stray antialiased
-// pixel is not a bracket, and without a floor this check would pass on noise.
-let minimumShare = 0.005
 
 for index in 0..<count {
     guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else {
@@ -58,7 +48,7 @@ for index in 0..<count {
     guard
         let context = CGContext(
             data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { fail("cannot rasterize representation \(index)") }
     context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
@@ -66,59 +56,109 @@ for index in 0..<count {
     let bytes = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
 
     var colors = Set<UInt32>()
-    var accentTopLeft = 0
-    var inkBottomRight = 0
+    var opaque = 0
+    var tile = 0
+    var paper = 0
+    var paperLeft = 0
+    var paperRight = 0
+    var opaqueLeft = 0
+    var opaqueRight = 0
+    var paperCentre = 0
+    var centre = 0
+    var amber = 0
+    var amberTopRight = 0
 
     // Row 0 of a CGBitmapContext's buffer is the TOP row of the image, even
-    // though CoreGraphics' drawing coordinate system has its origin at the
-    // bottom left. Getting this backwards inverts the quadrants and reports
-    // "no accent bracket" on a correct icon.
-    //
-    // The two brackets are probed differently because they are no longer two
-    // hues. Since the mark converged on the site palette the opening bracket
-    // is the accent teal -- still green-dominant, so that half is unchanged --
-    // and the closing bracket is plain ink, which has no dominant channel at
-    // all. Ink is found by being dark and near-neutral instead. On a white
-    // card that is unambiguous; the glass treatment lightens it but does not
-    // tint it enough to reach the neutrality bound.
+    // though CoreGraphics' drawing coordinates start at the bottom left.
+    // Getting this backwards puts the ribbon in the wrong quadrant.
     for y in 0..<h {
         for x in 0..<w {
             let p = (y * w + x) * 4
-            let r = Int(bytes[p])
-            let g = Int(bytes[p + 1])
-            let b = Int(bytes[p + 2])
+            let a = Int(bytes[p + 3])
+            // The legacy renditions carry a transparent margin and a soft
+            // shadow around the tile. Neither is the icon.
+            guard a >= 192 else { continue }
+            // Un-premultiply, so a pixel at the tile's antialiased edge is
+            // judged by its colour, not darkened by its coverage.
+            let r = Int(bytes[p]) * 255 / a
+            let g = Int(bytes[p + 1]) * 255 / a
+            let b = Int(bytes[p + 2]) * 255 / a
             colors.insert(UInt32(r) << 16 | UInt32(g) << 8 | UInt32(b))
+            opaque += 1
 
-            let isTop = y < h / 2
             let isLeft = x < w / 2
-            // A margin of 12 is comfortably above channel noise in the glass
-            // gradient and comfortably below a drawn bracket, which clears it
-            // by an order of magnitude even after compositing.
-            if g > r + 12 && g > b + 12 && isTop && isLeft { accentTopLeft += 1 }
-            let isInk = max(r, max(g, b)) < 128 && abs(r - g) < 24 && abs(g - b) < 24
-            if isInk && !isTop && !isLeft { inkBottomRight += 1 }
+            let isTop = y < h / 2
+            if isLeft { opaqueLeft += 1 } else { opaqueRight += 1 }
+            // The diagonal of the N crosses the middle of the canvas.
+            let inCentre = abs(2 * x - w) < w / 5 && abs(2 * y - h) < h / 5
+            if inCentre { centre += 1 }
+
+            if b > r + 60 && b > g + 20 && r < 140 {
+                tile += 1
+            } else if min(r, min(g, b)) >= 185 && b - r <= 70 {
+                paper += 1
+                if isLeft { paperLeft += 1 } else { paperRight += 1 }
+                if inCentre { paperCentre += 1 }
+            } else if r > 200 && g > 110 && g < 215 && b < 100 {
+                amber += 1
+                if isTop && !isLeft { amberTopRight += 1 }
+            }
         }
     }
 
-    guard colors.count > 1 else {
-        fail("representation \(index) (\(w)x\(h)) is a single flat colour")
+    let label = "representation \(index) (\(w)x\(h))"
+    guard colors.count > 1 else { fail("\(label) is a single flat colour") }
+    guard opaque > 0 else { fail("\(label) is fully transparent") }
+    let share = { (n: Int, of: Int) in of == 0 ? 0 : Double(n) / Double(of) }
+    let tileShare = share(tile, opaque)
+    let paperShare = share(paper, opaque)
+    let leftShare = share(paperLeft, opaqueLeft)
+    let rightShare = share(paperRight, opaqueRight)
+    let centreShare = share(paperCentre, centre)
+    let amberShare = share(amber, opaque)
+
+    // At 16px a stroke of the N is about one pixel wide and blends into the
+    // tile, so most of it no longer reads as paper. Measured on the shipped
+    // icon: paper is 15-18% of the opaque pixels from 32px up and 6% at 16px,
+    // and the ribbon's amber is 1-3% from 32px up and gone at 16px. The floors
+    // sit well under those numbers and well over a missing mark's zero.
+    let small = w < 32
+
+    // The tile is most of the icon; the N is a real share of it but not all
+    // of it. An N scaled to nothing, or blown up to cover the tile, fails.
+    guard tileShare >= 0.40 else {
+        fail("\(label) has no blue tile (\(pct(tileShare)) of opaque pixels are tile blue)")
     }
-    let quadrant = Double((w / 2) * (h / 2))
-    let accentShare = Double(accentTopLeft) / quadrant
-    let inkShare = Double(inkBottomRight) / quadrant
-    guard accentShare >= minimumShare else {
-        fail(
-            "representation \(index) (\(w)x\(h)) has no accent bracket "
-                + "(\(accentTopLeft) accent-dominant pixels in the top-left quadrant)")
+    guard paperShare >= (small ? 0.03 : 0.10) && paperShare <= 0.45 else {
+        fail("\(label) has no N of the right size (\(pct(paperShare)) of opaque pixels are paper)")
     }
-    guard inkShare >= minimumShare else {
-        fail(
-            "representation \(index) (\(w)x\(h)) has no ink bracket "
-                + "(\(inkBottomRight) ink pixels in the bottom-right quadrant)")
+    // The N is symmetric under a half turn, so each half carries a stem and
+    // half of the diagonal. One half bare means half of the mark is gone.
+    let halfFloor = small ? 0.03 : 0.08
+    guard leftShare >= halfFloor && rightShare >= halfFloor else {
+        fail("\(label) has half an N (left \(pct(leftShare)), right \(pct(rightShare)) paper)")
     }
-    let accentPct = String(format: "%.1f", accentShare * 100)
-    let inkPct = String(format: "%.1f", inkShare * 100)
-    print("  \(w)x\(h): \(colors.count) colours, accent \(accentPct)%, ink \(inkPct)%")
+    guard centreShare >= 0.10 else {
+        fail("\(label) has no diagonal through the middle (\(pct(centreShare)) paper)")
+    }
+    if staging && !small {
+        guard share(amberTopRight, opaque) >= 0.01 else {
+            fail("\(label) is a staging icon without the amber ribbon in the top-right corner")
+        }
+        guard amberTopRight * 10 >= amber * 9 else {
+            fail("\(label) has amber outside the top-right corner")
+        }
+    } else if !staging {
+        guard amberShare < 0.002 else {
+            fail("\(label) is a production icon carrying staging amber (\(pct(amberShare)))")
+        }
+    }
+    print(
+        "  \(w)x\(h): tile \(pct(tileShare)), paper \(pct(paperShare)) "
+            + "(left \(pct(leftShare)), right \(pct(rightShare)), centre \(pct(centreShare))), "
+            + "amber \(pct(amberShare))")
 }
 
-print("\(path) carries the mark at all \(count) representations")
+func pct(_ value: Double) -> String { String(format: "%.1f%%", value * 100) }
+
+print("\(path) carries the \(args[3]) icon at all \(count) representations")

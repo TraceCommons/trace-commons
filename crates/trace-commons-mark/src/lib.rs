@@ -35,6 +35,9 @@
 //! the per-client transcription tests are what keep the four descriptions of
 //! the mark from wandering apart.
 //!
+//! The macOS app icon is no longer one of those files: it is the NEAR AI
+//! tile, an Icon Composer document under `macos/icons/`.
+//!
 //! Nothing here has a dependency, and nothing here rasterizes. SVG out; each
 //! platform's own toolchain turns that into whatever it needs.
 //!
@@ -195,37 +198,6 @@ pub fn svg(scheme: Scheme, size: u32) -> String {
     )
 }
 
-/// The frameless, two-colour glyph variant as an SVG document.
-///
-/// Both brackets in their own colours, on nothing. This is the variant an
-/// Icon Composer `.icon` wants: the system draws the tile, its shape, its
-/// shadow and its specular highlight, and composites the appearance -- so a
-/// layer that brought its own opaque ground would sit inside the system's
-/// tile as a light square that never changes, in dark and tinted appearances
-/// alike. That is exactly the light/dark collapse the `.icon` route exists to
-/// remove, so the ground is left to the system and only the mark is supplied.
-///
-/// Distinct from [`template_svg`], which is also frameless but collapses both
-/// brackets to a single ink for a status area. Here they keep their colours.
-pub fn glyph_svg(scheme: Scheme, size: u32) -> String {
-    format!(
-        concat!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" "#,
-            r#"viewBox="0 0 {view} {view}" role="img" aria-label="Trace Commons">"#,
-            r#"<path d="{green_path}" fill="none" stroke="{green}" stroke-width="{stroke}"/>"#,
-            r#"<path d="{blue_path}" fill="none" stroke="{blue}" stroke-width="{stroke}"/>"#,
-            r#"</svg>"#,
-        ),
-        size = size,
-        view = VIEW,
-        green_path = PATH_BRACKET_OPEN,
-        blue_path = PATH_BRACKET_CLOSE,
-        stroke = STROKE_FRAMED,
-        green = scheme.bracket_open(),
-        blue = scheme.bracket_close(),
-    )
-}
-
 /// The frameless, single-ink template variant as an SVG document.
 ///
 /// `ink` is a CSS colour written straight into the document -- pass
@@ -245,76 +217,6 @@ pub fn template_svg(ink: &str, size: u32) -> String {
         blue_path = PATH_BRACKET_CLOSE,
         stroke = STROKE_TEMPLATE,
         ink = ink,
-    )
-}
-
-/// The geometry and palette as JSON, for renderers that cannot read SVG.
-///
-/// macOS builds its `.icns` with CoreGraphics rather than by rasterizing the
-/// SVG, because `sips`' SVG support is not a documented interface and the build
-/// should not depend on it. It is NOT because `sips` renders the mark wrongly.
-///
-/// An earlier version of this comment said `sips` zeroed the blue channel at 16
-/// and 32 pixels. That was a misreading: the corruption came from
-/// `iconutil --convert iconset`, which mis-decodes its own `ic04`/`ic05`
-/// chunks -- those are raw ARGB RLE rather than PNG. Read through
-/// `CGImageSource`, which is what macOS itself uses, every representation is
-/// clean, and so is direct `sips` output. The trap is worth knowing about
-/// because it presents as corruption of exactly the two sizes the Finder and
-/// the menu bar use, which is precisely what somebody verifying an `.icns`
-/// would expect a real bug to look like.
-///
-/// This is emitted rather than hand-written on the Swift side so the numbers
-/// still come from here. Written by hand rather than with serde: this crate is
-/// dependency-free on purpose, and the document is nine fields.
-pub fn geometry_json() -> String {
-    let vertices = |v: &[(u32, u32); 3]| {
-        v.iter()
-            .map(|(x, y)| format!("[{x}, {y}]"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let scheme_object = |s: Scheme| {
-        format!(
-            concat!(
-                "{{\n      \"surface\": \"{surface}\",\n",
-                "      \"line\": \"{line}\",\n",
-                "      \"bracketOpen\": \"{green}\",\n",
-                "      \"bracketClose\": \"{blue}\",\n",
-                "      \"ink\": \"{ink}\"\n    }}",
-            ),
-            surface = s.surface(),
-            line = s.line(),
-            green = s.bracket_open(),
-            blue = s.bracket_close(),
-            ink = s.ink(),
-        )
-    };
-    format!(
-        concat!(
-            "{{\n",
-            "  \"view\": {view},\n",
-            "  \"frame\": [{fx}, {fy}, {fw}, {fh}],\n",
-            "  \"strokeFrame\": {sframe},\n",
-            "  \"strokeFramed\": {sframed},\n",
-            "  \"strokeTemplate\": {stemplate},\n",
-            "  \"bracketOpen\": [{green}],\n",
-            "  \"bracketClose\": [{blue}],\n",
-            "  \"schemes\": {{\n    \"light\": {light},\n    \"dark\": {dark}\n  }}\n",
-            "}}",
-        ),
-        view = VIEW,
-        fx = FRAME_RECT.0,
-        fy = FRAME_RECT.1,
-        fw = FRAME_RECT.2,
-        fh = FRAME_RECT.3,
-        sframe = STROKE_FRAME,
-        sframed = STROKE_FRAMED,
-        stemplate = STROKE_TEMPLATE,
-        green = vertices(&VERTICES_BRACKET_OPEN),
-        blue = vertices(&VERTICES_BRACKET_CLOSE),
-        light = scheme_object(Scheme::Light),
-        dark = scheme_object(Scheme::Dark),
     )
 }
 
@@ -455,154 +357,8 @@ pub fn all_exports() -> Vec<Export> {
             },
             contents: template_svg(scheme.ink(), 1024),
         });
-        // Both glyphs are exported and both are consumed: the macOS `.icon`
-        // names the light one as its base layer and the dark one as an
-        // `image-name-specializations` override for the dark appearance, so
-        // dark mode gets this palette rather than the light inks composited
-        // onto a dark ground. See macos/scripts/make-icon-document.sh.
-        out.push(Export {
-            relative_path: match scheme {
-                Scheme::Light => "mark-glyph-light.svg",
-                Scheme::Dark => "mark-glyph-dark.svg",
-            },
-            contents: glyph_svg(scheme, 1024),
-        });
     }
-    out.push(Export {
-        relative_path: "geometry.json",
-        contents: geometry_json(),
-    });
     out
-}
-
-/// The staging channel's accent: an amber that no production surface uses, so
-/// the staging app is told apart from the production one by colour before it
-/// is told apart by shape. Both schemes share it, as the teal does.
-pub const STAGING_AMBER: &str = "#FFB000";
-
-/// The staging marker's dark ink, for stripes and the badge letter.
-pub const STAGING_INK: &str = "#14110A";
-
-/// A candidate look for the staging app icon. Each one is the production glyph
-/// with something added, never the production glyph changed, so the brackets
-/// stay where `make-icon-document.sh` and `verify-icon.swift` look for them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StagingOption {
-    /// A diagonal hazard-striped ribbon across the free top-right corner.
-    Ribbon,
-    /// The whole ground tinted amber (light) or deep amber (dark).
-    Tint,
-    /// A round amber badge carrying an S in the free bottom-left corner.
-    Badge,
-}
-
-impl StagingOption {
-    pub const ALL: [StagingOption; 3] = [
-        StagingOption::Ribbon,
-        StagingOption::Tint,
-        StagingOption::Badge,
-    ];
-
-    /// The look the generated staging assets use.
-    pub const RECOMMENDED: StagingOption = StagingOption::Ribbon;
-
-    pub fn name(self) -> &'static str {
-        match self {
-            StagingOption::Ribbon => "ribbon",
-            StagingOption::Tint => "tint",
-            StagingOption::Badge => "badge",
-        }
-    }
-
-    /// The ground tint of [`StagingOption::Tint`], per scheme.
-    fn tint(scheme: Scheme) -> &'static str {
-        match scheme {
-            Scheme::Light => "#FFC940",
-            Scheme::Dark => "#6B4600",
-        }
-    }
-}
-
-/// The staging marker for `option`, as SVG elements in the 64-unit space.
-fn staging_marker(option: StagingOption) -> String {
-    match option {
-        StagingOption::Ribbon => {
-            // Band: 24 <= x - y <= 50, running off the top and right edges
-            // (the viewBox clips it). Stripes are bands of x + y. Nothing
-            // reaches either bracket: the open one ends at x=28, the close
-            // one starts at y=36 on x=53, and the band is at x=64 by y=30.
-            let corner = |d: f32, u: f32| format!("{},{}", (u + d) / 2.0, (u - d) / 2.0);
-            let band = |lo: f32, hi: f32, fill: &str| {
-                format!(
-                    r#"<polygon points="{} {} {} {}" fill="{fill}"/>"#,
-                    corner(24.0, lo),
-                    corner(50.0, lo),
-                    corner(50.0, hi),
-                    corner(24.0, hi),
-                )
-            };
-            let mut out = band(30.0, 110.0, STAGING_AMBER);
-            let mut lo = 40.0;
-            while lo < 110.0 {
-                out.push_str(&band(lo, lo + 8.0, STAGING_INK));
-                lo += 16.0;
-            }
-            out
-        }
-        StagingOption::Tint => String::new(),
-        StagingOption::Badge => format!(
-            concat!(
-                r#"<circle cx="14" cy="50" r="11" fill="{amber}" stroke="{ink}" stroke-width="2"/>"#,
-                r#"<path d="M19 45H11.5a3 3 0 0 0 0 5.5H16.5a3 3 0 0 1 0 5.5H9" fill="none" "#,
-                r#"stroke="{ink}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
-            ),
-            amber = STAGING_AMBER,
-            ink = STAGING_INK,
-        ),
-    }
-}
-
-/// The staging glyph layer: [`glyph_svg`] plus the marker for `option`. Same
-/// two bracket paths at the same stroke, so the icon pipeline's bracket checks
-/// apply to it unchanged.
-pub fn staging_glyph_svg(option: StagingOption, scheme: Scheme, size: u32) -> String {
-    let ground = match option {
-        StagingOption::Tint => format!(
-            r#"<rect width="{v}" height="{v}" fill="{}"/>"#,
-            StagingOption::tint(scheme),
-            v = VIEW
-        ),
-        _ => String::new(),
-    };
-    let marker = staging_marker(option);
-    let glyph = glyph_svg(scheme, size);
-    // glyph_svg is `<svg ...><path/><path/></svg>`: splice the ground before
-    // the brackets and the marker after them.
-    let open_end = glyph.find('>').expect("svg start tag") + 1;
-    let close_start = glyph.rfind("</svg>").expect("svg end tag");
-    let mut out = String::new();
-    out.push_str(&glyph[..open_end]);
-    out.push_str(&ground);
-    out.push_str(&glyph[open_end..close_start]);
-    out.push_str(&marker);
-    out.push_str(&glyph[close_start..]);
-    out
-}
-
-/// The staging channel's icon documents, for the recommended look. Written to
-/// `assets/mark-staging` under the same file names the `.icon` build reads
-/// from `assets/mark`, so `TC_ICON_SOURCE` is the only switch.
-pub fn staging_exports() -> Vec<Export> {
-    Scheme::ALL
-        .into_iter()
-        .map(|scheme| Export {
-            relative_path: match scheme {
-                Scheme::Light => "mark-glyph-light.svg",
-                Scheme::Dark => "mark-glyph-dark.svg",
-            },
-            contents: staging_glyph_svg(StagingOption::RECOMMENDED, scheme, 1024),
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -681,50 +437,6 @@ mod tests {
             assert_eq!(VIEW - open.0, close.0, "x of {open:?} vs {close:?}");
             assert_eq!(VIEW - open.1, close.1, "y of {open:?} vs {close:?}");
         }
-    }
-
-    /// The glyph variant exists so an Icon Composer `.icon` can supply the
-    /// mark and let the system supply the ground. If it carried the frame
-    /// rect, the icon would be a light tile in every appearance -- which is
-    /// the light/dark collapse the `.icon` route is meant to remove.
-    #[test]
-    fn the_glyph_variant_has_no_ground_of_its_own() {
-        for scheme in Scheme::ALL {
-            let doc = glyph_svg(scheme, 1024);
-            assert!(
-                !doc.contains("<rect"),
-                "{} glyph carries a frame rect: {doc}",
-                scheme.name()
-            );
-            assert!(
-                !doc.contains(scheme.surface()),
-                "{} glyph paints a surface",
-                scheme.name()
-            );
-            assert!(
-                doc.contains(scheme.bracket_open()),
-                "{} glyph lost the green bracket",
-                scheme.name()
-            );
-            assert!(
-                doc.contains(scheme.bracket_close()),
-                "{} glyph lost the blue bracket",
-                scheme.name()
-            );
-            assert!(doc.contains(PATH_BRACKET_OPEN));
-            assert!(doc.contains(PATH_BRACKET_CLOSE));
-        }
-    }
-
-    /// Both brackets keep their own colour. The template variant collapses
-    /// them to one ink on purpose; the glyph variant must not, or the icon
-    /// stops being the two-colour mark.
-    #[test]
-    fn the_glyph_variant_keeps_two_colours() {
-        let doc = glyph_svg(Scheme::Light, 1024);
-        assert_ne!(Scheme::Light.bracket_open(), Scheme::Light.bracket_close());
-        assert!(doc.contains(Scheme::Light.bracket_open()));
-        assert!(doc.contains(Scheme::Light.bracket_close()));
     }
 
     /// The palette literals here are copies of tokens that live in each
@@ -869,22 +581,19 @@ mod tests {
         assert!(!doc.contains("#00D4AA"), "template is single-ink: {doc}");
     }
 
-    /// Seven documents, distinct paths, and none of them empty. The list drives
+    /// Four documents, distinct paths, and none of them empty. The list drives
     /// both the export tool and the drift check, so a duplicate path here would
     /// silently drop a packaging surface.
     #[test]
-    fn exports_are_seven_distinct_non_empty_documents() {
+    fn exports_are_four_distinct_non_empty_documents() {
         let exports = all_exports();
-        assert_eq!(exports.len(), 7);
+        assert_eq!(exports.len(), 4);
         let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
         paths.sort_unstable();
         assert_eq!(
             paths,
             [
-                "geometry.json",
                 "mark-dark.svg",
-                "mark-glyph-dark.svg",
-                "mark-glyph-light.svg",
                 "mark-light.svg",
                 "mark-template-dark.svg",
                 "mark-template-light.svg",
@@ -892,9 +601,6 @@ mod tests {
         );
         for export in &exports {
             assert!(!export.contents.is_empty(), "{}", export.relative_path);
-            if !export.relative_path.ends_with(".svg") {
-                continue;
-            }
             assert!(
                 export.contents.starts_with("<svg") && export.contents.ends_with("</svg>"),
                 "{} is not a complete document",
@@ -913,31 +619,6 @@ mod tests {
         }
     }
 
-    /// The JSON the macOS renderer consumes has to carry every number that
-    /// renderer needs, and carry them as numbers rather than strings. A typo
-    /// here surfaces as a blank icon at build time, which is the failure this
-    /// slice exists to stop shipping.
-    #[test]
-    fn geometry_json_carries_the_numbers_the_renderer_needs() {
-        let doc = geometry_json();
-        assert!(doc.contains(r#""view": 64"#), "{doc}");
-        assert!(doc.contains(r#""frame": [1, 1, 62, 62]"#), "{doc}");
-        assert!(doc.contains(r#""strokeFrame": 2"#), "{doc}");
-        assert!(doc.contains(r#""strokeFramed": 7"#), "{doc}");
-        assert!(doc.contains(r#""strokeTemplate": 8"#), "{doc}");
-        assert!(
-            doc.contains(r#""bracketOpen": [[11, 28], [11, 11], [28, 11]]"#),
-            "{doc}"
-        );
-        assert!(
-            doc.contains(r#""bracketClose": [[53, 36], [53, 53], [36, 53]]"#),
-            "{doc}"
-        );
-        assert!(doc.contains("#FFFFFF"), "{doc}");
-        assert!(doc.contains("#00D4AA"), "{doc}");
-        assert!(doc.contains("#FFFFFF"), "{doc}");
-    }
-
     /// Light and dark have to actually differ, in both treatments. Emitting the
     /// same document twice under two names is a failure that looks like success
     /// in any file listing.
@@ -948,52 +629,5 @@ mod tests {
             template_svg(Scheme::Light.ink(), 64),
             template_svg(Scheme::Dark.ink(), 64)
         );
-    }
-
-    #[test]
-    fn staging_glyphs_keep_the_production_brackets() {
-        for option in StagingOption::ALL {
-            for scheme in Scheme::ALL {
-                let svg = staging_glyph_svg(option, scheme, 1024);
-                assert!(svg.contains(PATH_BRACKET_OPEN), "{option:?} {scheme:?}");
-                assert!(svg.contains(PATH_BRACKET_CLOSE), "{option:?} {scheme:?}");
-                assert!(svg.contains(scheme.bracket_open()));
-                assert!(svg.contains(&format!(
-                    r#"stroke="{}" stroke-width="{}""#,
-                    scheme.bracket_close(),
-                    STROKE_FRAMED
-                )));
-                assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
-                assert_ne!(svg, glyph_svg(scheme, 1024), "{option:?} adds nothing");
-            }
-        }
-    }
-
-    #[test]
-    fn staging_exports_differ_from_production_and_between_schemes() {
-        let staging = staging_exports();
-        assert_eq!(staging.len(), 2);
-        let production = all_exports();
-        for export in &staging {
-            let prod = production
-                .iter()
-                .find(|p| p.relative_path == export.relative_path)
-                .expect("a production file of the same name");
-            assert_ne!(prod.contents, export.contents);
-            assert!(export.contents.contains(STAGING_AMBER));
-            // Text is rejected by Icon Composer.
-            assert!(!export.contents.contains("<text"));
-        }
-        assert_ne!(staging[0].contents, staging[1].contents);
-    }
-
-    #[test]
-    fn staging_marker_stays_out_of_the_brackets() {
-        // The ribbon's band is x - y in [24, 50]; the open bracket's far end
-        // (28, 11) and the close bracket's top (53, 36) must be outside it.
-        for (x, y) in [(28, 11), (11, 11), (53, 36), (53, 53), (36, 53)] {
-            let d: i32 = x - y;
-            assert!(!(24..=50).contains(&d), "({x},{y}) is under the ribbon");
-        }
     }
 }

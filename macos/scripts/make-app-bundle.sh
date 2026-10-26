@@ -143,18 +143,13 @@ done
 # the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
 # there was none to show.
 #
-# This is the Icon Composer .icon route: it writes both Assets.car, which is
-# what macOS 26 draws and what carries the Liquid Glass treatment, and
-# AppIcon.icns as the legacy fallback. scripts/info-plist.sh declares
-# CFBundleIconName for the former and CFBundleIconFile for the latter, which
-# is the pair actool's own partial Info.plist emits.
-#
-# scripts/make-icons.sh is the earlier, flat .icns-only route. It is kept
-# because it produces the full ten-representation ladder that iconutil wants
-# and this one produces four, so it is the thing to fall back to if the .icon
-# route ever has to be backed out. It is not wired into this build.
+# The channel's Icon Composer document (macos/icons/) is compiled into both
+# Assets.car, which is what macOS draws and what carries the Liquid Glass
+# treatment, and AppIcon.icns as the legacy fallback. scripts/info-plist.sh
+# declares CFBundleIconName for the former and CFBundleIconFile for the
+# latter, which is the pair actool's own partial Info.plist emits.
 ./scripts/make-icon-document.sh "$REPO_ROOT/$TC_ICON_SOURCE" \
-  "$APP/Contents/Resources"
+  "$APP/Contents/Resources" "$TC_CHANNEL"
 
 # cargo stamps the dylib with an absolute install name under target/. Repoint
 # it inside the bundle so the app does not depend on this checkout's path.

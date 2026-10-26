@@ -24,19 +24,17 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ASSETS="assets/mark"
 TILES="windows/packaging/Assets"
-# The staging channel's icon documents (macos/channels/staging.env).
-STAGING="assets/mark-staging"
 
-cargo run --quiet -p trace-commons-mark --bin mark-export -- "$ASSETS" --repo-root . --staging-dir "$STAGING"
+cargo run --quiet -p trace-commons-mark --bin mark-export -- "$ASSETS" --repo-root .
 
-if ! git diff --exit-code -- "$ASSETS" "$STAGING" "$TILES"; then
+if ! git diff --exit-code -- "$ASSETS" "$TILES"; then
   echo "FATAL: generated assets do not match the generator." >&2
   echo "These files are generated from crates/trace-commons-mark, not edited." >&2
   echo "Run scripts/mark/check-drift.sh locally and commit the result." >&2
   exit 1
 fi
 
-UNTRACKED="$(git ls-files --others --exclude-standard -- "$ASSETS" "$STAGING" "$TILES")"
+UNTRACKED="$(git ls-files --others --exclude-standard -- "$ASSETS" "$TILES")"
 if [ -n "$UNTRACKED" ]; then
   echo "FATAL: the generator wrote files that are not committed:" >&2
   echo "$UNTRACKED" >&2
@@ -52,10 +50,10 @@ while IFS= read -r tracked; do
     echo "FATAL: $tracked is committed but the generator did not write it." >&2
     MISSING=1
   fi
-done < <(git ls-files -- "$ASSETS" "$STAGING" "$TILES")
+done < <(git ls-files -- "$ASSETS" "$TILES")
 if [ "$MISSING" != 0 ]; then
   echo "A committed asset no longer corresponds to any packaging surface." >&2
   exit 1
 fi
 
-echo "assets/mark, $STAGING and $TILES match the generator"
+echo "assets/mark and $TILES match the generator"
