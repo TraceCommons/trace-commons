@@ -2432,6 +2432,32 @@ mod tests {
         assert_eq!(std::fs::read(&labels).unwrap(), b"[1, 2]");
     }
 
+    /// A labels file that fails to read (here, unreadable by its owner) is
+    /// read again on the next call, not answered as no labels until a
+    /// restart.
+    #[cfg(unix)]
+    #[test]
+    fn a_labels_file_that_failed_to_read_is_read_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let labels = f.dir.path().join(SESSION_LABELS_FILE);
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        std::fs::set_permissions(&labels, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = only(&f.list(&[], &[]));
+        std::fs::set_permissions(&labels, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(unreadable["user_task"].is_null(), "{unreadable}");
+        assert_eq!(only(&f.list(&[], &[]))["user_task"], "docs");
+    }
+
     /// A label that could not be written is not answered, listed or kept
     /// for a later write.
     #[cfg(unix)]

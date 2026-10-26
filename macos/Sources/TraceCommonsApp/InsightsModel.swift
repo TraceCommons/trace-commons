@@ -370,8 +370,8 @@ final class InsightsModel {
         switch message {
         case "insights-session-file-gone": return "analytics_analyze_file_gone"
         case "insights-session-unknown": return sessionUnknownKey
-        case "insights-analyze-source-too-large": return "analytics_analyze_too_large"
-        case "insights-analyze-codex-not-one-session": return "analytics_analyze_codex_not_one"
+        case "insights-session-too-large": return "analytics_analyze_too_large"
+        case "insights-session-not-one-session": return "analytics_analyze_codex_not_one"
         default: return "analytics_analyze_failed"
         }
     }

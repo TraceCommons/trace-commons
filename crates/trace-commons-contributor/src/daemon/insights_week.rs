@@ -1681,15 +1681,25 @@ impl CounterPass {
     }
 
     /// The labels file, read the first time it is needed, for a caller
-    /// holding its lock.
+    /// holding its lock. A failed read (a wrong owner, a transient I/O
+    /// error) answers as unreadable without being kept, so the next call
+    /// reads again; only a file not in the labels shape stays unreadable.
     fn read_labels<'s>(&self, slot: &'s mut Option<LabelsRead>) -> &'s LabelsRead {
-        slot.get_or_insert_with(|| match std::fs::read(self.labels_path()) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(LabelsRead::Read)
-                .unwrap_or(LabelsRead::Unreadable),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => LabelsRead::Absent,
-            Err(_) => LabelsRead::Unreadable,
-        })
+        static READ_FAILED: LabelsRead = LabelsRead::Unreadable;
+        if slot.is_none() {
+            *slot = match std::fs::read(self.labels_path()) {
+                Ok(bytes) => Some(
+                    serde_json::from_slice(&bytes)
+                        .map(LabelsRead::Read)
+                        .unwrap_or(LabelsRead::Unreadable),
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Some(LabelsRead::Absent)
+                }
+                Err(_) => return &READ_FAILED,
+            };
+        }
+        slot.as_ref().unwrap_or(&READ_FAILED)
     }
 
     /// The labels this build can read, by session, made under the key
