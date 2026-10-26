@@ -5731,6 +5731,34 @@ mod tests {
     }
 
     #[test]
+    fn breakdown_rows_split_claude_by_day_and_leave_codex_null() {
+        let f = Fixture::new();
+        let claude = f.write("a.jsonl", &claude_bytes());
+        let codex = f.write("c.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &claude),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let week = f.week(&[]);
+        let days = week["rollup"]["by_day"].as_array().unwrap();
+        for session in sessions_of(&week) {
+            if session["source"] == "codex" {
+                assert_eq!(session["by_day"], serde_json::Value::Null);
+                continue;
+            }
+            let by_day = session["by_day"].as_array().unwrap();
+            assert_eq!(by_day.len(), 7);
+            for (amount, day) in by_day.iter().zip(days) {
+                let total: u64 = ["uncached", "cache_read", "cache_write", "output"]
+                    .iter()
+                    .map(|series| day[series].as_u64().unwrap())
+                    .sum();
+                assert_eq!(amount.as_u64(), Some(total));
+            }
+        }
+    }
+
+    #[test]
     fn breakdown_metadata_is_null_without_a_join() {
         let f = Fixture::new();
         let path = f.write("s.jsonl", &codex_bytes());
