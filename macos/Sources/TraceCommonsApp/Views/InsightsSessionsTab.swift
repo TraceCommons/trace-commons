@@ -98,6 +98,9 @@ struct InsightsSessionsTab: View {
     private func feed(_ rows: [DaemonData.InsightsWatchedSession]) -> some View {
         LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(rows) { row in
+                #if DEBUG
+                let _ = OtherCollectionRowBodies.record("insightsWatchedFeed", row.sessionRef)
+                #endif
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     feedRow(row)
                     if model.selected == row.sessionRef { expanded(row) }
@@ -109,6 +112,9 @@ struct InsightsSessionsTab: View {
             }
             feedFoot(empty: rows.isEmpty)
         }
+        // Rows are built as they scroll in, each with its label menus: the
+        // responder-scale tests measure the feed by this name.
+        .accessibilityIdentifier("insightsWatchedFeed")
         .scrollTargetLayout()
         // Full Keyboard Access: focus the feed, then up and down move
         // between rows and Return opens or closes the row.
