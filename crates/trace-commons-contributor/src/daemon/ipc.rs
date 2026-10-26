@@ -2623,11 +2623,12 @@ impl DaemonShared {
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
         // Snapshot settings without nesting its lock under policy or queue.
-        let (scrub_check, setup_roots_declared) = {
+        let (scrub_check, setup_roots_declared, max_queue_entries) = {
             let settings = self.settings.lock().expect("settings lock");
             (
                 settings.scrub_check,
                 super::settings::roots_declared(&settings),
+                settings.max_queue_entries,
             )
         };
         // Nudge: the suggestion ledger and the switches it reads, each in
@@ -2662,6 +2663,7 @@ impl DaemonShared {
         // policy guard is dropped straight away; nothing below needs it.
         let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
+        let queue_capacity_used = queue.capacity_used();
         let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
         // Same guards as `decisions_owed`, and the same function
         // `list_projects` reports, so the two answers always agree.
@@ -2848,6 +2850,12 @@ impl DaemonShared {
             "consent_hold": consent_hold,
             "paused": paused,
             "queue_depth": queue.pending().len(),
+            // Authoritative admission capacity, independent of the single
+            // health slot. Pending depth excludes Approved and includes
+            // person-included entries, so it cannot answer this question.
+            // Zero has the same meaning here as in admission: no new slots.
+            "queue_capacity_used": queue_capacity_used,
+            "queue_at_capacity": queue_capacity_used >= max_queue_entries,
             // Additive (K6). The badge's exact count: `Pending` entries that
             // need a decision from this person. Unlike `queue_depth`, this
             // excludes armed folders' `Pending` entries that will go out
@@ -14472,6 +14480,57 @@ mod tests {
 
     fn approved_entry(size_bytes: u64) -> super::super::queue::QueueEntry {
         approved_entry_n(0, size_bytes)
+    }
+
+    #[test]
+    fn status_queue_at_capacity_counts_approved_and_excludes_person_included_and_history() {
+        let s = shared();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            for (n, state, person_included) in [
+                (0, QueueState::Pending, false),
+                (1, QueueState::Approved, false),
+                (2, QueueState::Pending, true),
+                (3, QueueState::Approved, true),
+                (4, QueueState::Uploading, false),
+                (5, QueueState::Uploaded, false),
+                (6, QueueState::Failed, false),
+                (7, QueueState::Expired, false),
+                (8, QueueState::Superseded, false),
+            ] {
+                let mut entry = approved_entry_n(n, 10);
+                entry.state = state;
+                entry.person_included = person_included;
+                queue.push_for_test(entry);
+            }
+        }
+        for (limit, full) in [(3, false), (2, true), (1, true), (0, true)] {
+            s.settings.lock().unwrap().max_queue_entries = limit;
+            let status = s.status_value();
+            assert_eq!(
+                status["queue_depth"], 2,
+                "legacy Pending-only depth remains unchanged"
+            );
+            assert_eq!(
+                status["queue_capacity_used"], 2,
+                "same exact admission predicate: {status}"
+            );
+            assert_eq!(status["queue_at_capacity"], full, "limit={limit}: {status}");
+            assert!(status["health"]["last_error_label"].is_null());
+        }
+    }
+
+    #[test]
+    fn status_queue_at_capacity_zero_limit_matches_admission_for_an_empty_queue() {
+        let s = shared();
+        s.settings.lock().unwrap().max_queue_entries = 0;
+        let status = s.status_value();
+        assert_eq!(status["queue_capacity_used"], 0);
+        assert_eq!(status["queue_at_capacity"], true);
+        s.settings.lock().unwrap().max_queue_entries = 1;
+        let status = s.status_value();
+        assert_eq!(status["queue_capacity_used"], 0);
+        assert_eq!(status["queue_at_capacity"], false);
     }
 
     #[test]

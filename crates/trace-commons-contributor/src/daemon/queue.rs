@@ -1406,6 +1406,15 @@ impl Queue {
         }
     }
 
+    /// Occupied watcher-admission slots, independent of the health label.
+    /// Manually included sessions and non-live history never consume a slot.
+    pub fn capacity_used(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| counts_against_the_cap(entry))
+            .count()
+    }
+
     pub fn pending(&self) -> Vec<&QueueEntry> {
         self.entries
             .iter()
@@ -1428,11 +1437,7 @@ impl Queue {
         {
             return Ok(());
         }
-        let live = self
-            .entries
-            .iter()
-            .filter(|e| counts_against_the_cap(e))
-            .count();
+        let live = self.capacity_used();
         if live >= max_entries {
             bail!("queue-full");
         }

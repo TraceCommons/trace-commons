@@ -853,6 +853,9 @@ final class TracesStore {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
+        // The health slot may retain an earlier watcher failure after the
+        // queue has room. Only the authoritative capacity read clears it.
+        if status.queueAtCapacity == false { said.insert("queue-full") }
         if status.dailyBudget?.blocked != nil { said.insert("daily-cap-reached") }
         if let budget = status.dailyBudget, budget.blocked == true {
             out.append(Safeguard(

@@ -457,6 +457,10 @@ extension DaemonData {
         /// never shown as text.
         public let consentHold: String?
         public let paused: Bool?
+        /// Authoritative admission capacity, including eligible Approved entries.
+        /// Missing on older daemons; unknown must never establish recovery.
+        public let queueAtCapacity: Bool?
+        public let queueCapacityUsed: Int?
         /// Every `Pending` entry. NOT the badge: never draw a count from it.
         public let queueDepth: Int?
         /// the badge's exact count. `nil` is unknown (an older daemon, or
@@ -518,6 +522,8 @@ extension DaemonData {
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
             case paused
+            case queueAtCapacity = "queue_at_capacity"
+            case queueCapacityUsed = "queue_capacity_used"
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
             case unpurposedTraces = "unpurposed_traces"
