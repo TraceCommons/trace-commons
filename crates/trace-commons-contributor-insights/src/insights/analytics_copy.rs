@@ -524,6 +524,22 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_analyze_intro",
         "Analyze & save reads a watched trace on this Mac and keeps a dated snapshot of what it found. Nothing is uploaded. Analyze it again to refresh it.",
     ),
+    // In place of Analyze & save on a row the daemon says it can't analyze
+    // (`analyzable: false`), and under the row when the daemon refuses it
+    // for that reason: the core's whole-file analysis takes files up to
+    // its size limit, and a Codex file with exactly one trace in it.
+    (
+        "analytics_analyze_not_analyzable",
+        "This trace can't be analyzed: its file is too large or doesn't hold exactly one trace.",
+    ),
+    (
+        "analytics_analyze_too_large",
+        "This trace's file is too large to analyze.",
+    ),
+    (
+        "analytics_analyze_codex_not_one",
+        "This Codex file doesn't hold exactly one trace, so it can't be analyzed.",
+    ),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",
@@ -675,6 +691,17 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_models_finish_one", "{span} active · {u} turn"),
     ("analytics_models_finish_other", "{span} active · {u} turns"),
     ("analytics_models_interrupts", "Interrupts per trace: {x}"),
+    // On a rejection row, each model whose traces the person gave an
+    // Outcome label (`kept_by_model`): the share they marked Kept, beside
+    // the figure and never folded into it. Partly kept is not kept.
+    (
+        "analytics_models_kept_one",
+        "{label}: {p}% kept, of {n} trace you marked",
+    ),
+    (
+        "analytics_models_kept_other",
+        "{label}: {p}% kept, of {n} traces you marked",
+    ),
     // The row states that name no model first.
     ("analytics_models_not_enough", "Not enough traces yet"),
     ("analytics_models_not_priced", "Not priced"),

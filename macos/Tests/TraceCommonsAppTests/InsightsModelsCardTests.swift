@@ -148,7 +148,15 @@ final class InsightsModelsCardTests: XCTestCase {
             .init(text: "claude-opus-4-7 (4.2%, 31 traces)", detail: "Interrupts per trace: 0.2"),
             .init(text: "Next: claude-sonnet-4-6 (9.1%, 14 traces)", detail: "Interrupts per trace: 0.4"),
         ])
-        XCTAssertEqual(bugFix.notes, ["Undone edits we could see"])
+        // The person's kept share per model, from their Outcome labels,
+        // beside the figure and never folded into it.
+        XCTAssertEqual(bugFix.notes, [
+            "Undone edits we could see",
+            "claude-opus-4-7: 70% kept, of 10 traces you marked",
+            "claude-sonnet-4-6: 50% kept, of 4 traces you marked",
+        ])
+        // A row short of traces still says what the person marked.
+        XCTAssertEqual(rows[2].notes, ["claude-opus-4-7: 100% kept, of 1 trace you marked"])
         XCTAssertTrue(bugFix.info.first?.hasPrefix("Not every trace records the edits you declined") == true)
         let across = rows[4]
         XCTAssertEqual(across.lead, "Lowest share of edits rejected across your task types, weighted by task mix")
@@ -216,8 +224,32 @@ final class InsightsModelsCardTests: XCTestCase {
         XCTAssertEqual(InsightsModelsWords.percent(42), (4.2).formatted(.number.precision(.fractionLength(0...1))))
         XCTAssertEqual(InsightsModelsWords.percent(40), "4")
         XCTAssertEqual(InsightsModelsWords.perSession(180), (0.18).formatted(.number.precision(.fractionLength(0...1))))
+        // Under a tenth, never "0".
+        XCTAssertEqual(InsightsModelsWords.perSession(50), (0.05).formatted(.number.precision(.significantDigits(1))))
+        XCTAssertEqual(InsightsModelsWords.perSession(1), (0.001).formatted(.number.precision(.significantDigits(1))))
+        XCTAssertEqual(InsightsModelsWords.perSession(0), "0")
         XCTAssertTrue(InsightsModelsWords.money(1_234_560).contains("1.23"), InsightsModelsWords.money(1_234_560))
         XCTAssertTrue(InsightsModelsWords.money(41_200).contains("0.0412"), InsightsModelsWords.money(41_200))
+        // Cents always shown, as the app's other prices: "$0.50", and a
+        // dollar just under one reads as the dollar does.
+        let half = InsightsModelsWords.money(500_000)
+        XCTAssertTrue(half.contains("0.50"), half)
+        let under = InsightsModelsWords.money(999_999), dollar = InsightsModelsWords.money(1_000_000)
+        XCTAssertEqual(under, dollar)
+        XCTAssertTrue(dollar.contains("1.00"), dollar)
+        XCTAssertFalse(InsightsModelsWords.money(30).hasSuffix("0.00"), InsightsModelsWords.money(30))
+    }
+
+    /// A question this build has no words for is left out, never drawn
+    /// under a blank heading.
+    func testAQuestionThisBuildDoesNotKnowIsLeftOut() throws {
+        var object = try Self.recordedObject()
+        var rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        rows[0]["question"] = "something_new"
+        object["rows"] = rows
+        let words = InsightsModelsWords.rows(try Self.decode(object), copy: try copy())
+        XCTAssertEqual(words.count, 5)
+        XCTAssertFalse(words.contains { $0.id == "something_new" || $0.title.isEmpty })
     }
 
     // MARK: - InsightsModel
@@ -276,7 +308,7 @@ final class InsightsModelsCardTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views")
         let window = try String(contentsOf: root.appendingPathComponent("InsightsView.swift"), encoding: .utf8)
-        XCTAssertTrue(window.contains("{ try await client.insightsModelAnswers() }"))
+        XCTAssertTrue(window.contains("{ @Sendable in try await client.insightsModelAnswers() }"))
         XCTAssertTrue(window.contains("modelAnswersReader: modelAnswersReader"))
         XCTAssertTrue(window.contains("models: model.modelAnswers,"))
         let overview = try String(contentsOf: root.appendingPathComponent("InsightsOverviewTab.swift"), encoding: .utf8)
