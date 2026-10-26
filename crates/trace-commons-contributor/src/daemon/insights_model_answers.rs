@@ -156,9 +156,6 @@ mod tests {
             f
         }
 
-        /// `docs_priced`, with three more Docs sessions on `SMALLER` sent
-        /// through NEAR AI: one charged 0.0125 USD, one 0.0375 USD over two
-        /// calls, one with a call the ledger did not charge.
         /// `docs_priced`, plus seven Docs sessions declaring `SMALLER` sent
         /// through NEAR AI and verified: six served by `SMALLER` (one with
         /// an unknown charge), and one served by another model, the case a

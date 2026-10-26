@@ -113,14 +113,22 @@ fn lines_balanced(shape: &SessionShape) -> bool {
     net * u128::from(REFACTOR_NET_LINES.den) <= u128::from(REFACTOR_NET_LINES.num) * changed
 }
 
+/// The task the local rules give the facts now: as stored when they were
+/// classified under this version, else re-run from the stored shape.
+pub fn current_task(facts: &SessionFacts) -> InferredTask {
+    let classifier = LocalRulesClassifier;
+    if facts.classifier_version == classifier.version() {
+        facts.task
+    } else {
+        classifier.classify(&facts.shape)
+    }
+}
+
 /// Re-runs the local rules from the stored shape when the facts were
 /// classified under another version.
 pub fn reclassify(facts: &mut SessionFacts) {
-    let classifier = LocalRulesClassifier;
-    if facts.classifier_version != classifier.version() {
-        facts.task = classifier.classify(&facts.shape);
-        facts.classifier_version = classifier.version();
-    }
+    facts.task = current_task(facts);
+    facts.classifier_version = LocalRulesClassifier.version();
 }
 
 #[cfg(test)]

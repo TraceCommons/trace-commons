@@ -61,7 +61,7 @@ Known gaps:
 
 ## Running it
 
-This build is meant to be tried in **sample data mode**. The Models card is then filled with sample answers, so every state can be seen without months of real sessions. Sample mode is a launch switch in debug builds, not a code change. In sample mode the Sessions labels say "not available", because the sample has no watched sessions.
+This build is meant to be tried in **sample data mode**. The Models card is then filled with sample answers, so every state can be seen without months of real sessions. Sample mode is a launch switch in debug builds, not a code change. In sample mode the Sessions rows draw no label controls, because the sample has no watched sessions to label.
 
 Analyze is filled in sample mode too: five saved snapshots from the sample week (three Claude Code, two Codex) with their models, three assessed and one with a linked commit and test report, the saved history summary for them, and one group of two snapshots with its assessment. Nothing you do there is kept. Saving an assessment, linking evidence, deleting a snapshot or changing the group is answered with the sample unchanged. Making a new group, comparison tasks and Analyze & save aren't available in sample mode. None of this touches your real saved analyses.
 

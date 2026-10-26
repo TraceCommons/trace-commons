@@ -522,7 +522,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // Behind Analyze's "i".
     (
         "analytics_analyze_intro",
-        "Analyze & save reads a watched trace on this Mac and keeps a dated snapshot of what it found. Nothing is uploaded. Analyze it again to refresh it.",
+        "Analyze & save reads a watched trace on this device and keeps a dated snapshot of what it found. Nothing is uploaded. Analyze it again to refresh it.",
     ),
     ("analytics_turn", "Turn {n}"),
     (
@@ -600,7 +600,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_card_models", "Models"),
     (
         "analytics_models_scope",
-        "In your traces · labels as recorded · task type inferred",
+        "In your traces · labels as recorded · task type yours, else inferred",
     ),
     (
         "analytics_models_window",

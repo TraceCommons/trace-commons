@@ -33,8 +33,10 @@ answer, as the contributor crate's
 prints it between its `BEGIN insights_model_answers` and
 `END insights_model_answers` lines under `--nocapture`, and that test
 compares its answer to this file in the same way. Ten generated Docs
-sessions on two priced models answer the Docs cost row at API prices, three
-more sent through NEAR AI give it a charge beside that figure, and the
+sessions on two priced models answer the Docs cost row at API prices, seven
+more sent through NEAR AI and verified (six served by the model they
+declare, one of them with a call the ledger did not charge, and one served
+by another model) give it a charge beside that figure, and the
 synthetic Claude Code session joins them on the other rows, which are short
 of sessions or edits. The one digest is the price table's `table_id`. The
 macOS decode and Models card tests read it.

@@ -8,9 +8,13 @@
 //! `analyze` returns the SHA-256 of the exact bytes of any path the daemon
 //! user can read, `open` is a recursive private-directory create at any path,
 //! and any sufficiently private directory is adopted as a store, `~/.ssh`
-//! among them. No daemon method forwards here today, and none may without an
-//! authorization gate and an allow-list of store directories first. The same
-//! constraint is stated in both copies of the C header.
+//! among them. So no daemon method forwards a caller's request here. One
+//! daemon method builds its own: `insights_analyze_session` runs `analyze`
+//! on a file its own watcher found, matched to a row the caller names by an
+//! opaque reference, into the standard store, so the caller chooses neither
+//! the file nor the directory. Any other forwarding needs an authorization
+//! gate and an allow-list of store directories first. The same constraint is
+//! stated in both copies of the C header.
 use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
@@ -2054,7 +2058,7 @@ mod tests {
             ("analytics_card_models", "Models"),
             (
                 "analytics_models_scope",
-                "In your traces \u{b7} labels as recorded \u{b7} task type inferred",
+                "In your traces \u{b7} labels as recorded \u{b7} task type yours, else inferred",
             ),
             ("analytics_models_cost", "{x} at API prices"),
             ("analytics_models_basis_undone", "Undone edits we could see"),

@@ -192,7 +192,7 @@ use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
-use crate::insights::task_classifier::{LocalRulesClassifier, TaskClassifier, reclassify};
+use crate::insights::task_classifier::{current_task, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
 use crate::insights::usage::NativeTokenCounts;
@@ -481,13 +481,7 @@ impl CounterRow {
     /// were read under older rules, as the Models answers read it; `None`
     /// with no facts.
     fn inferred_task(&self) -> Option<InferredTask> {
-        let facts = self.facts.as_ref()?;
-        let classifier = LocalRulesClassifier;
-        Some(if facts.classifier_version == classifier.version() {
-            facts.task
-        } else {
-            classifier.classify(&facts.shape)
-        })
+        self.facts.as_ref().map(current_task)
     }
 
     /// The time a Sessions row is listed and labelled by: its earliest
