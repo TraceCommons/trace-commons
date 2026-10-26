@@ -21,17 +21,25 @@
 //! operation's own `analyze` response. With `save` the result is stored as a
 //! dated snapshot in the standard Insights store, the one the app reads when
 //! no `--insights-store` is given; no other directory can be named. Nothing
-//! reaches the network.
+//! reaches the network. So a dry-run daemon refuses the method: a save
+//! writes the person's real store, outside the daemon's state directory.
+//!
+//! A file that analysis refuses whole, so every attempt would fail the same
+//! way, is answered with why and not read: one over 16 MiB, or a Codex file
+//! that does not record exactly one session. The pass notes both when it
+//! reads the file, and the Sessions row says `analyzable: false`.
 //!
 //! # What crosses the socket
 //!
 //! The core's `analyze` response, as the in-process call returns it: the
 //! snapshot (its derived observations and the source's SHA-256 digest, as
-//! every saved snapshot carries) and the episodes a save invalidated. Never
-//! the file's path.
+//! every saved snapshot carries) and the episodes a save invalidated; a
+//! saved snapshot also carries the keyed digests a saved import does (its
+//! session identity and, for Claude Code, its per-turn series), under the
+//! Insights store's own digest key. Never the file's path.
 
 use super::insights_sessions::{ERR_SESSION_REF_INVALID, ERR_SESSION_UNKNOWN, gate};
-use super::insights_week::{FEED_COUNTER_PASS, LocateError};
+use super::insights_week::{FEED_COUNTER_PASS, LocateError, NotAnalyzable};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::policy::ProjectMode;
 use crate::insights::service::{LocalInsightsOperation, LocalInsightsRequest, dispatch_json};
@@ -42,6 +50,20 @@ pub const ERR_ANALYZE_SAVE_INVALID: &str = "insights-analyze-save-invalid";
 /// The row is listed, but its file is no longer where the watcher finds
 /// sessions: moved or deleted since the pass read it.
 pub const ERR_SESSION_FILE_GONE: &str = "insights-session-file-gone";
+/// The session's file is larger than the analysis reads
+/// (`insights::MAX_SOURCE_BYTES`, 16 MiB): it is counted, never analyzed.
+pub const ERR_SESSION_TOO_LARGE: &str = "insights-session-too-large";
+/// A Codex session file that does not record exactly one session (one
+/// `session_meta`), which the analysis refuses.
+pub const ERR_SESSION_NOT_ONE_SESSION: &str = "insights-session-not-one-session";
+
+/// The answer for a file the analysis refuses, by why.
+fn not_analyzable(reason: NotAnalyzable) -> &'static str {
+    match reason {
+        NotAnalyzable::TooLarge => ERR_SESSION_TOO_LARGE,
+        NotAnalyzable::NotOneSession => ERR_SESSION_NOT_ONE_SESSION,
+    }
+}
 
 /// `session_ref` (required) and `save` (optional, `false` when absent).
 fn params(params: &serde_json::Value) -> Result<(String, bool), &'static str> {
@@ -104,6 +126,10 @@ pub fn handle_analyze_session(shared: &DaemonShared, req: &Request) -> Response 
         Err(LocateError::Unknown) => {
             return Response::err(req.id, ERR_BAD_PARAMS, ERR_SESSION_UNKNOWN);
         }
+        // Refused as the pass found the file: no read would go otherwise.
+        Err(LocateError::NotAnalyzable(reason)) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, not_analyzable(reason));
+        }
     };
     let (source_index, session_ref) = &found[located.index];
     // The folder's rule now, as the pass resolves it: a folder made Never
@@ -120,14 +146,20 @@ pub fn handle_analyze_session(shared: &DaemonShared, req: &Request) -> Response 
     if never_now {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_SESSION_UNKNOWN);
     }
-    // Discovery listed it a moment ago; it may have gone since.
-    if !session_ref.path.is_file() {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_SESSION_FILE_GONE);
+    // Discovery listed it a moment ago; it may have gone since, or grown
+    // past what the analysis reads since the pass read it.
+    match std::fs::metadata(&session_ref.path) {
+        Ok(meta) if meta.is_file() => {
+            if meta.len() > crate::insights::MAX_SOURCE_BYTES {
+                return Response::err(req.id, ERR_UNAVAILABLE, ERR_SESSION_TOO_LARGE);
+            }
+        }
+        _ => return Response::err(req.id, ERR_UNAVAILABLE, ERR_SESSION_FILE_GONE),
     }
     let request = LocalInsightsRequest {
         // The standard store, the app's own: never a directory a caller
         // names.
-        store_dir: store_dir(),
+        store_dir: store_dir(shared),
         operation: LocalInsightsOperation::Analyze {
             source: located.format,
             file: session_ref.path.clone(),
@@ -160,20 +192,22 @@ pub fn handle_analyze_session(shared: &DaemonShared, req: &Request) -> Response 
     }
 }
 
-/// The store a save goes to: the standard one (`None`), or in a test the
-/// directory it set, so no test writes to the real one.
-fn store_dir() -> Option<std::path::PathBuf> {
+/// The store a save goes to: the standard one (`None`). In a test build,
+/// always a directory inside the daemon's own state directory, which every
+/// test makes in a temporary directory: no test, on any thread, can write to
+/// the developer's real store.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn store_dir(shared: &DaemonShared) -> Option<std::path::PathBuf> {
     #[cfg(test)]
-    return TEST_STORE_DIR.with(|dir| dir.borrow().clone());
+    return Some(shared.store.daemon_path(TEST_STORE_DIR));
     #[cfg(not(test))]
     None
 }
 
+/// The Insights store a test build saves to, in the daemon's state
+/// directory.
 #[cfg(test)]
-thread_local! {
-    static TEST_STORE_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
+const TEST_STORE_DIR: &str = "insights-test-store";
 
 #[cfg(test)]
 mod tests {
@@ -188,11 +222,11 @@ mod tests {
     use crate::daemon::settings::SourceDeclaration;
 
     /// A daemon watching one Claude Code session (Codex off) in a temporary
-    /// root, with Insights saving to a temporary store.
+    /// root, with Insights saving to a store in its temporary state
+    /// directory.
     struct Fixture {
         shared: DaemonShared,
         root: tempfile::TempDir,
-        store: tempfile::TempDir,
     }
 
     impl Fixture {
@@ -220,13 +254,7 @@ mod tests {
                 settings.codex_source = Some(SourceDeclaration::Off);
                 settings.insights_counter_pass = true;
             }
-            let store = tempfile::tempdir().unwrap();
-            TEST_STORE_DIR.with(|dir| *dir.borrow_mut() = Some(store.path().join("insights")));
-            Self {
-                shared,
-                root,
-                store,
-            }
+            Self { shared, root }
         }
 
         /// The one session the watcher finds.
@@ -285,13 +313,7 @@ mod tests {
         }
 
         fn saved(&self) -> PathBuf {
-            self.store.path().join("insights")
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            TEST_STORE_DIR.with(|dir| *dir.borrow_mut() = None);
+            self.shared.store.daemon_path(TEST_STORE_DIR)
         }
     }
 
@@ -460,9 +482,64 @@ mod tests {
         assert!(!f.saved().exists());
     }
 
+    /// Advertised, and refused in a dry run: a save writes the real
+    /// Insights store, outside the daemon's state directory.
     #[test]
-    fn the_method_is_advertised_and_local_in_a_dry_run() {
+    fn the_method_is_advertised_and_refused_in_a_dry_run() {
         assert!(super::super::ipc::METHODS.contains(&"insights_analyze_session"));
-        assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&"insights_analyze_session"));
+        assert!(
+            !super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&"insights_analyze_session")
+        );
+    }
+
+    /// A saved test snapshot lands in the fixture's own state directory,
+    /// from any thread.
+    #[test]
+    fn a_save_off_the_fixtures_thread_stays_in_its_state_directory() {
+        let f = Fixture::new();
+        f.count("/proj");
+        let reference = f.listed();
+        let answer = std::thread::scope(|scope| {
+            scope
+                .spawn(|| f.analyze(json!({"session_ref": reference, "save": true})))
+                .join()
+                .unwrap()
+        });
+        let id = answer.result.unwrap()["analysis"]["insight"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let saved = crate::insights::service::list_saved(Some(&f.saved())).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, id);
+    }
+
+    /// A file the whole-file analysis refuses says why, and is not read:
+    /// over its byte bound when the pass counted it, or grown past it since.
+    #[test]
+    fn a_session_too_large_to_analyze_says_so() {
+        let f = Fixture::new();
+        f.count("/proj");
+        let reference = f.listed();
+        let session = f.session();
+        let mut bytes = std::fs::read(&session.path).unwrap();
+        bytes.extend(std::iter::repeat_n(b' ', 17 * 1024 * 1024));
+        std::fs::write(&session.path, &bytes).unwrap();
+        // Grown since it was counted: the row is as it was.
+        assert_eq!(
+            error(&f.analyze(json!({"session_ref": reference, "save": true}))),
+            (ERR_UNAVAILABLE.into(), ERR_SESSION_TOO_LARGE.into())
+        );
+        // Counted as it is now: the row says so, and so does the answer.
+        f.count("/proj");
+        let listed = handle_request(&f.shared, &req("insights_sessions", json!({})))
+            .result
+            .unwrap();
+        assert_eq!(listed["sessions"][0]["analyzable"], false);
+        assert_eq!(
+            error(&f.analyze(json!({"session_ref": f.listed(), "save": true}))),
+            (ERR_UNAVAILABLE.into(), ERR_SESSION_TOO_LARGE.into())
+        );
+        assert!(!f.saved().exists());
     }
 }

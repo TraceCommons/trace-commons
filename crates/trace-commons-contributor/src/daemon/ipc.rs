@@ -534,8 +534,9 @@ pub const METHODS: &[&str] = &[
 /// they approve or grant a send, or write outside the state store (the
 /// keychain, a tool's own config, the skills folder): `approve`,
 /// `grant_automatic`, `harness_commit`, `near_ai_credential_forget`,
-/// `remove_token_local_copies`, `discard_token_reviews` and the
-/// `skill_install_*` writes.
+/// `remove_token_local_copies`, `discard_token_reviews`, the
+/// `skill_install_*` writes and `insights_analyze_session` (with `save` it
+/// writes the person's real Insights store, and can make its digest key).
 pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "hello",
     "status",
@@ -565,10 +566,6 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "insights_sessions",
     "insights_session_drill",
     "insights_session_label",
-    // Reads one watched session and saves its snapshot in the local
-    // Insights store, the store the app writes in process; nothing leaves
-    // the Mac.
-    "insights_analyze_session",
     "insights_model_answers",
     "inference_call_proof",
     "private_ai",

@@ -387,6 +387,43 @@ struct CounterRow {
     /// marker, so its rows are never read again for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     automation_read: bool,
+    /// Why the whole-file analysis Analyze & save runs on the session's
+    /// file (`insights::analyze_file`) would refuse it, as the pass found
+    /// the file. `None` when it would take it, or the row was made before
+    /// this was looked for: such a file is refused, if at all, when Analyze
+    /// & save runs. Left out of the file while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    not_analyzable: Option<NotAnalyzable>,
+}
+
+/// Why Analyze & save cannot analyze a listed session's file: the core's
+/// whole-file analysis refuses it, so every attempt would fail the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NotAnalyzable {
+    /// Larger than the analysis reads (`insights::MAX_SOURCE_BYTES`).
+    TooLarge,
+    /// A Codex file that does not record exactly one `session_meta`.
+    NotOneSession,
+}
+
+impl NotAnalyzable {
+    /// Why a session file of `bytes` bytes, with `session_metas` Codex
+    /// session records when it is Codex's, would be refused.
+    fn of(
+        source: AnalyticsSource,
+        bytes: Option<u64>,
+        session_metas: Option<usize>,
+    ) -> Option<Self> {
+        if bytes.is_some_and(|bytes| bytes > crate::insights::MAX_SOURCE_BYTES) {
+            Some(NotAnalyzable::TooLarge)
+        } else if source == AnalyticsSource::Codex && session_metas.is_some_and(|count| count != 1)
+        {
+            Some(NotAnalyzable::NotOneSession)
+        } else {
+            None
+        }
+    }
 }
 
 /// For `skip_serializing_if`.
@@ -1557,6 +1594,7 @@ impl CounterPass {
                     facts_version: SESSION_FACTS_VERSION,
                     automation: read.automation,
                     automation_read: true,
+                    not_analyzable: read.not_analyzable,
                 },
             ));
         }
@@ -2273,8 +2311,11 @@ impl CounterPass {
             return Err(LocateError::Unknown);
         };
         let never = never_digests(&key, never_project_keys);
-        let (session, _) =
+        let (session, row) =
             find_listed(&key, &store, &never, reference).ok_or(LocateError::Unknown)?;
+        if let Some(reason) = row.not_analyzable {
+            return Err(LocateError::NotAnalyzable(reason));
+        }
         let session = *session;
         Ok(found
             .iter()
@@ -2665,6 +2706,8 @@ pub(crate) enum LocateError {
     Unreadable(serde_json::Value),
     /// No visible row has that reference.
     Unknown,
+    /// The row's file is one the analysis refuses, as the pass found it.
+    NotAnalyzable(NotAnalyzable),
 }
 
 /// The folders whose rule is Never, the contribution override included
@@ -2720,7 +2763,14 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// none or more than one, as a saved snapshot's identity does. The file is
 /// read line by line ([`scan_session`]), never held whole.
 fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
-    let scanned = std::fs::File::open(&candidate.path).ok().and_then(|file| {
+    let file = std::fs::File::open(&candidate.path).ok();
+    // The one file's own size, as the analysis reads it: delegated
+    // transcripts are counted in the candidate's, never read.
+    let bytes = file
+        .as_ref()
+        .and_then(|file| file.metadata().ok())
+        .map(|meta| meta.len());
+    let scanned = file.and_then(|file| {
         scan_session(
             source,
             std::io::BufReader::new(file),
@@ -2740,6 +2790,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             span: None,
             facts: None,
             automation: Automation::Unknown,
+            not_analyzable: NotAnalyzable::of(source, bytes, None),
         };
     };
     let mut facts = scanned.facts;
@@ -2792,6 +2843,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         first_event_at: scanned.first_event_at,
         span: scanned.span,
         automation: scanned.automation,
+        not_analyzable: NotAnalyzable::of(source, bytes, Some(scanned.session_metas)),
     }
 }
 
@@ -2807,6 +2859,7 @@ struct ReadBody {
     /// is unknown.
     facts: Option<SessionFacts>,
     automation: Automation,
+    not_analyzable: Option<NotAnalyzable>,
 }
 
 /// The extractors' results for one transcript, from one pass over its lines.
@@ -2820,6 +2873,9 @@ struct ScannedSession {
     first_event_at: Option<DateTime<Utc>>,
     span: Option<(DateTime<Utc>, DateTime<Utc>)>,
     automation: Automation,
+    /// Codex's `session_meta` records: the whole-file analysis takes a
+    /// file with exactly one.
+    session_metas: usize,
 }
 
 /// Tells a Codex session its harness started from one the person started,
@@ -2933,6 +2989,7 @@ fn scan_session(
         (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
     let mut automation = (source == AnalyticsSource::Codex).then(CodexAutomationScan::default);
+    let mut session_metas = 0usize;
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
     let mut index: u64 = 0;
@@ -2981,6 +3038,9 @@ fn scan_session(
         identity.observe(&record);
         if let Some(scan) = automation.as_mut() {
             scan.observe(&record);
+        }
+        if source == AnalyticsSource::Codex && record["type"] == "session_meta" {
+            session_metas += 1;
         }
         if first_event.is_none() {
             first_event = record_timestamp(&record);
@@ -3053,6 +3113,7 @@ fn scan_session(
         // Claude Code records no marker: its delegated transcripts are
         // never read as sessions of their own, so its rows are unknown.
         automation: automation.map_or(Automation::Unknown, CodexAutomationScan::finish),
+        session_metas,
     })
 }
 
@@ -3522,6 +3583,9 @@ fn session_row_value(
         "inferred_task": row.inferred_task(),
         "user_task": label.and_then(|label| label.task),
         "user_outcome": label.and_then(|label| label.outcome),
+        // Whether Analyze & save can analyze it; `false` when the core's
+        // whole-file analysis refuses its file, so a shell does not offer it.
+        "analyzable": row.not_analyzable.is_none(),
     })
 }
 
@@ -4220,6 +4284,63 @@ mod tests {
             listed["sessions"][0]["started_at"], "2026-09-14T09:00:00+00:00",
             "{listed}"
         );
+        // Counted, but more than the whole-file analysis reads.
+        assert_eq!(listed["sessions"][0]["analyzable"], false);
+        let tag = f.pass.store_tag();
+        let row = only_row(&f.pass);
+        assert_eq!(
+            f.pass.locate(
+                &row.listed_reference(tag),
+                &NeverFolders::NONE,
+                &[(SOURCE_CLAUDE_CODE, path.as_path())]
+            ),
+            Err(LocateError::NotAnalyzable(NotAnalyzable::TooLarge))
+        );
+    }
+
+    /// The whole-file analysis takes a Codex file with exactly one
+    /// `session_meta`; the pass counts any, and says which it cannot
+    /// analyze.
+    #[test]
+    fn a_codex_file_without_exactly_one_session_is_not_analyzable() {
+        for (metas, analyzable) in [(0, false), (1, true), (2, false)] {
+            let f = Fixture::new();
+            let bytes = codex_bytes_from(&vec![None; metas]);
+            let path = f.write("c.jsonl", &bytes);
+            f.run(&[candidate(SOURCE_CODEX, &path)]);
+            let listed = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 10);
+            assert_eq!(
+                listed["sessions"][0]["analyzable"], analyzable,
+                "{metas}: {listed}"
+            );
+            let row = only_row(&f.pass);
+            let located = f.pass.locate(
+                &row.listed_reference(f.pass.store_tag()),
+                &NeverFolders::NONE,
+                &[(SOURCE_CODEX, path.as_path())],
+            );
+            if analyzable {
+                assert_eq!(located.unwrap().unwrap().index, 0);
+            } else {
+                assert_eq!(
+                    located,
+                    Err(LocateError::NotAnalyzable(NotAnalyzable::NotOneSession))
+                );
+            }
+        }
+        // A row made before this was looked for is offered, and refused,
+        // if at all, when Analyze & save runs.
+        let f = Fixture::new();
+        let path = f.write("c.jsonl", &codex_bytes_from(&[None, None]));
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        edit_stored_rows(&f, |row| {
+            assert_eq!(row["not_analyzable"], "not_one_session");
+            row.remove("not_analyzable");
+        });
+        let pass = f.reopened();
+        let f = Fixture { pass, ..f };
+        let listed = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 10);
+        assert_eq!(listed["sessions"][0]["analyzable"], true);
     }
 
     /// `CODEX_PER_TURN_SERIES` (owner decision D11) held: the pass stores
@@ -4349,6 +4470,17 @@ mod tests {
             span,
             facts: None,
             automation: Automation::Unknown,
+            not_analyzable: NotAnalyzable::of(
+                source,
+                Some(bytes.len() as u64),
+                Some(
+                    bytes
+                        .split(|byte| *byte == b'\n')
+                        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+                        .filter(|record| record["type"] == "session_meta")
+                        .count(),
+                ),
+            ),
         }
     }
 
@@ -4698,6 +4830,7 @@ mod tests {
                     facts_version: SESSION_FACTS_VERSION,
                     automation: Automation::Unknown,
                     automation_read: true,
+                    not_analyzable: None,
                 },
             );
         }
@@ -4771,6 +4904,7 @@ mod tests {
                     facts_version: SESSION_FACTS_VERSION,
                     automation: Automation::Unknown,
                     automation_read: true,
+                    not_analyzable: None,
                 },
             );
         }
@@ -4856,6 +4990,7 @@ mod tests {
             facts_version: SESSION_FACTS_VERSION,
             automation: Automation::Unknown,
             automation_read: true,
+            not_analyzable: None,
         }
     }
 

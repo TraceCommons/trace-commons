@@ -67,7 +67,9 @@ use trace_commons_protocol::insights::{
 };
 use trace_commons_protocol::insights_usage_series::DigestKeyStore;
 
-const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// The most bytes one file's analysis reads; a larger file is refused
+/// (`insights_source_too_large`).
+pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
 // without one here lets an older client accept the store and then reject
 // individual snapshots, with no diagnosable event and no downgrade path.

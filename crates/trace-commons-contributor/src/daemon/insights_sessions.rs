@@ -817,6 +817,7 @@ mod tests {
             assert_eq!(
                 keys,
                 [
+                    "analyzable",
                     "folder",
                     "inferred_task",
                     "session_ref",

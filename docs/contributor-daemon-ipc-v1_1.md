@@ -609,10 +609,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
-| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
-| `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
+| `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -5031,8 +5031,8 @@ place, and a client that keeps the row on screen in view sees no jump.
 
 Each row is exactly
 `{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder",
-"inferred_task", "user_task", "user_outcome"}` (the last three are additive;
-a client that predates them ignores them):
+"inferred_task", "user_task", "user_outcome", "analyzable"}` (the last four
+are additive; a client that predates them ignores them):
 
 - `session_ref` is opaque: `t` and the order the pass made the row in, then
   `.` and the tag of the store it was answered from (the same number a `next`
@@ -5088,6 +5088,12 @@ a client that predates them ignores them):
   and says which of the two it shows.
 - `user_outcome` is what the person said became of the work (`kept`,
   `partly_kept` or `thrown_away`), or `null` while unset. Never inferred.
+- `analyzable` is whether `insights_analyze_session` can analyze the row's
+  file: `false` when the core's whole-file analysis refuses it as the pass
+  found it (larger than 16 MiB, or a Codex file that does not record exactly
+  one `session_meta`), so a shell does not offer Analyze & save on it. `true`
+  otherwise, including for a row made before this was looked for, whose
+  file is refused, if at all, when Analyze & save runs.
 
 `insights_session_drill` takes `session_ref` (**required**, from the list)
 and `tz` (optional, seconds east; the daemon's local offset when absent). It
@@ -5258,8 +5264,15 @@ reaches the network.
 - A row whose file is no longer where the watcher finds sessions (moved or
   deleted since it was counted, or gone while it was read) is `unavailable`
   / `insights-session-file-gone`.
-- An analysis that fails is `unavailable` with the core's fixed label, never
-  a path.
+- A file the core's whole-file analysis refuses, so every attempt would
+  fail the same way, is `unavailable` with why, and is not read: larger
+  than 16 MiB (as the pass found it, or grown past it since) is
+  `insights-session-too-large`; a Codex file that does not record exactly
+  one `session_meta` (as the pass found it) is
+  `insights-session-not-one-session`. Such a row lists with `analyzable:
+  false`.
+- Any other analysis that fails is `unavailable` with the core's fixed
+  label, never a path.
 
 Otherwise it answers `{"enabled": true, "feed": "counter_pass", "readable":
 true, "analysis"}`, where `analysis` is the core's `analyze` response as the
@@ -5268,8 +5281,18 @@ derived observations and the source's SHA-256 digest, never its path) and
 `mutation_effects` (the episodes and comparison tasks a save invalidated;
 empty without `save`). With `save` the snapshot goes to the standard Insights store,
 the one the app reads when no `--insights-store` is given; the caller cannot
-name another directory. Local in a dry-run daemon: it writes only that
-store.
+name another directory. A saved `insight` also carries what a saved import
+carries and an unsaved one does not, each a keyed digest (HMAC-SHA-256 under
+that store's own digest key, made on first save, never under the counter
+key, and never the key itself): `session_identity` (`key_fingerprint`, and
+`session`, a keyed digest of the one session ID the transcript records;
+`null` when there is none or more than one) and, for Claude Code,
+`turn_series` (`key_fingerprint`, and per turn and tool call the keyed
+digests `msg_key`, `args_key` and `path_key` of a message ID, a tool call's
+arguments and a path, never the values). They cross only on this socket,
+as the in-process `analyze` answer returns them to the app. Refused in a
+dry-run daemon: a save writes the person's real Insights store, outside the
+daemon's state directory, and can make its digest key.
 
 ### `insights_model_answers`
 
