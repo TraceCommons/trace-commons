@@ -6708,6 +6708,8 @@ impl TraceCorpusStore for PgBackend {
                 submission_id: row.get("submission_id"),
                 gate_policy_version: row.get("gate_policy_version"),
                 gate_version_hash: row.get("gate_version_hash"),
+                // NULL (V139) on a substance Settle row: decoded as `None`,
+                // never defaulted.
                 perplexity_micros: row.get("perplexity_micros"),
                 tail_fraction_micros: row.get("tail_fraction_micros"),
                 perplexity_passed: row.get("perplexity_passed"),
@@ -7446,6 +7448,9 @@ impl TraceCorpusStore for PgBackend {
             submission_id: row.get(1),
             gate_policy_version: row.get(2),
             gate_version_hash: row.get(3),
+            // `None` passes through to the cached copy unchanged (V139). A
+            // pipeline submission has no canonical summary hash, so a
+            // substance Settle row is never the match.
             perplexity_micros: row.get(4),
             tail_fraction_micros: row.get(5),
             perplexity_passed: row.get(6),

@@ -964,6 +964,17 @@ def test_export_docstring_and_gitignore_protect_operator_data() -> None:
     assert "scripts/operator/*.csv" in GITIGNORE.read_text(encoding="utf-8")
 
 
+def test_export_query_skips_rows_with_no_perplexity() -> None:
+    # V139: a substance row stores NULL perplexity and tail fraction. The
+    # export keeps only rows with a perplexity, inside the DISTINCT ON
+    # selection, and no longer filters on the credit quality version (a
+    # duplicate-withheld substance row has version NULL).
+    latest_gate = M.__doc__.split("latest_gate AS (", 1)[1].split("),", 1)[0]
+    assert "WHERE perplexity_micros IS NOT NULL" in latest_gate
+    assert "DISTINCT ON (tenant_id, submission_id)" in latest_gate
+    assert "credit_quality_calibration_version" not in M.__doc__
+
+
 def test_label_parser_accepts_only_documented_values() -> None:
     assert M._parse_label("failure", "task_success") == M.FAILURE
     assert M._parse_label("success", "task_success") == M.SUCCESS

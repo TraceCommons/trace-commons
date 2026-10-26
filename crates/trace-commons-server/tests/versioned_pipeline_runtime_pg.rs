@@ -45193,8 +45193,9 @@ struct GateDecisionRow {
     pipeline_run_id: Option<uuid::Uuid>,
     gate_policy_version: String,
     gate_version_hash: String,
-    perplexity_micros: i64,
-    tail_fraction_micros: i64,
+    /// NULL (V139) on a substance row, which measures no perplexity.
+    perplexity_micros: Option<i64>,
+    tail_fraction_micros: Option<i64>,
     peak_perplexity_micros: Option<i64>,
     perplexity_passed: bool,
     novelty_score_micros: i64,
@@ -45365,12 +45366,9 @@ async fn settle_writes_one_gate_decision_row_per_submission() {
         row.gate_version_hash,
         package.manifest.score.configuration_hash
     );
+    assert_eq!(row.perplexity_micros, micros(evidence.perplexity_micros));
     assert_eq!(
-        Some(row.perplexity_micros),
-        micros(evidence.perplexity_micros)
-    );
-    assert_eq!(
-        Some(row.tail_fraction_micros),
+        row.tail_fraction_micros,
         micros(evidence.tail_fraction_micros)
     );
     assert_eq!(
@@ -45843,7 +45841,7 @@ async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
     .unwrap();
     assert!(evidence.credit_quality_micros.is_some(), "{evidence:?}");
     assert_eq!(
-        Some(rows[0].perplexity_micros),
+        rows[0].perplexity_micros,
         evidence
             .perplexity_micros
             .map(|v| i64::try_from(v).unwrap())
@@ -46571,7 +46569,9 @@ async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
     let pipeline_row = gate_decision_rows(&tenant, run.submission_id).await;
     assert_eq!(pipeline_row.len(), 1);
     assert!(
-        pipeline_row[0].perplexity_micros > 0,
+        pipeline_row[0]
+            .perplexity_micros
+            .is_some_and(|micros| micros > 0),
         "a scored pipeline row"
     );
     let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
@@ -46657,7 +46657,10 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].source, "pipeline_settle");
     assert!(before[0].agent_prose_perplexity_micros.is_none());
-    let rewritten = before[0].perplexity_micros + 1_234_567;
+    let rewritten = before[0]
+        .perplexity_micros
+        .expect("a compatibility row holds a perplexity")
+        + 1_234_567;
 
     let touched = backend
         .update_trace_gate_decision_perplexity(
@@ -46720,7 +46723,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     assert_eq!(touched, 1);
     let legacy = gate_decision_rows(&tenant, legacy_submission).await;
     assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy[0].perplexity_micros, 7_000_000);
+    assert_eq!(legacy[0].perplexity_micros, Some(7_000_000));
     assert_eq!(legacy[0].peak_perplexity_micros, Some(8_000_000));
     assert!(!legacy[0].perplexity_passed);
     assert_eq!(legacy[0].agent_prose_perplexity_micros, Some(1));
@@ -46824,7 +46827,7 @@ async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
     assert_eq!(settled.state, PipelineRunState::Complete, "{settled:?}");
     let rows = gate_decision_rows(&tenant, scored.submission_id).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].perplexity_micros, i64::MAX);
+    assert_eq!(rows[0].perplexity_micros, Some(i64::MAX));
     assert_eq!(rows[0].peak_perplexity_micros, Some(i64::MAX));
     assert_eq!(rows[0].chunk_count, Some(i32::MAX));
 }
@@ -50666,7 +50669,7 @@ async fn a_registered_score_policy_writes_a_gate_decision_row() {
         )
         .unwrap();
         assert_eq!(
-            Some(row.perplexity_micros),
+            row.perplexity_micros,
             evidence
                 .perplexity_micros
                 .map(|value| i64::try_from(value).unwrap())
@@ -52344,9 +52347,10 @@ async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
     assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
 }
 
-/// SQ-11, spec 8.1: a substance run completes Settle and writes its legacy
-/// row with the sentinel perplexity 0, the evidence `substance_passed` as
-/// its `perplexity_passed`, and credit quality version 4.
+/// SQ-11, spec 8.1, V139: a substance run completes Settle and writes its
+/// legacy row with NULL perplexity and tail fraction (its Score measures
+/// neither), the evidence `substance_passed` as its `perplexity_passed`,
+/// and credit quality version 4.
 #[tokio::test]
 async fn a_substance_run_settles_and_writes_its_legacy_row() {
     use trace_commons_server::credit_quality::CREDIT_QUALITY_VERSION_SUBSTANCE;
@@ -52399,8 +52403,13 @@ async fn a_substance_run_settles_and_writes_its_legacy_row() {
     assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
     let row = &rows[0];
     assert_eq!(row.source, "pipeline_settle");
-    assert_eq!(row.perplexity_micros, 0);
-    assert_eq!(row.tail_fraction_micros, 0);
+    assert_eq!(evidence.perplexity_micros, None, "{evidence:?}");
+    assert_eq!(evidence.tail_fraction_micros, None, "{evidence:?}");
+    assert_eq!(row.perplexity_micros, None, "no perplexity was measured");
+    assert_eq!(
+        row.tail_fraction_micros, None,
+        "no tail fraction was measured"
+    );
     assert_eq!(
         Some(row.perplexity_passed),
         evidence.substance_passed,

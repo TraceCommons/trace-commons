@@ -5823,8 +5823,8 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
                 submission_id: owned,
                 gate_policy_version: "test-policy".to_string(),
                 gate_version_hash: "sha256:gate".to_string(),
-                perplexity_micros: 7_000_000,
-                tail_fraction_micros: 0,
+                perplexity_micros: Some(7_000_000),
+                tail_fraction_micros: Some(0),
                 perplexity_passed: true,
                 novelty_score_micros: 900_000,
                 nearest_neighbor_hash: "sha256:neighbor".to_string(),
@@ -73572,7 +73572,7 @@ impl_ingest_test_corpus_store! {
             if let Some(decision_id) = latest_decision_id {
                 for (t, row) in rows.iter_mut() {
                     if t == tenant_id && row.decision_id == decision_id {
-                        row.perplexity_micros = perplexity_micros;
+                        row.perplexity_micros = Some(perplexity_micros);
                         row.peak_perplexity_micros = peak_perplexity_micros;
                         row.perplexity_passed = perplexity_passed;
                         return Ok(1);
@@ -73884,20 +73884,23 @@ impl Database for PerplexityDriverTestDb {
             .read()
             .unwrap()
             .iter()
-            // Mirrors the Postgres enumeration: never-scored rows are not
+            // Mirrors the Postgres enumeration: never-scored rows (perplexity
+            // 0) and rows with no perplexity (NULL, V139) are not
             // credit-scoring inputs.
-            .filter(|(_, row)| row.perplexity_micros > 0)
+            .filter_map(|(tenant_id, row)| {
+                let perplexity_micros = row.perplexity_micros.filter(|micros| *micros > 0)?;
+                Some(
+                    trace_commons_server::trace_corpus_storage::GateCreditInput {
+                        tenant_id: tenant_id.clone(),
+                        decision_id: row.decision_id,
+                        perplexity_micros,
+                        peak_perplexity_micros: row.peak_perplexity_micros.unwrap_or(0),
+                        novelty_score_micros: row.novelty_score_micros,
+                        decided_at: row.decided_at,
+                    },
+                )
+            })
             .take(limit)
-            .map(
-                |(tenant_id, row)| trace_commons_server::trace_corpus_storage::GateCreditInput {
-                    tenant_id: tenant_id.clone(),
-                    decision_id: row.decision_id,
-                    perplexity_micros: row.perplexity_micros,
-                    peak_perplexity_micros: row.peak_perplexity_micros.unwrap_or(0),
-                    novelty_score_micros: row.novelty_score_micros,
-                    decided_at: row.decided_at,
-                },
-            )
             .collect())
     }
 
@@ -74148,7 +74151,10 @@ impl Database for PerplexityDriverTestDb {
         let mut latest: std::collections::HashMap<Uuid, (String, &StorageTraceGateDecisionRow)> =
             std::collections::HashMap::new();
         for (tenant_id, row) in decisions.iter() {
-            if !submission_ids.contains(&row.submission_id) {
+            // Mirrors the Postgres `perplexity_micros IS NOT NULL` (V139): a
+            // row with no perplexity is not a score, filtered before the
+            // latest-per-submission choice.
+            if !submission_ids.contains(&row.submission_id) || row.perplexity_micros.is_none() {
                 continue;
             }
             let candidate_key = (row.decided_at, row.decision_id);
@@ -74169,7 +74175,9 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
                     submission_id: row.submission_id,
                     credit_quality_micros,
-                    perplexity_micros: row.perplexity_micros,
+                    perplexity_micros: row
+                        .perplexity_micros
+                        .expect("rows with no perplexity were skipped above"),
                     novelty_score_micros: row.novelty_score_micros,
                     gate_passed: row.perplexity_passed && row.novelty_passed,
                     chunk_count: row.chunk_count,
@@ -74204,7 +74212,8 @@ impl Database for PerplexityDriverTestDb {
         let mut latest: std::collections::HashMap<Uuid, &StorageTraceGateDecisionRow> =
             std::collections::HashMap::new();
         for (row_tenant_id, row) in decisions.iter() {
-            if row_tenant_id != tenant_id {
+            // Mirrors the Postgres `d.perplexity_micros IS NOT NULL` (V139).
+            if row_tenant_id != tenant_id || row.perplexity_micros.is_none() {
                 continue;
             }
             let owns_submission = submissions
@@ -74241,7 +74250,9 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
                     submission_id: row.submission_id,
                     credit_quality_micros,
-                    perplexity_micros: row.perplexity_micros,
+                    perplexity_micros: row
+                        .perplexity_micros
+                        .expect("rows with no perplexity were skipped above"),
                     novelty_score_micros: row.novelty_score_micros,
                     gate_passed: row.perplexity_passed && row.novelty_passed,
                     chunk_count: row.chunk_count,
@@ -74281,7 +74292,13 @@ impl Database for PerplexityDriverTestDb {
             }
             let mut latest: Option<&StorageTraceGateDecisionRow> = None;
             for (row_tenant_id, row) in decisions.iter() {
-                if row_tenant_id != tenant_id || row.submission_id != *submission_id {
+                // Mirrors the Postgres LEFT JOIN condition
+                // `d.perplexity_micros IS NOT NULL` (V139): a submission whose
+                // only decision has no perplexity reads as unscored.
+                if row_tenant_id != tenant_id
+                    || row.submission_id != *submission_id
+                    || row.perplexity_micros.is_none()
+                {
                     continue;
                 }
                 let candidate_key = (row.decided_at, row.decision_id);
@@ -74298,7 +74315,9 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
                     submission_id: row.submission_id,
                     credit_quality_micros,
-                    perplexity_micros: row.perplexity_micros,
+                    perplexity_micros: row
+                        .perplexity_micros
+                        .expect("rows with no perplexity were skipped above"),
                     novelty_score_micros: row.novelty_score_micros,
                     gate_passed: row.perplexity_passed && row.novelty_passed,
                     chunk_count: row.chunk_count,
@@ -75130,8 +75149,8 @@ fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow
         submission_id,
         gate_policy_version: "rescore_test_v1".to_string(),
         gate_version_hash: "sha256:rescore_test_v1".to_string(),
-        perplexity_micros: 111,
-        tail_fraction_micros: 222,
+        perplexity_micros: Some(111),
+        tail_fraction_micros: Some(222),
         perplexity_passed: false,
         novelty_score_micros: 333_333,
         nearest_neighbor_hash: "sha256:novelty-neighbor".to_string(),
@@ -75185,13 +75204,13 @@ async fn update_trace_gate_decision_perplexity_touches_only_perplexity_columns()
         .expect("row still present");
 
     // The three perplexity columns changed to exactly what we passed.
-    assert_eq!(after.perplexity_micros, 6_000_001);
+    assert_eq!(after.perplexity_micros, Some(6_000_001));
     assert_eq!(after.peak_perplexity_micros, Some(9_000_002));
     assert!(after.perplexity_passed);
 
     // Full equality also protects every scoring instrumentation column.
     let mut expected = before;
-    expected.perplexity_micros = 6_000_001;
+    expected.perplexity_micros = Some(6_000_001);
     expected.peak_perplexity_micros = Some(9_000_002);
     expected.perplexity_passed = true;
     assert_eq!(after, expected);
@@ -77840,10 +77859,10 @@ async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cr
     let id3 = Uuid::new_v4();
     let mut row3_old = rescore_test_decision_row(id3);
     row3_old.decided_at = Utc::now() - chrono::Duration::seconds(120);
-    row3_old.perplexity_micros = 111;
+    row3_old.perplexity_micros = Some(111);
     let mut row3_new = rescore_test_decision_row(id3);
     row3_new.decided_at = Utc::now();
-    row3_new.perplexity_micros = 999;
+    row3_new.perplexity_micros = Some(999);
     db.seed_gate_decision("tenant-a", row3_old);
     db.seed_gate_decision("tenant-a", row3_new);
 
@@ -77856,11 +77875,11 @@ async fn list_scores_by_submission_ids_returns_latest_decision_per_submission_cr
     let mut row4_low_id = rescore_test_decision_row(id4);
     row4_low_id.decision_id = Uuid::from_u128(1);
     row4_low_id.decided_at = tie_decided_at;
-    row4_low_id.perplexity_micros = 111;
+    row4_low_id.perplexity_micros = Some(111);
     let mut row4_high_id = rescore_test_decision_row(id4);
     row4_high_id.decision_id = Uuid::from_u128(2);
     row4_high_id.decided_at = tie_decided_at;
-    row4_high_id.perplexity_micros = 222;
+    row4_high_id.perplexity_micros = Some(222);
     // Seed the LOWER decision_id FIRST: a naive "first-seen wins on ties"
     // implementation (comparing decided_at alone with `>=`) would keep
     // row4_low_id and fail this assertion. Only an explicit
@@ -77939,7 +77958,7 @@ async fn update_trace_gate_decision_perplexity_only_touches_latest_decision_row(
     older.decided_at = now - chrono::Duration::hours(1);
     older.gate_policy_version = "gate_v35b".to_string();
     older.gate_version_hash = "sha256:gate_v35b".to_string();
-    older.perplexity_micros = 111;
+    older.perplexity_micros = Some(111);
     older.peak_perplexity_micros = Some(444);
     older.perplexity_passed = false;
 
@@ -77948,7 +77967,7 @@ async fn update_trace_gate_decision_perplexity_only_touches_latest_decision_row(
     newer.decided_at = now;
     newer.gate_policy_version = "gate_v27b".to_string();
     newer.gate_version_hash = "sha256:gate_v27b".to_string();
-    newer.perplexity_micros = 222;
+    newer.perplexity_micros = Some(222);
     newer.peak_perplexity_micros = Some(555);
     newer.perplexity_passed = false;
 
@@ -77975,7 +77994,7 @@ async fn update_trace_gate_decision_perplexity_only_touches_latest_decision_row(
         .expect("newer decision row still present");
 
     // Only the LATEST decision row's three perplexity columns changed.
-    assert_eq!(newer_after.perplexity_micros, 6_000_001);
+    assert_eq!(newer_after.perplexity_micros, Some(6_000_001));
     assert_eq!(newer_after.peak_perplexity_micros, Some(9_000_002));
     assert!(newer_after.perplexity_passed);
 
@@ -78223,7 +78242,8 @@ async fn author_only_rescore_writes_author_columns_and_nothing_else() {
             .expect("decision still present");
         assert_eq!(author_columns_of(&after), MEASURED_AUTHOR_COLUMNS);
         assert_eq!(
-            after.perplexity_micros, 0,
+            after.perplexity_micros,
+            Some(0),
             "author_only must not rewrite perplexity"
         );
         assert_eq!(after.peak_perplexity_micros, Some(0));
@@ -78255,7 +78275,7 @@ async fn author_only_rescore_never_erases_values_it_cannot_recompute() {
             .gate_decision_for("tenant-a", original.submission_id)
             .expect("decision still present");
         assert_eq!(author_columns_of(&after), AUTHOR_SENTINEL);
-        assert_eq!(after.perplexity_micros, 0);
+        assert_eq!(after.perplexity_micros, Some(0));
     }
 }
 
@@ -78293,7 +78313,7 @@ async fn dry_run_rescore_scores_everything_and_writes_nothing() {
             .gate_decision_for("tenant-a", original.submission_id)
             .expect("decision still present");
         // Still exactly as the fixture corrupted them.
-        assert_eq!(after.perplexity_micros, 0);
+        assert_eq!(after.perplexity_micros, Some(0));
         assert_eq!(after.peak_perplexity_micros, Some(0));
         assert!(!after.perplexity_passed);
         assert_eq!(author_columns_of(&after), AUTHOR_SENTINEL);
@@ -78409,7 +78429,10 @@ async fn the_default_rescore_writes_whole_trace_and_author_columns() {
             .db
             .gate_decision_for("tenant-a", original.submission_id)
             .expect("decision still present");
-        assert_eq!(after.perplexity_micros, RESCORED_PERPLEXITY_MICROS as i64);
+        assert_eq!(
+            after.perplexity_micros,
+            Some(RESCORED_PERPLEXITY_MICROS as i64)
+        );
         assert!(after.perplexity_passed);
         assert_eq!(author_columns_of(&after), MEASURED_AUTHOR_COLUMNS);
     }
@@ -78431,7 +78454,10 @@ async fn the_default_rescore_clears_author_columns_it_cannot_recompute() {
             .db
             .gate_decision_for("tenant-a", original.submission_id)
             .expect("decision still present");
-        assert_eq!(after.perplexity_micros, RESCORED_PERPLEXITY_MICROS as i64);
+        assert_eq!(
+            after.perplexity_micros,
+            Some(RESCORED_PERPLEXITY_MICROS as i64)
+        );
         assert_eq!(author_columns_of(&after), [None; 5]);
     }
 }
@@ -78462,7 +78488,7 @@ async fn rescore_counts_a_pipeline_row_as_skipped_not_rescored() {
             .db
             .gate_decision_for("tenant-a", pipeline)
             .expect("decision still present");
-        assert_eq!(row.perplexity_micros, 0, "{mode:?}");
+        assert_eq!(row.perplexity_micros, Some(0), "{mode:?}");
         assert_eq!(author_columns_of(&row), AUTHOR_SENTINEL, "{mode:?}");
     }
 }
@@ -78581,13 +78607,13 @@ async fn score_credit_quality_pass_leaves_never_scored_rows_without_a_score() {
     );
 
     let mut scored = rescore_test_decision_row(Uuid::new_v4());
-    scored.perplexity_micros = 5_000_000;
+    scored.perplexity_micros = Some(5_000_000);
     scored.peak_perplexity_micros = Some(6_000_000);
     scored.novelty_score_micros = 200_000;
 
     // What the skip-duplicate branch writes: never scored, flags true.
     let mut skipped = rescore_test_decision_row(Uuid::new_v4());
-    skipped.perplexity_micros = 0;
+    skipped.perplexity_micros = Some(0);
     skipped.peak_perplexity_micros = None;
     skipped.novelty_score_micros = 100_000;
     skipped.perplexity_passed = true;
@@ -78648,7 +78674,7 @@ async fn score_credit_quality_pass_uses_the_calibration_in_force_when_each_row_w
     let mut before = rescore_test_decision_row(Uuid::new_v4());
     let mut after = rescore_test_decision_row(Uuid::new_v4());
     for row in [&mut before, &mut after] {
-        row.perplexity_micros = ppl;
+        row.perplexity_micros = Some(ppl);
         row.peak_perplexity_micros = Some(peak);
         row.novelty_score_micros = nov;
     }
@@ -78707,17 +78733,17 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
     // Three rows with varied signals, one deliberately below the novelty
     // floor (0.5) so `credit_quality` collapses it to q == 0.
     let mut row_a = rescore_test_decision_row(Uuid::new_v4());
-    row_a.perplexity_micros = m(15.0);
+    row_a.perplexity_micros = Some(m(15.0));
     row_a.peak_perplexity_micros = Some(m(18.0));
     row_a.novelty_score_micros = m(0.85);
 
     let mut row_b = rescore_test_decision_row(Uuid::new_v4());
-    row_b.perplexity_micros = m(20.0);
+    row_b.perplexity_micros = Some(m(20.0));
     row_b.peak_perplexity_micros = Some(m(21.0));
     row_b.novelty_score_micros = m(0.95);
 
     let mut row_c = rescore_test_decision_row(Uuid::new_v4());
-    row_c.perplexity_micros = m(20.0);
+    row_c.perplexity_micros = Some(m(20.0));
     row_c.peak_perplexity_micros = Some(m(21.0));
     row_c.novelty_score_micros = m(0.49); // novelty below floor -> graded (V2) nonzero q
 
@@ -78735,7 +78761,9 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
 
     for original in &snapshot {
         let expected = trace_commons_server::credit_quality::credit_quality(
-            original.perplexity_micros,
+            original
+                .perplexity_micros
+                .expect("every seeded row holds a perplexity"),
             original.peak_perplexity_micros.unwrap_or(0),
             original.novelty_score_micros,
             &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
@@ -78767,11 +78795,10 @@ async fn score_credit_quality_pass_backfills_q_and_leaves_other_columns_untouche
     let below_floor = db
         .gate_decision_with_credit_quality_by_id("tenant-a", row_c.decision_id)
         .expect("row_c present");
+    let row_c_perplexity = row_c.perplexity_micros.expect("row_c holds a perplexity");
     let expected_c = trace_commons_server::credit_quality::credit_quality(
-        row_c.perplexity_micros,
-        row_c
-            .peak_perplexity_micros
-            .unwrap_or(row_c.perplexity_micros),
+        row_c_perplexity,
+        row_c.peak_perplexity_micros.unwrap_or(row_c_perplexity),
         row_c.novelty_score_micros,
         &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
     );
@@ -102050,8 +102077,8 @@ async fn seed_merge_fixture_derived_surfaces(
                 submission_id,
                 gate_policy_version: "test-policy".to_string(),
                 gate_version_hash: "sha256:gate".to_string(),
-                perplexity_micros: 7_000_000,
-                tail_fraction_micros: 0,
+                perplexity_micros: Some(7_000_000),
+                tail_fraction_micros: Some(0),
                 perplexity_passed: true,
                 novelty_score_micros: 900_000,
                 nearest_neighbor_hash: "sha256:neighbor".to_string(),

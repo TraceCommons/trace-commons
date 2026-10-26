@@ -662,12 +662,9 @@ impl SubstanceScorePolicy {
             input,
         )?;
         let evidence = &mut outcome.evidence;
-        // The legacy gate-decision row needs a perplexity and a tail
-        // fraction; the family runs no scorer, so both are the fixed
-        // sentinel 0 (spec section 8.1), told apart by the credit quality
-        // version.
-        evidence.perplexity_micros = Some(0);
-        evidence.tail_fraction_micros = Some(0);
+        // The family runs no perplexity scorer, so the evidence carries no
+        // perplexity and no tail fraction, and the legacy gate-decision row
+        // stores NULL in both columns (V139): no perplexity was measured.
         evidence.quality_passed = Some(substance_passed);
         evidence.coverage_tokens = Some(
             token_weights
@@ -1303,8 +1300,9 @@ mod tests {
         assert_eq!(evidence.credit_quality_version, Some(4));
         assert_eq!(evidence.substance_passed, Some(true));
         assert_eq!(evidence.quality_passed, evidence.substance_passed);
-        assert_eq!(evidence.perplexity_micros, Some(0));
-        assert_eq!(evidence.tail_fraction_micros, Some(0));
+        // The family measures no perplexity: the evidence carries none.
+        assert_eq!(evidence.perplexity_micros, None);
+        assert_eq!(evidence.tail_fraction_micros, None);
         assert_eq!(evidence.scorer_model_id, None);
         assert_eq!(evidence.peak_perplexity_micros, None);
         assert_eq!(result.evaluation.rule_id, "substance_novelty_v1");
@@ -1375,7 +1373,8 @@ mod tests {
     }
 
     /// Spec section 8.3, Settle: the legacy gate-decision row builds from
-    /// substance evidence, with the perplexity sentinel and `cq4`.
+    /// substance evidence, with no perplexity and no tail fraction (NULL,
+    /// V139) and `cq4`.
     #[tokio::test]
     async fn substance_legacy_row_fields_are_complete() {
         let config = SubstanceScoreConfig::local_reference();
@@ -1383,8 +1382,8 @@ mod tests {
         let evidence = &output.result().evidence;
         let values = PipelineGateDecisionScoreValues::from_evidence(evidence)
             .expect("the legacy row builds from substance evidence");
-        assert_eq!(values.perplexity_micros, 0);
-        assert_eq!(values.tail_fraction_micros, 0);
+        assert_eq!(values.perplexity_micros, None);
+        assert_eq!(values.tail_fraction_micros, None);
         assert_eq!(
             values.perplexity_passed,
             evidence

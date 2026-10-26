@@ -44,8 +44,10 @@ PostgreSQL export query for the default schema:
           tenant_id, submission_id, decided_at, perplexity_micros,
           tail_fraction_micros, novelty_score_micros
         FROM trace_gate_decisions
-        -- SQ-11: a substance row (version 4) holds 0 here, not a perplexity.
-        WHERE credit_quality_calibration_version IS DISTINCT FROM 4
+        -- SQ-11, V139: a substance row measured no perplexity and holds
+        -- NULL here. Skipped before DISTINCT ON, so the latest row with a
+        -- perplexity is the one exported.
+        WHERE perplexity_micros IS NOT NULL
         ORDER BY tenant_id, submission_id, decided_at DESC, decision_id DESC
       ),
       latest_outcome AS (

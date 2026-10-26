@@ -94,7 +94,11 @@ pub struct ScorePolicyDependencies<'a> {
 ///   compatibility evidence carries them. A policy whose evidence lacks one
 ///   fails its run closed at Settle
 ///   (`pipeline_gate_decision_evidence_incomplete`) before any leg pays;
-///   the server never fills one in.
+///   the server never fills one in. An evidence that carries the substance
+///   fields is the exception: it measures no perplexity, so it must carry
+///   neither `perplexity_micros` nor `tail_fraction_micros`, and the row
+///   stores NULL in both (V139). One that carries either fails closed the
+///   same way (`pipeline_gate_decision_evidence_inconsistent`).
 ///
 /// A policy may hold a trace for operator review instead of pricing it
 /// (`ScoreOutput::held_for_review`). A reviewer resolves the hold through

@@ -2021,7 +2021,12 @@ minimal reference (`score_runs_under_runtime_controls`):
   `nearest_neighbor_hash`. A registered policy whose evidence lacks one of
   them fails its run at Settle under
   `pipeline_gate_decision_evidence_incomplete` before any leg pays. The server
-  never fills one in.
+  never fills one in. An evidence that carries the substance fields is the
+  exception: substance measures no perplexity, so the evidence must carry
+  neither `perplexity_micros` nor `tail_fraction_micros`, and the row stores
+  NULL in both (V139). An evidence that carries either fails its run at
+  Settle under `pipeline_gate_decision_evidence_inconsistent` before any leg
+  pays.
 
 A registered policy can also record two more things on its Score output:
 
@@ -2899,8 +2904,9 @@ on it fails as above, and its revision is removed (N-7).
 
 A run with a paid leg (any `complete` leg: each carries a receipt) whose
 Settle commit is refused for good waits in
-**`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict` or
-`pipeline_gate_decision_evidence_incomplete`, and the run keeps that label.
+**`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict`,
+`pipeline_gate_decision_evidence_incomplete` or
+`pipeline_gate_decision_evidence_inconsistent`, and the run keeps that label.
 It is not failed, so its paid revision stays in the index. No claim selects
 it, and the contributor sees it as pending.
 
@@ -3655,6 +3661,9 @@ Settle checks a compatibility run's Score evidence before the index write or
 any settlement leg. Evidence that lacks a field the row needs fails the run
 terminally with `pipeline_gate_decision_evidence_incomplete`, with nothing
 paid and no row written; it is deterministic, so the run is not retried. A
+substance run's evidence carries no perplexity and no tail fraction, and its
+row stores NULL in both (V139); substance evidence that carries either fails
+the run the same way, with `pipeline_gate_decision_evidence_inconsistent`. A
 value too large for its column (the chunk aggregate saturates a perplexity
 on purpose) is stored saturated, as `main`'s gate writer stores it. If the
 submission already has a pipeline row naming another run, the commit fails

@@ -1912,6 +1912,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_indexed_upload_frontiers",
         include_str!("../../../../migrations/V138__account_trust_indexed_upload_frontiers.sql"),
     ),
+    // V139: `trace_gate_decisions.perplexity_micros` and
+    // `tail_fraction_micros` take NULL, which a substance Settle row stores:
+    // its Score measures no perplexity. V134 to V138 are taken on main.
+    (
+        139,
+        "trace_gate_decision_perplexity_nullable",
+        include_str!("../../../../migrations/V139__trace_gate_decision_perplexity_nullable.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.
@@ -5973,7 +5981,10 @@ impl Database for PgBackend {
                  -- A row the gate never scored has no credit quality. The
                  -- driver's skip-duplicate branch records perplexity 0 and
                  -- leaves credit quality NULL; scoring it here would hand
-                 -- every skipped duplicate the graded-floor product.
+                 -- every skipped duplicate the graded-floor product. A row
+                 -- with no perplexity (NULL, a substance Settle row, V139)
+                 -- fails the same test, and the source test below too, so
+                 -- it is never an input.
                  WHERE COALESCE(perplexity_micros, 0) > 0
                    -- A row the pipeline's Settle wrote already holds the
                    -- credit quality its Score computed under the bundle's
@@ -6300,6 +6311,12 @@ impl Database for PgBackend {
                     chunks_capped
                  FROM trace_gate_decisions
                  WHERE submission_id = ANY($1)
+                   -- A row with no perplexity (a substance Settle row,
+                   -- V139) has no score this read reports. Filtered before
+                   -- DISTINCT ON, so the latest row WITH a perplexity is the
+                   -- one read, and a submission with none is absent, as one
+                   -- with no decision is.
+                   AND perplexity_micros IS NOT NULL
                  -- decision_id is the final, unique tiebreaker (mirrors
                  -- list_contributor_cap_signals) so decisions that share a
                  -- decided_at sort deterministically instead of Postgres
@@ -6372,6 +6389,12 @@ impl Database for PgBackend {
                      JOIN trace_submissions s
                        ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
                      WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                       -- A row with no perplexity (a substance Settle row,
+                       -- V139) is not signed as a score. Filtered before
+                       -- DISTINCT ON, so the latest row WITH a perplexity is
+                       -- the one signed, and a submission with none is
+                       -- absent, as one with no decision is.
+                       AND d.perplexity_micros IS NOT NULL
                      -- decision_id is the final, unique tiebreaker (mirrors
                      -- list_scores_by_submission_ids) so decisions that share a
                      -- decided_at sort deterministically instead of Postgres
@@ -6429,6 +6452,12 @@ impl Database for PgBackend {
         // from trace_gate_decisions, precisely so an owned-but-unscored
         // submission comes back with NULL score columns instead of
         // vanishing. That absence is the defect this method exists to fix.
+        //
+        // A decision with no perplexity (a substance Settle row, V139) is
+        // left out in the JOIN condition, not in WHERE: a submission whose
+        // only decision is such a row still comes back, with NULL score
+        // columns, exactly as one with no decision does, and one that also
+        // has a row with a perplexity reads the latest of those.
         let rows = client
             .query(
                 "SELECT DISTINCT ON (s.submission_id)
@@ -6445,6 +6474,7 @@ impl Database for PgBackend {
                  FROM trace_submissions s
                  LEFT JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                  AND d.perplexity_micros IS NOT NULL
                  WHERE s.tenant_id = $1
                    AND s.auth_principal_ref = $2
                    AND s.submission_id = ANY($3)

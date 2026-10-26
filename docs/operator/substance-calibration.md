@@ -174,6 +174,25 @@ refuses an unknown version, but two readers need attention:
   decision E9). It skips every `cq4` row. A separate fit for `cq4` is a
   later decision.
 
+## No perplexity on the gate decision row
+
+Substance measures no perplexity. The `trace_gate_decisions` row that a
+substance run's Settle writes stores NULL in `perplexity_micros` and
+`tail_fraction_micros` (V139). NULL means "no perplexity was measured". It
+is never a 0. A duplicate-withheld substance row also has
+`credit_quality_calibration_version` NULL, so do not use the version to find
+these rows: use `perplexity_micros IS NULL`.
+
+The readers of these columns read only rows that hold a value:
+
+- The score attestation (`GET` and `POST /v1/contributors/me/score-attestation`)
+  and the admin read-back (`POST /v1/admin/scores-by-submission`) read the
+  latest row with a perplexity. A submission whose only row is a substance
+  row reads as a submission with no gate decision.
+- `trace-commons-gate-calibrate tail-floor` and the export query in
+  `scripts/operator/analyze-gate-outcome.py` skip a row with NULL in the
+  column they read.
+
 ## For the removal of the compare harness
 
 The legacy removal (#1330) deletes the compare harness

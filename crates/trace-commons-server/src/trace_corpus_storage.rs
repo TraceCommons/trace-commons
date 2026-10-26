@@ -2075,8 +2075,16 @@ pub struct TraceGateDecisionRow {
     pub submission_id: Uuid,
     pub gate_policy_version: String,
     pub gate_version_hash: String,
-    pub perplexity_micros: i64,
-    pub tail_fraction_micros: i64,
+    /// The representative perplexity, in micros. `None` means no perplexity
+    /// was measured (migration V139): a substance Settle row stores NULL,
+    /// because its Score runs no perplexity scorer. Every legacy writer
+    /// stores a value. Readers MUST NOT default `None` to 0, which reads as
+    /// a measured perplexity.
+    pub perplexity_micros: Option<i64>,
+    /// The tail fraction, in micros. `None` exactly when
+    /// `perplexity_micros` is `None` (migration V139), with the same rule
+    /// for readers.
+    pub tail_fraction_micros: Option<i64>,
     pub perplexity_passed: bool,
     pub novelty_score_micros: i64,
     pub nearest_neighbor_hash: String,
@@ -2195,7 +2203,8 @@ pub struct GateWorkItem {
 /// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
 /// Only decisions the gate actually scored are inputs: a row with perplexity 0
 /// (the skip-duplicate branch) is never enumerated, so its credit quality
-/// stays NULL, as the inline path leaves it.
+/// stays NULL, as the inline path leaves it. Nor is a row with no perplexity
+/// (NULL, V139), so `perplexity_micros` is always a measured value here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateCreditInput {
     pub tenant_id: String,
@@ -2379,6 +2388,11 @@ pub struct ContributorCapSignalRow {
 /// submission has more than one decision row, the row with the latest
 /// `decided_at` wins. `credit_quality_micros` is `None` until the shadow-mode
 /// credit-quality pass has scored the decision (migration V39).
+///
+/// Only a decision row that holds a perplexity is read: a row with none (a
+/// substance Settle row, migration V139) is not a score these reads report,
+/// so `perplexity_micros` is always a measured value. A submission whose only
+/// decision has no perplexity reads as one with no decision.
 ///
 /// Note that `submission_id` is derived from session content, so the same
 /// session uploaded by two contributors in different tenants shares one id

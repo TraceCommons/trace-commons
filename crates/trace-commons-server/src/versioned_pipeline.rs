@@ -181,6 +181,14 @@ pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable
 /// its evidence lacks a field the row needs: the commit writes nothing.
 pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
     "pipeline_gate_decision_evidence_incomplete";
+/// Settle refuses to write a substance run's `trace_gate_decisions` row
+/// when its Score evidence carries a perplexity or a tail fraction. The
+/// substance Score measures neither, and its row stores NULL in both (V139),
+/// so a value there is one no scorer measured. Handled as
+/// `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL` is: the commit writes
+/// nothing, and the run fails terminally before any leg pays.
+pub const PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL: &str =
+    "pipeline_gate_decision_evidence_inconsistent";
 /// A Score policy asked for a hold again on an input that carries the
 /// operator's approval of its earlier hold
 /// (`ScoreInput::operator_review`). The run fails closed under this label
@@ -257,8 +265,11 @@ macro_rules! finishable_settle_run_sql {
 /// written by its commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineGateDecisionScoreValues {
-    pub perplexity_micros: i64,
-    pub tail_fraction_micros: i64,
+    /// `None` for a substance evidence, whose Score measures no perplexity:
+    /// the row stores NULL (V139). `Some` for every other evidence.
+    pub perplexity_micros: Option<i64>,
+    /// `None` exactly when `perplexity_micros` is `None`.
+    pub tail_fraction_micros: Option<i64>,
     pub novelty_score_micros: i64,
     pub perplexity_passed: bool,
     pub novelty_passed: bool,
@@ -279,6 +290,14 @@ impl PipelineGateDecisionScoreValues {
     /// when a field the row requires is absent. A value too large for its
     /// column saturates, as `main`'s gate writer stores it: the chunk
     /// aggregate saturates a perplexity to `u64::MAX` on purpose.
+    ///
+    /// The perplexity and the tail fraction depend on the evidence. A
+    /// substance evidence (one that carries the substance fields, which
+    /// `ScoreEvidence::validate` holds all set or all absent) measures no
+    /// perplexity: it must carry neither field, and both values are `None`,
+    /// stored as NULL (V139). One that carries either is refused with
+    /// `PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL`. Every other
+    /// evidence requires both, as before.
     pub fn from_evidence(evidence: &ScoreEvidence) -> Result<Self, &'static str> {
         let micros = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let count = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
@@ -287,9 +306,20 @@ impl PipelineGateDecisionScoreValues {
                 .map(micros)
                 .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
         };
+        let (perplexity_micros, tail_fraction_micros) = if evidence.substance_micros.is_some() {
+            if evidence.perplexity_micros.is_some() || evidence.tail_fraction_micros.is_some() {
+                return Err(PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL);
+            }
+            (None, None)
+        } else {
+            (
+                Some(required(evidence.perplexity_micros)?),
+                Some(required(evidence.tail_fraction_micros)?),
+            )
+        };
         Ok(Self {
-            perplexity_micros: required(evidence.perplexity_micros)?,
-            tail_fraction_micros: required(evidence.tail_fraction_micros)?,
+            perplexity_micros,
+            tail_fraction_micros,
             novelty_score_micros: required(evidence.novelty_score_micros)?,
             perplexity_passed: evidence
                 .quality_passed
@@ -6235,8 +6265,11 @@ impl PgPipelineStore {
     ///
     /// Fails closed, writing nothing, when the run has no Score outcome or
     /// its compatibility evidence lacks a field the row needs
-    /// (`PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`): such a row
-    /// would tell every consumer something the Score did not say. The
+    /// (`PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`), or its
+    /// substance evidence carries a perplexity or a tail fraction
+    /// (`PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL`): such a row
+    /// would tell every consumer something the Score did not say. A
+    /// substance row stores NULL in both columns (V139). The
     /// Settle phase runs the same evidence check before any leg settles
     /// (`PipelineGateDecisionScoreValues::from_evidence`), so this refusal
     /// is reached only if the outcome changed between the two.
@@ -6299,8 +6332,8 @@ impl PgPipelineStore {
         if evidence.operator_rejected_hold.is_some() {
             return Ok(false);
         }
-        let values =
-            PipelineGateDecisionScoreValues::from_evidence(&evidence).map_err(|_| incomplete())?;
+        let values = PipelineGateDecisionScoreValues::from_evidence(&evidence)
+            .map_err(|label| DatabaseError::Constraint(label.to_string()))?;
         let attestation_chain_hash =
             pipeline_score_outcome_hash(&decision, &evidence_value, &evaluation)
                 .map_err(|_| incomplete())?;
@@ -7984,7 +8017,8 @@ async fn receipt_is_tombstoned(
 /// and one of its legs paid (`settle_run_has_paid_leg_sql!`), and either the
 /// failure is a refusal of the Settle commit that a retry cannot change
 /// (`PIPELINE_GATE_DECISION_CONFLICT_LABEL`,
-/// `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`) or the run was held
+/// `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`,
+/// `PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL`) or the run was held
 /// before (V128 `operator_held_at`): an operator released it, and its
 /// attempt failed. The run moves to `awaiting_operator` with its label kept,
 /// records the hold's time and sets the review audit marker, so the
@@ -7996,7 +8030,8 @@ async fn hold_paid_settle_run_for_operator_on_tx(
     error_label: &str,
 ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
     let refused_for_good = error_label == PIPELINE_GATE_DECISION_CONFLICT_LABEL
-        || error_label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL;
+        || error_label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+        || error_label == PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL;
     tx.query_opt(
         concat!(
             "UPDATE pipeline_runs p
@@ -13352,13 +13387,15 @@ impl PipelineService {
                 }
                 // Spec 2026-10-08, Slice C: Settle's gate decision row
                 // cannot be written -- the compatibility Score evidence lacks
-                // a field the row needs, or the submission's pipeline row
-                // names another run. Both are deterministic, so the run fails
-                // terminally instead of spending its attempts. Settle checks
-                // the evidence before any leg settles, and `mark_failed`
-                // resolves only legs still open, so a completed leg stays
-                // complete.
+                // a field the row needs, the substance Score evidence carries
+                // a perplexity it never measured, or the submission's
+                // pipeline row names another run. All are deterministic, so
+                // the run fails terminally instead of spending its attempts.
+                // Settle checks the evidence before any leg settles, and
+                // `mark_failed` resolves only legs still open, so a completed
+                // leg stays complete.
                 if label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL
                     || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL
                 {
                     return self.mark_failed_or_record_lease_expired(&run, &label).await;
@@ -15605,11 +15642,12 @@ impl PipelineService {
             //
             // The gate decision row's refusals are re-raised bare for the
             // same reason, and `process_claimed_run` fails the run
-            // terminally on them: both are deterministic, so a retry would
+            // terminally on them: all are deterministic, so a retry would
             // fail the same way.
             Err(DatabaseError::Constraint(label))
                 if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
                     || label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL
                     || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL =>
             {
                 return Err(anyhow::anyhow!(label));
@@ -18110,6 +18148,103 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fields every gate decision row needs, as a compatibility Score
+    /// evidence carries them, without a perplexity or a tail fraction.
+    fn gate_row_evidence() -> ScoreEvidence {
+        let mut evidence = ScoreEvidence::fixed(InstrumentAwards::new(Vec::new()).unwrap());
+        evidence.novelty_score_micros = Some(400_000);
+        evidence.quality_passed = Some(true);
+        evidence.novelty_passed = Some(true);
+        evidence.nearest_neighbor_hash = Some(sha256_prefixed(b"neighbour"));
+        evidence
+    }
+
+    /// `gate_row_evidence` with the seven substance fields, which
+    /// `ScoreEvidence::validate` holds all set or all absent.
+    fn substance_gate_row_evidence() -> ScoreEvidence {
+        let mut evidence = gate_row_evidence();
+        evidence.substance_micros = Some(435_557);
+        evidence.substance_passed = Some(true);
+        evidence.substance_version = Some(1);
+        evidence.substance_work_micros = Some(262_788);
+        evidence.substance_replay_micros = Some(1_000_000);
+        evidence.substance_tool_calls = Some(1);
+        evidence.witness_provenance_class =
+            Some(trace_commons_gate_api::pipeline::ScoreWitnessClass::Unattested);
+        evidence.validate().expect("the substance fixture is valid");
+        evidence
+    }
+
+    /// V139: a compatibility evidence still needs both perplexity fields,
+    /// and the row stores what it carries.
+    #[test]
+    fn compatibility_gate_row_values_require_both_perplexity_fields() {
+        let mut evidence = gate_row_evidence();
+        evidence.perplexity_micros = Some(12_000_000);
+        evidence.tail_fraction_micros = Some(250_000);
+        let values = PipelineGateDecisionScoreValues::from_evidence(&evidence)
+            .expect("complete compatibility evidence builds a row");
+        assert_eq!(values.perplexity_micros, Some(12_000_000));
+        assert_eq!(values.tail_fraction_micros, Some(250_000));
+
+        for missing in ["perplexity_micros", "tail_fraction_micros"] {
+            let mut incomplete = evidence.clone();
+            match missing {
+                "perplexity_micros" => incomplete.perplexity_micros = None,
+                _ => incomplete.tail_fraction_micros = None,
+            }
+            assert_eq!(
+                PipelineGateDecisionScoreValues::from_evidence(&incomplete),
+                Err(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL),
+                "compatibility evidence without {missing} fails closed"
+            );
+        }
+        assert_eq!(
+            PipelineGateDecisionScoreValues::from_evidence(&gate_row_evidence()),
+            Err(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL),
+            "compatibility evidence without either fails closed"
+        );
+    }
+
+    /// V139: a substance evidence measures no perplexity, so its row stores
+    /// NULL in both columns, and a substance evidence that carries either
+    /// field is refused rather than written.
+    #[test]
+    fn substance_gate_row_values_hold_no_perplexity() {
+        let evidence = substance_gate_row_evidence();
+        let values = PipelineGateDecisionScoreValues::from_evidence(&evidence)
+            .expect("substance evidence builds a row without a perplexity");
+        assert_eq!(values.perplexity_micros, None);
+        assert_eq!(values.tail_fraction_micros, None);
+        assert!(values.perplexity_passed, "the substance gate's verdict");
+
+        for (field, set) in [
+            (
+                "perplexity_micros",
+                (|e: &mut ScoreEvidence| e.perplexity_micros = Some(0)) as fn(&mut ScoreEvidence),
+            ),
+            ("tail_fraction_micros", |e| e.tail_fraction_micros = Some(0)),
+            ("both", |e| {
+                e.perplexity_micros = Some(12_000_000);
+                e.tail_fraction_micros = Some(250_000);
+            }),
+        ] {
+            let mut carrying = substance_gate_row_evidence();
+            set(&mut carrying);
+            assert_eq!(
+                PipelineGateDecisionScoreValues::from_evidence(&carrying),
+                Err(PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL),
+                "substance evidence carrying {field} is refused"
+            );
+        }
+        assert!(
+            PIPELINE_GATE_DECISION_EVIDENCE_INCONSISTENT_LABEL
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_'),
+            "the refusal is a hash-safe label"
+        );
+    }
 
     /// Issue #1233, defect 2: Settle's index dispatch deadline is a
     /// monotonic `Instant`, the earlier of the lease's remaining time (read
