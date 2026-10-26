@@ -205,6 +205,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_drill_tokens", "Tokens"),
     ("analytics_drill_coverage", "Coverage"),
     ("analytics_drill_reason", "Reason"),
+    ("analytics_drill_show_all", "Show all {n}"),
+    ("analytics_drill_show_fewer", "Show fewer"),
     // 7a. Where a feed T session's calls went (design part B), from the
     // proxy's own record. Its tokens are the proxy's per-call count, never
     // summed with or reconciled to the transcript's. Only verified proof
