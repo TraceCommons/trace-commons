@@ -647,6 +647,54 @@ fn destination_for(choice: TerminalSetting) -> Option<&'static str> {
     choice.app().map(TerminalApp::name)
 }
 
+/// Tool maintenance opens a terminal without needing a managed-session helper,
+/// account, profile, ticket or credential. Currently offered by native macOS.
+pub fn tool_setup_available() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Keep the vendor output visible in every supported macOS terminal. The
+/// command is built by `tool_setup`, never accepted as an IPC parameter.
+#[cfg(any(target_os = "macos", test))]
+fn setup_shell_command(body: &str) -> Result<String, ManagedError> {
+    if body.is_empty() || body.len() > 16_384 || body.contains('\0') {
+        return Err(ManagedError::InvalidRequest);
+    }
+    let script = format!(
+        "PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"; export PATH; {body}; exec \"${{SHELL:-/bin/zsh}}\" -l"
+    );
+    Ok(format!("/bin/bash -lc '{}'", script.replace('\'', "'\\''")))
+}
+
+pub fn launch_tool_setup(
+    choice: TerminalSetting,
+    installed: &[TerminalApp],
+    body: &str,
+) -> Result<(), ManagedError> {
+    #[cfg(target_os = "macos")]
+    {
+        let command = setup_shell_command(body)?;
+        launch_macos(choice, installed, &command, |lines| {
+            let mut script = std::process::Command::new("/usr/bin/osascript");
+            for line in &lines {
+                script.args(["-e", line]);
+            }
+            let output =
+                super::profiles::bounded_output(script).map_err(|_| ManagedError::LaunchUnknown)?;
+            if !output.status.success() {
+                return Err(ManagedError::LaunchUnknown);
+            }
+            Ok(output.stdout)
+        })?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (choice, installed, body);
+        Err(ManagedError::TerminalNotFound)
+    }
+}
+
 /// Open the session in the chosen terminal, which must be among
 /// `installed`, with `cwd` as its working directory where the app takes
 /// one by command line (Windows and Linux). On macOS the helper itself
@@ -724,6 +772,30 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_one_quoted_shell_invocation_and_keeps_the_terminal_open() {
+        let command = setup_shell_command("printf '%s\\n' 'quoted $HOME `not-code`'").unwrap();
+        assert!(command.starts_with("/bin/bash -lc '"));
+        assert!(command.contains("$HOME/.local/bin:$HOME/.opencode/bin:$PATH"));
+        assert!(command.contains("exec \"${SHELL:-/bin/zsh}\" -l"));
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
+            let script = app.script(&command);
+            assert_eq!(
+                script
+                    .iter()
+                    .filter(|line| line.contains(&applescript_literal(&command)))
+                    .count(),
+                1
+            );
+        }
+        assert!(setup_shell_command("").is_err());
+        assert!(setup_shell_command("bad\0command").is_err());
+    }
 
     #[cfg(unix)]
     /// A config folder whose path tries to close the AppleScript string

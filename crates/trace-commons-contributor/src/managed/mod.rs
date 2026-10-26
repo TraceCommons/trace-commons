@@ -15,6 +15,7 @@ pub mod sessions;
 pub mod signin;
 pub mod statusline;
 pub mod supervisor;
+pub mod tool_setup;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

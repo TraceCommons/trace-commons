@@ -420,6 +420,7 @@ private struct Launcher: View {
             Task { @MainActor in
                 model.refreshBalanceOnActivation()
                 model.refreshCredentialOnActivation()
+                model.refreshManagedSessions()
                 await model.refreshReengageDeclaration()
             }
         }
