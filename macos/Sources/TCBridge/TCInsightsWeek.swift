@@ -91,6 +91,10 @@ public struct InsightsCardSession: Decodable, Sendable, Equatable, Identifiable 
     public let cache_share: InsightsShareFigure?
     public let state: String
     public let reasons: [String]
+    /// Claude Code only: tokens on each day of the week, Monday first,
+    /// summing to the week's `by_day`. `nil` for Codex, for an unknown
+    /// figure, and from a core that predates it.
+    public let by_day: [UInt64]?
     public var id: String { session_ref }
 }
 

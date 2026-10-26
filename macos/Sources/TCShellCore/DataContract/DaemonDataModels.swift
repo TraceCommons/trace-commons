@@ -2823,12 +2823,17 @@ extension DaemonData {
         /// Where its calls went, from the proxy's record; `nil` while
         /// `routingAvailable` is not true.
         public let routing: InsightsWeekRouting?
+        /// Claude Code only: the session's tokens on each day of the week,
+        /// Monday first, summing to the week's `byDay`. `nil` for Codex, for
+        /// an unknown figure, and from a daemon that predates it.
+        public let byDay: [Int64]?
 
         public enum CodingKeys: String, CodingKey {
             case source, tokens, state, reasons, routing, folder
             case sessionRef = "session_ref"
             case startedAt = "started_at"
             case lastEventAt = "last_event_at"
+            case byDay = "by_day"
         }
     }
 
