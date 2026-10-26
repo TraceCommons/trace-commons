@@ -1,8 +1,8 @@
 //! The person's own labels on a watched session (feed T): what the task
 //! was, and what became of the work (Insights PM request, 2026-10-21).
 //!
-//! Local only: the daemon keeps them in its counter store, beside the row
-//! they name, and they never leave the device. Two closed sets, each set
+//! Local only: the daemon keeps them in a file of their own beside its
+//! counter store, by the row they name, and they never leave the device. Two closed sets, each set
 //! with one click on a Sessions feed row:
 //!
 //! - [`LabelledTask`]: the task as the person names it. Pre-filled from the

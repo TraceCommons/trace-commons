@@ -611,7 +611,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
-| `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's counter store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
+| `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
 | `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -5175,25 +5175,38 @@ as `insights_sessions` is: with `insights_counter_pass` off it answers
 and opens no store; on, an unreadable key, store or folder rules answer
 `readable: false` with the fixed reason. A reference that names no listed
 row (never stored, made again since, automated, or in a Never folder) is
-`bad_params` / `insights-session-unknown`, and nothing is written; a store
-that cannot be written is `unavailable` /
-`insights-session-label-write-failed`, and the label is as it was. Otherwise
+`bad_params` / `insights-session-unknown`, and nothing is written; a labels
+file that cannot be written, or is not in the labels shape and so is never
+written over, is `unavailable` / `insights-session-label-write-failed`, and
+the label is as it was, in the file and in every later answer. Otherwise
 it answers `{"enabled": true, "feed": "counter_pass", "readable": true,
 "session"}`, where `session` is the row exactly as `insights_sessions` now
-lists it. Local in a dry-run daemon: it writes only the counter store.
+lists it. Local in a dry-run daemon: it writes only the daemon's labels
+file, in its state directory.
 
 Where a label lives and when it goes:
 
-- In the counter store, keyed by the row's keyed session digest (the store's
-  row key), never by the reference. A row made again when its file grows
-  gets a new `session_ref` and keeps its label.
+- In its own small file beside the counter store
+  (`insights-session-labels.json`), keyed by the row's keyed session digest
+  (the store's row key), never by the reference. A row made again when its
+  file grows gets a new `session_ref` and keeps its label. A label write
+  writes only that file, never the store.
+- The file is read by the fields a build knows: an unknown field, a later
+  task or outcome word, or a later schema name never makes it unreadable. A
+  label a build cannot read is answered as unset and kept as written, and a
+  change sets only the field it names.
 - It goes with its row: when the row ages out of the 13 kept weeks, when the
   store's caps evict it, and when its folder is Never (no label is set on a
   row in a Never folder; one whose folder becomes Never is hidden at once
   and dropped at the next pass, and does not come back if the folder is
-  watched again). Unenroll removes the store, and every label with it.
-- A store written before labels loads with none, and a store with no label
-  is written without the `labels` key, as before.
+  watched again). Unenroll removes the store and the labels file.
+- A store restart keeps it. The counter store is begun again whenever it
+  cannot be read (a damaged file, or one a later or earlier build wrote);
+  its rows come back from the sessions on disk a poll's budget at a time,
+  and until a pass leaves nothing for later, no label is dropped for a row
+  not yet back. A label whose row does not come back (its file gone) is
+  dropped then. A new counter key (its keychain entry gone) names every
+  session anew, so the labels made under the old one are removed.
 - It is never sent anywhere: it crosses only on this socket, on the Sessions
   rows and as counts in `insights_model_answers`.
 

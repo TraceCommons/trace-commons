@@ -578,8 +578,8 @@ async fn unenroll_clears_the_insights_counter_store() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
-/// The person's own labels on their sessions live in the counter store and
-/// go with it on unenroll: counted again afterwards, the session has none.
+/// The person's own labels on their sessions live beside the counter store
+/// and go with it on unenroll: counted again afterwards, the session has none.
 #[tokio::test]
 async fn unenroll_clears_the_persons_session_labels() {
     let s = shared();
@@ -603,14 +603,14 @@ async fn unenroll_clears_the_persons_session_labels() {
     .result
     .unwrap();
     assert_eq!(labelled["session"]["user_task"], "bug_fix");
-    assert!(
-        std::fs::read_to_string(rows_file(&s))
-            .unwrap()
-            .contains("\"labels\"")
-    );
+    let labels_file = s
+        .store
+        .daemon_path(crate::daemon::insights_week::SESSION_LABELS_FILE);
+    assert!(labels_file.exists());
 
     assert!(call(&s).await.error.is_none());
     assert!(!rows_file(&s).exists());
+    assert!(!labels_file.exists());
 
     s.settings.lock().unwrap().insights_counter_pass = true;
     counted(&s);

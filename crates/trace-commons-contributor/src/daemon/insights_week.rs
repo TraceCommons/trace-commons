@@ -114,16 +114,20 @@
 //! store and never reach a keychain. The store and its key are removed on
 //! unenroll.
 //!
-//! The store also keeps the person's own labels on their sessions (task and
-//! outcome, `insights::session_labels`; Insights PM request, 2026-10-21),
-//! set through `insights_session_label`. Each is keyed by its row's keyed
-//! session digest, which a row made again when its file grows keeps, so a
-//! label outlives the row's new reference. A label goes with its row: when
-//! the row ages out of the kept weeks, the caps evict it, or its folder is
-//! Never (no label is set on a row in a Never folder, and the next pass
-//! drops one whose folder became Never). The store's removal on unenroll
-//! takes every label with it. Labels are never sent anywhere: the Sessions
-//! rows carry them back to the shell, and the Models answers read them.
+//! The person's own labels on their sessions (task and outcome,
+//! `insights::session_labels`; Insights PM request, 2026-10-21), set through
+//! `insights_session_label`, live in their own file beside the store
+//! ([`LabelFile`]): they are the one thing here that cannot be read again
+//! from the sessions on disk, and the store is begun again whenever it
+//! cannot be read. Each is keyed by its row's keyed session digest, which a
+//! row made again when its file grows keeps, so a label outlives the row's
+//! new reference. A label goes with its row: when the row ages out of the
+//! kept weeks, the caps evict it, or its folder is Never (no label is set on
+//! a row in a Never folder, and the next pass drops one whose folder became
+//! Never). A store begun again keeps every label while its rows come back
+//! (`CounterPass::keep_labels`). Unenroll removes the labels file with the
+//! store. Labels are never sent anywhere: the Sessions rows carry them back
+//! to the shell, and the Models answers read them.
 //!
 //! Anyone holding both the store and the key could confirm a guessed path;
 //! a store copied without the key reveals none.
@@ -184,7 +188,7 @@ use crate::insights::goals::WeekFigures;
 use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
-use crate::insights::session_labels::SessionLabel;
+use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
 use crate::insights::task_classifier::{LocalRulesClassifier, TaskClassifier, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
@@ -203,6 +207,12 @@ use crate::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX};
 pub const FEED_COUNTER_PASS: &str = "counter_pass";
 /// The store, in the daemon directory.
 pub const COUNTER_ROWS_FILE: &str = "insights-counter-rows.json";
+/// The person's own labels on their sessions, beside the store
+/// ([`LabelFile`]).
+pub const SESSION_LABELS_FILE: &str = "insights-session-labels.json";
+/// The labels file's schema. Any other name is read all the same, by the
+/// fields this build knows.
+const SESSION_LABELS_SCHEMA: &str = "trace_commons.insights_session_labels.v1";
 /// Where the key lives under the key-file custody (owner decision D16).
 pub const COUNTER_KEY_DIR: &str = "insights-counter-key";
 /// v2 adds each row's keyed harness-session digest (owner decision D15,
@@ -598,14 +608,6 @@ struct CounterStore {
     /// written before it.
     #[serde(default)]
     generation: u32,
-    /// The person's own labels (`insights_session_label`), keyed by the
-    /// same keyed session digest as `rows`, so a row made again under a new
-    /// reference keeps its label. Only for a row that is stored: one whose
-    /// row goes (aged out, evicted, a Never folder) goes with it
-    /// (`prune_labels`). Absent in a store written before labels, which
-    /// loads with none, and left out of the file while empty.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    labels: BTreeMap<KeyedDigest, SessionLabel>,
 }
 
 /// The observation an evicted session's row was made from. No path and no
@@ -643,9 +645,89 @@ impl CounterStore {
             ledger_folded_started: None,
             evicted: BTreeMap::new(),
             generation: new_generation(),
-            labels: BTreeMap::new(),
         }
     }
+}
+
+/// The person's own labels on their sessions (`insights_session_label`), in
+/// their own file beside the store ([`SESSION_LABELS_FILE`]). Apart from the
+/// store because they are the one thing in it that cannot be read again from
+/// the sessions on disk: the store is begun again whenever it cannot be read
+/// (a build that wrote a field this one does not know, a damaged file), and
+/// that must never take a label with it.
+///
+/// So this file is read by the fields this build knows and no others: an
+/// unknown field, a task or outcome word from a later build, or a later
+/// schema name is no reason to refuse it. Each label is kept as written, so
+/// one this build cannot read (a later build's word) is answered as unset
+/// and kept for the build that can, and a change sets only the field it
+/// names. A file that is not this shape at all is never written over: its
+/// labels are unset in every answer and a label write is refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LabelFile {
+    schema: String,
+    /// The key the session digests below were made under, as the store
+    /// names its own. Under any other key they name no session, and the
+    /// next write begins the file again.
+    key_fingerprint: KeyedDigest,
+    /// The store generation the labels were last kept against: while the
+    /// store holds another, it was begun again and its rows are still
+    /// coming back, so no label is dropped for a row not yet read again
+    /// (`CounterPass::keep_labels`).
+    #[serde(default)]
+    generation: u32,
+    /// Each label as written (`task`, `outcome`), by the same keyed session
+    /// digest as the store's rows, so a row made again under a new
+    /// reference keeps its label.
+    #[serde(default)]
+    labels: BTreeMap<KeyedDigest, serde_json::Value>,
+    /// Anything else a later build wrote, kept as it was.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LabelFile {
+    fn empty(key_fingerprint: KeyedDigest, generation: u32) -> Self {
+        Self {
+            schema: SESSION_LABELS_SCHEMA.to_string(),
+            key_fingerprint,
+            generation,
+            labels: BTreeMap::new(),
+            rest: serde_json::Map::new(),
+        }
+    }
+
+    /// The labels this build can read, by session; one with nothing it
+    /// knows set is left out.
+    fn readable(&self) -> BTreeMap<KeyedDigest, SessionLabel> {
+        self.labels
+            .iter()
+            .map(|(session, stored)| (*session, read_label(stored)))
+            .filter(|(_, label)| !label.is_empty())
+            .collect()
+    }
+}
+
+/// A label as the labels file keeps it, read by the words this build knows:
+/// any other word, or a field it does not know, is unset.
+fn read_label(stored: &serde_json::Value) -> SessionLabel {
+    let word = |name: &str| stored.get(name).and_then(serde_json::Value::as_str);
+    SessionLabel {
+        task: word("task").and_then(LabelledTask::from_wire),
+        outcome: word("outcome").and_then(SessionOutcome::from_wire),
+    }
+}
+
+/// The labels file as last read or written.
+#[derive(Debug, Clone)]
+enum LabelsRead {
+    /// No file: no label set since the store's key was made, or since a
+    /// clear.
+    Absent,
+    Read(LabelFile),
+    /// A file not in the labels shape: answered as no labels, never
+    /// written over.
+    Unreadable,
 }
 
 /// One session the watcher found, as the pass sees it.
@@ -979,6 +1061,10 @@ pub struct CounterPass {
     /// never written: a fold drops their tallies before it writes. A leaf
     /// lock.
     never_sessions: Mutex<NeverSessions>,
+    /// The labels file as last read or written; `None` until first needed.
+    /// A leaf lock, held across a label write, so two writes never
+    /// interleave and a cached label is always one the file holds.
+    labels: Mutex<Option<LabelsRead>>,
     /// Signalled when the worker goes idle.
     #[cfg(test)]
     idle: std::sync::Condvar,
@@ -1028,6 +1114,7 @@ impl CounterPass {
             cleared: AtomicU64::new(0),
             worker: Mutex::new(WorkerSlot::default()),
             never_sessions: Mutex::new(NeverSessions::default()),
+            labels: Mutex::new(None),
             #[cfg(test)]
             idle: std::sync::Condvar::new(),
             #[cfg(test)]
@@ -1344,19 +1431,25 @@ impl CounterPass {
         order.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified_at));
         let mut reads: Vec<(KeyedDigest, CounterRow)> = Vec::new();
         let mut bytes_budgeted = 0u64;
+        // Sessions still being written: a label on one is kept while it
+        // waits, though a store begun again holds no row for it yet.
+        let mut writing: BTreeSet<KeyedDigest> = BTreeSet::new();
         for candidate in order {
             let Some(source) = analytics_source(candidate.source) else {
                 continue;
             };
-            if candidate.modified_at < cutoff
-                || now
-                    .signed_duration_since(candidate.modified_at)
-                    .num_seconds()
-                    < i64::try_from(quiescence_secs).unwrap_or(i64::MAX)
-            {
+            if candidate.modified_at < cutoff {
                 continue;
             }
             let session = session_key(&key, candidate.source, &candidate.path.to_string_lossy());
+            if now
+                .signed_duration_since(candidate.modified_at)
+                .num_seconds()
+                < i64::try_from(quiescence_secs).unwrap_or(i64::MAX)
+            {
+                writing.insert(session);
+                continue;
+            }
             let unchanged = current.rows.get(&session).is_some_and(|row| {
                 row.size_bytes == candidate.size_bytes
                     && row.modified_at == candidate.modified_at
@@ -1519,12 +1612,111 @@ impl CounterPass {
         );
         never_sessions.purge(&mut store.routing);
         prune_routing(&mut store, &gone, cutoff);
-        prune_labels(&mut store, &never);
         self.stage_into(&mut cached, store);
         self.mark_pass(now);
+        let staged = cached.as_ref().map(Arc::clone);
         drop(cached);
         self.flush()?;
+        if let Some(store) = staged {
+            self.keep_labels(&store, &never, &writing, summary.deferred == 0, cleared);
+        }
         Ok(Some(summary))
+    }
+
+    /// The labels file's path, beside the store.
+    fn labels_path(&self) -> PathBuf {
+        self.rows_path.with_file_name(SESSION_LABELS_FILE)
+    }
+
+    fn labels_slot(&self) -> std::sync::MutexGuard<'_, Option<LabelsRead>> {
+        self.labels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The labels file, read the first time it is needed, for a caller
+    /// holding its lock.
+    fn read_labels<'s>(&self, slot: &'s mut Option<LabelsRead>) -> &'s LabelsRead {
+        slot.get_or_insert_with(|| match std::fs::read(self.labels_path()) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(LabelsRead::Read)
+                .unwrap_or(LabelsRead::Unreadable),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => LabelsRead::Absent,
+            Err(_) => LabelsRead::Unreadable,
+        })
+    }
+
+    /// The labels this build can read, by session, made under the key
+    /// `fingerprint` names; none when the file is absent, unreadable or
+    /// under another key.
+    fn readable_labels(&self, fingerprint: &KeyedDigest) -> BTreeMap<KeyedDigest, SessionLabel> {
+        let mut slot = self.labels_slot();
+        match self.read_labels(&mut slot) {
+            LabelsRead::Read(file) if file.key_fingerprint == *fingerprint => file.readable(),
+            _ => BTreeMap::new(),
+        }
+    }
+
+    /// Write `file` as the labels file, for a caller holding its lock. The
+    /// cached file changes only once the write succeeds.
+    fn write_labels(&self, slot: &mut Option<LabelsRead>, file: LabelFile) -> Result<(), ()> {
+        let body = serde_json::to_vec(&file).map_err(|_| ())?;
+        let path = self.labels_path();
+        let dir = path.parent().ok_or(())?;
+        crate::config::write_atomic_0600(dir, &path, &body).map_err(|_| ())?;
+        *slot = Some(LabelsRead::Read(file));
+        Ok(())
+    }
+
+    /// After a pass has written `store`: keep a label only while its row is
+    /// stored outside a Never folder, or its session is still being written
+    /// (`writing`). So a row that aged out, was evicted or was dropped for
+    /// a Never folder takes its label with it.
+    ///
+    /// Except while the store is catching up after being begun again: its
+    /// rows come back a few at a time, within the per-poll budget, so until
+    /// a pass leaves nothing for later (`caught_up`) a label waits for its
+    /// row rather than going for want of one. A labels file under another
+    /// key names no session any more and is removed. A failure is left for
+    /// the next pass.
+    fn keep_labels(
+        &self,
+        store: &CounterStore,
+        never: &NeverDigests,
+        writing: &BTreeSet<KeyedDigest>,
+        caught_up: bool,
+        cleared: u64,
+    ) {
+        let mut slot = self.labels_slot();
+        // A clear since the pass began removed the file: write nothing.
+        if self.cleared.load(Ordering::SeqCst) != cleared {
+            return;
+        }
+        let LabelsRead::Read(file) = self.read_labels(&mut slot) else {
+            return;
+        };
+        if file.key_fingerprint != store.key_fingerprint {
+            if std::fs::remove_file(self.labels_path()).is_ok() {
+                *slot = Some(LabelsRead::Absent);
+            }
+            return;
+        }
+        if file.generation != store.generation && !caught_up {
+            return;
+        }
+        let mut kept = file.clone();
+        kept.generation = store.generation;
+        kept.labels.retain(|session, _| {
+            writing.contains(session)
+                || store
+                    .rows
+                    .get(session)
+                    .is_some_and(|row| is_listed(row, never))
+        });
+        if kept != *file && self.write_labels(&mut slot, kept).is_err() {
+            // A fixed label only.
+            tracing::warn!("insights session labels could not be written");
+        }
     }
 
     /// A pass finished at `now`, for the answer's `updated_at`. Called under
@@ -1757,7 +1949,21 @@ impl CounterPass {
             Err(_) => return Err(ERR_CLEAR_FAILED),
         }
         *cached = None;
+        // The labels go with the store. Under their lock, so a label write
+        // either finishes before the removal or sees the clear and writes
+        // nothing.
+        let mut labels = self.labels_slot();
+        let labels_removed = match std::fs::remove_file(self.labels_path()) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        *labels = None;
         self.cleared.fetch_add(1, Ordering::SeqCst);
+        drop(labels);
+        if !labels_removed {
+            // The rows are gone; the next clear tries the labels again.
+            return Err(ERR_CLEAR_FAILED);
+        }
         if let Ok(mut at) = self.last_pass_at.lock() {
             *at = None;
         }
@@ -1864,11 +2070,15 @@ impl CounterPass {
                 store
                     .rows
                     .iter()
-                    .filter(|(_, row)| !never.contains(&row.project) && !row.is_automated())
+                    .filter(|(_, row)| is_listed(row, &never))
                     .collect()
             }
             _ => Vec::new(),
         };
+        let user_labels = store
+            .as_ref()
+            .map(|store| self.readable_labels(&store.key_fingerprint))
+            .unwrap_or_default();
         let labels = folder_digests(key.as_ref(), folders);
         let stored = rows.len();
         // Recency is the first recorded event, else the time discovery
@@ -1887,10 +2097,7 @@ impl CounterPass {
         );
         let sessions: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(session, row)| {
-                let label = store.as_ref().and_then(|store| store.labels.get(*session));
-                session_row_value(row, label, &labels)
-            })
+            .map(|(session, row)| session_row_value(row, user_labels.get(*session), &labels))
             .collect();
         Ok(serde_json::json!({
             "enabled": true,
@@ -1911,16 +2118,14 @@ impl CounterPass {
     /// `insights_session_label`: apply `change` to the label of the row
     /// `reference` names and answer that row as `insights_sessions` lists
     /// it, under `session`. `Err` when no visible row has that reference
-    /// (never stored, made again since, automated, or in a Never folder;
-    /// the label is then as it was), or the store file could not be
-    /// written (the label is then held in the cached store, and the next
-    /// write that succeeds writes it).
+    /// (never stored, made again since, automated, or in a Never folder),
+    /// or the labels file could not be written or read; the label is then
+    /// as it was, in the file and in every answer.
     ///
-    /// Never makes a key, and writes nothing while the pass is off. Under
-    /// the cache lock from load to staging, as a fold is, so neither a pass
-    /// nor a fold stages over it and a `clear` either sees it or removes
-    /// it; the file is written after that lock is released
-    /// ([`Self::flush`]).
+    /// Never makes a key, and writes nothing while the pass is off. Writes
+    /// only the small labels file ([`LabelFile`]), never the store: the row
+    /// is found in the cached store, which is not copied, and the cache
+    /// lock is released before the labels lock is taken.
     pub(crate) fn label_value(
         &self,
         enabled: bool,
@@ -1932,43 +2137,57 @@ impl CounterPass {
         if !enabled {
             return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
-        let key = match self.keys.load() {
-            Ok(Some(key)) => key,
-            Ok(None) => return Err(super::insights_sessions::ERR_SESSION_UNKNOWN),
-            Err(_) => return Ok(unreadable_value(UNREADABLE_KEY)),
-        };
-        let mut cached = match self.cached.lock() {
-            Ok(cached) => cached,
-            Err(_) => return Ok(unreadable_value(UNREADABLE_STORE)),
-        };
-        let current = match self.load_into(&mut cached) {
-            Ok(Some(store)) if store.key_fingerprint == key_fingerprint(&key) => store,
+        // Read before the store, so a clear after it is seen below.
+        let cleared = self.cleared.load(Ordering::SeqCst);
+        let (key, store) = match self.visible_store() {
+            Ok((Some(key), Some(store))) => (key, store),
             Ok(_) => return Err(super::insights_sessions::ERR_SESSION_UNKNOWN),
             Err(reason) => return Ok(unreadable_value(reason)),
         };
         let never = never_digests(&key, never_project_keys);
-        let session = current
+        let (session, row) = store
             .rows
             .iter()
-            .find(|(_, row)| {
-                !never.contains(&row.project) && !row.is_automated() && row.reference() == reference
-            })
-            .map(|(session, _)| *session)
+            .find(|(_, row)| is_listed(row, &never) && row.reference() == reference)
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
-        let mut label = current.labels.get(&session).copied().unwrap_or_default();
-        change.apply(&mut label);
-        let mut store = (*current).clone();
-        if label.is_empty() {
-            store.labels.remove(&session);
-        } else {
-            store.labels.insert(session, label);
-        }
-        prune_labels(&mut store, &never);
-        self.stage_into(&mut cached, store);
-        drop(cached);
-        self.flush()
-            .map_err(|_| super::insights_sessions::ERR_SESSION_LABEL_WRITE_FAILED)?;
-        let row = &current.rows[&session];
+        let label = {
+            let mut slot = self.labels_slot();
+            // A clear since the row was found removed the labels with the
+            // store: the row names nothing now, and nothing is written.
+            if self.cleared.load(Ordering::SeqCst) != cleared {
+                return Err(super::insights_sessions::ERR_SESSION_UNKNOWN);
+            }
+            let current = match self.read_labels(&mut slot) {
+                LabelsRead::Read(file) if file.key_fingerprint == store.key_fingerprint => {
+                    file.clone()
+                }
+                // A file not in the labels shape is never written over.
+                LabelsRead::Unreadable => {
+                    return Err(super::insights_sessions::ERR_SESSION_LABEL_WRITE_FAILED);
+                }
+                // None yet, or one under a key that is gone, whose digests
+                // name no session now.
+                LabelsRead::Absent | LabelsRead::Read(_) => {
+                    LabelFile::empty(store.key_fingerprint, store.generation)
+                }
+            };
+            let mut file = current.clone();
+            let mut stored = match file.labels.remove(session) {
+                Some(serde_json::Value::Object(stored)) => stored,
+                _ => serde_json::Map::new(),
+            };
+            change.apply_stored(&mut stored);
+            let stored = serde_json::Value::Object(stored);
+            let label = read_label(&stored);
+            if stored.as_object().is_some_and(|stored| !stored.is_empty()) {
+                file.labels.insert(*session, stored);
+            }
+            if file != current {
+                self.write_labels(&mut slot, file)
+                    .map_err(|_| super::insights_sessions::ERR_SESSION_LABEL_WRITE_FAILED)?;
+            }
+            label
+        };
         let folders = folder_digests(Some(&key), folders);
         let label = (!label.is_empty()).then_some(label);
         Ok(serde_json::json!({
@@ -2106,11 +2325,11 @@ impl CounterPass {
                     .collect();
                 keyed.sort_by_key(|(_, row)| row.seq);
                 // The person's own labels, by the engine's reference.
+                let user_labels = self.readable_labels(&store.key_fingerprint);
                 let labels: BTreeMap<String, SessionLabel> = keyed
                     .iter()
                     .filter_map(|(session, row)| {
-                        store
-                            .labels
+                        user_labels
                             .get(*session)
                             .map(|label| (row.reference(), *label))
                     })
@@ -2955,17 +3174,11 @@ impl DigestKeyStore for KeyFileInDir {
     }
 }
 
-/// Keep a label only while its row is stored and its folder is not Never:
-/// a row that aged out, was evicted or dropped for a Never folder takes its
-/// label with it.
-fn prune_labels(store: &mut CounterStore, never: &NeverDigests) {
-    let rows = &store.rows;
-    store.labels.retain(|session, label| {
-        !label.is_empty()
-            && rows
-                .get(session)
-                .is_some_and(|row| !never.contains(&row.project))
-    });
+/// Whether the Sessions methods show a row: the person's (not automated),
+/// outside a Never folder. The one test the list, the drill, a label and
+/// Analyze & save all make.
+fn is_listed(row: &CounterRow, never: &NeverDigests) -> bool {
+    !never.contains(&row.project) && !row.is_automated()
 }
 
 /// Age out and cap the route tallies against the rows the store keeps.

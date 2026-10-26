@@ -25,7 +25,7 @@ The answers come from the user's own sessions, on their own machine.
 
 2. **One-click labels on each Sessions row** (new).
    - **What:** each row gets a **Task** control (Bug fix, Refactor, Tests, Docs, Other), pre-filled with the automatic guess and marked as guessed or set by you. It also gets an **Outcome** control (Kept, Partly kept, Thrown away). Your task label replaces the guess in the Models answers, and the outcome adds a "kept share" per model.
-   - **Where it's stored:** labels stay on the machine. They're deleted on unenroll, never kept for Never folders, and dropped when a session leaves the 13-week window.
+   - **Where it's stored:** labels stay on the machine, in a small file of their own beside the daemon's session store. They're deleted on unenroll, never kept for Never folders, and dropped when a session leaves the 13-week window. When the daemon has to rebuild its session store (a damaged file, or one another build wrote), the labels are kept and come back with their sessions.
    - **Why:** the automatic task types are rough guesses, and "accepted" can't be measured from transcripts alone. One click from the user is the most accurate signal and needs no data to leave the machine.
 
 3. **Correctness fixes to the #1510 answers.**

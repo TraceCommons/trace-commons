@@ -42,9 +42,10 @@
 //! answering the row as listed. Two closed sets
 //! (`insights::session_labels`), checked before the gate; gated as the list
 //! is, and never written while the pass is off. The daemon keeps a label in
-//! the counter store by the row's keyed session digest, so it survives the
-//! row being made again under a new reference (`insights_week` has the
-//! rules), and it is never sent anywhere.
+//! its labels file beside the counter store, by the row's keyed session
+//! digest, so it survives the row being made again under a new reference
+//! and the store being begun again (`insights_week` has the rules), and it
+//! is never sent anywhere.
 
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 
@@ -53,7 +54,7 @@ use super::insights_week::{
 };
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, display_path_for_key, known_keys};
-use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
+use crate::insights::session_labels::{LabelledTask, SessionOutcome};
 
 /// The most sessions one `insights_sessions` page lists, newest first.
 /// `truncated` and `next` say when more follow.
@@ -71,7 +72,8 @@ pub const ERR_SESSIONS_LIMIT_INVALID: &str = "insights-sessions-limit-invalid";
 /// `task` or `outcome` is not one of its closed words, or `null`; or
 /// neither was given.
 pub const ERR_SESSION_LABEL_INVALID: &str = "insights-session-label-invalid";
-/// The store could not be written; the label is as it was.
+/// The labels file could not be written, or is not in the labels shape and
+/// is never written over; the label is as it was.
 pub const ERR_SESSION_LABEL_WRITE_FAILED: &str = "insights-session-label-write-failed";
 
 /// What one `insights_session_label` call does to one of a row's labels.
@@ -85,11 +87,22 @@ pub(crate) enum LabelEdit<T> {
 }
 
 impl<T: Copy> LabelEdit<T> {
-    fn apply(self, slot: &mut Option<T>) {
+    /// Apply it to the field `name` of a label as the labels file keeps
+    /// it, by `wire` word.
+    fn apply_stored(
+        self,
+        stored: &mut serde_json::Map<String, serde_json::Value>,
+        name: &str,
+        wire: fn(T) -> &'static str,
+    ) {
         match self {
             LabelEdit::Keep => {}
-            LabelEdit::Clear => *slot = None,
-            LabelEdit::Set(value) => *slot = Some(value),
+            LabelEdit::Clear => {
+                stored.remove(name);
+            }
+            LabelEdit::Set(value) => {
+                stored.insert(name.to_string(), wire(value).into());
+            }
         }
     }
 }
@@ -102,9 +115,12 @@ pub(crate) struct LabelChange {
 }
 
 impl LabelChange {
-    pub(crate) fn apply(self, label: &mut SessionLabel) {
-        self.task.apply(&mut label.task);
-        self.outcome.apply(&mut label.outcome);
+    /// Apply it to a label as the labels file keeps it: only the fields it
+    /// names change, so a field or word another build wrote is kept.
+    pub(crate) fn apply_stored(self, stored: &mut serde_json::Map<String, serde_json::Value>) {
+        self.task.apply_stored(stored, "task", LabelledTask::wire);
+        self.outcome
+            .apply_stored(stored, "outcome", SessionOutcome::wire);
     }
 }
 
@@ -457,7 +473,7 @@ mod tests {
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
 
     use super::super::insights_week::{
-        COUNTER_ROWS_FILE, CounterCandidate, CounterPass, UNREADABLE_STORE,
+        COUNTER_ROWS_FILE, CounterCandidate, CounterPass, SESSION_LABELS_FILE, UNREADABLE_STORE,
     };
     use super::*;
     use crate::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX};
@@ -1871,9 +1887,9 @@ mod tests {
             )
         }
 
-        /// The labels the store holds, however many rows it has.
+        /// The labels the labels file holds, however many rows there are.
         fn stored_labels(&self) -> usize {
-            let path = self.dir.path().join(COUNTER_ROWS_FILE);
+            let path = self.dir.path().join(SESSION_LABELS_FILE);
             let Ok(text) = std::fs::read_to_string(path) else {
                 return 0;
             };
@@ -2064,8 +2080,6 @@ mod tests {
         );
         f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[PROJECT], now());
         assert_eq!(f.stored_labels(), 0);
-        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
-        assert!(!text.contains("\"labels\""), "{text}");
 
         // Watched again: read again, with no label.
         f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[], now());
@@ -2110,8 +2124,10 @@ mod tests {
             &[],
         )
         .unwrap();
+        assert!(f.dir.path().join(SESSION_LABELS_FILE).exists());
         f.pass.clear().unwrap();
         assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+        assert!(!f.dir.path().join(SESSION_LABELS_FILE).exists());
         // A label after the clear names nothing, and makes no key.
         assert_eq!(
             f.label(
@@ -2158,9 +2174,8 @@ mod tests {
         );
     }
 
-    /// Back-compat: a store written before labels loads with none and
-    /// lists every row as before, plus the new keys; a store with no label
-    /// is written without the key, as an older daemon wrote it.
+    /// Back-compat: the store is written as before labels, which live in
+    /// their own file, and lists every row as before, plus the new keys.
     #[test]
     fn a_store_from_before_labels_reads_and_is_written_as_before() {
         let f = Fixture::new();
@@ -2168,6 +2183,7 @@ mod tests {
         f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
         let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
         assert!(!text.contains("\"labels\""), "{text}");
+        assert!(!f.dir.path().join(SESSION_LABELS_FILE).exists());
         let row = only(&f.list(&[], &[]));
         let keys: std::collections::BTreeSet<&str> = row
             .as_object()
@@ -2199,6 +2215,184 @@ mod tests {
             assert_eq!(labelled[key], row[key], "{key}");
         }
         assert_eq!(labelled["user_task"], "other");
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(
+            !text.contains("\"labels\""),
+            "the store is not written: {text}"
+        );
+    }
+
+    fn labelled_once(f: &Fixture, path: &Path, params: serde_json::Value) -> String {
+        f.run(&[(SOURCE_CLAUDE_CODE, path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut params = params;
+        params["session_ref"] = reference.clone().into();
+        f.label(params, &[]).unwrap();
+        reference
+    }
+
+    /// The store is begun again whenever it cannot be read, a store a
+    /// later build wrote included. The labels are not in it: while its rows
+    /// come back a poll's budget at a time, a label waits for its row.
+    #[test]
+    fn a_label_survives_the_store_being_begun_again() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        labelled_once(
+            &f,
+            &path,
+            serde_json::json!({"task": "tests", "outcome": "kept"}),
+        );
+        // A field this build does not know: the store is unreadable.
+        let rows_file = f.dir.path().join(COUNTER_ROWS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&rows_file).unwrap()).unwrap();
+        value["a_later_field"] = serde_json::json!(1);
+        std::fs::write(&rows_file, value.to_string()).unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                rows_file,
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        assert_eq!(f.list(&[], &[])["readable"], false);
+        // Begun again with a poll's worth of other sessions read first: the
+        // labelled one waits for the next poll, and so does its label.
+        let others: Vec<PathBuf> = (0
+            ..crate::insights::analytics_constants::COUNTER_PASS_MAX_READS_PER_TICK)
+            .map(|i| f.write(&format!("o{i}.jsonl"), &codex_bytes()))
+            .collect();
+        let mut files: Vec<(&'static str, &Path, &str)> = others
+            .iter()
+            .map(|other| (SOURCE_CODEX, other.as_path(), OTHER))
+            .collect();
+        files.push((SOURCE_CLAUDE_CODE, &path, PROJECT));
+        f.run(&files);
+        assert!(
+            rows(&f.list(&[], &[]))
+                .iter()
+                .all(|row| row["source"] == "codex"),
+            "not read yet"
+        );
+        assert_eq!(f.stored_labels(), 1);
+        f.run(&files);
+        let row = rows(&f.list(&[], &[]))
+            .into_iter()
+            .find(|row| row["source"] == "claude_code")
+            .unwrap();
+        assert_eq!(row["user_task"], "tests");
+        assert_eq!(row["user_outcome"], "kept");
+        assert_eq!(f.stored_labels(), 1);
+    }
+
+    /// A label written by another build: an unknown field, a task word
+    /// this build does not know and another schema name are read past,
+    /// answered as unset, and kept when the person changes the other label.
+    #[test]
+    fn a_label_file_from_another_build_is_read_and_kept() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let reference = labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let labels = f.dir.path().join(SESSION_LABELS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&labels).unwrap()).unwrap();
+        value["schema"] = "trace_commons.insights_session_labels.v9".into();
+        value["a_later_field"] = serde_json::json!({"kept": true});
+        let session = value["labels"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        value["labels"][&session] = serde_json::json!({"task": "migration", "confidence": 3});
+        std::fs::write(&labels, value.to_string()).unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        let row = only(&f.list(&[], &[]));
+        assert_eq!(f.list(&[], &[])["readable"], true);
+        assert!(
+            row["user_task"].is_null(),
+            "an unknown word is unset: {row}"
+        );
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_outcome"], "kept");
+        assert!(row["user_task"].is_null());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&labels).unwrap()).unwrap();
+        assert_eq!(
+            written["labels"][&session],
+            serde_json::json!({"task": "migration", "confidence": 3, "outcome": "kept"})
+        );
+        assert_eq!(written["a_later_field"], serde_json::json!({"kept": true}));
+        // A file not in the labels shape at all is never written over.
+        std::fs::write(&labels, b"[1, 2]").unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        assert!(only(&f.list(&[], &[]))["user_outcome"].is_null());
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_LABEL_WRITE_FAILED)
+        );
+        assert_eq!(std::fs::read(&labels).unwrap(), b"[1, 2]");
+    }
+
+    /// A label that could not be written is not answered, listed or kept
+    /// for a later write.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_label_write_keeps_the_label_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let reference = labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let dir = f.dir.path();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = f.label(
+            serde_json::json!({"session_ref": reference, "task": "tests", "outcome": "kept"}),
+            &[],
+        );
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(refused, Err(ERR_SESSION_LABEL_WRITE_FAILED));
+        let row = only(&f.list(&[], &[]));
+        assert_eq!(row["user_task"], "docs");
+        assert!(row["user_outcome"].is_null());
+        // The next write writes only its own change.
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "partly_kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_task"], "docs");
+        assert_eq!(row["user_outcome"], "partly_kept");
     }
 
     #[test]
