@@ -171,7 +171,8 @@ struct InsightsView: View {
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
                                     analysis: model.canAnalyzeSessions ? model : nil,
                                     openAnalysis: { tab = .analyze },
-                                    detailInInspector: inspector != nil)
+                                    detailInInspector: inspector != nil,
+                                    opened: { inspector?.personOpened() })
             case .analyze: content
             }
         }

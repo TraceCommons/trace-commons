@@ -45,6 +45,9 @@ struct InsightsSessionsTab: View {
     /// The open trace's details are drawn in the window's inspector
     /// (`InsightsInspector`), not under its row.
     var detailInInspector = false
+    /// The person opened a trace (`InsightsInspector.personOpened`); not
+    /// called for a trace picked for them or a row closed.
+    var opened: () -> Void = {}
     /// The feed row the arrow keys are on (Full Keyboard Access).
     @State private var keyRow: String?
     /// The feed row at the top of the scroll: when the list is read again
@@ -98,7 +101,7 @@ struct InsightsSessionsTab: View {
             if !choices.isEmpty {
                 GlassSelect(text("analytics_drill_session"), selection: Binding(
                     get: { model.selected ?? "" },
-                    set: { model.select($0) }
+                    set: { model.select($0); opened() }
                 ), options: choices.map { GlassPickerOption($0.title, value: $0.value) })
             }
             if !detailInInspector { inlineDetail }
@@ -147,6 +150,7 @@ struct InsightsSessionsTab: View {
         }
         .onKeyPress(.return) {
             guard let keyRow, rows.contains(where: { $0.sessionRef == keyRow }) else { return .ignored }
+            if model.selected != keyRow { opened() }
             model.toggle(keyRow)
             return .handled
         }
@@ -163,6 +167,7 @@ struct InsightsSessionsTab: View {
         let open = model.selected == row.sessionRef
         return Button {
             keyRow = row.sessionRef
+            if !open { opened() }
             model.toggle(row.sessionRef)
         } label: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -276,7 +281,8 @@ struct InsightsSessionsTab: View {
 /// Where Insights hands the Monitor window's inspector the Sessions tab's
 /// details: filled while Sessions is on screen, empty otherwise. The window
 /// draws `detail` in the inspector and, as for a Traces session, opens the
-/// inspector when a trace is newly opened (`demandKey`).
+/// inspector when the person opens a trace (`demandKey`), never when a
+/// trace is picked for them or the tab is shown again.
 @Observable @MainActor
 final class InsightsInspector {
     /// The Sessions model whose open trace the inspector shows.
@@ -295,8 +301,18 @@ final class InsightsInspector {
         detail = nil
     }
 
-    /// The open trace, as the inspector's demand (`InspectorDemand`).
-    var demandKey: String? { sessions?.selected.map { "insights-session:" + $0 } }
+    /// How many times the person has opened a trace in this window. Kept
+    /// through `clear()` and `show(_:detail:)`, so the demand is the same
+    /// key whichever tab is shown and changes only when they open one.
+    private(set) var opens = 0
+
+    /// The person opened a trace: a row clicked or entered open, or a
+    /// saved snapshot picked.
+    func personOpened() { opens += 1 }
+
+    /// The inspector's demand (`InspectorDemand`): a new key for each trace
+    /// the person opens, and none before the first.
+    var demandKey: String? { opens > 0 ? "insights-session-open:\(opens)" : nil }
 }
 
 /// The open trace's details: for a watched trace its Analyze & save and
@@ -333,6 +349,10 @@ struct InsightsSessionDetail: View {
                     drillContent(drill)
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
+                } else if !inline && model.selected == nil && !model.busy {
+                    Text(text("analytics_sessions_explainer_saved"))
+                        .insightsNote()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if model.busy { GlassSpinner() }
             }

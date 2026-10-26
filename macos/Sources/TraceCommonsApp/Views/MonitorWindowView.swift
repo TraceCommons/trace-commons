@@ -550,9 +550,10 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
-            // A trace opened on Insights' Sessions: its details live in
-            // the inspector, as a selected Traces session's card does.
-            .union(shownTab == .insights ? insightsInspector.demandKey.map { [$0] } ?? [] : [])
+            // A trace the person opened on Insights' Sessions: its details
+            // live in the inspector, as a selected Traces session's card
+            // does. On every tab, so showing a tab again is no new key.
+            .union(insightsInspector.demandKey.map { [$0] } ?? [])
     }
 
     /// The tab on screen (`shownTab(_:requiresOnboarding:)`).
