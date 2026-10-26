@@ -153,6 +153,30 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         throw DaemonWaitTimedOut(what: "the watcher never queued the session")
     }
 
+    /// The Models card's answered shape, which the throwaway store above
+    /// never reaches (counting is off there): the daemon's own recorded
+    /// answer, and the sample's hand-written one, whose rejection rows
+    /// carry the person's kept shares (`kept_by_model`, each figure's
+    /// `kept`) that the recorded answer has only empty. A key the model
+    /// drops fails here, by path.
+    func testEveryModelAnswersKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_model_answers.json")
+        let recorded = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        assertDeclared(DaemonData.InsightsModelAnswers.self, recorded, method: "insights_model_answers")
+        var sample = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(SampleDaemonData.modelAnswersSample.utf8)) as? [String: Any])
+        sample["_sample"] = nil
+        assertDeclared(DaemonData.InsightsModelAnswers.self, sample, method: "insights_model_answers")
+        let paths = KeyRecorder.keyPaths(in: sample)
+        for path in ["rows[].kept_by_model", "rows[].leader.kept.kept_permille", "rows[].next.kept.thrown_away",
+                     "rows[].kept_by_model[][].partly_kept"] {
+            XCTAssertTrue(paths.contains(path), "the sample carries \(path)")
+        }
+    }
+
     func testEveryKeyTheDaemonSendsIsDeclared() throws {
         let daemon = try startDaemonWithOneSession()
         let frames = OSAllocatedUnfairLock(initialState: [String]())

@@ -228,17 +228,37 @@ final class InsightsSampleAnalyzeTests: XCTestCase {
         }
     }
 
+    /// A saved Codex trace's drill is drawn as the core draws one: no
+    /// per-turn chart, "not recorded", no turns and no markers. A Claude
+    /// Code trace keeps its chart.
+    func test_aCodexSampleTraceDrawsNoChart() throws {
+        for trace in InsightsSampleWeek.traces {
+            let operation = Operation("session_drill", tz: 0, snapshotID: trace.id)
+            let drill = try XCTUnwrap(answer(operation).session)
+            XCTAssertEqual(drill.source, trace.source)
+            if trace.source == "codex" {
+                XCTAssertNil(drill.series, trace.id)
+                XCTAssertEqual(drill.series_unavailable, "not_recorded")
+                XCTAssertNil(drill.turns)
+                XCTAssertTrue(drill.markers.isEmpty)
+            } else {
+                XCTAssertEqual(drill.series?.count, 52)
+                XCTAssertNil(drill.series_unavailable)
+            }
+        }
+    }
+
     /// No operation the window can send reaches the store except the
-    /// sample's three reads; everything the sample does not answer is
+    /// sample's reads and a chosen file analyzed without saving it, which
+    /// writes nothing; everything else the sample does not answer is
     /// refused.
     func test_noSampleWriteReachesTheStore() async throws {
-        XCTAssertEqual(InsightsSampleWeek.storeReads, ["copy", "card_inputs", "pattern_sessions"])
+        XCTAssertEqual(InsightsSampleWeek.storeReads, ["copy", "card_inputs", "pattern_sessions", "question_cards"])
         let store = StoreRecorder()
         let service = InsightsSampleWeek.service(fallback: { request in try await store.call(request) })
         let id = ids[0], episodeID = InsightsSampleWeek.episodeID
         let writes: [Operation] = [
             .init("analyze", source: "claude_code", file: "/tmp/trace.jsonl", save: true),
-            .init("analyze", source: "claude_code", file: "/tmp/trace.jsonl", save: false),
             .init("annotate", id: id, category: "docs", outcome: "accepted"), .init("clear_annotation", id: id),
             .init("delete", id: id), .init("delete", id: "unknown"),
             .init("link_git", id: id, repository: "/tmp/repository", commit: String(repeating: "a", count: 40)),
@@ -254,12 +274,21 @@ final class InsightsSampleAnalyzeTests: XCTestCase {
             .init("comparison_task_set_outcome", id: "t", outcome: "accepted", expectedRevision: 1),
             .init("comparison_task_delete", id: "t", expectedRevision: 1),
             .init("comparison_save_spec"), .init("comparison_preview_spec"),
-            .init("question_cards", snapshotIDs: [id], questions: InsightQuestion.allCases),
             .init("goal_set"), .init("lever_feedback"), .init("lever_card", enabled: false),
         ]
         for operation in writes { _ = try? await service(.init(operation: operation)) }
         let reached = await store.operations
         XCTAssertEqual(reached, [], "no write reaches the store")
+        // The reads do: the question cards, and a chosen file analyzed but
+        // not saved.
+        for operation: Operation in [
+            .init("question_cards", snapshotIDs: [], questions: InsightQuestion.allCases),
+            .init("analyze", source: "claude_code", file: "/tmp/trace.jsonl", save: false),
+        ] {
+            _ = try? await service(.init(operation: operation))
+        }
+        let read = await store.operations
+        XCTAssertEqual(read, ["question_cards", "analyze"])
         do {
             _ = try await service(.init(operation: .init("episode_create", snapshotIDs: [id])))
             XCTFail("a new group is refused")

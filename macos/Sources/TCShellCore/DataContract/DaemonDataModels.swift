@@ -2293,11 +2293,18 @@ extension DaemonData {
         /// The person's own outcome: `kept`, `partly_kept` or
         /// `thrown_away`; `nil` while unset.
         public var userOutcome: String?
+        /// Whether `insights_analyze_session` can analyze the trace: `false`
+        /// when its file is over the core's size limit, or is a Codex file
+        /// without exactly one session in it. Absent from a daemon before
+        /// the flag; read as `true` then, and the daemon's refusal says why.
+        public let analyzable: Bool?
 
         public var id: String { sessionRef }
+        /// `analyzable`, `true` from a daemon that predates it.
+        public var canAnalyze: Bool { analyzable ?? true }
 
         public enum CodingKeys: String, CodingKey {
-            case source, turns, folder, tokens, sparkline
+            case source, turns, folder, tokens, sparkline, analyzable
             case sessionRef = "session_ref"
             case startedAt = "started_at"
             case inferredTask = "inferred_task"
@@ -2429,6 +2436,10 @@ extension DaemonData {
         /// On `docs_cost` only, and only when a Docs trace in the window
         /// went through NEAR AI.
         public let nearAiCharge: InsightsNearAiCharge?
+        /// On the rejection rows: each model whose traces in the row the
+        /// person gave an outcome, by label, whatever the row's state.
+        /// Empty elsewhere; absent from a daemon before the labels.
+        public let keptByModel: [InsightsModelKept]?
 
         public var id: String { question }
 
@@ -2438,6 +2449,48 @@ extension DaemonData {
             case sessionsByModel = "sessions_by_model"
             case leftOut = "left_out"
             case nearAiCharge = "near_ai_charge"
+            case keptByModel = "kept_by_model"
+        }
+    }
+
+    /// The outcomes the person gave one model's traces in a row (their
+    /// Outcome labels): beside the rejection figure, never folded into it.
+    /// The three counts sum to `labelled`; `keptPermille` is `kept /
+    /// labelled`, partly kept not counted as kept.
+    public struct InsightsKeptFigure: Codable, Equatable, Sendable {
+        public let labelled: Int
+        public let kept: Int
+        public let partlyKept: Int
+        public let thrownAway: Int
+        public let keptPermille: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case labelled, kept
+            case partlyKept = "partly_kept"
+            case thrownAway = "thrown_away"
+            case keptPermille = "kept_permille"
+        }
+    }
+
+    /// `[label, kept figure]`, as the daemon sends a pair.
+    public struct InsightsModelKept: Codable, Equatable, Sendable {
+        public let label: String
+        public let figure: InsightsKeptFigure
+
+        public init(label: String, figure: InsightsKeptFigure) {
+            self.label = label; self.figure = figure
+        }
+
+        public init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            label = try pair.decode(String.self)
+            figure = try pair.decode(InsightsKeptFigure.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var pair = encoder.unkeyedContainer()
+            try pair.encode(label)
+            try pair.encode(figure)
         }
     }
 
@@ -2453,9 +2506,13 @@ extension DaemonData {
         public let interruptsPerSessionPermille: Int?
         /// On a `docs_cost` figure only: this model's traces through NEAR AI.
         public let nearAiCharge: InsightsNearAiCharge?
+        /// On a rejection figure only, and only when the person gave one of
+        /// this model's traces in the row an outcome; the same figure as
+        /// the row's `keptByModel` entry for this label.
+        public let kept: InsightsKeptFigure?
 
         public enum CodingKeys: String, CodingKey {
-            case label, sessions, edits, figure
+            case label, sessions, edits, figure, kept
             case interruptsPerSessionPermille = "interrupts_per_session_permille"
             case nearAiCharge = "near_ai_charge"
         }

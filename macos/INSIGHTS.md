@@ -11,16 +11,23 @@ snapshots you saved, **Patterns** shows where that week's tokens went,
 whole screen described below. **Spend** is shown disabled with a "Later"
 chip.
 
-Analyze picks no file (Insights PM, 2026-10-21: terminal users never see
-their session files). An open watched row in **Sessions** has **Analyze &
-save**: the daemon (`insights_analyze_session`) finds that session's file
-among the ones its watcher already watches, never in a Never folder, runs
-the same local analysis on it and saves derived observations to the
-standard store, the same local store as the CLI; the saved snapshot then
+Choose a Codex rollout, Claude Code session or trajectory file to analyze it
+locally. Analysis is
+temporary; **Re-read and save** reads the selected file again and saves derived
+observations to the same local store as the CLI. While the daemon's watched
+list shows in **Sessions** (Insights PM, 2026-10-21: terminal users never see
+their session files), an open watched row there also has **Analyze & save**:
+the daemon (`insights_analyze_session`) finds that session's file among the
+ones its watcher already watches, never in a Never folder, runs the same local
+analysis on it and saves it to the standard store; the saved snapshot then
 opens in Analyze's detail. With a custom `--insights-store` the action is not
-offered, since the daemon writes only the standard store. A file moved or
-deleted since it was counted, or a row listed again since, says so under the
-row. While nothing is saved, Analyze says to save a session from Sessions.
+offered, since the daemon writes only the standard store. A row the daemon
+cannot analyze (too large, or a Codex file without exactly one session) says
+so in place of the action; a file moved or deleted since it was counted, or a
+row listed again since, says so under the row, and a row listed again
+refreshes the list. Choose file stays on Analyze either way: with counting
+off, without a daemon, with a custom store or in sample data it is the one
+way in, and the line under Analyze's title names only buttons on screen.
 Saved snapshots update only when analyzed again. Deleting a snapshot keeps the original file. Assessments
 are user-reported and remain separate from verified outcomes.
 
@@ -128,10 +135,14 @@ then the leading model and "Next:", each with its figure and traces; or
 "Not enough traces yet" or "Not priced" with each model's traces, or "No
 clear difference" with both figures and neither first. Rejection rows say
 their basis ("Undone edits we could see") and interrupts per trace beside
-each figure; the docs row adds what Private AI charged, never added to the
-API-price figure. How each figure is measured and the traces left out, by
+each figure, and the share of each model's traces you marked Kept with
+the Outcome label, beside the figure and never folded into it; the docs row
+adds what Private AI charged, never added to the API-price figure. How each figure is measured and the traces left out, by
 reason, are behind the row's "i". Labels are as the agent recorded them.
-When the answer is off, unreadable or not served, no card is drawn. Every word
+When the answer is off, unreadable or not served, no card is drawn. The
+answers are read each time Overview appears and after each saved label, so
+a label set on Sessions shows, and a failed read hides the card only until
+the next one. Every word
 is the core's (`analytics_models_*`); no word ranks a model.
 
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that

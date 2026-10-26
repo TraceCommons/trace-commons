@@ -18,6 +18,7 @@ struct InsightsView: View {
     private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
+    @State private var source = "codex"
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -36,10 +37,10 @@ struct InsightsView: View {
             { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
         let modelAnswersReader: InsightsModel.ModelAnswersReader? = daemon.map { client in
-            { try await client.insightsModelAnswers() }
+            { @Sendable in try await client.insightsModelAnswers() }
         }
         let watchedLabel: InsightsSessionsModel.WatchedLabelWriter? = daemon.map { client in
-            { reference, task, outcome in
+            { @Sendable reference, task, outcome in
                 try await client.insightsSessionLabel(sessionRef: reference, task: task, outcome: outcome)
             }
         }
@@ -48,7 +49,7 @@ struct InsightsView: View {
         var sessionAnalyzer: InsightsModel.SessionAnalyzer? = storeSelection.storeDirectory != nil
             ? nil
             : daemon.map { client in
-                { reference in try await client.insightsAnalyzeSession(sessionRef: reference, save: true) }
+                { @Sendable reference in try await client.insightsAnalyzeSession(sessionRef: reference, save: true) }
             }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
@@ -153,6 +154,9 @@ struct InsightsView: View {
                     },
                     showReads: { tab = .patterns },
                     showPatterns: { tab = .patterns })
+                // Each time, so labels set on Sessions since show, and one
+                // failed read hides the card only until the next.
+                .onAppear { model.refreshModelAnswers() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
@@ -170,6 +174,8 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        // A saved label changes the Models answers.
+        .onAppear { sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() } }
         .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
@@ -228,7 +234,8 @@ struct InsightsView: View {
                               recapCardEnabled: week?.recapCardEnabled ?? false)
     }
 
-    /// The Analyze tab: the saved traces and the saved-history tools, each section on its own card under its title (owner,
+    /// The Analyze tab: choosing and saving traces, and the saved-history
+    /// tools, each section on its own card under its title (owner,
     /// 2026-10-15: between hairlines they ran together). What a section is
     /// and what it keeps is behind its title's "i"; failures, a custom
     /// store and what an action needs first stay on the page.
@@ -257,23 +264,34 @@ struct InsightsView: View {
                 }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
-            .onChange(of: model.selected?.id) { _, id in
+            // Initial too: Analyze & save sets the detail while Sessions
+            // still shows, so Analyze appears with it already set.
+            .onChange(of: model.selected?.id, initial: true) { _, id in
                 if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
             }
         }
     }
 
-    /// Analyze's head. Traces come from Sessions' Analyze & save, never a
-    /// file the person picks (Insights PM, 2026-10-21: terminal users never
-    /// see their trace files), so this says where to get one. What analysis
-    /// keeps, and that closing discards late results, are behind the
-    /// title's "i".
+    /// Sessions offers Analyze & save on its open watched row: a daemon
+    /// that writes the store shown here, and its watched list on screen.
+    private var offersSessionAnalyze: Bool {
+        model.canAnalyzeSessions && model.weekFeed == .counterPass
+    }
+
+    /// Analyze's head: a trace file to analyze, and while Sessions offers
+    /// Analyze & save (Insights PM, 2026-10-21: terminal users never see
+    /// their trace files), that too. The file stays the one way in without
+    /// it: counting off, no daemon, a custom store or sample data. The line
+    /// under the title names a button on screen. What analysis keeps, and
+    /// that closing discards late results, are behind the title's "i".
     private var analyzeSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // Refresh at the title's trailing end, as every refresh is
             // (owner, 2026-10-20).
             InsightsSectionTitle(title: model.text("analytics_tab_analyze"), info: [
-                model.text("analytics_analyze_intro"), model.text("cancellation_notice"),
+                model.text("intro"), model.text("snapshot_notice"),
+            ] + (offersSessionAnalyze ? [model.text("analytics_analyze_intro")] : []) + [
+                model.text("cancellation_notice"),
             ]) {
                 if model.busy { GlassSpinner() }
                 GlassRefreshButton(model.text("refresh_accessibility")) { model.refresh() }
@@ -284,8 +302,22 @@ struct InsightsView: View {
                     Text(location)
                         .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
                 }
-                Text(model.text(model.snapshots.isEmpty ? "analytics_analyze_empty" : "analytics_analyze_how"))
-                    .insightsNote()
+                if let head = Self.analyzeHeadKey(empty: model.snapshots.isEmpty, sessions: offersSessionAnalyze) {
+                    Text(model.text(head)).insightsNote()
+                }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    GlassSelect(model.text("source"), selection: $source, options: [
+                        GlassPickerOption(model.text("codex"), value: "codex"),
+                        GlassPickerOption(model.text("claude_code"), value: "claude_code"),
+                        GlassPickerOption(model.text("trajectory"), value: "trajectory"),
+                    ])
+                    .fixedSize()
+                    Button(model.text("choose_file")) {
+                        if let file = FolderPanel.chooseTraceFile(source: source) {
+                            model.analyze(file: file, source: source)
+                        }
+                    }
+                }.disabled(model.busy)
                 if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
                 if !model.invalidatedEpisodeIDs.isEmpty {
                     LazyVStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
@@ -300,6 +332,19 @@ struct InsightsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+    }
+
+    /// The line under Analyze's title: how to add a trace, naming only
+    /// buttons on screen. Choose file always is; Analyze & save only while
+    /// Sessions offers it. Without it, nothing once a trace is saved, as
+    /// before Sessions had the action.
+    static func analyzeHeadKey(empty: Bool, sessions: Bool) -> String? {
+        switch (empty, sessions) {
+        case (true, true): return "analytics_analyze_empty"
+        case (false, true): return "analytics_analyze_how"
+        case (true, false): return "empty"
+        case (false, false): return nil
+        }
     }
 
     /// The saved-history summary, its loading line, or its failure.

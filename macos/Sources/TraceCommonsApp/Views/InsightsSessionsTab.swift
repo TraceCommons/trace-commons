@@ -98,6 +98,9 @@ struct InsightsSessionsTab: View {
     private func feed(_ rows: [DaemonData.InsightsWatchedSession]) -> some View {
         LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(rows) { row in
+                #if DEBUG
+                let _ = OtherCollectionRowBodies.record("insightsWatchedFeed", row.sessionRef)
+                #endif
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     feedRow(row)
                     if model.selected == row.sessionRef { expanded(row) }
@@ -109,6 +112,9 @@ struct InsightsSessionsTab: View {
             }
             feedFoot(empty: rows.isEmpty)
         }
+        // Rows are built as they scroll in, each with its label menus: the
+        // responder-scale tests measure the feed by this name.
+        .accessibilityIdentifier("insightsWatchedFeed")
         .scrollTargetLayout()
         // Full Keyboard Access: focus the feed, then up and down move
         // between rows and Return opens or closes the row.
@@ -131,17 +137,20 @@ struct InsightsSessionsTab: View {
     }
 
     /// One watched trace: its harness tile, its label and tokens, and its
-    /// sparkline, then its own labels' controls. VoiceOver reads the trace
-    /// as one button, the sparkline in words; each control after it names
-    /// the trace it labels.
+    /// sparkline, then its own labels' controls. The whole card is the
+    /// row's button, padding and all, as every other interactive row's is;
+    /// the controls are drawn over it where the label keeps their room, so
+    /// their menus take their own clicks and a click anywhere else on the
+    /// card opens the row. VoiceOver reads the trace as one button, the
+    /// sparkline in words; each control after it names the trace it labels.
     private func feedRow(_ row: DaemonData.InsightsWatchedSession) -> some View {
         let open = model.selected == row.sessionRef
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Button {
-                readTurn = nil
-                keyRow = row.sessionRef
-                model.toggle(row.sessionRef)
-            } label: {
+        return Button {
+            readTurn = nil
+            keyRow = row.sessionRef
+            model.toggle(row.sessionRef)
+        } label: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                     InsightsHarnessTile(source: row.source)
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -157,21 +166,29 @@ struct InsightsSessionsTab: View {
                             .frame(width: InsightsSparkline.width, height: InsightsSparkline.height)
                     }
                 }
-                .contentShape(Rectangle())
+                // The controls' room; they are drawn over it below.
+                if model.canLabel { labelControls(row).hidden() }
             }
-            .buttonStyle(GlassPressStyle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(InsightsSessionsWords.rowAccessibilityLabel(row, copy: copy))
-            .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
-            if model.canLabel { labelControls(row) }
+            .padding(.vertical, GlassTokens.Space.s3)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .contentShape(Rectangle())
+            .insightsRowCard()
+            .overlay {
+                if keyRow == row.sessionRef {
+                    RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
+                        .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
+                }
+            }
         }
-        .padding(.vertical, GlassTokens.Space.s3)
-        .padding(.horizontal, GlassTokens.Space.s4)
-        .insightsRowCard()
-        .overlay {
-            if keyRow == row.sessionRef {
-                RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
-                    .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
+        .buttonStyle(GlassPressStyle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(InsightsSessionsWords.rowAccessibilityLabel(row, copy: copy))
+        .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
+        .overlay(alignment: .bottomLeading) {
+            if model.canLabel {
+                labelControls(row)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .padding(.horizontal, GlassTokens.Space.s4)
             }
         }
     }
@@ -235,23 +252,37 @@ struct InsightsSessionsTab: View {
 
     /// The open row's one action: the daemon analyzes the trace it found
     /// and saves the snapshot, which then opens in Analyze. A spinner while
-    /// it is asked, and the core's line if it could not be.
+    /// it is asked, and the core's line if it could not be; a row no longer
+    /// listed under its reference reads the list again. A row the daemon
+    /// says it cannot analyze shows why in place of the action.
+    @ViewBuilder
     private func analyzeAction(_ row: DaemonData.InsightsWatchedSession, _ analysis: InsightsModel) -> some View {
         let reference = row.sessionRef
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            HStack(spacing: GlassTokens.Space.s3) {
-                Button(text("analytics_analyze_save")) {
-                    Task { if await analysis.analyzeAndSave(session: reference) { openAnalysis() } }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            if row.canAnalyze {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Button(text("analytics_analyze_save")) {
+                        Task {
+                            if await analysis.analyzeAndSave(session: reference) {
+                                openAnalysis()
+                            } else if analysis.sessionAnalyzeFailure?.key == InsightsModel.sessionUnknownKey {
+                                model.rowNoLongerListed()
+                            }
+                        }
+                    }
+                    .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                    .disabled(analysis.busy)
+                    .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
+                        "analytics_analyze_save_a11y", row, copy: copy))
+                    if analysis.analyzingSession == reference { GlassSpinner() }
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(GlassButtonStyle(.secondary, small: true))
-                .disabled(analysis.busy)
-                .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
-                    "analytics_analyze_save_a11y", row, copy: copy))
-                if analysis.analyzingSession == reference { GlassSpinner() }
-                Spacer(minLength: 0)
-            }
-            if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
-                Text(text(failure.key)).insightsError()
+                if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
+                    Text(text(failure.key)).insightsError()
+                }
+            } else {
+                Text(text("analytics_analyze_not_analyzable")).insightsCaption()
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         // Lined up under the label, past the harness tile, as the labels are.

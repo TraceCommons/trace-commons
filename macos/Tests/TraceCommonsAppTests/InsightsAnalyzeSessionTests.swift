@@ -7,7 +7,7 @@ import TCShellCore
 /// Analyze & save on a watched trace (Insights PM, 2026-10-21: terminal
 /// users never see their trace files): the daemon analyzes and saves the
 /// trace its watcher found, and the saved snapshot opens in Analyze. Analyze
-/// itself picks no file.
+/// keeps its own Choose file for when Sessions cannot offer it.
 final class InsightsAnalyzeSessionTests: XCTestCase {
     /// The daemon's answer around the core's `analyze` response.
     private static func answer(_ analysis: [String: Any]?, enabled: Bool = true,
@@ -84,6 +84,11 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
              "analytics_analyze_file_gone"),
             (.failure(DaemonDataError.daemon(code: "bad_params", message: "insights-session-unknown")),
              "analytics_analyze_unknown"),
+            (.failure(DaemonDataError.daemon(code: "unavailable", message: "insights-analyze-source-too-large")),
+             "analytics_analyze_too_large"),
+            (.failure(DaemonDataError.daemon(code: "unavailable",
+                                             message: "insights-analyze-codex-not-one-session")),
+             "analytics_analyze_codex_not_one"),
             (.failure(DaemonDataError.daemon(code: "unknown_method", message: "insights_analyze_session")),
              "analytics_analyze_failed"),
             (.failure(DaemonDataError.unreachable), "analytics_analyze_failed"),
@@ -147,22 +152,25 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
 
     // MARK: Sources
 
-    /// Analyze picks no file: no source picker, no Choose file, and the
-    /// app's one open panel picks folders only.
+    /// Choose file stays on Analyze whatever Sessions offers: it is the one
+    /// way to add a trace with counting off, without a daemon, with a
+    /// custom store or in sample data. The line under the title names a
+    /// button on screen: Analyze & save only while Sessions offers it.
     @MainActor
-    func testAnalyzeHasNoFilePicker() throws {
+    func testAnalyzeKeepsChooseFileAndNamesOnlyButtonsOnScreen() throws {
         let view = try MonitorNavigationTests.text("Views/InsightsView.swift")
-        XCTAssertFalse(view.contains("chooseTraceFile"))
-        XCTAssertFalse(view.contains("\"choose_file\""))
-        XCTAssertFalse(view.contains("model.text(\"source\")"))
-        XCTAssertFalse(view.contains("model.analyze(file:"))
-        XCTAssertFalse(view.contains(".fileImporter("))
-        XCTAssertTrue(view.contains("\"analytics_analyze_empty\""))
-        let panel = try MonitorNavigationTests.text("Views/FolderPanel.swift")
-        XCTAssertFalse(panel.contains("chooseTraceFile"))
-        XCTAssertFalse(panel.contains("TraceFileStart"))
-        XCTAssertFalse(panel.contains("canChooseFiles = true"))
-        XCTAssertEqual(panel.components(separatedBy: "NSOpenPanel()").count - 1, 1)
+        XCTAssertTrue(view.contains("FolderPanel.chooseTraceFile(source: source)"))
+        XCTAssertTrue(view.contains("model.text(\"choose_file\")"))
+        XCTAssertTrue(view.contains("model.text(\"source\")"))
+        XCTAssertTrue(view.contains("model.analyze(file: file, source: source)"))
+        XCTAssertTrue(view.contains("model.canAnalyzeSessions && model.weekFeed == .counterPass"))
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: true, sessions: true), "analytics_analyze_empty")
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: false, sessions: true), "analytics_analyze_how")
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: true, sessions: false), "empty")
+        XCTAssertNil(InsightsView.analyzeHeadKey(empty: false, sessions: false))
+        let copy = try XCTUnwrap(TCInsights.copy())
+        XCTAssertTrue(copy["empty", default: ""].contains("Choose a file"))
+        XCTAssertFalse(copy["empty", default: ""].contains("Analyze & save"))
     }
 
     /// The open Sessions row carries the action, which asks the daemon to
@@ -177,6 +185,31 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
         XCTAssertTrue(view.contains("client.insightsAnalyzeSession(sessionRef: reference, save: true)"))
         XCTAssertTrue(view.contains("storeSelection.storeDirectory != nil"))
         XCTAssertTrue(view.contains("openAnalysis: { tab = .analyze }"))
+        // Analyze appears with the saved snapshot already its detail, so
+        // the scroll to it runs on the initial value too.
+        XCTAssertTrue(view.contains(".onChange(of: model.selected?.id, initial: true)"))
+    }
+
+    /// A row the daemon says it cannot analyze shows why in place of the
+    /// action; a daemon that predates the flag offers it on every row. A
+    /// row no longer listed under its reference reads the list again, as
+    /// the label and drill paths do.
+    @MainActor
+    func testARowTheDaemonCannotAnalyzeSaysWhyAndAStaleOneReadsTheListAgain() throws {
+        let row = { (flag: String) in
+            try JSONDecoder().decode(DaemonData.InsightsWatchedSession.self, from: Data(
+                #"{"session_ref":"g2.t7","source":"codex","started_at":null,"turns":null,"tokens":null,"sparkline":null,"folder":"f"\#(flag)}"#
+                    .utf8))
+        }
+        XCTAssertFalse(try row(#","analyzable":false"#).canAnalyze)
+        XCTAssertTrue(try row(#","analyzable":true"#).canAnalyze)
+        XCTAssertTrue(try row("").canAnalyze, "an older daemon's row is offered the action")
+        XCTAssertEqual(try row("").sessionRef, "g2.t7", "a reference is kept as sent, never parsed")
+        let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        XCTAssertTrue(tab.contains("if row.canAnalyze {"))
+        XCTAssertTrue(tab.contains("text(\"analytics_analyze_not_analyzable\")"))
+        XCTAssertTrue(tab.contains("analysis.sessionAnalyzeFailure?.key == InsightsModel.sessionUnknownKey"))
+        XCTAssertTrue(tab.contains("model.rowNoLongerListed()"))
     }
 
     /// Every word the action and Analyze's head show is core copy.
@@ -184,7 +217,8 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
         let copy = try XCTUnwrap(TCInsights.copy())
         for key in ["analytics_analyze_save", "analytics_analyze_save_a11y", "analytics_analyze_failed",
                     "analytics_analyze_file_gone", "analytics_analyze_unknown", "analytics_analyze_empty",
-                    "analytics_analyze_how", "analytics_analyze_intro"] {
+                    "analytics_analyze_how", "analytics_analyze_intro", "analytics_analyze_not_analyzable",
+                    "analytics_analyze_too_large", "analytics_analyze_codex_not_one"] {
             XCTAssertFalse(copy[key, default: ""].isEmpty, key)
         }
         XCTAssertTrue(copy["analytics_analyze_save_a11y", default: ""].contains("{label}"))

@@ -23,14 +23,22 @@ enum InsightsSampleWeek {
 
     static let weekStart = "2026-10-05"
 
-    /// The sample's answers; the store's for `storeReads` only. Anything
-    /// else is refused here, so no write the window sends reaches the store.
+    /// The sample's answers; the store's for `storeReads` only, and the
+    /// core's for a chosen file analyzed but not saved, which reads that
+    /// file and writes nothing. Anything else is refused here, so no write
+    /// the window sends reaches the store.
     static func service(fallback: @escaping InsightsModel.Service) -> InsightsModel.Service {
         { request in
             if let answer = try response(request.operation) { return answer }
-            guard storeReads.contains(request.operation.type) else { throw InsightsError.service(refusal) }
+            guard reachesStore(request.operation) else { throw InsightsError.service(refusal) }
             return try await fallback(request)
         }
+    }
+
+    /// A read the sample leaves to the core: one of `storeReads`, or a
+    /// chosen file analyzed without saving it.
+    static func reachesStore(_ operation: InsightsRequest.Operation) -> Bool {
+        storeReads.contains(operation.type) || (operation.type == "analyze" && operation.save != true)
     }
 
     /// The sample's answer to a request, decoded and checked as the core's
@@ -192,8 +200,19 @@ enum InsightsSampleWeek {
     /// One trace, 52 turns, dated and sourced as the saved trace asked for
     /// (Claude Code otherwise): context grows to the threshold, the cache is
     /// written again after a pause, a file is read again, and context shrinks.
+    /// A saved Codex trace is drawn as the core draws one: no per-turn
+    /// series ("not recorded"), no turns and no markers.
     static func session(_ snapshotID: String) -> [String: Any] {
         let saved = traces.first { $0.id == snapshotID }
+        if saved?.source == "codex", let saved {
+            return [
+                "feed": "saved", "session_ref": snapshotID, "source": "codex",
+                "date": String(saved.firstEvent.prefix(10)), "tz": 0,
+                "tokens": 1_200_000, "span_secs": 2_700, "state": "known", "reasons": [String](),
+                "long_context_threshold": 150_000, "series_unavailable": "not_recorded",
+                "markers": [Any](),
+            ]
+        }
         let turns: [[String: Any]] = (1 ... 52).map { turn in
             let context = turn < 48 ? 14_000 + 3_000 * turn : 60_000 + 3_000 * (turn - 48)
             let write = turn == 31 ? 96_000 : 3_000

@@ -102,8 +102,12 @@ enum InsightsModelsWords {
         InsightsOverviewWords.fill(text(key, copy), values)
     }
 
+    /// The rows this build has words for, in the daemon's order. A
+    /// question it does not know is left out, never drawn under a blank
+    /// heading.
     static func rows(_ answers: DaemonData.InsightsModelAnswers, copy: [String: String]) -> [Row] {
-        (answers.rows ?? []).map { row($0, copy: copy) }
+        (answers.rows ?? []).filter { !text("analytics_models_row_" + $0.question, copy).isEmpty }
+            .map { row($0, copy: copy) }
     }
 
     static func row(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> Row {
@@ -182,8 +186,9 @@ enum InsightsModelsWords {
         return text("analytics_unavailable", copy)
     }
 
-    /// What the row's figure counts, which traces the time row compares,
-    /// and what Private AI charged, under the models.
+    /// What the row's figure counts, the share of each model's traces the
+    /// person marked Kept, which traces the time row compares, and what
+    /// Private AI charged, under the models.
     static func notes(_ row: DaemonData.InsightsModelAnswerRow, copy: [String: String]) -> [String] {
         var notes: [String] = []
         switch row.basis {
@@ -191,6 +196,7 @@ enum InsightsModelsWords {
         case "undone": notes.append(text("analytics_models_basis_undone", copy))
         default: break
         }
+        notes += (row.keptByModel ?? []).compactMap { keptLine($0, copy: copy) }
         if row.leader != nil {
             switch row.editMode {
             case "prompting": notes.append(text("analytics_models_mode_prompting", copy))
@@ -200,6 +206,17 @@ enum InsightsModelsWords {
         }
         if let charge = row.nearAiCharge, let line = chargeLine(charge, copy: copy) { notes.append(line) }
         return notes
+    }
+
+    /// One model's kept share from the person's Outcome labels: "{label}:
+    /// 70% kept, of 10 traces you marked". Beside the rejection figure,
+    /// never folded into it; `nil` for a model with none marked.
+    static func keptLine(_ entry: DaemonData.InsightsModelKept, copy: [String: String]) -> String? {
+        let figure = entry.figure
+        guard figure.labelled > 0, figure.keptPermille >= 0 else { return nil }
+        return fill(figure.labelled == 1 ? "analytics_models_kept_one" : "analytics_models_kept_other", copy,
+                    ["label": entry.label, "p": percent(UInt64(figure.keptPermille)),
+                     "n": String(figure.labelled)])
     }
 
     /// What Private AI charged per trace, apart from the API-price figure;
@@ -251,20 +268,27 @@ enum InsightsModelsWords {
         (Double(permille) / 10).formatted(.number.precision(.fractionLength(0...1)))
     }
 
-    /// Interrupts per trace from the daemon's per mille: 180 is "0.2".
+    /// Interrupts per trace from the daemon's per mille: 180 is "0.2", and
+    /// under a tenth one significant digit, so 1 to 50 per mille never
+    /// reads as "0": 50 is "0.05".
     static func perSession(_ permille: Int) -> String {
-        (Double(permille) / 1_000).formatted(.number.precision(.fractionLength(0...1)))
+        let value = Double(permille) / 1_000
+        guard permille > 0, permille < 100 else {
+            return value.formatted(.number.precision(.fractionLength(0...1)))
+        }
+        return value.formatted(.number.precision(.significantDigits(1)))
     }
 
-    /// Integer USD micros as dollars: cents from a dollar up, and up to
-    /// three significant digits under one, so a docs trace's fraction of a
-    /// cent is not shown as zero.
+    /// Integer USD micros as dollars, as the app's other prices are
+    /// (`InferenceViews.money`): two to four decimals, so "$0.50", "$1.00"
+    /// and a docs trace's "$0.0412". Under a hundredth of a cent, one
+    /// significant digit, so a charge is never shown as zero.
     static func money(_ micros: UInt64) -> String {
         let dollars = Decimal(micros) / 1_000_000
         let style = Decimal.FormatStyle.Currency(code: "USD")
-        return micros >= 1_000_000
-            ? dollars.formatted(style.precision(.fractionLength(2)))
-            : dollars.formatted(style.precision(.significantDigits(1...3)))
+        return micros > 0 && micros < 100
+            ? dollars.formatted(style.precision(.significantDigits(1)))
+            : dollars.formatted(style.precision(.fractionLength(2...4)))
     }
 
     /// Active seconds as "5 min, 12 sec".

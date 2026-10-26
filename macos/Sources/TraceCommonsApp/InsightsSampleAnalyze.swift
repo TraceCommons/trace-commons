@@ -16,17 +16,17 @@ import TCBridge
 /// assessment, a link, a delete, a group's assessment or members) is
 /// answered with that thing as it stands, as a goal write is, so the next
 /// read shows the sample unchanged. A write the sample has nothing to
-/// answer with (a new group, a comparison task or specification, analyzing
-/// a file) is refused. Neither reaches the store.
+/// answer with (a new group, a comparison task or specification, saving an
+/// analyzed file) is refused. Neither reaches the store.
 extension InsightsSampleWeek {
     /// The refusal for an operation the sample does not answer. Not a core
     /// code, so the window shows its usual failure line.
     static let refusal = "insights_sample_not_answered"
 
-    /// The operations the sample leaves to the store: the core's copy and
-    /// the two Overview drill-downs it read before Analyze was sampled.
-    /// Every one is a read.
-    static let storeReads: Set<String> = ["copy", "card_inputs", "pattern_sessions"]
+    /// The operations the sample leaves to the store: the core's copy, the
+    /// two Overview drill-downs it read before Analyze was sampled, and the
+    /// question cards. Every one is a read.
+    static let storeReads: Set<String> = ["copy", "card_inputs", "pattern_sessions", "question_cards"]
 
     /// The sample's answer body for an Analyze operation; `nil` for one it
     /// does not answer.
@@ -61,10 +61,10 @@ extension InsightsSampleWeek {
         }
     }
 
-    private static let noEffects: [String: Any] = [
+    private static var noEffects: [String: Any] { [
         "invalidated_episode_ids": [String](), "stale_comparison_task_ids": [String](),
         "stale_comparison_tasks": [Any](),
-    ]
+    ] }
 
     private static func trace(_ id: String?) throws -> SampleTrace {
         guard let trace = traces.first(where: { $0.id == id }) else { throw InsightsError.service("insights_not_found") }
@@ -215,10 +215,10 @@ extension InsightsSampleWeek {
         }
     }
 
-    static let provider: [String: Any] = [
+    static var provider: [String: Any] { [
         "id": "trace-commons-local", "version": "1", "rubric_version": "descriptive-counts-v1",
         "execution_mode": "local", "schema_version": 1,
-    ]
+    ] }
 
     /// Oldest first. The last two are the group.
     static let traces: [SampleTrace] = [

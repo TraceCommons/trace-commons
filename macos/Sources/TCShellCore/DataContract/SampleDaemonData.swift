@@ -324,8 +324,8 @@ enum SampleDaemonData {
     /// `tests/fixtures/insights-analytics/insights_model_answers.json`). A
     /// temp store holds too few traces to answer a row, so the answered
     /// rows are written by hand: every state but `not_priced` on one card,
-    /// both bases, a NEAR AI charge beside the API-price figure, and traces
-    /// left out. Off for a fresh install, unreadable where counts are
+    /// both bases, a NEAR AI charge beside the API-price figure, the
+    /// person's kept shares on two rejection rows, and traces left out. Off for a fresh install, unreadable where counts are
     /// unknown. SAMPLE labels and figures, never a pilot observation.
     static func modelAnswers(_ set: Sample) -> String {
         switch set {
@@ -346,12 +346,17 @@ enum SampleDaemonData {
         "rows":[\#
         {"question":"bug_fix_rejected","state":"answered","basis":"undone","edit_mode":null,\#
         "leader":{"label":"claude-opus-4-7","sessions":31,"edits":412,"figure":{"kind":"rate_permille","value":42},\#
-        "interrupts_per_session_permille":180,"near_ai_charge":null},\#
+        "interrupts_per_session_permille":180,"near_ai_charge":null,\#
+        "kept":{"labelled":10,"kept":7,"partly_kept":2,"thrown_away":1,"kept_permille":700}},\#
         "next":{"label":"claude-sonnet-4-6","sessions":14,"edits":160,"figure":{"kind":"rate_permille","value":91},\#
-        "interrupts_per_session_permille":360,"near_ai_charge":null},\#
+        "interrupts_per_session_permille":360,"near_ai_charge":null,\#
+        "kept":{"labelled":4,"kept":2,"partly_kept":0,"thrown_away":2,"kept_permille":500}},\#
         "sessions_by_model":[["claude-opus-4-7",31],["claude-sonnet-4-6",14],["gpt-5.3-codex",3]],\#
         "left_out":{"unknown_facts":2,"automated":4,"delegated":1,"capped":0,"routed":0,"reviewer":0,\#
-        "no_majority":1,"unpriced":0,"too_few_edits":3,"mix_too_different":0},"near_ai_charge":null},\#
+        "no_majority":1,"unpriced":0,"too_few_sessions":0,"too_few_edits":3,"mix_too_different":0},\#
+        "near_ai_charge":null,"kept_by_model":[\#
+        ["claude-opus-4-7",{"labelled":10,"kept":7,"partly_kept":2,"thrown_away":1,"kept_permille":700}],\#
+        ["claude-sonnet-4-6",{"labelled":4,"kept":2,"partly_kept":0,"thrown_away":2,"kept_permille":500}]]},\#
         {"question":"refactor_rejected","state":"no_clear_difference","basis":"undone","edit_mode":null,\#
         "leader":{"label":"claude-opus-4-7","sessions":9,"edits":120,"figure":{"kind":"rate_permille","value":30},\#
         "interrupts_per_session_permille":110,"near_ai_charge":null},\#
@@ -363,7 +368,9 @@ enum SampleDaemonData {
         {"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,\#
         "leader":null,"next":null,"sessions_by_model":[["claude-opus-4-7",4],["gpt-5.3-codex",1]],\#
         "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":0,"reviewer":0,\#
-        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},\#
+        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null,\#
+        "kept_by_model":[["claude-opus-4-7",{"labelled":1,"kept":1,"partly_kept":0,"thrown_away":0,\#
+        "kept_permille":1000}]]},\#
         {"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,\#
         "leader":{"label":"claude-sonnet-4-6","sessions":6,"edits":18,"figure":{"kind":"usd_micros","value":41200},\#
         "interrupts_per_session_permille":0,"near_ai_charge":{"basis":"near_ai_ledger",\#
