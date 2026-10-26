@@ -495,7 +495,7 @@ struct InsightsBreakdownFold: View {
     @Binding var showAll: Bool
     let copy: [String: String]
 
-    static func shown<Row>(_ rows: [Row], all: Bool) -> [Row] {
+    nonisolated static func shown<Row>(_ rows: [Row], all: Bool) -> [Row] {
         all ? rows : Array(rows.prefix(folded))
     }
 

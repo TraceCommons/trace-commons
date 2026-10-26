@@ -451,7 +451,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The row at the foot of the feed while the next page is read.
     (
         "analytics_sessions_explainer_watched",
-        "Your Claude Code and Codex sessions, newest first. Open one to see where its tokens went, label it, or analyze it.",
+        "Your Claude Code and Codex traces, newest first. Open one to see where its tokens went, label it, or analyze it.",
     ),
     (
         "analytics_sessions_explainer_saved",
