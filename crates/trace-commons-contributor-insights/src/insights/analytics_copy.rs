@@ -378,7 +378,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_drill_day_none", "No tokens counted on this day."),
     (
         "analytics_drill_day_codex",
-        "Codex sessions can't be split by day yet.",
+        "Codex traces can't be split by day yet.",
     ),
     // 7a. Where a feed T session's calls went (design part B), from the
     // proxy's own record. Its tokens are the proxy's per-call count, never
