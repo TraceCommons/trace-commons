@@ -697,7 +697,7 @@ pub const SCOPE_TAG_REQUIRED: &str = "required to share";
 
 /// Distinguish trace-scoring eligibility from other optional reward uses.
 /// Scope choice grants permission; acceptance and scoring still decide credit.
-pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for scored traces, allow Train coding models. Creating benchmarks and training evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.";
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for traces, allow Train coding models. Creating benchmarks and training evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.";
 
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
