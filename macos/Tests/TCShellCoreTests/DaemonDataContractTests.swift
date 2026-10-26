@@ -85,6 +85,19 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertNotNil(status.queueDepth, "queue_depth is present and must not stand in for it")
     }
 
+    func testSetupCompletionPreservesAbsentNullFalseAndTrue() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let absent = try decoder.decode(DaemonData.Status.self, from: Data(#"{}"#.utf8))
+        XCTAssertNil(absent.setupComplete, "an older daemon must retain the local completion fallback")
+        let null = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":null}"#.utf8))
+        XCTAssertNil(null.setupComplete)
+        let incomplete = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":false}"#.utf8))
+        XCTAssertEqual(incomplete.setupComplete, false)
+        let complete = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":true}"#.utf8))
+        XCTAssertEqual(complete.setupComplete, true)
+        XCTAssertThrowsError(try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":"true"}"#.utf8)))
+    }
+
     func testNullAndAbsentDecisionsOwedBothDecodeAsNilAndZeroStaysZero() throws {
         let decoder = DaemonDataDecoding.decoder()
         let absent = try decoder.decode(DaemonData.Status.self, from: Data(#"{"queue_depth":5}"#.utf8))

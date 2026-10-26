@@ -629,6 +629,22 @@ pub(crate) fn save_config(store: &ConfigStore, cfg: &ContributorConfig, body: &[
     }
 }
 
+/// Execute a local write only while the complete enrollment snapshot is still
+/// current. The callback must not take the credential commit lock again.
+pub(crate) fn with_current_config<T>(
+    store: &ConfigStore,
+    expected: &ContributorConfig,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let locks = coordination(store.dir())?;
+    let _commit = locks.commit.lock()?;
+    let current = store.load_config()?.ok_or_else(changed)?;
+    if serde_json::to_value(&current)? != serde_json::to_value(expected)? {
+        return Err(changed());
+    }
+    operation()
+}
+
 /// Cancel an in-flight enrollment without touching any existing credential.
 pub(crate) fn invalidate(store: &ConfigStore) -> Result<()> {
     let locks = coordination(store.dir())?;

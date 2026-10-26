@@ -191,6 +191,12 @@ pub(crate) fn schema() -> Value {
     );
     json!({
         "schema_version":"trace_commons.config_schema.v1",
+        "setup": {
+            "status_command":"near-ai --json config setup",
+            "completion_command":"near-ai --json config complete --scopes SCOPE[,SCOPE...]",
+            "consent_options_method":"get_setup_status",
+            "description":"An agent may choose data uses and complete configured setup. Completion does not arm folders or approve uploads."
+        },
         "patch_schema":{
             "$schema":"https://json-schema.org/draft/2020-12/schema",
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties

@@ -19,6 +19,9 @@ pub struct Status {
     pub logged_in: bool,
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// CLI completion for the current enrollment, absent on older daemons.
+    #[serde(default)]
+    pub setup_complete: Option<bool>,
     #[serde(default)]
     pub account_scope: Option<String>,
     #[serde(default)]
@@ -95,6 +98,13 @@ pub struct ArmingRewordingCard {
 }
 
 impl Status {
+    /// Shared completion is proof only for a live, identified enrollment.
+    pub fn shared_setup_complete(&self) -> bool {
+        self.logged_in
+            && self.tenant_id.as_deref().is_some_and(|id| !id.is_empty())
+            && self.setup_complete == Some(true)
+    }
+
     /// Every rewording, as the cards the window draws.
     pub fn arming_rewording_notices(&self) -> Vec<ArmingRewordingCard> {
         self.arming_rewordings

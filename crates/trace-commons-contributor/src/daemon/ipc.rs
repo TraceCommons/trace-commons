@@ -428,6 +428,8 @@ pub const METHODS: &[&str] = &[
     "get_public_profile",
     "get_settings",
     "get_config_schema",
+    "get_setup_status",
+    "complete_setup",
     "preview_settings",
     "token_storage_status",
     "remove_token_local_copies",
@@ -549,6 +551,8 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "cancel",
     "get_settings",
     "get_config_schema",
+    "get_setup_status",
+    "complete_setup",
     "preview_settings",
     "set_settings",
     "consent_options",
@@ -2619,7 +2623,13 @@ impl DaemonShared {
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
         // Snapshot settings without nesting its lock under policy or queue.
-        let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
+        let (scrub_check, setup_roots_declared) = {
+            let settings = self.settings.lock().expect("settings lock");
+            (
+                settings.scrub_check,
+                super::settings::roots_declared(&settings),
+            )
+        };
         // Nudge: the suggestion ledger and the switches it reads, each in
         // its own short lock, before the policy and queue section below.
         let nudge_snapshot = self.nudge_snapshot();
@@ -2827,6 +2837,7 @@ impl DaemonShared {
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": logged_in,
+            "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
@@ -4133,6 +4144,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "token_storage_status" => handle_token_storage(shared, req),
         "remove_token_local_copies" => handle_token_storage(shared, req),
         "discard_token_reviews" => handle_token_storage(shared, req),
+        "get_setup_status" => super::setup_completion::handle_status(shared, req),
+        "complete_setup" => super::setup_completion::handle_complete(shared, req),
         "get_config_schema" => {
             if req
                 .params
@@ -18539,7 +18552,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 100, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 102, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 77, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

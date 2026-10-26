@@ -443,6 +443,9 @@ extension DaemonData {
         public let schemaVersion: String?
         public let loggedIn: Bool?
         public let tenantId: String?
+        /// Explicit CLI setup completion for the current enrollment. Absent
+        /// on older daemons, which retain shell-local completion behavior.
+        public let setupComplete: Bool?
         /// Opaque account binding; present whenever the daemon can derive a
         /// scope from its store, signed in or not. Not proof of sign-in: read
         /// `loggedIn` for that.
@@ -510,6 +513,7 @@ extension DaemonData {
             case schemaVersion = "schema_version"
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
+            case setupComplete = "setup_complete"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
