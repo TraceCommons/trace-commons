@@ -47,8 +47,9 @@ public struct GlassPaneLayout: Equatable, Sendable {
     /// 2026-10-08).
     public static var inspectorWidth: CGFloat { (mainWidth * 2 / 3).rounded() }
 
-    /// How far into each pane beside it the divider takes the pointer, so
-    /// the gap is easier to catch without looking any wider.
+    /// How far into the map beside it the divider takes the pointer, so
+    /// the gap is easier to catch without looking any wider. Not into the
+    /// main pane: its scroller runs along the edge beside the gap.
     public static let dividerReach: CGFloat = 4
 
     /// `main` is the main pane's width the last time the window had no map
@@ -432,8 +433,9 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     /// by its background (`GlassBackdrop`), so a drag in the gap moved the
     /// window and never resized the panes. The handle under the gap
     /// refuses to move the window, and takes the pointer
-    /// `GlassPaneLayout.dividerReach` into each pane beside it, so the gap
-    /// is easier to catch and looks no wider.
+    /// `GlassPaneLayout.dividerReach` into the map, so the gap is easier to
+    /// catch and looks no wider; it leaves the main pane's scroller its
+    /// edge. A click that never drags changes nothing.
     private func divider(main: CGFloat, windowWidth: CGFloat) -> some View {
         Capsule()
             .fill(GlassColor.textTertiary)
@@ -452,7 +454,9 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
                             showsInspector: presented.inspector)
                     },
                     onEnd: { translation in
-                        let start = dragStart ?? main
+                        // Only a drag that moved ends one: a bare click
+                        // never writes the width it happens to see.
+                        guard let start = dragStart else { return }
                         let kept = GlassPaneLayout.draggedMain(
                             from: start, by: translation, windowWidth: windowWidth,
                             showsInspector: presented.inspector)
@@ -461,7 +465,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
                         dragMain = nil
                         keep(main: kept, windowWidth: windowWidth)
                     })
-                    .padding(.horizontal, -GlassPaneLayout.dividerReach)
+                    .padding(.trailing, -GlassPaneLayout.dividerReach)
             }
             // A divider that goes while pointed at (the map hidden) drops
             // its grip.
@@ -604,6 +608,10 @@ final class GlassDividerHandleView: NSView {
     var onEnd: (@MainActor (CGFloat) -> Void)?
     /// Where the drag began, in the window's coordinates; nil between drags.
     private var startX: CGFloat?
+    /// The pointer moved since the mouse went down: only then does the
+    /// mouse going up end a drag. A bare click, the one that activates the
+    /// window included, reports nothing.
+    private var moved = false
     private var tracking: NSTrackingArea?
 
     override var mouseDownCanMoveWindow: Bool { false }
@@ -631,6 +639,7 @@ final class GlassDividerHandleView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         startX = event.locationInWindow.x
+        moved = false
         NSCursor.resizeLeftRight.set()
     }
 
@@ -639,12 +648,15 @@ final class GlassDividerHandleView: NSView {
         // The divider stops at its limits while the pointer goes on; the
         // cursor stays the resize one until the drag ends.
         NSCursor.resizeLeftRight.set()
+        moved = true
         onDrag?(event.locationInWindow.x - startX)
     }
 
     override func mouseUp(with event: NSEvent) {
         guard let startX else { return }
         self.startX = nil
+        guard moved else { return }
+        moved = false
         onEnd?(event.locationInWindow.x - startX)
     }
 }
