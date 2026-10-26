@@ -11,8 +11,8 @@ import TCShellCore
 final class InsightsResponderScaleTests: XCTestCase {
     func testSavedSessionsKeepPlatformViewsBounded() throws {
         let copy = try InsightsSessionRouteTests.coreCopy()
-        let a = measure(InsightsCardInputsView(inputs: try savedSessions(20), snapshots: [], copy: copy), collection: "insightsSavedSessions", first: "session-0")
-        let b = measure(InsightsCardInputsView(inputs: try savedSessions(1061), snapshots: [], copy: copy), collection: "insightsSavedSessions", first: "session-0",
+        let a = measure(InsightsCardInputsView(inputs: try savedSessions(20), snapshots: [], copy: copy, showAll: true), collection: "insightsSavedSessions", first: "session-0")
+        let b = measure(InsightsCardInputsView(inputs: try savedSessions(1061), snapshots: [], copy: copy, showAll: true), collection: "insightsSavedSessions", first: "session-0",
                         scrollTargets: [(0.5, "session-530"), (1, "session-1060"), (0, "session-0")])
         print("INSIGHTS_RESPONDERS saved small=\(a) large=\(b)")
         XCTAssertGreaterThan(a, 0)
@@ -23,8 +23,8 @@ final class InsightsResponderScaleTests: XCTestCase {
         let copy = try InsightsSessionRouteTests.coreCopy()
         let small = try counterSessions(20)
         let large = try counterSessions(1061)
-        let a = measure(InsightsCounterSessionsView(sessions: small, copy: copy), collection: "insightsCounterSessions", first: "0")
-        let b = measure(InsightsCounterSessionsView(sessions: large, copy: copy), collection: "insightsCounterSessions", first: "0",
+        let a = measure(InsightsCounterSessionsView(sessions: small, copy: copy, showAll: true), collection: "insightsCounterSessions", first: "0")
+        let b = measure(InsightsCounterSessionsView(sessions: large, copy: copy, showAll: true), collection: "insightsCounterSessions", first: "0",
                         scrollTargets: [(0.5, "530"), (1, "1060"), (0, "0")])
         print("INSIGHTS_RESPONDERS counter small=\(a) large=\(b)")
         XCTAssertGreaterThan(a, 0)
