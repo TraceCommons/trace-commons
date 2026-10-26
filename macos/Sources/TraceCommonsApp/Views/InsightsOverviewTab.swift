@@ -484,6 +484,34 @@ struct InsightsOverviewTab: View {
     }
 }
 
+/// A Breakdown card's session list opens folded to its first few rows
+/// (owner, 2026-10-26: the card had too many rows for Overview), with a
+/// link under them to show every row and to fold them again.
+struct InsightsBreakdownFold: View {
+    /// Rows shown while folded.
+    static let folded = 5
+
+    let count: Int
+    @Binding var showAll: Bool
+    let copy: [String: String]
+
+    static func shown<Row>(_ rows: [Row], all: Bool) -> [Row] {
+        all ? rows : Array(rows.prefix(folded))
+    }
+
+    var body: some View {
+        if count > Self.folded {
+            Button(showAll
+                   ? copy["analytics_drill_show_fewer"] ?? ""
+                   : InsightsOverviewWords.fill(copy["analytics_drill_show_all"] ?? "", ["n": String(count)])) {
+                showAll.toggle()
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+            .padding(.top, GlassTokens.Space.s2)
+        }
+    }
+}
+
 /// A horizontal bar in the single data series' colour on a recessed
 /// track. An unknown share draws the empty track only, and its figure
 /// beside it is the dash.
@@ -525,6 +553,7 @@ struct InsightsShareBar: View {
 struct InsightsCounterSessionsView: View {
     let sessions: InsightsCounterSessions
     let copy: [String: String]
+    @State private var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private var routed: Bool { sessions.column == .shown }
@@ -536,7 +565,7 @@ struct InsightsCounterSessionsView: View {
                 // A week can contain thousands of sessions. Keep selectable
                 // text hosts off the responder tree until their rows are visible.
                 LazyVStack(spacing: 0) {
-                    ForEach(sessions.rows) { row in
+                    ForEach(InsightsBreakdownFold.shown(sessions.rows, all: showAll)) { row in
                         #if DEBUG
                         let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
                         #endif
@@ -553,6 +582,7 @@ struct InsightsCounterSessionsView: View {
                         }
                     }
                 }
+                InsightsBreakdownFold(count: sessions.rows.count, showAll: $showAll, copy: copy)
                 if routed {
                     Text(text("analytics_route_measure_note")).insightsCaption()
                 }
@@ -593,6 +623,7 @@ struct InsightsCardInputsView: View {
     let inputs: InsightsCardInputs
     let snapshots: [LocalInsight]
     let copy: [String: String]
+    @State private var showAll = false
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
@@ -612,7 +643,7 @@ struct InsightsCardInputsView: View {
                 // Saved-session breakdowns share the same viewport-bound
                 // rendering as watched sessions, while retaining text selection.
                 LazyVStack(spacing: 0) {
-                    ForEach(inputs.sessions) { session in
+                    ForEach(InsightsBreakdownFold.shown(inputs.sessions, all: showAll)) { session in
                         #if DEBUG
                         let _ = OtherCollectionRowBodies.record("insightsSavedSessions", session.session_ref)
                         #endif
@@ -628,6 +659,7 @@ struct InsightsCardInputsView: View {
                                 .joined(separator: " \u{b7} "))
                     }
                 }
+                InsightsBreakdownFold(count: inputs.sessions.count, showAll: $showAll, copy: copy)
             }
             .insightsCardBody()
         }
