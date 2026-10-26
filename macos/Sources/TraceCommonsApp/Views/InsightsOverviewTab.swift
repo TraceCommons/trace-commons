@@ -489,7 +489,7 @@ struct InsightsOverviewTab: View {
 /// link under them to show every row and to fold them again.
 struct InsightsBreakdownFold: View {
     /// Rows shown while folded.
-    static let folded = 5
+    nonisolated static let folded = 5
 
     let count: Int
     @Binding var showAll: Bool
