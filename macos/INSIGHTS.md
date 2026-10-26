@@ -135,10 +135,14 @@ then the leading model and "Next:", each with its figure and traces; or
 "Not enough traces yet" or "Not priced" with each model's traces, or "No
 clear difference" with both figures and neither first. Rejection rows say
 their basis ("Undone edits we could see") and interrupts per trace beside
-each figure; the docs row adds what Private AI charged, never added to the
-API-price figure. How each figure is measured and the traces left out, by
+each figure, and the share of each model's traces you marked Kept with
+the Outcome label, beside the figure and never folded into it; the docs row
+adds what Private AI charged, never added to the API-price figure. How each figure is measured and the traces left out, by
 reason, are behind the row's "i". Labels are as the agent recorded them.
-When the answer is off, unreadable or not served, no card is drawn. Every word
+When the answer is off, unreadable or not served, no card is drawn. The
+answers are read each time Overview appears and after each saved label, so
+a label set on Sessions shows, and a failed read hides the card only until
+the next one. Every word
 is the core's (`analytics_models_*`); no word ranks a model.
 
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
