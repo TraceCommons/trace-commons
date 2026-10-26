@@ -908,6 +908,25 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         model.close()
     }
 
+    /// The whole card is the row's button, padding and all, as every other
+    /// interactive row's is: the card is inside the button's label, and the
+    /// label controls are drawn over it, outside the button, where the
+    /// label keeps their room, so their menus take their own clicks.
+    @MainActor
+    func testTheWholeRowCardIsTheButtonAndTheLabelMenusSitOverIt() throws {
+        let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        let start = try XCTUnwrap(tab.range(of: "private func feedRow("))
+        let end = try XCTUnwrap(tab.range(of: "\n    }\n", range: start.upperBound..<tab.endIndex))
+        let body = String(tab[start.upperBound..<end.lowerBound])
+        func at(_ text: String) throws -> String.Index { try XCTUnwrap(body.range(of: text), text).lowerBound }
+        XCTAssertLessThan(try at("} label: {"), try at(".padding(.vertical, GlassTokens.Space.s3)"))
+        XCTAssertLessThan(try at("labelControls(row).hidden()"), try at(".insightsRowCard()"))
+        XCTAssertLessThan(try at(".insightsRowCard()"), try at(".buttonStyle(GlassPressStyle())"),
+                          "the card is in the button's label")
+        XCTAssertLessThan(try at(".buttonStyle(GlassPressStyle())"), try at(".overlay(alignment: .bottomLeading)"),
+                          "the controls sit over the button, not in it")
+    }
+
     /// Without a daemon client the rows draw no label controls.
     @MainActor
     func testNoLabelControlsWithoutTheDaemon() {

@@ -131,17 +131,20 @@ struct InsightsSessionsTab: View {
     }
 
     /// One watched trace: its harness tile, its label and tokens, and its
-    /// sparkline, then its own labels' controls. VoiceOver reads the trace
-    /// as one button, the sparkline in words; each control after it names
-    /// the trace it labels.
+    /// sparkline, then its own labels' controls. The whole card is the
+    /// row's button, padding and all, as every other interactive row's is;
+    /// the controls are drawn over it where the label keeps their room, so
+    /// their menus take their own clicks and a click anywhere else on the
+    /// card opens the row. VoiceOver reads the trace as one button, the
+    /// sparkline in words; each control after it names the trace it labels.
     private func feedRow(_ row: DaemonData.InsightsWatchedSession) -> some View {
         let open = model.selected == row.sessionRef
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Button {
-                readTurn = nil
-                keyRow = row.sessionRef
-                model.toggle(row.sessionRef)
-            } label: {
+        return Button {
+            readTurn = nil
+            keyRow = row.sessionRef
+            model.toggle(row.sessionRef)
+        } label: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                     InsightsHarnessTile(source: row.source)
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -157,21 +160,29 @@ struct InsightsSessionsTab: View {
                             .frame(width: InsightsSparkline.width, height: InsightsSparkline.height)
                     }
                 }
-                .contentShape(Rectangle())
+                // The controls' room; they are drawn over it below.
+                if model.canLabel { labelControls(row).hidden() }
             }
-            .buttonStyle(GlassPressStyle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(InsightsSessionsWords.rowAccessibilityLabel(row, copy: copy))
-            .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
-            if model.canLabel { labelControls(row) }
+            .padding(.vertical, GlassTokens.Space.s3)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .contentShape(Rectangle())
+            .insightsRowCard()
+            .overlay {
+                if keyRow == row.sessionRef {
+                    RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
+                        .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
+                }
+            }
         }
-        .padding(.vertical, GlassTokens.Space.s3)
-        .padding(.horizontal, GlassTokens.Space.s4)
-        .insightsRowCard()
-        .overlay {
-            if keyRow == row.sessionRef {
-                RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
-                    .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
+        .buttonStyle(GlassPressStyle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(InsightsSessionsWords.rowAccessibilityLabel(row, copy: copy))
+        .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
+        .overlay(alignment: .bottomLeading) {
+            if model.canLabel {
+                labelControls(row)
+                    .padding(.vertical, GlassTokens.Space.s3)
+                    .padding(.horizontal, GlassTokens.Space.s4)
             }
         }
     }
