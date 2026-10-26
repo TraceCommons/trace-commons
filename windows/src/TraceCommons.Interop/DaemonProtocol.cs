@@ -680,6 +680,10 @@ public sealed class DaemonStatus
     [JsonPropertyName("logged_in")]
     public bool LoggedIn { get; set; }
 
+    /// <summary>CLI setup completion for the current enrollment; absent on older daemons.</summary>
+    [JsonPropertyName("setup_complete")]
+    public bool? SetupComplete { get; set; }
+
     [JsonPropertyName("paused")]
     public bool Paused { get; set; }
 

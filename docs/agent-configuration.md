@@ -1,6 +1,6 @@
 # Configure the app with an AI agent
 
-An agent with terminal access can use `near-ai` to discover the running app's settings, preview changes, apply them, inspect trace value estimates, and manage folder upload policies. No MCP server is required. Give the agent the [sample prompt](examples/agent-configuration-prompt.md) with your desired changes.
+An agent with terminal access can use `near-ai` to discover the running app's settings, preview changes, apply them, inspect trace value estimates, manage folder upload policies, and finish setup after configuring the app. No MCP server is required. Give the agent the [sample prompt](examples/agent-configuration-prompt.md) with your desired changes.
 
 These configuration commands require a build containing this feature in both the CLI and the app. They do not modify settings files directly. The app's daemon validates and persists changes using the same settings path as the UI.
 
@@ -66,7 +66,55 @@ Preview validates a cloned candidate and returns `applied: false` with `changes`
 
 Apply validates again and updates only the supplied settings through the daemon. A preview does not reserve the state: the UI or another client may change settings in between. Recheck the result and run `config show` after applying. Preserve any runtime outcome returned by the setter, such as `private_inference_state`; saving `private_inference: true` does not prove that authentication or proxy startup succeeded.
 
-Configuration does not complete browser sign-in, grant operating-system permissions, enroll an account, or approve traces. Use the app's existing flows where those are required.
+Applying settings does not finish setup. Complete browser sign-in and enrollment through their existing flows, then use the setup commands below to choose data uses and finish onboarding. These commands do not grant operating-system permissions or approve traces.
+
+## Finish setup from the CLI
+
+After the agent has configured the app, it can finish setup without walking
+through the first-run screens:
+
+```sh
+"$TC_CLI" --config-dir "$TC_DIR" --json config setup
+
+# The agent may choose these uses on the user's behalf.
+"$TC_CLI" --config-dir "$TC_DIR" --json config complete \
+  --scopes debugging_evaluation,model_training
+
+"$TC_CLI" --config-dir "$TC_DIR" --json config setup
+"$TC_CLI" --config-dir "$TC_DIR" --json daemon status
+```
+
+`config setup` reports the current enrollment's completion state, readiness,
+blocking reason, saved data-use scopes and available choices. Read the returned
+scope descriptions before choosing. `--scopes` is a comma-separated list of
+protocol scope names; `debugging_evaluation` is the required floor. Use only
+`debugging_evaluation` to choose no optional uses. The example also permits
+model training; it is an example choice, not a required default.
+
+An agent can make this data-use choice for the user. It does not need a separate
+confirmation in the graphical app. To keep an existing explicit choice, run
+`config complete` without `--scopes`. A fresh enrollment whose scopes have not
+been chosen needs `--scopes` or an earlier explicit `consent scopes --scopes ...`
+command. Unknown scope names are refused.
+
+Completion requires the running daemon, a usable enrollment and declared
+Claude/Codex sources. An explicit `off` declaration counts. It does not sign in,
+enroll, change folder modes, arm automatic sharing, approve a backlog, or open
+OS permission prompts. Handle any reported missing prerequisites through the
+existing configuration or account commands, then finish setup again.
+
+Completion is bound to the current enrollment and app state directory. The
+command verifies that the enrollment has not changed before saving. Repeating
+it is safe; a different account or channel does not inherit it. The daemon
+persists the marker and publishes a status update, so an open native first-run
+screen hands off to the normal app, and the marker survives restarts. Check
+`status.setup_complete` rather than editing GUI preferences or marker files.
+Existing GUI completion markers and older-daemon behavior remain supported.
+
+If saving completion fails after an explicit data-use change was saved, inspect
+the returned state before retrying; do not assume the scope choice was rolled
+back. Completion itself does not add consent scopes. The frozen Tauri shell
+continues to use its existing local onboarding flow.
 
 ## Discover trace value estimates
 

@@ -671,6 +671,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
+| `get_setup_status` | empty object | versioned completion/readiness state, enrollment scope, saved data uses and available scope choices | read-only; no offline initialization or setup mutation |
+| `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
@@ -9044,3 +9046,26 @@ launcher on a saved key.
   model) and `route_models` (`[{id, name?}]`, NEAR AI's chat models in its
   order, as the proxy read them). The launcher offers `route_models` in the
   tool's own model picker; without all three it does not start the tool.
+
+## CLI setup completion
+
+`get_setup_status` and `complete_setup` support an agent that configures the
+app before opening its first-run UI. `near-ai config setup` reads the state;
+`near-ai config complete [--scopes CSV]` finishes setup. The CLI uses only the
+live daemon and sends back the expected enrollment scope from its initial read.
+An agent may make the data-use choice on the user's behalf through `--scopes`;
+no separate graphical confirmation is required. Omitting scopes preserves an
+already chosen set. See [agent configuration](agent-configuration.md#finish-setup-from-the-cli).
+
+The additive `status.setup_complete` boolean is a completion proof for the
+current enrollment. Source declarations, a usable enrollment and a recorded
+scope choice are required. Completion is bound to the tenant, ingest authority,
+device identity and local state directory. It survives a daemon restart but
+cannot finish another enrollment. Marker persistence precedes `status_changed`.
+Missing or invalid state does not produce a positive completion proof.
+
+Native shells accept this positive proof alongside their existing local
+completion marker. An absent field from an older daemon keeps the existing
+local behavior. Signed-out and undeclared-root gates still apply. Completing
+setup never arms a folder, grants automatic uploads, approves a trace or records
+an operating-system permission.

@@ -800,7 +800,7 @@ impl App {
                 // Both halves of "does this device need onboarding" are the
                 // daemon's to answer, so the question is asked here rather
                 // than at window construction, where neither is known yet.
-                onboarding::present_if_needed(app, status.logged_in, status.tenant_id.as_deref());
+                onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
             }

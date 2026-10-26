@@ -28,6 +28,8 @@ const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 /// device key and are removed by `wipe()`, so a logout cannot leave one
 /// contributor's auto-upload opt-ins in place for whoever enrolls next.
 pub const DAEMON_SETTINGS_FILE: &str = "daemon-settings.json";
+/// Explicit CLI setup completion for one enrollment in this state directory.
+pub const DAEMON_SETUP_COMPLETION_FILE: &str = "daemon-setup-completion.json";
 pub const DAEMON_STATE_FILE: &str = "daemon-state.json";
 pub const DAEMON_PROJECTS_FILE: &str = "daemon-projects.json";
 pub const DAEMON_QUEUE_FILE: &str = "daemon-queue.jsonl";
@@ -104,8 +106,9 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 8] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 9] = [
     CONFIG_FILE,
+    DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     DAEMON_PAYOUT_LINK_FILE,
     DAEMON_PAYOUT_ORG_NAMES_FILE,
@@ -1485,6 +1488,7 @@ impl ConfigStore {
             RECEIPTS_FILE,
             NEAR_AI_NOTICE_MARKER_FILE,
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
@@ -1514,6 +1518,7 @@ impl ConfigStore {
             DEVICE_KEY_FILE,
             RECEIPTS_FILE,
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
@@ -2263,6 +2268,7 @@ mod tests {
         let (_d, store) = store();
         let names = [
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
