@@ -9047,6 +9047,40 @@ launcher on a saved key.
   order, as the proxy read them). The launcher offers `route_models` in the
   tool's own model picker; without all three it does not start the tool.
 
+### `managed_tool_setup` — coding-tool installation and updates
+
+A local, explicit Terminal action, currently offered by native macOS when
+`managed_snapshot.capabilities.tool_setup` is true. Older daemons omit the
+optional capability and clients retain their official setup-guide links.
+
+Request parameters are exactly `tool: "claude" | "codex" | "opencode"` and
+`action: "install" | "update"`. Unknown fields are refused. Callers cannot
+supply shell commands, paths, environment overrides, accounts, credentials,
+profiles or session tickets. No sign-in is required.
+
+The service builds a fixed vendor command and hands it to the chosen terminal.
+The reply `{"opened":true}` acknowledges only that handoff, not installer
+completion. The app re-reads availability when it becomes active and on its
+normal managed-session poll. A failed handoff returns the existing managed
+error vocabulary; vendor failures remain visible in the terminal. No coding
+session or account is created, and installation does not start a tool login.
+
+Fresh installs use the official standalone installers for Claude Code, Codex,
+and OpenCode's current V2 installer. Existing OpenCode installations use their
+own updater rather than being replaced by the fresh-install command. Updates preserve recognized
+Homebrew casks/npm prefixes; native Claude uses `update`, Codex uses its official
+installer, and OpenCode uses its own `upgrade`. The handoff uses the same bounded
+AppleScript runner and selected Terminal/Ghostty/iTerm2 templates as managed
+sessions. The terminal stays open after the vendor command finishes. This does
+not change supported-version policy or auto-upgrade any tool on launch.
+
+Vendor references:
+
+- [Claude Code setup](https://code.claude.com/docs/en/setup)
+- [Codex CLI setup](https://developers.openai.com/codex/cli/)
+- [OpenCode setup](https://opencode.ai/v2/docs/)
+- [OpenCode upgrade command](https://dev.opencode.ai/docs/cli)
+
 ## CLI setup completion
 
 `get_setup_status` and `complete_setup` support an agent that configures the

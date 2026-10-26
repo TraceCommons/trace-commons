@@ -81,6 +81,14 @@ final class AppModel: ObservableObject {
         managedAction("set_managed_terminal", params: ["terminal": id])
     }
 
+    /// Only a named tool and setup action cross the RPC boundary. Setup needs
+    /// no sign-in, managed account, profile, session, or working directory.
+    func setupManagedTool(_ tool: String, action: String) {
+        guard managedSnapshot?.capabilities.toolSetup == true,
+              ManagedSurface.supportedTools.contains(tool), ["install", "update"].contains(action) else { return }
+        managedAction("managed_tool_setup", params: ["tool": tool, "action": action])
+    }
+
     func saveManagedCLIOptions(tool: String) {
         guard managedCLIOptionsDrafts.isChanged(tool: tool, saved: managedSnapshot?.cliOptions) else { return }
         managedAction("managed_cli_options_set", params: [
@@ -109,6 +117,9 @@ final class AppModel: ObservableObject {
                     throw CocoaError(.coderInvalidValue)
                 }
                 var response = try client.managedAction(method, params: params)
+                if method == "managed_tool_setup", response["opened"] as? Bool != true {
+                    throw DaemonClient.Failure(code: "unavailable", message: "managed-tool-setup-unconfirmed")
+                }
                 if let optionsBeingSaved,
                    response["tool"] as? String != attemptedTool || response["options"] as? String != optionsBeingSaved || response["revision"] as? UInt64 == nil {
                     throw DaemonClient.Failure(code: "unavailable", message: "managed-cli-options-unconfirmed")
@@ -1295,6 +1306,47 @@ final class AppModel: ObservableObject {
     /// The client the NEAR AI payout section calls through. Nil while no
     /// daemon is running.
     var payoutLinkDaemonClient: DaemonClient? { client }
+
+    /// Uses fresh cloud membership, then prepares inference and payment for
+    /// a sole owned organization. An account change invalidates every await.
+    func prepareSingleOrganizationOnboarding() async -> SingleOrganizationOnboardingOutcome {
+        guard let client else { return .unavailable }
+        let generation = accountSessionGeneration
+        let current: @MainActor @Sendable () -> Bool = { [weak self] in
+            self?.client === client && self?.accountSessionGeneration == generation
+        }
+        let preparation = SingleOrganizationOnboarding(
+            organizations: {
+                try await DaemonWork.run { Result { try client.nearAiSpendOrganizations(fresh: true) } }.get()
+            },
+            payoutOrganizations: {
+                try await DaemonWork.run { Result { try client.payoutLink.organizations() } }.get()
+            },
+            status: {
+                try await DaemonWork.run { Result { try client.payoutLink.status() } }.get()
+            },
+            selectSpend: { id in
+                try await DaemonWork.run { Result { try client.nearAiSelectSpendOrganization(id) } }.get()
+            },
+            startLink: { id, revision, version in
+                try await DaemonWork.run { Result {
+                    try client.payoutLink.startLink(
+                        railId: PayoutLinkSurface.nearAiRailId, organizationId: id,
+                        orgsRevision: revision, expectedVersion: version)
+                } }.get()
+            },
+            confirmLink: { id in
+                try await DaemonWork.run { Result {
+                    try client.payoutLink.confirmLink(
+                        railId: PayoutLinkSurface.nearAiRailId, organizationId: id)
+                } }.get()
+            },
+            isCurrent: current)
+        let result = await preparation.prepare()
+        guard current() else { return .unavailable }
+        return result
+    }
+
     /// The client the first run's passkey sheets complete their ceremony
     /// with (`LivePasskeyAccount`). Nil while no daemon is running.
     var passkeyClient: DaemonClient? { client }

@@ -614,6 +614,9 @@ pub(super) async fn status(
                     // After a restart nothing is listed; the saved name.
                     .or_else(|| saved_names.names.get(&id).cloned())
             };
+            let organization_id = (check == Some("match"))
+                .then(|| linked_here.map(|linked| linked.organization_id))
+                .flatten();
             let organization_name = (check == Some("match"))
                 .then(|| linked_here.and_then(|linked| name_of(linked.organization_id)))
                 .flatten();
@@ -638,6 +641,7 @@ pub(super) async fn status(
                 "unlink_requested": rail.unlink_requested,
                 "recipient_unavailable": rail.recipient_unavailable,
                 "recipient_ref_check": check,
+                "organization_id": organization_id,
                 "organization_name": organization_name,
                 "pending_here": pending_here,
             })

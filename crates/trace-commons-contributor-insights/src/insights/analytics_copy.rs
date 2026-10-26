@@ -449,6 +449,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The sparkline in words, for VoiceOver: its largest turn.
     ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
     // The row at the foot of the feed while the next page is read.
+    (
+        "analytics_sessions_explainer_watched",
+        "Your Claude Code and Codex traces, newest first. Open one to see where its tokens went, label it, or analyze it.",
+    ),
+    (
+        "analytics_sessions_explainer_saved",
+        "Traces you analyzed and saved. Pick one to see where its tokens went, turn by turn.",
+    ),
     ("analytics_sessions_loading_more", "Loading more\u{2026}"),
     // The feed foot's button after a page could not be read; same wording as
     // the startup retry in `health_copy`.

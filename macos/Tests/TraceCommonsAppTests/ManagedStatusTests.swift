@@ -40,6 +40,8 @@ final class ManagedStatusTests: XCTestCase {
     /// update links are drawn either way.
     func test_aFailureIsSaidWhereItWasAsked() throws {
         XCTAssertTrue(ManagedSessionsSection.failureOnSignInCard(method: "managed_launch_prepare", signInCardShown: true))
+        XCTAssertTrue(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: true))
+        XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: false))
         XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_launch_prepare", signInCardShown: false))
         for method in ["managed_session_stop", "managed_session_dismiss", "managed_session_start_again", nil] {
             XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: method, signInCardShown: true), method ?? "nil")

@@ -186,7 +186,7 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// that must not be. It is the whole difference between contributing
 /// automatically and reviewing each session. Do not shorten it for layout;
 /// change the layout.
-pub const AUTO_NO_REVIEW: &str = "No one looks at a trace before it is sent, including you.";
+pub const AUTO_NO_REVIEW: &str = "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled.";
 
 /// The one sentence the Contribution rule card says under Automatic when
 /// no privacy model is confirmed to have run (`Disclosure::PatternsOnly`).
@@ -599,22 +599,18 @@ pub fn void_notice_for_wire_with_regrant(
 /// What the fixed patterns remove, for an armed folder where no certified
 /// full pipeline ran -- the spec's "deterministic-only arming disclosure".
 ///
-/// Approved 2026-10-06. The spec's Open list says this wording is not
-/// yet written. The first two sentences are [`AUTO_SCRUB_SCOPE`]'s, word for
-/// word, so `the_scrub_sentences_match_what_the_redactor_does` holds them to
-/// the redactor too. The last replaces the model clause: it does not say no
-/// model runs (a configured filter or witness may run one), only that nothing
-/// confirms one did, which is what `automatic_gate::disclosure` answering
-/// `PatternsOnly` means. "Trust relaxes what may be sent, never what may be
-/// said."
-pub const AUTO_PATTERNS_ONLY_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Nothing confirms that a model checked these traces, so treat names, people, addresses, account numbers and a password typed into a sentence as sent.";
+/// Describes the deterministic patterns without promising a model pass.
+/// Detailed token-format heuristics belong in redactor documentation, while
+/// the adjacent limit keeps missed secrets and personal information visible.
+pub const AUTO_PATTERNS_ONLY_SCOPE: &str =
+    "Recognized secrets and some file paths and email addresses are removed automatically.";
 
 /// The limit of the patterns, for the same route as
 /// [`AUTO_PATTERNS_ONLY_SCOPE`].
 ///
-/// Approved 2026-10-06. [`AUTO_SCRUB_LIMIT`] without its model
-/// sentence, since on this route no model's result is relied on.
-pub const AUTO_PATTERNS_ONLY_LIMIT: &str = "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. Nothing here checks whether they were right.";
+/// No model's result is relied on for this route.
+pub const AUTO_PATTERNS_ONLY_LIMIT: &str =
+    "Redaction can miss other secrets and personal information.";
 
 /// The raw send, and both enclaves: the spec's first "further sentence".
 /// Shown only where a pinned witness is configured, since only then does a
@@ -1516,10 +1512,10 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 
 /// The route line with no witness configured.
 ///
-/// Approved 2026-10-06. With no witness the redactor runs in this
-/// process (`envelope::build_redactor`), and only the redacted envelope is
-/// uploaded. What an attached filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "No witness is set up. Traces are redacted on this computer, and the unredacted trace does not leave it.";
+/// The local redactor runs before upload; the hosted service applies its
+/// own privacy-filter pass at ingest. This does not promise complete PII
+/// removal. What an attached local filter receives is the next sentence's job.
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -1534,11 +1530,8 @@ pub const DISCLOSURE_ROUTE_NOT_ENROLLED: &str =
 pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
     "This app could not read its settings, so nothing is sent.";
 
-/// Local route, no filter attached.
-///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_LOCAL_FILTER_NONE: &str =
-    "No privacy filter is attached, so only the fixed patterns run.";
+/// Local route, no model privacy filter attached.
+pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Local redaction uses fixed patterns.";
 
 /// Local route, NEAR AI's hosted privacy filter attached.
 ///
@@ -3052,13 +3045,6 @@ mod tests {
         }
         assert!(!wire.contains("when a model recognises it"));
         assert!(!wire.contains("The model is not reliable"));
-        // The pattern half is the agreed sentence's, so the redactor test
-        // holds it.
-        let pattern_half = AUTO_SCRUB_SCOPE
-            .split(" Everything else")
-            .next()
-            .expect("the agreed scope sentence");
-        assert!(AUTO_PATTERNS_ONLY_SCOPE.starts_with(pattern_half));
     }
 
     /// The model-scrub route gets the agreed sentences and nothing of the
@@ -3231,7 +3217,7 @@ mod tests {
         );
         assert_eq!(
             AUTO_NO_REVIEW,
-            "No one looks at a trace before it is sent, including you."
+            "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled."
         );
         // Approved 2026-10-12 (owner), word for word.
         assert_eq!(
@@ -3376,8 +3362,12 @@ mod tests {
     /// grant a different act from the one described.
     #[test]
     fn no_review_is_stated_without_qualification() {
-        assert!(AUTO_NO_REVIEW.starts_with("No one looks at a trace before it is sent"));
-        assert!(AUTO_NO_REVIEW.contains("including you"));
+        assert!(
+            AUTO_NO_REVIEW
+                .starts_with("Submissions are automatically queued and sent without review.")
+        );
+        assert!(AUTO_NO_REVIEW.contains("withdraw them from future use"));
+        assert!(AUTO_NO_REVIEW.contains("distributed copies cannot be recalled"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
         }

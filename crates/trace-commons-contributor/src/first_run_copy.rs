@@ -556,8 +556,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Get started",
         },
         join: JoinCopy {
-            title_light: "Get started on ",
-            title_bold: "your terms",
+            title_light: "Sign in and choose an org for ",
+            title_bold: "payment and inference",
             body: "Sign in with your NEAR AI account to get started.",
             invite_eyebrow: "Invite link",
             invite_placeholder: crate::channel::INVITE_PLACEHOLDER,

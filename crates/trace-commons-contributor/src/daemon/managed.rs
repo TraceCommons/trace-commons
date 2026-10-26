@@ -17,6 +17,7 @@ use crate::{
         },
         signin,
         terminal::{self, TerminalApp, TerminalHandle, TerminalSetting},
+        tool_setup::{self, ToolSetupAction},
     },
 };
 use serde::Deserialize;
@@ -41,6 +42,7 @@ pub struct ManagedService {
     /// Brings a session's window to the front. A field so tests can record
     /// the call rather than drive a real terminal.
     focus: fn(&TerminalHandle) -> Result<(), ManagedError>,
+    setup_terminal: fn(TerminalSetting, &[TerminalApp], &str) -> Result<(), ManagedError>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +70,7 @@ impl ManagedService {
             installed_terminals: terminal::installed,
             installed_cache: terminal::InstalledCache::default(),
             focus: crate::managed::terminal::focus,
+            setup_terminal: terminal::launch_tool_setup,
         })
     }
 
@@ -219,8 +222,24 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
+            }
+            "managed_tool_setup" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Params {
+                    tool: ToolId,
+                    action: ToolSetupAction,
+                }
+                let params: Params = parse(request)?;
+                let native = find_native(params.tool).ok();
+                let command = tool_setup::command(params.tool, params.action, native.as_deref())?;
+                let installed = self.installed_terminals(choice.app());
+                (self.setup_terminal)(choice, &installed, &command)?;
+                // This acknowledges only the visible terminal handoff. The
+                // installer runs there; the next snapshot re-discovers tools.
+                Ok(json!({"opened": true}))
             }
             "managed_account_add" => {
                 #[derive(Deserialize)]
@@ -852,6 +871,53 @@ mod tests {
             sign_in,
             choice,
         )
+    }
+
+    #[test]
+    fn tool_setup_needs_no_sign_in_account_profile_or_session() {
+        let (_dir, _store, mut service) = service();
+        let before = service.sessions.revision();
+        service.setup_terminal = |_, _, command| {
+            assert!(command.contains("https://chatgpt.com/codex/install.sh"));
+            assert!(!command.contains("--config-dir"));
+            assert!(!command.contains("--ticket"));
+            Ok(())
+        };
+        let result = call(
+            &mut service,
+            "managed_tool_setup",
+            json!({"tool":"codex","action":"install"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result, json!({"opened":true}));
+        assert_eq!(service.sessions.revision(), before);
+        assert!(service.sessions.views().unwrap().is_empty());
+        assert!(service.accounts.list().is_empty());
+    }
+
+    #[test]
+    fn tool_setup_refuses_arbitrary_commands_and_does_not_claim_install_completion() {
+        let (_dir, _store, mut service) = service();
+        service.setup_terminal = |_, _, _| panic!("invalid input reached the terminal");
+        for params in [
+            json!({"tool":"codex;echo bad","action":"install"}),
+            json!({"tool":"codex","action":"install;echo bad"}),
+            json!({"tool":"codex","action":"install","command":"echo bad"}),
+            json!({"tool":"codex","action":"install","cwd":"/tmp"}),
+        ] {
+            assert!(call(&mut service, "managed_tool_setup", params, false).is_err());
+        }
+        service.setup_terminal = |_, _, _| Err(ManagedError::TerminalNotFound);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_tool_setup",
+                json!({"tool":"codex","action":"install"}),
+                false
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
     }
 
     fn launch(tool: ToolId, cwd: &std::path::Path) -> Value {

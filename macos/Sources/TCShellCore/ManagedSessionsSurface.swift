@@ -109,6 +109,8 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let folderSettings: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
+        /// Terminal installer support; absent from older daemons.
+        public let toolSetup: Bool?
         public let terminalDestination: String?
         /// Whether the daemon holds a NEAR AI sign-in. A bool, never the
         /// credential; absent from an older daemon, which reads as no.
@@ -121,6 +123,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let terminalChoices: [ManagedTerminalChoice]?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
+            case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
@@ -377,6 +380,14 @@ public extension ManagedSnapshot {
             guard ManagedSurface.toolKey(availability.tool) != nil else { return false }
             if let attemptedTool { return availability.tool == attemptedTool }
             return availability.installed
+        }
+    }
+
+    /// Explicitly reported missing tools, in the same order as launch buttons.
+    /// An older daemon without availability rows cannot establish absence.
+    var missingInstallTools: [ManagedToolAvailability] {
+        ManagedSurface.supportedTools.compactMap { tool in
+            tools?.first { $0.tool == tool && !$0.installed }
         }
     }
 
