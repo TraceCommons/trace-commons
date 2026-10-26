@@ -132,6 +132,8 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
     /// The linked org's name, from the daemon's org list or the name it
     /// saved for this link; nil when it has neither.
     public let organizationName: String?
+    /// The locally saved organization ID, only when its recipient ref matches.
+    public let organizationID: String?
 
     enum CodingKeys: String, CodingKey {
         case railId = "rail_id"
@@ -141,6 +143,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         case recipientUnavailable = "recipient_unavailable"
         case recipientRefCheck = "recipient_ref_check"
         case organizationName = "organization_name"
+        case organizationID = "organization_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -156,13 +159,15 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
             try c.decodeIfPresent(Bool.self, forKey: .recipientUnavailable) ?? false
         recipientRefCheck = try c.decodeIfPresent(String.self, forKey: .recipientRefCheck)
         organizationName = try c.decodeIfPresent(String.self, forKey: .organizationName)
+        organizationID = try c.decodeIfPresent(String.self, forKey: .organizationID)
     }
 
     public init(
         railId: String = PayoutLinkSurface.nearAiRailId, mode: String = "live", linked: Bool = false,
         state: String? = nil, version: Int64 = 0, requestState: String? = nil,
         unlinkRequested: Bool = false, recipientUnavailable: Bool = false,
-        recipientRefCheck: String? = nil, organizationName: String? = nil
+        recipientRefCheck: String? = nil, organizationName: String? = nil,
+        organizationID: String? = nil
     ) {
         self.railId = railId
         self.mode = mode
@@ -174,6 +179,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         self.recipientUnavailable = recipientUnavailable
         self.recipientRefCheck = recipientRefCheck
         self.organizationName = organizationName
+        self.organizationID = organizationID
     }
 }
 

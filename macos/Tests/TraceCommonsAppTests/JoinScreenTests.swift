@@ -12,6 +12,41 @@ import XCTest
 /// house pattern for a SwiftUI view.
 @MainActor
 final class JoinScreenTests: XCTestCase {
+    func test_organizationPreparationRequiresAnAuthenticatedUnfinishedJoin() {
+        var state = FirstRunState()
+        state.step = .join
+        XCTAssertFalse(JoinScreenLayout.canPrepareOrganization(state, isCommitting: false, completed: false))
+        state.account = .nearAI
+        XCTAssertFalse(JoinScreenLayout.canPrepareOrganization(state, isCommitting: false, completed: false))
+        state.signedIn = true
+        XCTAssertTrue(JoinScreenLayout.canPrepareOrganization(state, isCommitting: false, completed: false))
+        XCTAssertFalse(JoinScreenLayout.canPrepareOrganization(state, isCommitting: true, completed: false))
+        XCTAssertFalse(JoinScreenLayout.canPrepareOrganization(state, isCommitting: false, completed: true))
+        state.step = .privateAI
+        XCTAssertFalse(JoinScreenLayout.canPrepareOrganization(state, isCommitting: false, completed: false))
+    }
+
+    func test_singleOrganizationWaitsForMetadataAndStartsOnlyOnce() throws {
+        let copy = try coreCopy()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let grant = try XCTUnwrap(AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: dir.path)))
+        let state = FirstRunState(step: .join, account: .nearAI, enrolledInvite: "INVITE-1", signedIn: true)
+        let required = ConsentScope(name: "debugging_evaluation", title: "Debugging", description: "",
+                                    alwaysOn: true, grantsDataUse: true)
+        func ready(scope: ConsentScope?, attempted: Bool = false, organizationReady: Bool = true) -> Bool {
+            JoinScreenLayout.canAutomaticallyStart(
+                state, organizationReady: organizationReady, attempted: attempted, starting: false,
+                uses: copy.uses, requiredScope: scope, grant: grant, isCommitting: false, completed: false)
+        }
+        // Organization verification can finish before the daemon's consent metadata arrives.
+        XCTAssertFalse(ready(scope: nil))
+        XCTAssertTrue(ready(scope: required))
+        XCTAssertFalse(ready(scope: required, attempted: true))
+        XCTAssertFalse(ready(scope: required, organizationReady: false))
+    }
+
     private func coreCopy() throws -> FirstRunCopy {
         try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
     }
