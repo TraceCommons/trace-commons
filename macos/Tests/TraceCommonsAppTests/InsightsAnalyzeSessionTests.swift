@@ -7,7 +7,7 @@ import TCShellCore
 /// Analyze & save on a watched trace (Insights PM, 2026-10-21: terminal
 /// users never see their trace files): the daemon analyzes and saves the
 /// trace its watcher found, and the saved snapshot opens in Analyze. Analyze
-/// itself picks no file.
+/// keeps its own Choose file for when Sessions cannot offer it.
 final class InsightsAnalyzeSessionTests: XCTestCase {
     /// The daemon's answer around the core's `analyze` response.
     private static func answer(_ analysis: [String: Any]?, enabled: Bool = true,
@@ -147,22 +147,25 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
 
     // MARK: Sources
 
-    /// Analyze picks no file: no source picker, no Choose file, and the
-    /// app's one open panel picks folders only.
+    /// Choose file stays on Analyze whatever Sessions offers: it is the one
+    /// way to add a trace with counting off, without a daemon, with a
+    /// custom store or in sample data. The line under the title names a
+    /// button on screen: Analyze & save only while Sessions offers it.
     @MainActor
-    func testAnalyzeHasNoFilePicker() throws {
+    func testAnalyzeKeepsChooseFileAndNamesOnlyButtonsOnScreen() throws {
         let view = try MonitorNavigationTests.text("Views/InsightsView.swift")
-        XCTAssertFalse(view.contains("chooseTraceFile"))
-        XCTAssertFalse(view.contains("\"choose_file\""))
-        XCTAssertFalse(view.contains("model.text(\"source\")"))
-        XCTAssertFalse(view.contains("model.analyze(file:"))
-        XCTAssertFalse(view.contains(".fileImporter("))
-        XCTAssertTrue(view.contains("\"analytics_analyze_empty\""))
-        let panel = try MonitorNavigationTests.text("Views/FolderPanel.swift")
-        XCTAssertFalse(panel.contains("chooseTraceFile"))
-        XCTAssertFalse(panel.contains("TraceFileStart"))
-        XCTAssertFalse(panel.contains("canChooseFiles = true"))
-        XCTAssertEqual(panel.components(separatedBy: "NSOpenPanel()").count - 1, 1)
+        XCTAssertTrue(view.contains("FolderPanel.chooseTraceFile(source: source)"))
+        XCTAssertTrue(view.contains("model.text(\"choose_file\")"))
+        XCTAssertTrue(view.contains("model.text(\"source\")"))
+        XCTAssertTrue(view.contains("model.analyze(file: file, source: source)"))
+        XCTAssertTrue(view.contains("model.canAnalyzeSessions && model.weekFeed == .counterPass"))
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: true, sessions: true), "analytics_analyze_empty")
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: false, sessions: true), "analytics_analyze_how")
+        XCTAssertEqual(InsightsView.analyzeHeadKey(empty: true, sessions: false), "empty")
+        XCTAssertNil(InsightsView.analyzeHeadKey(empty: false, sessions: false))
+        let copy = try XCTUnwrap(TCInsights.copy())
+        XCTAssertTrue(copy["empty", default: ""].contains("Choose a file"))
+        XCTAssertFalse(copy["empty", default: ""].contains("Analyze & save"))
     }
 
     /// The open Sessions row carries the action, which asks the daemon to

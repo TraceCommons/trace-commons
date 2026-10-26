@@ -46,24 +46,23 @@ The answers come from the user's own sessions, on their own machine.
 
 ## What's happening with Analyze
 
-Analyze used to ask you to **pick a session file by hand** (`~/.claude/projects/<folder>/<id>.jsonl`). Terminal users never see these files, so **that flow is now removed** from this branch. The "Choose file" button and the "Source format" menu are gone.
-
-It's replaced by **"Analyze & save" on a watched session in Insights > Sessions**. Open a row and press the button.
+Analyze asks you to **pick a session file by hand** (`~/.claude/projects/<folder>/<id>.jsonl`). Terminal users never see these files, so there's now a second way in: **"Analyze & save" on a watched session in Insights > Sessions**. Open a row and press the button.
 - The daemon finds that session's file among the sessions it already watches, runs the same analysis, and saves it.
 - Analyze then opens the saved result, with its assessment and evidence.
 - It never runs on Never folders, nothing goes over the network, and no file path is sent to the app.
-- Analyze's empty state now says: "Open a trace in Sessions and choose Analyze & save."
+- A session the daemon can't analyze (over the core's size limit, or a Codex file without exactly one session) says so in place of the button.
+
+**"Choose file" stays.** Analyze & save needs watched-folder counting, which is off by default, a running daemon and the standard store. Without them (and in sample data mode) Choose file is the only way to add a trace, so it's always on Analyze. The line under Analyze's title names only buttons you can see: "Open a trace in Sessions and choose Analyze & save" only while Sessions offers it, otherwise the old "Choose a file to analyze".
 
 Known gaps:
 - With a custom `--insights-store` the button is hidden, because the daemon writes only the standard store.
-- The GTK client still has its own file picker.
 - The button hasn't been tried in the running app with real data yet. In sample data mode the button is not offered, so use real data to try it.
 
 ## Running it
 
-This build is meant to be tried in **sample data mode**. The Models card is then filled with sample answers, so every state can be seen without months of real sessions. Sample mode is a launch switch in debug builds, not a code change. In sample mode the Sessions labels say "not available", because the sample has no watched sessions.
+This build is meant to be tried in **sample data mode**. The Models card is then filled with sample answers, so every state can be seen without months of real sessions. Sample mode is a launch switch in debug builds, not a code change. In sample mode Sessions shows the sample's saved traces, not watched sessions, so no Task or Outcome labels are drawn. Use real data with counting on to try them.
 
-Analyze is filled in sample mode too: five saved snapshots from the sample week (three Claude Code, two Codex) with their models, three assessed and one with a linked commit and test report, the saved history summary for them, and one group of two snapshots with its assessment. Nothing you do there is kept. Saving an assessment, linking evidence, deleting a snapshot or changing the group is answered with the sample unchanged. Making a new group, comparison tasks and Analyze & save aren't available in sample mode. None of this touches your real saved analyses.
+Analyze is filled in sample mode too: five saved snapshots from the sample week (three Claude Code, two Codex) with their models, three assessed and one with a linked commit and test report, the saved history summary for them, and one group of two snapshots with its assessment. Nothing you do there is kept. Saving an assessment, linking evidence, deleting a snapshot or changing the group is answered with the sample unchanged. Making a new group, comparison tasks, saving a chosen file and Analyze & save aren't available in sample mode. Choosing a file shows its analysis without saving it, and the question cards read your real store. None of this touches your real saved analyses.
 
 ```bash
 cd macos
