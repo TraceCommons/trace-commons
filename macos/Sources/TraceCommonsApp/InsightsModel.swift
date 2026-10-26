@@ -26,6 +26,10 @@ final class InsightsModel {
     typealias ModelAnswersReader = @Sendable () async throws -> DaemonData.InsightsModelAnswers
     private let modelAnswersReader: ModelAnswersReader?
     private var modelAnswersGeneration = UUID()
+    /// A `refreshModelAnswers()` read is under way, and one more was asked
+    /// for meanwhile.
+    private var modelAnswersReading = false
+    private var modelAnswersAskedAgain = false
     /// Asks the daemon to analyze and save one watched trace by its
     /// Sessions reference (`insights_analyze_session`). `nil` without a
     /// daemon, and for a custom store, which the daemon never writes.
@@ -144,6 +148,25 @@ final class InsightsModel {
         guard modelAnswersGeneration == generation else { return }
         modelAnswers = answers.flatMap { $0.showsCounterPass ? $0 : nil }
     }
+    /// Read the Models card's answers again: as Overview appears, and
+    /// after a label is saved, since the person's labels change them. One
+    /// read at a time; asked while one is under way, it reads once more
+    /// after it, so a label saved meanwhile is counted. A failed read takes
+    /// the card away only until the next one.
+    func refreshModelAnswers() {
+        guard modelAnswersReader != nil else { return }
+        guard !modelAnswersReading else { modelAnswersAskedAgain = true; return }
+        modelAnswersReading = true
+        Task { [weak self] in
+            await self?.loadModelAnswers()
+            guard let self else { return }
+            self.modelAnswersReading = false
+            if self.modelAnswersAskedAgain {
+                self.modelAnswersAskedAgain = false
+                self.refreshModelAnswers()
+            }
+        }
+    }
     private func showSavedFeed(notice: Bool) {
         weekFeed = .saved; counterWeek = nil
         counterPassNoticeKey = notice ? FeedLineKey.counterPassUnavailable : nil
@@ -154,12 +177,12 @@ final class InsightsModel {
         perform(.init("copy"))
         refreshEpisodes()
         if weekReader != nil { Task { [weak self] in await self?.loadWeek() } }
-        if modelAnswersReader != nil { Task { [weak self] in await self?.loadModelAnswers() } }
+        // The Models card's answers are read as Overview appears.
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
         analyzingSession = nil; sessionAnalyzeFailure = nil
-        weekGeneration = UUID(); modelAnswersGeneration = UUID()
+        weekGeneration = UUID(); modelAnswersGeneration = UUID(); modelAnswersAskedAgain = false
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
         cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
         cardResult = nil; cardText = nil; cardError = nil
@@ -1281,13 +1304,26 @@ final class InsightsSessionsModel {
     /// put back if that newest write fails.
     private var labelWrites: [String: (latest: Int, base: RowLabels)] = [:]
     private var labelCount = 0
+    /// Each row's labels as last shown here (chosen, answered or put back),
+    /// with the `labelClock` tick they were shown at. A list read that
+    /// started before that tick, or while a write to the row is
+    /// unanswered, is older than them, so they are put over its rows.
+    private var labelsShown: [String: (labels: RowLabels, at: Int)] = [:]
+    private var labelClock = 0
+    /// The last label write asked for: each waits for the one before, so
+    /// the daemon applies one row's writes in the order they were made.
+    private var labelTail: Task<Void, Never>?
     /// Rows whose newest label could not be saved: each shows its labels as
-    /// they were, with the core's line, until it is labelled again.
+    /// they were, with the core's line, until it is labelled again or the
+    /// list no longer lists it.
     private(set) var labelFailed: Set<String> = []
     /// A label write is waiting for the daemon.
     var savingLabels: Bool { !labelWrites.isEmpty }
     /// The watched rows can be labelled: a daemon client is wired.
     var canLabel: Bool { watchedLabel != nil }
+    /// Called each time the daemon saves a label, so what reads the labels
+    /// (the Models card) can read again.
+    var labelSaved: (@MainActor () -> Void)?
     private var task: Task<Void, Never>?
     private var listTask: Task<Void, Never>?
     private var pageTask: Task<Void, Never>?
@@ -1369,10 +1405,11 @@ final class InsightsSessionsModel {
         writeLabel(reference, task: .keep, outcome: outcome.map { .set($0) } ?? .clear)
     }
 
-    /// Shows the change at once, then writes it. The daemon's answer is the
-    /// row as it now lists it; a write that fails puts the row's labels back
-    /// as the daemon last said them. Only the newest write to a row decides
-    /// what it shows; an older one's answer only moves what is put back.
+    /// Shows the change at once, then writes it, after any write asked for
+    /// before it. The daemon's answer is the row as it now lists it; a
+    /// write that fails puts the row's labels back as the daemon last said
+    /// them. Only the newest write to a row decides what it shows; an
+    /// older one's answer only moves what is put back.
     private func writeLabel(_ reference: String, task: DaemonData.InsightsLabelChange,
                             outcome: DaemonData.InsightsLabelChange) {
         guard let watchedLabel, let index = watched?.firstIndex(where: { $0.sessionRef == reference }),
@@ -1385,7 +1422,10 @@ final class InsightsSessionsModel {
         Self.apply(task, to: &row.userTask)
         Self.apply(outcome, to: &row.userOutcome)
         watched?[index] = row
-        Task { [weak self] in
+        showLabels(of: row)
+        let previous = labelTail
+        labelTail = Task { [weak self] in
+            await previous?.value
             let result: Result<DaemonData.InsightsSessionLabelAnswer, Error>
             do { result = .success(try await watchedLabel(reference, task, outcome)) } catch { result = .failure(error) }
             self?.answered(reference, number: number, result)
@@ -1400,6 +1440,7 @@ final class InsightsSessionsModel {
            let row = answer.session, row.sessionRef == reference {
             saved = row
         }
+        if saved != nil { labelSaved?() }
         guard pending.latest == number else {
             // A newer write to this row is under way and decides what it
             // shows; this one only moves what a failure would put back.
@@ -1411,18 +1452,53 @@ final class InsightsSessionsModel {
         labelWrites[reference] = nil
         if let saved {
             replaceRow(reference) { $0 = saved }
+            showLabels(of: saved)
             return
         }
         replaceRow(reference) { row in
             row.userTask = pending.base.task
             row.userOutcome = pending.base.outcome
         }
+        labelsShown[reference] = (pending.base, tickLabels())
         labelFailed.insert(reference)
         if case .failure(let error) = outcome, Self.isUnknownReference(error) {
             // Made again since its page was read (its file grew), or
             // dropped: read the loaded range again, as a drill does.
             refresh(dropping: nil)
         }
+    }
+
+    private func tickLabels() -> Int { labelClock += 1; return labelClock }
+
+    private func showLabels(of row: DaemonData.InsightsWatchedSession) {
+        labelsShown[row.sessionRef] = (RowLabels(task: row.userTask, outcome: row.userOutcome), tickLabels())
+    }
+
+    /// `rows` from a list read that started at label tick `since`, with the
+    /// labels shown here since then, or still being written, put over
+    /// them: a read under way while a label was saved would otherwise put
+    /// the old label back.
+    private func withShownLabels(_ rows: [DaemonData.InsightsWatchedSession],
+                                 since: Int) -> [DaemonData.InsightsWatchedSession] {
+        rows.map { row in
+            guard let shown = labelsShown[row.sessionRef],
+                  shown.at > since || labelWrites[row.sessionRef] != nil else { return row }
+            var row = row
+            row.userTask = shown.labels.task
+            row.userOutcome = shown.labels.outcome
+            return row
+        }
+    }
+
+    /// After the list is replaced by a read that started at tick `since`:
+    /// its rows are the daemon's word for every label shown before then,
+    /// and a row it no longer lists keeps no mark.
+    private func settleLabels(listed rows: [DaemonData.InsightsWatchedSession], since: Int) {
+        let listed = Set(rows.map(\.sessionRef))
+        labelsShown = labelsShown.filter { reference, shown in
+            labelWrites[reference] != nil || (shown.at > since && listed.contains(reference))
+        }
+        labelFailed.formIntersection(listed)
     }
 
     private func replaceRow(_ reference: String, _ change: (inout DaemonData.InsightsWatchedSession) -> Void) {
@@ -1496,6 +1572,7 @@ final class InsightsSessionsModel {
         guard active, watched != nil, let cursor = nextCursor, !loadingMore, !listBusy,
               let watchedReader else { return false }
         let current = listToken
+        let labelsFrom = labelClock
         loadingMore = true
         pageFailed = false
         pageTask = Task { [weak self] in
@@ -1508,7 +1585,8 @@ final class InsightsSessionsModel {
             switch outcome {
             case .success(let page) where page.showsCounterPass:
                 let known = Set((self.watched ?? []).map(\.sessionRef))
-                let fresh = (page.sessions ?? []).filter { !known.contains($0.sessionRef) }
+                let fresh = self.withShownLabels((page.sessions ?? []).filter { !known.contains($0.sessionRef) },
+                                                 since: labelsFrom)
                 self.watched = (self.watched ?? []) + fresh
                 self.nextCursor = page.next
                 self.autoRetried = false
@@ -1555,6 +1633,7 @@ final class InsightsSessionsModel {
         let wanted = max(loaded.count, 1)
         listTask?.cancel(); pageTask?.cancel(); pageTask = nil; loadingMore = false
         listToken = UUID(); let current = listToken
+        let labelsFrom = labelClock
         listBusy = true
         listTask = Task { [weak self] in
             var rows: [DaemonData.InsightsWatchedSession] = []
@@ -1588,7 +1667,8 @@ final class InsightsSessionsModel {
                     if let first { self.showSaved(notice: first.enabled) }
                     return
                 }
-                self.watched = rows
+                self.watched = self.withShownLabels(rows, since: labelsFrom)
+                self.settleLabels(listed: rows, since: labelsFrom)
                 self.nextCursor = next
                 self.stamp = Self.stamp(first)
                 if next == nil { self.pageFailed = false; self.autoRetried = false }
@@ -1627,7 +1707,7 @@ final class InsightsSessionsModel {
         noticeKey = notice ? InsightsModel.FeedLineKey.counterPassUnavailable : nil
         if watched != nil {
             // A watched trace's figures never stay on the saved feed.
-            watched = nil; nextCursor = nil; pageFailed = false; autoRetried = false
+            watched = nil; nextCursor = nil; pageFailed = false; autoRetried = false; labelFailed = []
             token = UUID(); task?.cancel(); task = nil
             selected = nil; drill = nil; failed = false; drillBusy = false
         }
@@ -1639,6 +1719,7 @@ final class InsightsSessionsModel {
         guard active, let watchedReader else { return }
         listTask?.cancel(); pageTask?.cancel(); pageTask = nil; loadingMore = false
         listToken = UUID(); let current = listToken
+        let labelsFrom = labelClock
         listBusy = true
         listTask = Task { [weak self] in
             let outcome: Result<DaemonData.InsightsSessions, Error>
@@ -1647,7 +1728,8 @@ final class InsightsSessionsModel {
             self.listBusy = false
             switch outcome {
             case .success(let list) where list.showsCounterPass:
-                let rows = list.sessions ?? []
+                let rows = self.withShownLabels(list.sessions ?? [], since: labelsFrom)
+                self.settleLabels(listed: rows, since: labelsFrom)
                 let wasWatched = self.watched != nil
                 self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.autoRetried = false; self.stamp = Self.stamp(list); self.noticeKey = nil
                 if !wasWatched {

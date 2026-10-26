@@ -154,6 +154,9 @@ struct InsightsView: View {
                     },
                     showReads: { tab = .patterns },
                     showPatterns: { tab = .patterns })
+                // Each time, so labels set on Sessions since show, and one
+                // failed read hides the card only until the next.
+                .onAppear { model.refreshModelAnswers() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
@@ -171,6 +174,8 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        // A saved label changes the Models answers.
+        .onAppear { sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() } }
         .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)

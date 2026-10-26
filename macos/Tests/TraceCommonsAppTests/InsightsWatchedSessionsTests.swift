@@ -805,6 +805,109 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         model.close()
     }
 
+    /// A list read under way while a label is saved never puts the old
+    /// label back: the label shown is put over the rows it brings. A read
+    /// that starts after is the daemon's word again.
+    @MainActor
+    func testARefreshUnderWayNeverPutsAnOldLabelBack() async throws {
+        let daemon = WatchedRecorder(pages: [
+            nil: Self.pageJSON(first: 9, count: 3, next: "c1"),
+            "c1": Self.pageJSON(first: 6, count: 3, next: nil),
+        ])
+        let labels = LabelRecorder()
+        var saved = 0
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.labelSaved = { saved += 1 }
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        XCTAssertEqual(model.watched?.count, 6)
+
+        // Both pages are read again; the first is held until the label is
+        // saved.
+        await daemon.holdFirstPage()
+        model.rowNoLongerListed()
+        model.setOutcome("t8", to: "kept")
+        await settleLabels(model)
+        XCTAssertEqual(saved, 1, "a saved label asks the Models answers to be read again")
+        await daemon.releaseFirstPage()
+        await settle(model)
+        XCTAssertEqual(model.watched?.count, 6)
+        XCTAssertEqual(model.watched?.first { $0.sessionRef == "t8" }?.userOutcome, "kept",
+                       "the read under way does not put the unlabelled row back")
+
+        // This recorder's list never carries labels, so a read that
+        // starts now shows what it lists.
+        model.reload()
+        await settle(model)
+        XCTAssertNil(model.watched?.first { $0.sessionRef == "t8" }?.userOutcome)
+        model.close()
+    }
+
+    /// Writes to one row reach the daemon one at a time, in the order they
+    /// were made, so a later choice is never overwritten by an earlier one.
+    @MainActor
+    func testLabelWritesReachTheDaemonInOrder() async throws {
+        let daemon = WatchedRecorder(answer: .json(Self.rowsJSON([7, 5], next: nil)))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        await labels.hold()
+        model.setTask("t7", to: "docs")
+        model.setTask("t7", to: "tests")
+        model.setOutcome("t7", to: "kept")
+        for _ in 0..<20 { await Task.yield(); try await Task.sleep(for: .milliseconds(5)) }
+        var started = await labels.started
+        XCTAssertEqual(started, 1, "the second write waits for the first")
+        await labels.release()
+        await settleLabels(model)
+        started = await labels.started
+        XCTAssertEqual(started, 3)
+        let writes = await labels.writes
+        XCTAssertEqual(writes, ["t7 set(docs) keep", "t7 set(tests) keep", "t7 keep set(kept)"])
+        XCTAssertEqual(model.watched?.first?.userTask, "tests")
+        XCTAssertEqual(model.watched?.first?.userOutcome, "kept")
+        model.close()
+    }
+
+    /// A row's "couldn't be saved" mark goes once the list no longer lists
+    /// the row (made again under a new reference, or gone).
+    @MainActor
+    func testAFailedLabelsMarkGoesWithItsRow() async throws {
+        let daemon = WatchedRecorder(answer: .json(Self.rowsJSON([7, 5], next: nil)))
+        let labels = LabelRecorder()
+        let model = InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            watchedLabel: { try await labels.write($0, $1, $2) })
+        model.open()
+        model.showWatched(true)
+        await settle(model)
+        await labels.fail(with: .unreachable)
+        model.setOutcome("t7", to: "kept")
+        await settleLabels(model)
+        XCTAssertEqual(model.labelFailed, ["t7"])
+        await daemon.setPage(nil, Self.rowsJSON([9, 5], next: nil, revision: 11))
+        model.reload()
+        await settle(model)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t5"])
+        XCTAssertEqual(model.labelFailed, [], "no mark is kept for a row no longer listed")
+        model.close()
+    }
+
     /// Without a daemon client the rows draw no label controls.
     @MainActor
     func testNoLabelControlsWithoutTheDaemon() {
@@ -914,6 +1017,8 @@ private actor WatchedRecorder {
 /// answers the row with them, or throws while failing.
 private actor LabelRecorder {
     var writes: [String] = []
+    /// Writes that have reached the recorder, held or not.
+    var started = 0
     private var labels: [String: (task: String?, outcome: String?)] = [:]
     private var failure: DaemonDataError?
     private var holding = false
@@ -935,6 +1040,7 @@ private actor LabelRecorder {
 
     func write(_ reference: String, _ task: DaemonData.InsightsLabelChange,
                _ outcome: DaemonData.InsightsLabelChange) async throws -> DaemonData.InsightsSessionLabelAnswer {
+        started += 1
         if holding { await withCheckedContinuation { held.append($0) } }
         if let failure { throw failure }
         writes.append("\(reference) \(Self.word(task)) \(Self.word(outcome))")

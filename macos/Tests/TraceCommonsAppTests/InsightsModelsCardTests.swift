@@ -301,6 +301,39 @@ final class InsightsModelsCardTests: XCTestCase {
         XCTAssertNil(model.modelAnswers, "an earlier answer is not kept past a failed read")
     }
 
+    /// Overview appearing, or a label being saved, reads the answers again:
+    /// a failed read hides the card only until the next one, and a read
+    /// asked for while one is under way runs once more after it.
+    @MainActor
+    func testARefreshReadsAgainAndShowsTheCardAfterAFailedRead() async throws {
+        let answers = try Self.recorded()
+        let reader = FlipModelAnswers(answers: answers)
+        let model = model({ try await reader.read() })
+        await reader.breakIt()
+        model.refreshModelAnswers()
+        try await waitForReads(reader, 1)
+        XCTAssertNil(model.modelAnswers)
+        await reader.mend()
+        model.refreshModelAnswers()
+        model.refreshModelAnswers()
+        model.refreshModelAnswers()
+        try await waitForReads(reader, 3)
+        for _ in 0..<50 where model.modelAnswers == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.modelAnswers, answers)
+        try await Task.sleep(for: .milliseconds(100))
+        let reads = await reader.reads
+        XCTAssertEqual(reads, 3, "asked three times during one read: one more read after it, not two")
+    }
+
+    @MainActor
+    private func waitForReads(_ reader: FlipModelAnswers, _ count: Int) async throws {
+        for _ in 0..<200 {
+            if await reader.reads >= count { try await Task.sleep(for: .milliseconds(20)); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("the answers were not read \(count) times")
+    }
+
     /// The window builds its model with the daemon's reader and passes the
     /// answers to the Overview tab, which draws the card.
     func testTheWindowWiresTheCardToTheDaemon() throws {
@@ -311,6 +344,8 @@ final class InsightsModelsCardTests: XCTestCase {
         XCTAssertTrue(window.contains("{ @Sendable in try await client.insightsModelAnswers() }"))
         XCTAssertTrue(window.contains("modelAnswersReader: modelAnswersReader"))
         XCTAssertTrue(window.contains("models: model.modelAnswers,"))
+        XCTAssertTrue(window.contains(".onAppear { model.refreshModelAnswers() }"))
+        XCTAssertTrue(window.contains("sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() }"))
         let overview = try String(contentsOf: root.appendingPathComponent("InsightsOverviewTab.swift"), encoding: .utf8)
         XCTAssertTrue(overview.contains("if let models { InsightsModelsCard(answers: models, copy: copy) }"))
     }
@@ -319,9 +354,12 @@ final class InsightsModelsCardTests: XCTestCase {
 private actor FlipModelAnswers {
     let answers: DaemonData.InsightsModelAnswers
     var broken = false
+    var reads = 0
     init(answers: DaemonData.InsightsModelAnswers) { self.answers = answers }
     func breakIt() { broken = true }
+    func mend() { broken = false }
     func read() throws -> DaemonData.InsightsModelAnswers {
+        reads += 1
         if broken { throw DaemonDataError.unreachable }
         return answers
     }
