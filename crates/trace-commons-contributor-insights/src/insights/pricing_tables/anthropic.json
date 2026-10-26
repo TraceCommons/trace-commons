@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "table_id": "sha256:97aeb32f2fa47f4b9f20c3653e71a2855ecf546753bb4559dcefeb5390336107",
+  "table_id": "sha256:be28771d884edcf6a26a3a5147dcc05cc01a7001d24141be756676a43273d184",
   "version": 1,
   "currency": "usd",
-  "published_at": "2026-10-21T15:16:38Z",
+  "published_at": "2026-10-26T10:56:33Z",
   "provenance": {
     "publisher": "Anthropic",
     "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
-    "retrieved_at": "2026-10-21T15:16:38Z",
-    "content_sha256": "sha256:aecd8a453904d60173d2c777f87b6cf8593831b16ad7ca7a65af16bf75f979bd",
-    "reviewed_by": "Pending owner review",
-    "reviewed_at": "2026-10-21T15:16:38Z",
-    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before retrieved_at.",
-    "source_notes": "Page bytes change on every docs build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Model ids come from the models overview (current models) and model deprecations (older, dated ids) pages."
+    "retrieved_at": "2026-10-26T10:53:51Z",
+    "content_sha256": "sha256:98eccce13453cddbebf8cabffd33a430ab2ec5e1a0c22ce258d7797838380a41",
+    "reviewed_by": "Kristi Poldsam (poldsam)",
+    "reviewed_at": "2026-10-26T10:56:33Z",
+    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before the first fetch, 2026-10-21.",
+    "source_notes": "Page bytes change on every docs build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Model ids come from the models overview (current models) and model deprecations (older, dated ids) pages. The owner-review refetch at retrieved_at found every rate unchanged from the first fetch, 2026-10-21T15:16:38Z."
   },
   "entries": [
     {

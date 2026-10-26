@@ -1,11 +1,13 @@
 //! Immutable local pricing-table catalog.
 //!
 //! The production catalog ships two list-price tables, one per source page,
-//! embedded at build time: no runtime fetch. Both await the owner's review
-//! (`reviewed_by` reads "Pending owner review" until then). This module
-//! performs no network access, persistence, or provider inference.
+//! embedded at build time: no runtime fetch. The owner checked every rate
+//! in both against the live pages on 2026-10-26 (UTC) and found none
+//! changed; that refetch is each table's `retrieved_at` and
+//! `content_sha256`. This module performs no network access, persistence,
+//! or provider inference.
 //!
-//! How each table was taken, on 2026-10-21 (UTC), 15:16:38Z:
+//! How each table was first taken, on 2026-10-21 (UTC), 15:16:38Z:
 //!
 //! - Anthropic (version 1): `source_url` is where the docs pricing page
 //!   redirected; `content_sha256` hashes the raw bytes fetched there, which
@@ -39,8 +41,9 @@
 //! not the hash against a refetch.
 //!
 //! Neither page dates its rates, so every `effective_from` is the start of
-//! the 13-week Insights window before the fetch (the Monday, 00:00 UTC),
-//! as `provenance.effective_from_basis` says; an older turn is unpriced.
+//! the 13-week Insights window before the first fetch (the Monday, 00:00
+//! UTC), as `provenance.effective_from_basis` says; an older turn is
+//! unpriced. The review refetch found the same rates, so it kept that start.
 //! The one dated statement is the OpenAI page's footnote, "GPT-5.6 Sol's
 //! promotional pricing is available at least through November 21, 2026":
 //! both gpt-5.6-sol entries end at 2026-11-22T00:00:00Z (`effective_until`
@@ -271,11 +274,11 @@ impl PricingCatalog {
 pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     (
         1,
-        "sha256:97aeb32f2fa47f4b9f20c3653e71a2855ecf546753bb4559dcefeb5390336107",
+        "sha256:be28771d884edcf6a26a3a5147dcc05cc01a7001d24141be756676a43273d184",
     ),
     (
         2,
-        "sha256:4db3deaea1a0cc607167214169643e036e23c70dfe236ac5964cb0b3da62cec9",
+        "sha256:174b7e4fe9d1299f7f3f96e0a9335a44cbbfb19e629a6f3e44810868c77160fe",
     ),
 ];
 
