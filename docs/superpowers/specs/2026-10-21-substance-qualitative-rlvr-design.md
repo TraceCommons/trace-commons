@@ -14,8 +14,8 @@ tests on that corpus that show how much each assumption moves the score
 
 The design targets one buyer: the reinforcement learning lab that post-trains
 agents (the RLVR lab, section 4). It is model-free. It reads the trace
-envelope, the witness class that the server stored at upload, and fixed
-constants. It runs no model and makes no remote call.
+envelope, the stored witness class as the Score step reads it (section 5.3),
+and fixed constants. It runs no model and makes no remote call.
 
 ## 1. Why: substance is a proxy for value
 
@@ -75,7 +75,8 @@ State these limits before the model, so a reader does not over-trust it.
   inference through NEAR AI, and attested bodies travel only when the
   contributor shares tool payloads. The requirement is off by default, because
   turning it on would refuse every trace from Claude Code, Codex, Gemini, and
-  Cline. So `v` is 0 for most traces now (section 5.3).
+  Cline. Pipeline receipts also store no witness evidence yet. So `v` is 0 for
+  every pipeline trace now (section 5.3).
 - The market numbers are secondary. No primary rate card exists. The research
   reads trade press and vendor pages (section 3). Treat the figures as
   directional.
@@ -151,13 +152,31 @@ link is the designer's inference. Section 7 states how to check it.
 ## 5. The model
 
 Substance is a pure function of the envelope and the witness class that the
-server stored at upload (section 5.3). It returns one number in `[0, 1]`. It
-reads one projection of the envelope, not the raw bytes:
+Score step reads (section 5.3). It returns one number in `[0, 1]`. It reads one
+projection of the envelope, not the raw bytes: the deduplicated tool calls. The
+work term and the replay shares read this projection. It uses the replay rules
+of the protocol crate, so it reads the same payload fields as the protocol's
+replay-sufficiency measure. Those rules are private today, and this design
+makes them public helpers of the protocol crate (section 8.2):
 
-- Deduplicated tool calls. Each `tool_call`'s arguments serialized as canonical
-  JSON, with calls identical by (`tool_name`, arguments) collapsed to one. The
-  work term and the replay shares read this, so an exact repeat earns nothing
-  extra; a near-duplicate with a varied argument still counts (section 2).
+- Arguments. A call's arguments are the first populated value under one of the
+  protocol's argument keys in its `structured_payload` (the new helper
+  `tool_call_arguments`).
+  The `tool_call_id` and the other payload keys are not arguments. A call with
+  no such value carries no arguments.
+- Deduplication. Calls with the same `tool_name` and the same arguments,
+  serialized as canonical JSON, collapse to one group. So an exact repeat earns
+  nothing extra, and a near-duplicate with a varied argument still counts
+  (section 2). Withheld calls of one tool carry no arguments, so they collapse
+  to one group.
+- Results. A `tool_result` carries a result when the protocol's
+  `event_carries_result` holds: it has non-empty content, or a populated value
+  under one of the protocol's result keys in its payload. It matches a call by
+  `tool_call_id` when both carry one, else by its `parent_event_id`. Each result
+  matches one call at most. A group carries a result when any of its calls has
+  a match. Here substance differs from the protocol's replay measure, which
+  pairs a result that has no call id with the next call in order. Substance
+  pairs a result that has neither id with no call.
 
 Two helper functions, each used below:
 
@@ -173,9 +192,8 @@ machine-observable trajectory of real actions (section 3.2).
 
 From the deduplicated tool-call projection:
 
-- `paired_calls`: `tool_call` events that carry arguments and that have a
-  matching `tool_result` with non-empty content. The match is by `tool_call_id`,
-  else by the result's `parent_event_id`.
+- `paired_calls`: deduplicated calls that carry arguments and a result
+  (section 5).
 - `distinct_tools`: distinct `tool_name` over the paired calls.
 
 ```
@@ -209,9 +227,8 @@ replay = w_hp * has_initial_prompt + w_sa * share_args + w_sr * share_results
 
 `has_initial_prompt` is 1 when the trace holds an initial prompt with content.
 `share_args` is the share of deduplicated tool calls that carry arguments.
-`share_results` is the share of deduplicated tool calls that carry a result: a
-matching `tool_result` with non-empty content, the same match as a paired call
-(section 5.1). When the trace has zero tool calls, `share_args` and
+`share_results` is the share of deduplicated tool calls that carry a result
+(section 5). When the trace has zero tool calls, `share_args` and
 `share_results` are 0, not full credit. So a tool-free trace earns at most the
 prompt share, `w_hp`, on replay. This is deliberate: a trace with no tool call
 cannot replay a trajectory, so it must not earn full replay.
@@ -241,9 +258,10 @@ inference. It is not a measure of proven value, because the receipt covers the
 final call only (section 2).
 
 `v` is 1 when the trace's `witness_provenance_class` is
-`provider_tee_final_call` or `gateway_final_call`, else 0. Both classes are
-final-call receipts verified against pinned signers. `v` is 0 for most traces
-today (section 2).
+`provider_tee_final_call` or `gateway_final_call`, else 0. The else case covers
+`unattested` and `legacy_v1`, a certificate of the older format. Both attested
+classes are final-call receipts verified against pinned signers. `v` is 0 for every
+pipeline trace today (section 2).
 
 The two classes prove different things. A provider-TEE receipt comes from the
 Chat Completions API: it names the model, and that model's key signs it. A
@@ -256,12 +274,42 @@ through the gateway.
 The class is not in the envelope, because a contributor could set a field
 there. The witness signs a certificate that states the class. The contributor's
 client uploads it beside the envelope, and the server verifies it at upload and
-stores the class. The Score stage reads the stored class once per trace, with
-the same read that the provenance labels use. That read returns `unattested`
-for a trace that is revoked, purged, expired, or not accepted, and for a trace
-whose stored envelope no longer matches the certificate. So such a trace loses
-the weight on a rescore. The evidence records the class (section 8.1), so a score
-is reproducible from the envelope, the bundle, and that recorded class.
+stores it with the class.
+
+The input of `v` is the stored class, read at Score time, not at upload.
+Before it calls the Score policy, the pipeline's Score step reads the
+class for the run's submission with the store read that the credit provenance
+label uses (`list_current_verified_witness_evidence`, mapped by
+`TraceWitnessProvenanceClass::from_claim`). It passes the class to the policy
+in a new `ScoreInput` field, `witness_class`, which is empty when the step does
+not read the class. A submission with no stored
+evidence reads `unattested`. A read error fails the Score attempt, which
+retries; it never falls back to `unattested`. The step reads the class only
+for a substance package whose configuration says so (below), so the
+compatibility family gets no new query and no new failure mode.
+
+The read gives `unattested` when, at Score time, the submission is not
+accepted, is revoked or purged, is past its retention date, or its stored
+envelope no longer matches the certificate. Each case takes the trace out of
+the live corpus or breaks its link to the certificate, so the weight ends with
+it. The certificate itself has no expiry in this read, so a run that waits in
+the queue keeps the weight while its submission is live. The evidence records
+the class that the policy used (section 8.1), so a score is reproducible from
+the envelope, the bundle, and that recorded class.
+
+Pipeline receipts store no witness evidence today. The submit handler verifies
+the certificate, but only the legacy upload path stores it, so every
+pipeline-routed trace reads `unattested`. The weight can apply only after the
+pipeline receipt stores the verified evidence in its own transaction, as the
+legacy path does.
+
+So the substance Score configuration holds `witness_source`, which says whether
+the Score step reads the class. With `not_read`, the step reads nothing, and
+the policy scores every trace as `unattested` and records that class. With
+`stored`, the step reads the class as above. The bundle id hashes the choice,
+so a package keeps its scores when a later package reads the class. The first
+release uses `not_read`. Until pipeline receipts store the evidence, it gives
+the same result as the read for every pipeline trace.
 
 ```
 attest = graded(v, att_floor_mult)
@@ -275,9 +323,10 @@ The score reads the class. This changes the label-only contract of V89 (#1061,
 earned-trust decision 5), which says that the provenance class weights no gate,
 score, or credit amount. Decision 5 is already reversed for account trust
 (2026-10-11), so the contract holds for gates, scores, and credit amounts. This
-design removes scores from it. The comment on `witness_provenance_classes` in
-the ingest service and the contract text in `docs/trace-commons.md` change with
-it.
+design removes scores from it. The comments on `witness_provenance_classes` in
+the ingest service and on `TraceWitnessProvenanceClass`, and the contract text
+in `docs/trace-commons.md`, change with it. The V89 migration header stays as
+the record of the original contract.
 
 ### 5.4 Composite, credit quality, and gate
 
@@ -352,7 +401,7 @@ Every value is provisional: a real buyer signal revises it (section 7).
 | `sub_ceil` | calibrated: 90th percentile | Substance saturation ceiling in `q`. At the 90th percentile of substance over the pinned corpus, the top tenth of real traces gets full substance credit, and the rest spread across the curve. The percentile is a judgment. |
 | `sub_floor_mult` | 0.25 | Substance floor in `q`. |
 | `att_floor_mult` | 0.90 | Attestation weight floor inside substance. An attested trace scores about 11 percent above the same trace unattested (1.0 against 0.9): "slightly higher," as the design intends. |
-| `substance_floor` | calibrated: owner decision | The pass threshold. The owner sets its percentile from the distribution report (section 11). A floor at percentile p fails p percent of the pinned corpus by construction. |
+| `substance_floor` | calibrated: owner decision | The pass threshold. The owner sets its percentile from the distribution report (section 11). A floor at percentile p fails at most p percent of the pinned corpus. Tied scores make it fail fewer, and every tool-free trace with a prompt has the same score. |
 
 Every parameter lives in the bundle configuration. The bundle id hashes them.
 The server never changes them at run time. A change to any parameter produces a
@@ -378,11 +427,12 @@ Calibration runs offline. It writes the calibrated values into the bundle
 configuration and produces a calibration report. The report records the corpus
 pin, the calibrated values, and the result of every check below. Two new
 `pipeline.py` commands do this (section 8.2). `pipeline.py dataset generate`
-builds the guardrail fixture of check 1 from the pinned corpus.
+builds the guardrail fixture of check 1 from the pinned corpus. Until the
+generator exists, check 1 runs on synthetic bases that the test code builds.
 `pipeline.py evaluate` scores a dataset with the substance bundle and writes the
 report. Neither runs a model, an embedder, or the index. Four checks apply.
 
-1. Fabrication regression guardrail. A synthetic benchmark pairs real base
+1. Fabrication regression guardrail. A synthetic benchmark pairs base
    traces with fabricated variants, one variant per base for each vector. For
    each pair, the variant must meet its expectation, and no variant may score
    above its base. The check is pairwise and per vector, not a pooled
@@ -421,7 +471,8 @@ provisional.
 
 ### 7.1 The guardrail recipe
 
-A base comes from the pinned corpus. It has at least one paired call, and every
+A base comes from the pinned corpus, or it is synthetic (section 7). It has at
+least one paired call, and every
 tool call in it is paired. So a variant that removes events can remove only real
 work, and every base scores above the floors, so a variant can score below it.
 The generator checks this structure; it never runs the score.
@@ -433,7 +484,7 @@ The generator checks this structure; it never runs the score.
 | Empty scaffold | `add_scaffold` | 20 `tool_call` events with no arguments and no results | not above |
 | Truncation | `truncate_half` | the second half of the events removed | not above |
 | Duplication | `duplicate_events` | the event list repeated once | not above |
-| Missing evidence | `strip_results` | every `tool_result` body removed | below |
+| Missing evidence | `strip_results` | every `tool_result` emptied: its content and its payload removed | below |
 | Asserted outcome | `assert_success_no_work` | all tool events removed, `task_success = success` | below |
 
 Noise padding and template filler tie their base, because substance reads no
@@ -470,21 +521,57 @@ the trace had no tool calls. A count above 0 with work at 0 means that no call
 was paired: the contributor withheld the tool payloads, or the capture lost
 them.
 
-`witness_provenance_class` records the stored witness class that set `v`
-(section 5.3). It lets an audit see which traces carried an attested final
-call, and it makes a rescore reproducible.
+`witness_provenance_class` records the class that set `v`: the stored class
+when `witness_source` is `stored`, and `unattested` when it is `not_read`
+(section 5.3). Under `stored`, it lets an audit see which traces carried an
+attested final call. Under either, it makes a rescore reproducible.
 
 `credit_quality_micros` and `credit_quality_version` are filled as today.
 
 The Settle step writes a row into the legacy gate-decision table,
-`trace_gate_decisions`, for every Score policy, and it fails the run closed
-when the evidence lacks six fields. Substance fills them: `quality_passed` is
-`substance_passed`; `novelty_score_micros`, `novelty_passed`, and
-`nearest_neighbor_hash` come from novelty, as today; `perplexity_micros` and
-`tail_fraction_micros` are a fixed sentinel of 0, because the family runs no
-scorer. The row carries the run id, its source, and the credit quality version,
-so a reader can tell a substance row from a perplexity row and never reads the
-sentinel as a perplexity.
+`trace_gate_decisions`, for every Score policy except the minimal reference
+policy, and it fails the run closed when the evidence lacks a required field.
+Substance fills the row: the evidence's `quality_passed`, which the row stores
+as `perplexity_passed`, is `substance_passed`, and `novelty_score_micros`,
+`novelty_passed`, and `nearest_neighbor_hash` come from novelty, as today.
+
+`perplexity_micros` and `tail_fraction_micros` are NULL on a substance row,
+because the family measures no perplexity. NULL means "not measured", as it
+already does for the per-author perplexity columns and
+`qualifying_token_fraction_micros` in the same table, and a reader must not
+default it. A migration removes NOT NULL from the two columns. Evidence
+validation refuses a partial set of the substance evidence fields, so they are
+all present or all absent, and Settle treats evidence that carries them as
+substance. The compatibility family still requires both values. Settle
+refuses a substance evidence that carries either one, with the label
+`pipeline_gate_decision_evidence_inconsistent`.
+
+A reader that uses a perplexity as a value reads only rows that have one:
+
+- The legacy signed score attestation, `trace_commons.score_attestation.v2`,
+  and the admin score read, `/v1/admin/scores-by-submission`, list only rows
+  with a perplexity, because a v2 entry requires one. A substance trace is
+  signed as `trace_commons.pipeline_score_attestation.v1` instead
+  (section 8.2).
+- The scoped form of the v2 attestation must account for every id that it is
+  asked about. It lists an owned submission that has a gate decision, but none
+  with a perplexity, in a new list, `scored_without_perplexity`, beside
+  `pending` and `unknown`. Without that list it would sign a substance-scored
+  trace as pending, and the contributor CLI, which waits until nothing is
+  pending, would wait until its timeout.
+- The tail-floor calibration and the gate outcome analysis skip NULL. So they
+  also skip the row of a substance run whose duplicate verdict withheld its
+  credit. That row carries no credit quality version, so a filter on the
+  version would miss it.
+- The legacy gate's duplicate cache copies the newest row for identical
+  content. It never picks a pipeline row, because a pipeline submission row has
+  no canonical summary hash. A copy would carry NULL, so it could not pass as a
+  perplexity either.
+
+A reader of the pass flag keeps substance rows, because the row's
+`perplexity_passed` is `substance_passed` by design. The account-trust rule
+counts it, and the public analytics summary counts a substance failure under
+its existing label, `perplexity_failed`.
 
 The new evidence fields are optional and are skipped when empty, so a
 compatibility outcome serializes byte-identically and stored hashes do not
@@ -497,11 +584,13 @@ move.
   `trace_commons.score.substance.v1`, and the rule id `substance_novelty_v1`.
   Admission, review, and settle reuse the compatibility ids.
 - Configuration. `SubstanceScoreConfig` holds the parameters of section 6,
-  `substance_version`, and the novelty configuration, which also gives the
-  novelty half of `q`. The bundle id hashes all of it. Calibration runs offline (section 7). The server never
-  fits or re-calibrates.
+  `substance_version`, `witness_source` (section 5.3), and the novelty
+  configuration, which also gives the novelty half of `q`. The bundle id hashes
+  all of it. Calibration runs offline (section 7). The server never fits or
+  re-calibrates.
 - Score policy. For each trace, in order: parse the reviewed envelope (a parse
-  failure is permanent); read the stored witness class (section 5.3); compute
+  failure is permanent); take the witness class, from `ScoreInput.witness_class`
+  when `witness_source` is `stored`, else `unattested` (section 5.3); compute
   the terms, the composite, and `substance_passed`; compute novelty with the
   existing compatibility code, moved behind one shared function; compute `q`;
   apply the compatibility rule for index membership and the award, with
@@ -513,10 +602,11 @@ move.
   with the embedder and the index, as today, with one change. The novelty
   aggregate weights each chunk by a token count, and today the perplexity
   scorer supplies that count when it scores the chunk. The substance family
-  calls no scorer, so the chunker supplies the count from its character
-  budget instead (4 characters per token, the estimate it already uses). So the
-  novelty weights of this family differ slightly from the compatibility
-  family's, and the novelty version changes with them.
+  calls no scorer, so the count comes from the chunk's length at 4 characters
+  per token, the estimate that the chunker already uses. So the novelty
+  weights of this family differ slightly from the compatibility family's. No
+  separate novelty version exists: the Score id, the bundle id, and
+  `substance_version` carry the change.
 - `substance_version` is one label over the formula and the projection. A
   change to any of them bumps the label and the bundle id.
 - New code lives in a new module,
@@ -525,31 +615,48 @@ move.
   generator is a subcommand of the `trace-commons-pipeline-corpus-export`
   binary, which already holds the pinned corpus loader. The `evaluate` driver
   is a library module run through an ignored test, the same shape as `run`
-  and `compare`. Both are driven from `scripts/operator/pipeline.py`.
-- The existing `q` consumers (contributor points, the contributor cap, the
-  account-trust rule, and the credit-estimate fit) read the legacy row, so
-  they see a substance `q` with no change to their readers. A consumer that
-  allowlists a credit quality version needs `cq4` added.
+  and `compare`. Both are driven from `scripts/operator/pipeline.py`. The
+  protocol crate makes its replay rules public: `event_carries_arguments`,
+  `event_carries_result`, `replay_call_id`, and the new `tool_call_arguments`
+  (section 5).
+- Contributor points, the contributor cap, and the account-trust rule read the
+  legacy row, so they see a substance `q` with no change to their readers. An
+  account-trust policy that sets a credit quality minimum must list version 4
+  in its allowlist. The credit-estimate fit learns credit amounts from version
+  3 rows only (owner decision E9). So a scored substance row stays out of it
+  until a separate `cq4` table is fit, and a withheld substance row counts in
+  its withheld share, as any withheld row does.
 - A pipeline-scored trace is signed as
-  `trace_commons.pipeline_score_attestation.v1`, which names the run, the
-  outcome, and the bundle, not the legacy `trace_commons.score_attestation.v2`.
-  Whether the signed outcome already carries `substance_micros`, or needs a
-  schema bump, is a plan-time check.
+  `trace_commons.pipeline_score_attestation.v1`, not the legacy
+  `trace_commons.score_attestation.v2` (section 8.1). Its entry names the
+  submission, the run, the Score outcome, the bundle, the scored award, and the
+  Score decision. It carries no Score evidence for any family, so
+  `substance_micros` is not signed and the schema does not change. Signing the
+  evidence is a separate change.
 
 ### 8.3 Tests
 
 - Golden tests: fixed envelopes and witness classes with pinned term values and
   composite, for each `substance_version`. A formula change breaks a pinned
   value and forces a version bump.
-- The guardrail contract: on the committed fixture, in CI, every pair meets its
+- The guardrail contract: on the committed fixture, or on the synthetic bases
+  until the fixture exists, in CI, every pair meets its
   expectation (section 7.1).
 - The compatibility baseline test
   (`compatibility_baseline_is_executable_and_detects_drift`) stays green, which
   shows that the evidence change is byte-neutral for that family.
 - Isolation: the substance-only `evaluate` run builds with no embedder and no
   index, which shows that substance reads neither.
-- Settle: the legacy row builds from substance evidence, so a substance run
-  settles and pays.
+- Settle: the legacy row builds from substance evidence, with NULL in both
+  perplexity columns, so a substance run settles and pays. A substance row
+  gives no v2 score attestation entry, no admin score entry, and no tail-floor
+  input, and the scoped v2 form lists it in `scored_without_perplexity`, not in
+  `pending`. Settle refuses compatibility evidence without the perplexity
+  fields and substance evidence with them.
+- Witness input, for a package whose `witness_source` is `stored`: a substance
+  Score of an attested submission gets its stored class, a revoked submission
+  gets `unattested`, and a failed read fails the attempt. With `not_read`,
+  every trace scores as `unattested`.
 - Qualification: the substance package passes `pipeline.py qualify`.
 
 ## 9. Learnings and changes from the earlier substance design
@@ -595,23 +702,27 @@ Changes:
 - Two value terms, work and replay. The write-action, outcome, and density terms
   are removed.
 - Replay gives no call-share credit to a trace with no tool calls.
-- Attestation enters substance as a light binary weight from the witness
-  provenance class that the server stored at upload. This removes scores from
-  the V89 label-only contract. It is an incentive to use attested inference.
+- Attestation enters substance as a light binary weight from the stored witness
+  provenance class, read at Score time. This removes scores from the V89
+  label-only contract. It is an incentive to use attested inference.
 - Set parameters are fixed by judgment. Only `sub_ceil` and `substance_floor`
   are calibrated on the pinned corpus, and a sensitivity analysis shows which
   assumptions move the score.
 - The fabrication vectors are a pairwise regression guardrail, not the
   acceptance criterion. The fit, the false-positive gate, the dumb-feature
   guard, the outcome join, and the `correct_failure` control are removed.
-- The evidence records the provenance class and the tool-call count. The score
+- The evidence records the provenance class and the tool-call count. The run
   is signed as `trace_commons.pipeline_score_attestation.v1`.
-- Substance reads one input beyond the envelope: the stored witness class.
+- Substance has one input beyond the envelope: the stored witness class, when
+  its configuration reads it.
 - The novelty aggregate weights chunks by the chunker's character estimate,
   not by the scorer's token count, because the family calls no scorer.
 - The family writes the legacy gate-decision row, as the compatibility family
-  does, so the existing `q` consumers need no change. The earlier design
-  planned a separate Stage 2 for them; it is dropped.
+  does, so contributor points, the contributor cap, and the account-trust rule
+  need no change. The earlier design
+  planned a separate Stage 2 for them; it is dropped. The row's perplexity
+  columns hold NULL, not a placeholder, so no reader takes a substance row for
+  a perplexity.
 
 What stays the same:
 
@@ -640,13 +751,15 @@ What stays the same:
 
 ## 11. Open owner decisions
 
-These decisions change the model and need an owner ruling before the plan.
+These decisions change the model and need an owner ruling before a substance
+package is promoted.
 
 - The `substance_floor` percentile. Set it from the distribution report
   (section 7, check 3). It also decides whether a tool-free trace passes: such
   a trace ranks low on work and earns at most the prompt share on replay
-  (section 5.4). A floor at percentile p fails p percent of the pinned corpus by
-  construction.
+  (section 5.4). A floor at percentile p fails at most p percent of the pinned
+  corpus. Every tool-free trace with a prompt has the same score, so where such
+  traces are common, many percentiles give the same floor.
 - The attestation weight. `att_floor_mult = 0.90` gives an attested trace about
   11 percent more substance. Confirm that this is the intended size, or set
   another.
