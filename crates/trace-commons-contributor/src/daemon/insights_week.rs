@@ -141,15 +141,18 @@
 //! labels and counts, joined here by the keyed harness-session digest
 //! (owner decision D15, extended to feed T). Never a session or project
 //! digest, a path, a message or session ID, a backend or model name, a price
-//! or a title. Each row also carries the same opaque `t{seq}` reference
-//! and resolved folder display label as the Sessions list, plus the latest
-//! recorded event time when available (activity, not completion). Nothing here
+//! or a title. Each row also carries its Sessions row's short `t{seq}`
+//! name (the reference the Sessions methods take adds the store's tag) and
+//! resolved folder display label, plus the latest recorded event time when
+//! available (activity, not completion). Nothing here
 //! is logged except fixed labels.
 //!
 //! The Sessions tab reads the same rows through `insights_sessions` and
 //! `insights_session_drill` (`daemon::insights_sessions`): each listed row
 //! carries an opaque reference (`t` and the order the row was made in, the
-//! engine's own `session_ref`), its harness, first event time, turn count
+//! engine's own `session_ref`, then `.` and the store's tag, so a reference
+//! from a store begun again names nothing), its harness, first event time,
+//! turn count
 //! and its folder's display label, resolved at answer time from the folder
 //! digest and never stored; the drill is the saved-snapshot drill's shape.
 //! Still never a digest, a path or a key.
@@ -418,12 +421,23 @@ impl CounterRow {
             )
     }
 
-    /// The opaque reference the Sessions methods name this row by: the
-    /// engine's own `session_ref`, the order the row was made in. Never a
+    /// The row's short name: the engine's own `session_ref`, `t` and the
+    /// order the row was made in, as the week's rows carry it. Never a
     /// digest or a path. A row read again when its file grew is made again
-    /// under a new one.
+    /// under a new one. The order begins again with the store, so the
+    /// Sessions methods name a row by [`Self::listed_reference`] instead.
     fn reference(&self) -> String {
         format!("t{}", self.seq)
+    }
+
+    /// The opaque reference the Sessions methods list and take: the short
+    /// name, `.`, and the tag of the store it was answered from
+    /// (`store_tag_of`), as the paging cursor names it. A store begun again
+    /// numbers its rows from `t0` again, so without the tag a reference
+    /// answered before would name another session now; with it, the
+    /// reference is refused as unknown ([`find_listed`]).
+    fn listed_reference(&self, store_tag: u64) -> String {
+        format!("{}.{store_tag}", self.reference())
     }
 
     /// The task the rules infer from the stored facts, re-run when they
@@ -2097,7 +2111,7 @@ impl CounterPass {
         );
         let sessions: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(session, row)| session_row_value(row, user_labels.get(*session), &labels))
+            .map(|(session, row)| session_row_value(row, tag, user_labels.get(*session), &labels))
             .collect();
         Ok(serde_json::json!({
             "enabled": true,
@@ -2145,10 +2159,7 @@ impl CounterPass {
             Err(reason) => return Ok(unreadable_value(reason)),
         };
         let never = never_digests(&key, never_project_keys);
-        let (session, row) = store
-            .rows
-            .iter()
-            .find(|(_, row)| is_listed(row, &never) && row.reference() == reference)
+        let (session, row) = find_listed(&key, &store, &never, reference)
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
         let label = {
             let mut slot = self.labels_slot();
@@ -2194,7 +2205,12 @@ impl CounterPass {
             "enabled": true,
             "feed": FEED_COUNTER_PASS,
             "readable": true,
-            "session": session_row_value(row, label.as_ref(), &folders),
+            "session": session_row_value(
+                row,
+                store_tag_of(&key, &store),
+                label.as_ref(),
+                &folders,
+            ),
         }))
     }
 
@@ -2212,23 +2228,12 @@ impl CounterPass {
             return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
         let (key, store) = match self.visible_store() {
-            Ok(found) => found,
+            Ok((Some(key), Some(store))) => (key, store),
+            Ok(_) => return Err(super::insights_sessions::ERR_SESSION_UNKNOWN),
             Err(reason) => return Ok(unreadable_value(reason)),
         };
-        let never = key
-            .as_ref()
-            .map_or(NeverDigests::These(BTreeSet::new()), |key| {
-                never_digests(key, never_project_keys)
-            });
-        let row = store
-            .as_ref()
-            .and_then(|store| {
-                store
-                    .rows
-                    .values()
-                    .filter(|row| !never.contains(&row.project) && !row.is_automated())
-                    .find(|row| row.reference() == reference)
-            })
+        let never = never_digests(&key, never_project_keys);
+        let (_, row) = find_listed(&key, &store, &never, reference)
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
         let input = row.session_input();
         let mut drill = crate::insights::session_drill::session_drill(
@@ -2268,14 +2273,9 @@ impl CounterPass {
             return Err(LocateError::Unknown);
         };
         let never = never_digests(&key, never_project_keys);
-        let session = store
-            .rows
-            .iter()
-            .find(|(_, row)| {
-                !never.contains(&row.project) && !row.is_automated() && row.reference() == reference
-            })
-            .map(|(session, _)| *session)
-            .ok_or(LocateError::Unknown)?;
+        let (session, _) =
+            find_listed(&key, &store, &never, reference).ok_or(LocateError::Unknown)?;
+        let session = *session;
         Ok(found
             .iter()
             .enumerate()
@@ -3181,6 +3181,39 @@ fn is_listed(row: &CounterRow, never: &NeverDigests) -> bool {
     !never.contains(&row.project) && !row.is_automated()
 }
 
+/// The row order and store tag a Sessions reference names
+/// ([`CounterRow::listed_reference`]): `t`, plain digits, `.`, plain digits.
+/// `None` for anything else, a reference from before the tag included.
+fn parse_listed_reference(text: &str) -> Option<(u64, u64)> {
+    let (seq, tag) = text.strip_prefix('t')?.split_once('.')?;
+    let digits = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    Some((digits(seq)?, digits(tag)?))
+}
+
+/// The listed row `reference` names in `store`, under `key`, with its
+/// session digest. `None` when it names no listed row, or was answered from
+/// another store (a new key, or a store begun again under the same one),
+/// whose order now names other sessions.
+fn find_listed<'s>(
+    key: &DigestKey,
+    store: &'s CounterStore,
+    never: &NeverDigests,
+    reference: &str,
+) -> Option<(&'s KeyedDigest, &'s CounterRow)> {
+    let (seq, tag) = parse_listed_reference(reference)?;
+    if tag != store_tag_of(key, store) {
+        return None;
+    }
+    store
+        .rows
+        .iter()
+        .find(|(_, row)| row.seq == seq && is_listed(row, never))
+}
+
 /// Age out and cap the route tallies against the rows the store keeps.
 fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff: DateTime<Utc>) {
     let matched: BTreeSet<KeyedDigest> = store
@@ -3446,6 +3479,7 @@ fn folder_digests<'f>(
 /// path.
 fn session_row_value(
     row: &CounterRow,
+    store_tag: u64,
     label: Option<&SessionLabel>,
     folders: &BTreeMap<KeyedDigest, &str>,
 ) -> serde_json::Value {
@@ -3478,7 +3512,7 @@ fn session_row_value(
         },
     };
     serde_json::json!({
-        "session_ref": row.reference(),
+        "session_ref": row.listed_reference(store_tag),
         "source": source,
         "started_at": row.listed_at().map(|at| at.to_rfc3339()),
         "turns": turns,
@@ -5370,6 +5404,8 @@ mod tests {
         }
     }
 
+    /// A week row carries its Sessions row's short name; the Sessions
+    /// methods take that name tagged with the store it was answered from.
     #[test]
     fn breakdown_rows_share_the_sessions_reference_and_allow_absent_folder() {
         let f = Fixture::new();
@@ -5379,8 +5415,12 @@ mod tests {
         let week = f.week_routed();
         let row = &sessions_of(&week)[0];
         assert_eq!(
-            row.get("session_ref"),
-            page["sessions"][0].get("session_ref")
+            page["sessions"][0]["session_ref"],
+            format!(
+                "{}.{}",
+                row["session_ref"].as_str().unwrap(),
+                f.pass.store_tag()
+            )
         );
         assert_eq!(row.get("folder"), Some(&serde_json::Value::Null));
     }
@@ -5406,7 +5446,14 @@ mod tests {
             let row = &sessions_of(&week)[0];
             assert_eq!(row["folder"], "My project");
             assert_eq!(row["folder"], page["sessions"][0]["folder"]);
-            assert_eq!(row["session_ref"], page["sessions"][0]["session_ref"]);
+            assert_eq!(
+                page["sessions"][0]["session_ref"],
+                format!(
+                    "{}.{}",
+                    row["session_ref"].as_str().unwrap(),
+                    f.pass.store_tag()
+                )
+            );
             assert!(!week.to_string().contains(PROJECT));
         }
         let hidden = f.pass.week_value_with_folders(
@@ -7137,8 +7184,9 @@ mod tests {
             f.pass.sessions_value(true, &NeverFolders::NONE, &[], 10)["sessions"][0].clone()
         };
         let drill = |f: &Fixture| {
+            let reference = listed(f)["session_ref"].as_str().unwrap().to_string();
             f.pass
-                .drill_value(true, "t0", &NeverFolders::NONE, utc())
+                .drill_value(true, &reference, &NeverFolders::NONE, utc())
                 .unwrap()["session"]
                 .clone()
         };
@@ -7563,6 +7611,51 @@ mod tests {
             .model_answers_value(true, &NeverFolders::NONE, false, false, now());
         for row in answers["rows"].as_array().unwrap() {
             assert_eq!(row["left_out"]["automated"], 1, "{}", row["question"]);
+        }
+    }
+
+    /// Analyze & save finds a file only for a listed row: never for an
+    /// automated one, though its reference is well formed and its file is
+    /// found.
+    #[test]
+    fn locate_finds_only_a_listed_row() {
+        let f = Fixture::new();
+        let person = f.write("person.jsonl", &codex_bytes());
+        let automated = f.write("automated.jsonl", &codex_bytes_from(&[Some(spawned())]));
+        f.run(&[
+            candidate(SOURCE_CODEX, &person),
+            candidate(SOURCE_CODEX, &automated),
+        ]);
+        let tag = f.pass.store_tag();
+        let found = [
+            (SOURCE_CODEX, person.as_path()),
+            (SOURCE_CODEX, automated.as_path()),
+        ];
+        let rows = stored_rows(&f.pass);
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let located = f
+                .pass
+                .locate(&row.listed_reference(tag), &NeverFolders::NONE, &found);
+            if row.is_automated() {
+                assert_eq!(located, Err(LocateError::Unknown));
+            } else {
+                assert_eq!(located.unwrap().unwrap().index, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_listed_reference_is_the_short_name_and_the_store_tag() {
+        assert_eq!(parse_listed_reference("t0.0"), Some((0, 0)));
+        assert_eq!(
+            parse_listed_reference("t12.4294967295"),
+            Some((12, 4_294_967_295))
+        );
+        for refused in [
+            "t0", "t.1", "t1.", "t-1.2", "t1.+2", "x1.2", "t1.2.3", "T1.2", "t 1.2", "",
+        ] {
+            assert_eq!(parse_listed_reference(refused), None, "{refused}");
         }
     }
 }

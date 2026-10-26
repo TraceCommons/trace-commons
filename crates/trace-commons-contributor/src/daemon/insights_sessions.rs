@@ -14,8 +14,9 @@
 //! scroll): at most [`WATCHED_SESSIONS_MAX`] a page, with an opaque cursor
 //! for the next ([`select_page`] has the order). No params is the first
 //! page, as the list answered before it was paged. Each row carries an
-//! opaque reference (`t` and the order the pass made the row in: never a
-//! digest or a path), its harness, its first recorded event's time, its
+//! opaque reference (`t` and the order the pass made the row in, `.` and
+//! the store's tag, as the cursor names the store: never a digest or a
+//! path), its harness, its first recorded event's time, its
 //! turn count (Claude Code only), its tokens and an integer sparkline of
 //! tokens per turn (`insights::session_sparkline`), and its folder's display
 //! label (owner decision 2026-10-20).
@@ -62,7 +63,8 @@ pub const WATCHED_SESSIONS_MAX: usize = 200;
 /// `session_ref` missing or not a string.
 pub const ERR_SESSION_REF_INVALID: &str = "insights-session-ref-invalid";
 /// No listed session has that reference: never stored, dropped since, made
-/// again under a new reference when its file grew, or in a Never folder.
+/// again under a new reference when its file grew, in a Never folder, or
+/// answered from a store since begun again.
 pub const ERR_SESSION_UNKNOWN: &str = "insights-session-unknown";
 
 /// `before` is not a cursor an earlier page gave.
@@ -793,11 +795,18 @@ mod tests {
         let mut references = std::collections::BTreeSet::new();
         for row in &listed {
             let reference = row["session_ref"].as_str().unwrap();
-            assert!(reference.starts_with('t'), "{reference}");
+            // `t`, the row's order, `.`, the store's tag: digits only.
+            let (order, tag) = reference
+                .strip_prefix('t')
+                .and_then(|rest| rest.split_once('.'))
+                .unwrap_or_else(|| panic!("{reference}"));
             assert!(
-                reference[1..].chars().all(|c| c.is_ascii_digit()),
+                [order, tag]
+                    .iter()
+                    .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
                 "{reference}"
             );
+            assert_eq!(tag, f.pass.store_tag().to_string());
             assert!(references.insert(reference.to_string()), "unique");
             let keys: std::collections::BTreeSet<&str> = row
                 .as_object()
@@ -2288,6 +2297,65 @@ mod tests {
         assert_eq!(row["user_task"], "tests");
         assert_eq!(row["user_outcome"], "kept");
         assert_eq!(f.stored_labels(), 1);
+    }
+
+    /// A store begun again numbers its rows from `t0` again, so a reference
+    /// answered before it would name another session. It carries the
+    /// store's tag, and is refused: no label or drill lands on the session
+    /// that now has its order.
+    #[test]
+    fn a_reference_from_before_the_store_was_begun_again_is_refused() {
+        let f = Fixture::new();
+        let first = f.write("first.jsonl", &claude_bytes());
+        let second = f.write("second.jsonl", &codex_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &first, PROJECT)]);
+        let stale = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(stale.starts_with("t0."), "{stale}");
+        // Unreadable: begun again, and another session is read first.
+        std::fs::write(f.dir.path().join(COUNTER_ROWS_FILE), b"{not json").unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        f.run(&[(SOURCE_CODEX, &second, OTHER)]);
+        let now_first = only(&f.list(&[], &[]));
+        assert_eq!(now_first["source"], "codex");
+        let fresh = now_first["session_ref"].as_str().unwrap();
+        assert!(fresh.starts_with("t0."), "the order begins again: {fresh}");
+        assert_ne!(fresh, stale);
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": stale, "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert_eq!(f.stored_labels(), 0);
+        assert_eq!(f.drill(&stale, &[]).unwrap_err(), ERR_SESSION_UNKNOWN);
+        // Nor does the short name alone name a row.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": "t0", "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        // The reference listed now does.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": fresh, "task": "docs"}),
+                &[]
+            )
+            .unwrap()["session"]["user_task"],
+            "docs"
+        );
     }
 
     /// A label written by another build: an unknown field, a task word

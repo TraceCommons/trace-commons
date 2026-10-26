@@ -4862,10 +4862,12 @@ sessions on disk. Otherwise:
   The rows come in the order the counter pass made them (within one pass,
   the most recently written file first; a re-read row moves to the end),
   never the store's own order, which follows a keyed digest of each path
-  and so means nothing. A row carries no reference, so a shell that draws
-  them knows each by its place, and the order is stable from one answer to
-  the next while no row is re-read. The Sessions tab lists the same rows,
-  each with an opaque reference, through `insights_sessions`.
+  and so means nothing. A row carries its Sessions row's short name as
+  `session_ref` (`t` and the order the pass made it in), for display only:
+  the Sessions methods take the reference `insights_sessions` lists, which
+  adds the store's tag, and refuse the short name. The order is stable from
+  one answer to the next while no row is re-read. The Sessions tab lists the
+  same rows, each with its opaque reference, through `insights_sessions`.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
@@ -5032,9 +5034,18 @@ Each row is exactly
 "inferred_task", "user_task", "user_outcome"}` (the last three are additive;
 a client that predates them ignores them):
 
-- `session_ref` is opaque: `t` and the order the pass made the row in. It is
-  never a digest or a path, and it changes when the session's file grows and
-  its row is made again, so a shell lists again rather than keeping it.
+- `session_ref` is opaque: `t` and the order the pass made the row in, then
+  `.` and the tag of the store it was answered from (the same number a `next`
+  cursor ends in), each part plain digits, for example `t12.3735928559`. It
+  is never a digest or a path, and it changes when the session's file grows
+  and its row is made again, so a shell lists again rather than keeping it.
+  A store begun again (an unreadable file, a new key, a clear) numbers its
+  rows from `t0` again; the tag is what keeps a reference answered before
+  from naming the session that now has its order. `insights_session_drill`,
+  `insights_session_label` and `insights_analyze_session` refuse a reference
+  from another store, or one without the tag, as `bad_params` /
+  `insights-session-unknown`, and the shell lists again. A shell compares
+  and sends it whole, and never parses it.
 - `source` is `claude_code` or `codex`.
 - `started_at` is the earliest recorded event, RFC 3339, or `null`.
 - `turns` is the turn count of the session's per-turn series; `null` for a
@@ -5094,8 +5105,9 @@ observed change either way (see `tokens` above); a series with unknown turns
 adds `some_turns_unknown` for the chart only.
 A missing or non-string `session_ref` is `bad_params` /
 `insights-session-ref-invalid`; one that names no listed row (never stored,
-made again since, or in a Never folder) is `bad_params` /
-`insights-session-unknown`; a malformed `tz` is `bad_params` /
+made again since, in a Never folder, or answered from a store since begun
+again) is `bad_params` / `insights-session-unknown`; a malformed `tz` is
+`bad_params` /
 `tz-invalid`.
 
 Each stored row keeps the earliest and latest recorded event for this. A row
@@ -5174,8 +5186,9 @@ as `insights_sessions` is: with `insights_counter_pass` off it answers
 `{"enabled": false, "feed": "counter_pass"}` and writes nothing, makes no key
 and opens no store; on, an unreadable key, store or folder rules answer
 `readable: false` with the fixed reason. A reference that names no listed
-row (never stored, made again since, automated, or in a Never folder) is
-`bad_params` / `insights-session-unknown`, and nothing is written; a labels
+row (never stored, made again since, automated, in a Never folder, or
+answered from a store since begun again) is `bad_params` /
+`insights-session-unknown`, and nothing is written; a labels
 file that cannot be written, or is not in the labels shape and so is never
 written over, is `unavailable` / `insights-session-label-write-failed`, and
 the label is as it was, in the file and in every later answer. Otherwise
@@ -5237,7 +5250,8 @@ is read, as `claude_code` or `codex` by the source that found it. Nothing
 reaches the network.
 
 - A reference that names no listed row (never stored, made again since its
-  file grew, automated, or in a Never folder) is `bad_params` /
+  file grew, automated, in a Never folder, or answered from a store since
+  begun again) is `bad_params` /
   `insights-session-unknown`. So is a row whose folder's rule is Never now,
   the contribution override included, though the pass has not yet dropped
   it: that file is not read.
