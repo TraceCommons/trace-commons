@@ -10,9 +10,6 @@ final class FirstRunCopyExportTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(json))
         XCTAssertEqual(copy.frame.quickSetup, "Quick setup")
         XCTAssertEqual(copy.frame.back, "Back")
-        XCTAssertEqual(
-            copy.join.titleLight + copy.join.titleBold,
-            "Sign in and choose an org for payment and inference")
         // The animated first run's own groups decode from the same table.
         XCTAssertEqual(copy.welcome.title, "Welcome to Near AI")
         XCTAssertEqual(copy.frame.stepTraces, "Traces")

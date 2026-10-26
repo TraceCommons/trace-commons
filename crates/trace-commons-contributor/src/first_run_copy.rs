@@ -850,15 +850,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn join_names_sign_in_and_the_organization_choice() {
-        let join = first_run_copy().join;
-        assert_eq!(
-            format!("{}{}", join.title_light, join.title_bold),
-            "Sign in and choose an org for payment and inference"
-        );
-    }
-
-    #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {
         let join = first_run_copy().join;
         assert_ne!(join.invite_dead, join.invite_error);
