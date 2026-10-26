@@ -333,16 +333,22 @@ final class InsightsModel {
         perform(.init("list"), preservingMutationEffects: true)
         return true
     }
+    /// The line for a row no longer listed under the reference asked for.
+    static let sessionUnknownKey = "analytics_analyze_unknown"
+
     /// The core's line for a failed Analyze & save: the daemon's fixed
-    /// labels for a file that has gone and a row that is no longer listed,
-    /// and one line for everything else.
+    /// labels for a file that has gone, a row that is no longer listed, a
+    /// file over the core's size limit and a Codex file without exactly one
+    /// session, and one line for everything else.
     static func sessionAnalyzeKey(_ outcome: Result<InsightsResponse, Error>) -> String {
         guard case .failure(let error) = outcome, case .daemon(_, let message) = error as? DaemonDataError else {
             return "analytics_analyze_failed"
         }
         switch message {
         case "insights-session-file-gone": return "analytics_analyze_file_gone"
-        case "insights-session-unknown": return "analytics_analyze_unknown"
+        case "insights-session-unknown": return sessionUnknownKey
+        case "insights-analyze-source-too-large": return "analytics_analyze_too_large"
+        case "insights-analyze-codex-not-one-session": return "analytics_analyze_codex_not_one"
         default: return "analytics_analyze_failed"
         }
     }
@@ -1444,6 +1450,10 @@ final class InsightsSessionsModel {
         drillBusy = false; listBusy = false; loadingMore = false
     }
     func reload() { if wantsWatched { readWatched() } else { load() } }
+    /// Something else asked the daemon about a listed row and was told it
+    /// no longer lists it (Analyze & save): read the loaded range again, as
+    /// a drill or a label does.
+    func rowNoLongerListed() { refresh(dropping: nil) }
     func select(_ reference: String) { selected = reference; load() }
 
     /// A watched row clicked: open it (closing any other), or close it when

@@ -84,6 +84,11 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
              "analytics_analyze_file_gone"),
             (.failure(DaemonDataError.daemon(code: "bad_params", message: "insights-session-unknown")),
              "analytics_analyze_unknown"),
+            (.failure(DaemonDataError.daemon(code: "unavailable", message: "insights-analyze-source-too-large")),
+             "analytics_analyze_too_large"),
+            (.failure(DaemonDataError.daemon(code: "unavailable",
+                                             message: "insights-analyze-codex-not-one-session")),
+             "analytics_analyze_codex_not_one"),
             (.failure(DaemonDataError.daemon(code: "unknown_method", message: "insights_analyze_session")),
              "analytics_analyze_failed"),
             (.failure(DaemonDataError.unreachable), "analytics_analyze_failed"),
@@ -182,12 +187,35 @@ final class InsightsAnalyzeSessionTests: XCTestCase {
         XCTAssertTrue(view.contains("openAnalysis: { tab = .analyze }"))
     }
 
+    /// A row the daemon says it cannot analyze shows why in place of the
+    /// action; a daemon that predates the flag offers it on every row. A
+    /// row no longer listed under its reference reads the list again, as
+    /// the label and drill paths do.
+    @MainActor
+    func testARowTheDaemonCannotAnalyzeSaysWhyAndAStaleOneReadsTheListAgain() throws {
+        let row = { (flag: String) in
+            try JSONDecoder().decode(DaemonData.InsightsWatchedSession.self, from: Data(
+                #"{"session_ref":"g2.t7","source":"codex","started_at":null,"turns":null,"tokens":null,"sparkline":null,"folder":"f"\#(flag)}"#
+                    .utf8))
+        }
+        XCTAssertFalse(try row(#","analyzable":false"#).canAnalyze)
+        XCTAssertTrue(try row(#","analyzable":true"#).canAnalyze)
+        XCTAssertTrue(try row("").canAnalyze, "an older daemon's row is offered the action")
+        XCTAssertEqual(try row("").sessionRef, "g2.t7", "a reference is kept as sent, never parsed")
+        let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        XCTAssertTrue(tab.contains("if row.canAnalyze {"))
+        XCTAssertTrue(tab.contains("text(\"analytics_analyze_not_analyzable\")"))
+        XCTAssertTrue(tab.contains("analysis.sessionAnalyzeFailure?.key == InsightsModel.sessionUnknownKey"))
+        XCTAssertTrue(tab.contains("model.rowNoLongerListed()"))
+    }
+
     /// Every word the action and Analyze's head show is core copy.
     func testTheWordsAreCoreCopy() throws {
         let copy = try XCTUnwrap(TCInsights.copy())
         for key in ["analytics_analyze_save", "analytics_analyze_save_a11y", "analytics_analyze_failed",
                     "analytics_analyze_file_gone", "analytics_analyze_unknown", "analytics_analyze_empty",
-                    "analytics_analyze_how", "analytics_analyze_intro"] {
+                    "analytics_analyze_how", "analytics_analyze_intro", "analytics_analyze_not_analyzable",
+                    "analytics_analyze_too_large", "analytics_analyze_codex_not_one"] {
             XCTAssertFalse(copy[key, default: ""].isEmpty, key)
         }
         XCTAssertTrue(copy["analytics_analyze_save_a11y", default: ""].contains("{label}"))

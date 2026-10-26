@@ -2293,11 +2293,18 @@ extension DaemonData {
         /// The person's own outcome: `kept`, `partly_kept` or
         /// `thrown_away`; `nil` while unset.
         public var userOutcome: String?
+        /// Whether `insights_analyze_session` can analyze the trace: `false`
+        /// when its file is over the core's size limit, or is a Codex file
+        /// without exactly one session in it. Absent from a daemon before
+        /// the flag; read as `true` then, and the daemon's refusal says why.
+        public let analyzable: Bool?
 
         public var id: String { sessionRef }
+        /// `analyzable`, `true` from a daemon that predates it.
+        public var canAnalyze: Bool { analyzable ?? true }
 
         public enum CodingKeys: String, CodingKey {
-            case source, turns, folder, tokens, sparkline
+            case source, turns, folder, tokens, sparkline, analyzable
             case sessionRef = "session_ref"
             case startedAt = "started_at"
             case inferredTask = "inferred_task"

@@ -235,23 +235,37 @@ struct InsightsSessionsTab: View {
 
     /// The open row's one action: the daemon analyzes the trace it found
     /// and saves the snapshot, which then opens in Analyze. A spinner while
-    /// it is asked, and the core's line if it could not be.
+    /// it is asked, and the core's line if it could not be; a row no longer
+    /// listed under its reference reads the list again. A row the daemon
+    /// says it cannot analyze shows why in place of the action.
+    @ViewBuilder
     private func analyzeAction(_ row: DaemonData.InsightsWatchedSession, _ analysis: InsightsModel) -> some View {
         let reference = row.sessionRef
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            HStack(spacing: GlassTokens.Space.s3) {
-                Button(text("analytics_analyze_save")) {
-                    Task { if await analysis.analyzeAndSave(session: reference) { openAnalysis() } }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            if row.canAnalyze {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Button(text("analytics_analyze_save")) {
+                        Task {
+                            if await analysis.analyzeAndSave(session: reference) {
+                                openAnalysis()
+                            } else if analysis.sessionAnalyzeFailure?.key == InsightsModel.sessionUnknownKey {
+                                model.rowNoLongerListed()
+                            }
+                        }
+                    }
+                    .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                    .disabled(analysis.busy)
+                    .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
+                        "analytics_analyze_save_a11y", row, copy: copy))
+                    if analysis.analyzingSession == reference { GlassSpinner() }
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(GlassButtonStyle(.secondary, small: true))
-                .disabled(analysis.busy)
-                .accessibilityLabel(InsightsSessionsWords.labelAccessibility(
-                    "analytics_analyze_save_a11y", row, copy: copy))
-                if analysis.analyzingSession == reference { GlassSpinner() }
-                Spacer(minLength: 0)
-            }
-            if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
-                Text(text(failure.key)).insightsError()
+                if let failure = analysis.sessionAnalyzeFailure, failure.reference == reference {
+                    Text(text(failure.key)).insightsError()
+                }
+            } else {
+                Text(text("analytics_analyze_not_analyzable")).insightsCaption()
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         // Lined up under the label, past the harness tile, as the labels are.
