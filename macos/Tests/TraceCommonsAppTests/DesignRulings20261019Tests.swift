@@ -126,7 +126,7 @@ final class DesignRulings20261019Tests: XCTestCase {
         let traces = try Self.text("Views/Monitor/NudgeViews.swift")
         let privateAI = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(traces.contains("GlassTabHeading(store.words?.tree.treeTitle ?? \"\") {"))
-        XCTAssertTrue(privateAI.contains("return GlassTabHeading(copy.inspectorStatus) {"))
+        XCTAssertTrue(privateAI.contains("GlassTabHeading(copy.inspectorStatus) {"))
         XCTAssertFalse(privateAI.contains("InspectorFactRow"), "the status has its own row style again")
         XCTAssertEqual(GlassTabHeading<EmptyView>.titleType, GlassTokens.TypeScale.bodyStrong)
     }

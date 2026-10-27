@@ -10,6 +10,42 @@ use super::{
 use crate::config::ConfigStore;
 use serde_json::{Value, json};
 
+/// A floor for the tool's soft open-file limit. Terminal.app starts shells
+/// at launchd's 256, which Claude Code outgrows at startup ("low max file
+/// descriptors"). It is a floor, not a setting: a limit already at or above
+/// it, or unlimited, is left alone, and only the soft limit moves.
+#[cfg(unix)]
+const OPEN_FILES_FLOOR: u32 = 10240;
+
+/// Run `command` under `/bin/sh`, which lifts a soft open-file limit below
+/// [`OPEN_FILES_FLOOR`] and then execs the tool, so the child inherits the
+/// raised limit however the helper was started (the app's button, `near-ai
+/// launch`, or a sign-in). The shell becomes the tool, so the pid, signals
+/// and exit code are the tool's own. A refusal (a lower hard limit) leaves
+/// the limit as it was. Program, arguments, environment changes and working
+/// directory carry over; the spawn sets nothing else on the command.
+#[cfg(unix)]
+fn with_open_files_floor(command: std::process::Command) -> std::process::Command {
+    let mut wrapped = std::process::Command::new("/bin/sh");
+    wrapped
+        .arg("-c")
+        .arg(format!(
+            "[ \"$(ulimit -Sn)\" = unlimited ] || [ \"$(ulimit -Sn)\" -ge {OPEN_FILES_FLOOR} ] || ulimit -Sn {OPEN_FILES_FLOOR} 2>/dev/null; exec \"$0\" \"$@\""
+        ))
+        .arg(command.get_program())
+        .args(command.get_args());
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => wrapped.env(key, value),
+            None => wrapped.env_remove(key),
+        };
+    }
+    if let Some(dir) = command.get_current_dir() {
+        wrapped.current_dir(dir);
+    }
+    wrapped
+}
+
 pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> anyhow::Result<i32> {
     let mut signals = TerminalSignals::new()?;
     let context: LaunchContext = call(
@@ -258,6 +294,8 @@ async fn run_native(
             let _ = capture.configure_codex(&mut command);
         }
     }
+    #[cfg(unix)]
+    let command = with_open_files_floor(command);
     let mut child = tokio::process::Command::from(command)
         .kill_on_drop(false)
         .spawn()?;
@@ -639,6 +677,8 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::with_open_files_floor;
     use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
     #[cfg(unix)]
     use super::{opencode_route_command, opencode_sign_in_command};
@@ -1116,5 +1156,95 @@ mod tests {
         assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":"true"}))));
         assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":1}))));
         assert!(!stop_asked(&Err(anyhow::anyhow!("daemon unavailable"))));
+    }
+
+    /// Run `command` the way a terminal that starts at `start_soft` open files
+    /// would: a shell lowers its own limit, then execs the wrapped command.
+    /// `None` when this host's hard limit forbids the start value.
+    #[cfg(unix)]
+    fn run_from_soft_limit(
+        command: &std::process::Command,
+        start_soft: u32,
+    ) -> Option<std::process::Output> {
+        let mut outer = std::process::Command::new("/bin/sh");
+        outer
+            .args([
+                "-c",
+                "ulimit -Sn \"$0\" 2>/dev/null || exit 99; exec \"$@\"",
+            ])
+            .arg(start_soft.to_string())
+            .arg(command.get_program())
+            .args(command.get_args());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => outer.env(key, value),
+                None => outer.env_remove(key),
+            };
+        }
+        if let Some(dir) = command.get_current_dir() {
+            outer.current_dir(dir);
+        }
+        let out = outer.output().unwrap();
+        (out.status.code() != Some(99)).then_some(out)
+    }
+
+    #[cfg(unix)]
+    fn probe() -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf '%s|%s|%s|%s|%s' \"$(ulimit -Sn)\" \"$0\" \"$1\" \"$KEPT\" \"${GONE-unset}\"; exit 7",
+                "tool name",
+                "a 'quoted' $HOME `arg`",
+            ])
+            .env("KEPT", "yes")
+            .env_remove("GONE");
+        command
+    }
+
+    /// A tool started from a shell at launchd's 256 open files outgrows it at
+    /// startup, however it was launched, so the supervisor raises the floor
+    /// at the one place it spawns.
+    #[cfg(unix)]
+    #[test]
+    fn the_spawned_tool_gets_at_least_ten_thousand_open_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = probe();
+        command.current_dir(dir.path());
+        let wrapped = with_open_files_floor(command);
+        let Some(out) = run_from_soft_limit(&wrapped, 256) else {
+            return;
+        };
+        let text = String::from_utf8(out.stdout).unwrap();
+        let soft: u32 = text.split('|').next().unwrap().parse().unwrap();
+        assert!(soft >= 10240, "{text}");
+        // The tool sees its own arguments, environment, and exit code.
+        assert!(
+            text.ends_with("|tool name|a 'quoted' $HOME `arg`|yes|unset"),
+            "{text}"
+        );
+        assert_eq!(out.status.code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_higher_open_file_limit_is_never_lowered() {
+        let Some(out) = run_from_soft_limit(&with_open_files_floor(probe()), 20000) else {
+            return;
+        };
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.starts_with("20000|"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_working_directory_survives_the_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("/bin/pwd");
+        command.current_dir(dir.path());
+        let out = with_open_files_floor(command).output().unwrap();
+        let printed = std::fs::canonicalize(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+        assert_eq!(printed, std::fs::canonicalize(dir.path()).unwrap());
     }
 }

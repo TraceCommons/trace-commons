@@ -38,6 +38,7 @@ const AUTH_ENV: &[&str] = &[
     "CODEX_ACCESS_TOKEN",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
 ];
 
 impl NativeProfiles {
@@ -542,6 +543,37 @@ pub fn tools() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_claude_commands_remove_inherited_secure_storage_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("config")).unwrap();
+        let profiles = NativeProfiles::new(&store);
+        let executable = dir.path().join("fixture-claude");
+        std::fs::write(&executable, b"never executed").unwrap();
+        let account = AccountView {
+            id: AccountId(uuid::Uuid::new_v4()),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            label: "fixture".into(),
+            auth_state: AuthState::Ready,
+            verified_at: None,
+        };
+        let command = profiles
+            .command(&account, &executable, NativeAction::Status, dir.path())
+            .unwrap();
+        let removed = command
+            .get_envs()
+            .find(|(key, _)| *key == "CLAUDE_SECURESTORAGE_CONFIG_DIR");
+        assert_eq!(removed.map(|(_, value)| value), Some(None));
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+                .and_then(|(_, value)| value),
+            Some(profiles.profile_root(account.id).unwrap().as_os_str())
+        );
+    }
 
     #[test]
     fn windows_installation_detects_wrappers_without_expanding_native_launch() {

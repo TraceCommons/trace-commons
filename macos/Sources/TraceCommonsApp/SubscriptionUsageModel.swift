@@ -2,11 +2,11 @@ import Foundation
 import Observation
 import TCShellCore
 
-/// Current account limits remain separate from analytics storage and its week.
+/// Account limits remain separate from analytics storage and its week.
 /// The only credential-capable operations are injected daemon calls.
 @Observable @MainActor
 final class SubscriptionUsageModel {
-    typealias Reader = @Sendable (Bool, Bool, String?) async throws -> DaemonData.SubscriptionUsage
+    typealias Reader = @Sendable (Bool, Bool, String?, String?) async throws -> DaemonData.SubscriptionUsage
     typealias Writer = @Sendable (String, Bool) async throws -> Void
 
     private let reader: Reader?
@@ -17,21 +17,27 @@ final class SubscriptionUsageModel {
     private var queuedRefresh = false
     private var queuedInteractive = false
     private var queuedProvider: String?
+    private var queuedLogin: String?
+    private var refreshingProvider: String?
+    private var refreshingLogin: String?
     private var observation: UUID?
     private var observationSleep: Task<Void, Never>?
     private let activePollInterval: Duration
     private(set) var codexEnabled: Bool?
+    private var claudeAvailable = false
     private(set) var shown: DaemonData.SubscriptionUsage?
     private(set) var failureKey: String?
     private(set) var unsupported = false
     private(set) var changingProviders = Set<String>()
 
     var supportedProviders: [DaemonData.SubscriptionUsageProvider] {
-        (shown?.providers ?? []).filter { $0.provider == "codex" && $0.enabled }
+        (shown?.providers ?? []).filter {
+            ($0.provider == "codex" && $0.enabled) || ($0.provider == "claude" && !$0.logins.isEmpty)
+        }
     }
-    var isVisible: Bool { reader != nil && !unsupported && codexEnabled == true }
+    var isVisible: Bool { reader != nil && !unsupported && (codexEnabled == true || claudeAvailable) }
     var isRefreshing: Bool {
-        reading != nil || supportedProviders.contains(where: \.refreshing)
+        reading != nil || supportedProviders.contains { $0.refreshing || $0.logins.contains { $0.refreshing == true } }
     }
     var canChange: Bool { writer != nil }
 
@@ -77,6 +83,8 @@ final class SubscriptionUsageModel {
         generation = UUID()
         reading = nil
         readingGeneration = nil
+        refreshingProvider = nil
+        refreshingLogin = nil
         clearQueuedRefresh()
     }
 
@@ -84,43 +92,51 @@ final class SubscriptionUsageModel {
         queuedRefresh = false
         queuedInteractive = false
         queuedProvider = nil
+        queuedLogin = nil
     }
 
     /// Refreshes coalesce while a current read is in flight. A read invalidated
     /// by a setting change may be superseded without awaiting its old reply.
-    func load(refresh: Bool = false, interactive: Bool = false, provider: String? = nil) async {
+    func load(refresh: Bool = false, interactive: Bool = false, provider: String? = nil, login: String? = nil) async {
         guard let reader, changingProviders.isEmpty, !Task.isCancelled else { return }
         if reading != nil, readingGeneration == generation {
             if refresh {
-                queuedProvider = queuedRefresh && queuedProvider != provider ? nil : provider
+                // Keep the exact scope; coalescing must never fan out.
+                queuedProvider = provider
+                queuedLogin = login
+                queuedInteractive = interactive
             }
             queuedRefresh = queuedRefresh || refresh
-            queuedInteractive = queuedInteractive || (refresh && interactive)
             return
         }
         let request = UUID()
         let token = generation
         reading = request
         readingGeneration = token
+        refreshingProvider = refresh ? (provider ?? "codex") : nil
+        refreshingLogin = refresh ? login : nil
         defer {
             if reading == request {
                 reading = nil
                 readingGeneration = nil
+                refreshingProvider = nil
+                refreshingLogin = nil
                 observationSleep?.cancel()
                 let pending = queuedRefresh
                 let prompt = queuedInteractive
                 let selected = queuedProvider
+                let selectedLogin = queuedLogin
                 clearQueuedRefresh()
                 if pending, generation == token, !Task.isCancelled {
                     Task { [weak self] in
                         guard let self, self.generation == token else { return }
-                        await self.load(refresh: true, interactive: prompt, provider: selected)
+                        await self.load(refresh: true, interactive: prompt, provider: selected, login: selectedLogin)
                     }
                 }
             }
         }
         do {
-            let value = try await reader(refresh, refresh && interactive, provider)
+            let value = try await reader(refresh, refresh && interactive, provider, login)
             guard generation == token, !Task.isCancelled else { return }
             guard value.schemaVersion == "trace_commons.subscription_usage.v1" else {
                 shown = nil
@@ -129,6 +145,7 @@ final class SubscriptionUsageModel {
             }
             shown = value
             codexEnabled = value.providers.first(where: { $0.provider == "codex" })?.enabled
+            claudeAvailable = value.providers.contains { $0.provider == "claude" && !$0.logins.isEmpty }
             unsupported = false
             failureKey = nil
         } catch {
@@ -139,16 +156,36 @@ final class SubscriptionUsageModel {
         }
     }
 
-    func refresh() {
-        guard codexEnabled == true, !isRefreshing else { return }
+    /// The default action retains Codex-only behavior. Claude always
+    /// requires the exact local login selected by its row.
+    func refresh(provider: String = "codex", login: String? = nil) {
+        guard canRefresh(provider: provider, login: login) else { return }
         let token = generation
         Task { [weak self] in
             guard let self, self.generation == token else { return }
-            await self.load(refresh: true, interactive: true, provider: "codex")
-            // Resume status polling immediately after an explicit request,
-            // even when the observer was in its minute-long idle wait.
+            self.observationSleep?.cancel()
+            await self.load(refresh: true, interactive: true, provider: provider, login: login)
+            // Wake polling while the worker awaits a Keychain decision.
             self.observationSleep?.cancel()
         }
+    }
+
+    func canRefresh(provider: String, login: String?) -> Bool {
+        guard changingProviders.isEmpty,
+              !supportedProviders.contains(where: { $0.refreshing || $0.logins.contains { $0.refreshing == true } }),
+              refreshingProvider == nil, !queuedRefresh,
+              let row = supportedProviders.first(where: { $0.provider == provider }) else { return false }
+        if provider == "claude" { return login.map { id in row.logins.contains { $0.id == id } } ?? false }
+        return provider == "codex" && (login == nil || row.logins.contains { $0.id == login })
+    }
+
+    func isRefreshing(provider: String, login: String?) -> Bool {
+        if refreshingProvider == provider && refreshingLogin == login { return true }
+        if queuedRefresh && queuedProvider == provider && queuedLogin == login { return true }
+        guard let row = supportedProviders.first(where: { $0.provider == provider }) else { return false }
+        guard let login else { return row.refreshing }
+        guard let entry = row.logins.first(where: { $0.id == login }) else { return false }
+        return entry.refreshing ?? row.refreshing
     }
 
     /// Hide disabled data immediately, and invalidate any read from before the
@@ -187,9 +224,10 @@ final class SubscriptionUsageModel {
             failureKey = "analytics_subscriptions_change_failed"
             // Reconcile actual state after a refused write without prompting.
             let token = generation
-            if let reader, let actual = try? await reader(false, false, nil), generation == token {
+            if let reader, let actual = try? await reader(false, false, nil, nil), generation == token {
                 shown = actual
                 codexEnabled = actual.providers.first(where: { $0.provider == "codex" })?.enabled
+                claudeAvailable = actual.providers.contains { $0.provider == "claude" && !$0.logins.isEmpty }
             }
             observationSleep?.cancel()
         }

@@ -52,7 +52,8 @@
 //! whole, so no file is skipped for its size and memory does not grow with
 //! it: it is bounded by one line and by what the scans keep, at most the
 //! series caps for Claude Code. One line over `COUNTER_PASS_MAX_LINE_BYTES`
-//! makes the session unknown, never zero. A file unchanged in size and time since its
+//! (an inlined image, say) is passed over unread and the session is marked
+//! partial; the lines around it are still counted. A file unchanged in size and time since its
 //! row was made is not read again; a file seen again with new bytes replaces
 //! its row. A row stored as unknown by the earlier whole-file read, which
 //! skipped files over 16 MiB, is read once more.
@@ -2798,9 +2799,17 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         };
     };
     let mut facts = scanned.facts;
+    // A line passed over may have held counters: partial, never complete.
+    let skipped = scanned.long_lines_skipped > 0;
+    if skipped {
+        if let Some(facts) = facts.as_mut() {
+            facts.capped = true;
+        }
+    }
     let body = match scanned.body {
         ScannedBody::Claude(Some(evidence)) => {
             let mut series = evidence.series;
+            series.truncated |= skipped;
             // A cap the series hit, told apart from the delegated mark
             // below, which sets `truncated` too.
             if let Some(facts) = facts.as_mut() {
@@ -2815,7 +2824,10 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
                 series,
             }
         }
-        ScannedBody::Codex(Some(evidence), series) => {
+        ScannedBody::Codex(Some(evidence), mut series) => {
+            if let Some(series) = series.as_mut() {
+                series.series.truncated |= skipped;
+            }
             if let (Some(facts), Some(series)) = (facts.as_mut(), series.as_ref()) {
                 facts.capped |= series.series.truncated;
             }
@@ -2880,6 +2892,9 @@ struct ScannedSession {
     /// Codex's `session_meta` records: the whole-file analysis takes a
     /// file with exactly one.
     session_metas: usize,
+    /// Lines longer than the bound, passed over unread (an inlined image,
+    /// say). Nonzero, the caller marks the session partial.
+    long_lines_skipped: u32,
 }
 
 /// Tells a Codex session its harness started from one the person started,
@@ -2960,8 +2975,9 @@ enum ScannedBody {
 /// bounded by one line and by what the extractors keep, at most the series
 /// caps.
 ///
-/// `None` when the file cannot be read or a line is longer than `max_line`
-/// bytes: the caller stores unknown, never zero.
+/// `None` when the file cannot be read: the caller stores unknown, never
+/// zero. A line longer than `max_line` bytes is passed over, unparsed, and
+/// counted in `long_lines_skipped`; the digest still covers it.
 ///
 /// `codex_per_turn` is `CODEX_PER_TURN_SERIES` (owner decision D11): held,
 /// no Codex per-turn series is kept, and the facts read beside it still are.
@@ -2997,6 +3013,7 @@ fn scan_session(
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
     let mut index: u64 = 0;
+    let mut long_lines_skipped: u32 = 0;
     loop {
         line.clear();
         // Room for the line and a `\r\n` ending; more is refused below.
@@ -3008,17 +3025,25 @@ fn scan_session(
             break;
         }
         hasher.update(&line);
-        if line.last() == Some(&b'\n') {
+        let ended = line.last() == Some(&b'\n');
+        if ended {
             // `str::lines`: a line ends at `\n` or `\r\n`.
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
         }
-        if line.len() as u64 > max_line {
-            return None;
-        }
         index += 1;
+        if line.len() as u64 > max_line {
+            // Passed over, never parsed: the rest of the line is hashed and
+            // dropped, so memory stays bounded and the digest still covers
+            // every byte. No scan sees it, so it cannot end the strict ones.
+            if !ended {
+                skip_line(&mut reader, &mut hasher).ok()?;
+            }
+            long_lines_skipped = long_lines_skipped.saturating_add(1);
+            continue;
+        }
         let Ok(text) = std::str::from_utf8(&line) else {
             utf8 = false;
             claude = None;
@@ -3118,7 +3143,36 @@ fn scan_session(
         // never read as sessions of their own, so its rows are unknown.
         automation: automation.map_or(Automation::Unknown, CodexAutomationScan::finish),
         session_metas,
+        long_lines_skipped,
     })
+}
+
+/// Read the rest of the current line, through its `\n` or to the end of
+/// the file, into `hasher` only: nothing is kept.
+fn skip_line(reader: &mut impl BufRead, hasher: &mut sha2::Sha256) -> std::io::Result<()> {
+    use sha2::Digest as _;
+    loop {
+        let (used, done) = {
+            let buf = reader.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(());
+            }
+            match buf.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    hasher.update(&buf[..=end]);
+                    (end + 1, true)
+                }
+                None => {
+                    hasher.update(buf);
+                    (buf.len(), false)
+                }
+            }
+        };
+        reader.consume(used);
+        if done {
+            return Ok(());
+        }
+    }
 }
 
 /// A record's top-level `timestamp`, RFC 3339, as UTC.
@@ -4396,6 +4450,7 @@ mod tests {
         let key = key_for(3);
         let scan = |bytes: &[u8], max: u64| {
             scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max, true)
+                .expect("a long line is passed over, never refuses the file")
         };
         let line =
             br#"{"type":"user","sessionId":"PRIVATE-ID","timestamp":"2026-09-14T09:00:00Z"}"#;
@@ -4403,16 +4458,72 @@ mod tests {
         // The bound is on the line, not its ending.
         for ending in [&b""[..], b"\n", b"\r\n"] {
             let bytes = [&line[..], ending].concat();
-            assert!(scan(&bytes, len - 1).is_none(), "{ending:?}");
-            let read = scan(&bytes, len).expect("a line at the bound is read");
+            let skipped = scan(&bytes, len - 1);
+            assert_eq!(skipped.harness_session_id, None, "{ending:?}");
+            assert_eq!(skipped.long_lines_skipped, 1, "{ending:?}");
+            let read = scan(&bytes, len);
             assert_eq!(read.harness_session_id.as_deref(), Some("PRIVATE-ID"));
+            assert_eq!(read.long_lines_skipped, 0);
         }
-        // A long line anywhere refuses the whole file, never part of it.
-        let mut two = [&line[..], b"\n"].concat();
-        two.extend_from_slice(&vec![b' '; line.len() + 1]);
-        two.extend_from_slice(b"\n");
-        assert!(scan(&two, len).is_none());
-        assert!(scan(&two, len + 1).is_some());
+        // A long line anywhere is passed over alone, never parsed: one that
+        // is not JSON would otherwise end the strict scans. The lines
+        // around it are read.
+        let mut three = [&line[..], b"\n"].concat();
+        three.extend_from_slice(&vec![b'x'; line.len() + 1]);
+        three.extend_from_slice(b"\n");
+        three.extend_from_slice(line);
+        three.extend_from_slice(b"\n");
+        let read = scan(&three, len);
+        assert_eq!(read.harness_session_id.as_deref(), Some("PRIVATE-ID"));
+        assert_eq!(read.long_lines_skipped, 1);
+        assert_eq!(scan(&three, len + 1).long_lines_skipped, 0);
+        // The digest still covers every byte, the passed-over line too.
+        let whole = |bytes: &[u8]| {
+            use sha2::Digest as _;
+            format!("{:x}", sha2::Sha256::digest(bytes))
+        };
+        let base = claude_bytes();
+        let longest = base.split(|b| *b == b'\n').map(<[u8]>::len).max().unwrap() as u64;
+        let first_end = base.iter().position(|b| *b == b'\n').unwrap() + 1;
+        let mut long = base[..first_end].to_vec();
+        long.extend_from_slice(&vec![b'x'; longest as usize + 1]);
+        long.extend_from_slice(b"\n");
+        long.extend_from_slice(&base[first_end..]);
+        let (ScannedBody::Claude(Some(plain)), ScannedBody::Claude(Some(skipped))) =
+            (scan(&base, longest).body, scan(&long, longest).body)
+        else {
+            panic!("the counters survive a long line");
+        };
+        assert_eq!(skipped.series, plain.series);
+        assert_eq!(skipped.model_labels, plain.model_labels);
+        assert_eq!(skipped.source_digest, whole(&long));
+    }
+
+    /// A line over `COUNTER_PASS_MAX_LINE_BYTES` (an inlined image, say) is
+    /// passed over: the session keeps its counters and is marked partial,
+    /// never stored as unknown and never as complete.
+    #[test]
+    fn a_session_with_a_long_line_is_counted_and_marked_partial() {
+        let base = facts_fixture("finished");
+        let first_end = base.iter().position(|b| *b == b'\n').unwrap() + 1;
+        let mut bytes = base[..first_end].to_vec();
+        bytes.extend_from_slice(&vec![b'x'; COUNTER_PASS_MAX_LINE_BYTES as usize + 1]);
+        bytes.extend_from_slice(b"\n");
+        bytes.extend_from_slice(&base[first_end..]);
+        let f = Fixture::new();
+        let path = f.write("image.jsonl", &bytes);
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let row = only_row(&f.pass);
+        assert!(
+            matches!(&row.body, RowBody::Claude { series, .. } if series.truncated),
+            "counted, and partial: {:?}",
+            row.body
+        );
+        let facts = row
+            .facts
+            .as_ref()
+            .expect("facts are kept beside the counters");
+        assert!(facts.capped && !facts.delegated_unread, "{facts:?}");
     }
 
     /// The whole-file read the counter pass made before it streamed, over

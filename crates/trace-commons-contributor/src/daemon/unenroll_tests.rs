@@ -801,8 +801,17 @@ async fn unenroll_turns_off_subscription_usage_in_memory_and_on_disk() {
                 .result
                 .unwrap();
         for provider in snapshot["providers"].as_array().unwrap() {
-            assert_eq!(provider["enabled"], false);
-            assert_eq!(provider["logins"], json!([]));
+            if provider["provider"] == "codex" {
+                assert_eq!(provider["enabled"], false);
+                assert_eq!(provider["logins"], json!([]));
+            } else {
+                // Claude remains available without opt-in, but a new manual
+                // action is needed to acquire any reading after unenroll.
+                for login in provider["logins"].as_array().unwrap() {
+                    assert_eq!(login["windows"], json!([]));
+                    assert!(login["updated_at"].is_null());
+                }
+            }
         }
     }
 }

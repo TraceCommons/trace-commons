@@ -35,8 +35,8 @@ struct InsightsView: View {
                     inspector: InsightsInspector? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
-            { @Sendable refresh, interactive, provider in
-                try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
+            { @Sendable refresh, interactive, provider, login in
+                try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: login)
             }
         }
         var subscriptionWriter: SubscriptionUsageModel.Writer? = daemon.map { client in

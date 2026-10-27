@@ -378,7 +378,9 @@ pub fn void_reason_line(label: &str) -> &'static str {
         "identity-changed" => {
             "Your traces would now be sent under a different account, identity or device."
         }
-        "scopes-widened" => "You now allow your contributions to be used in more ways.",
+        "scopes-widened" => {
+            "The ways contributions can be used have expanded since you turned this on."
+        }
         "privacy-filter-changed" => {
             "The privacy filter that reads your traces before they are sent was added, removed or changed."
         }

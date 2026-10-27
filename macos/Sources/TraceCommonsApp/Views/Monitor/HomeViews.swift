@@ -110,6 +110,49 @@ struct TracesHistoryPage: View {
     }
 }
 
+/// Home's hero cards that the person closed with their X (owner,
+/// 2026-10-27: Kimi and Insights were in the person's face), and Settings'
+/// switch for the campaign card. Kept in this Mac's defaults; nothing
+/// leaves the machine.
+///
+/// A closed campaign comes back when what the feed says for it changes;
+/// the Insights card comes back the next day; promotions off hides the
+/// campaign card altogether (owner, 2026-10-27).
+enum HomeClosedCards {
+    /// The fingerprint of the campaign as it was when closed.
+    static let campaignKey = "home.closedCampaignFingerprint"
+    /// The day (`day(_:)`) the Insights card was closed on.
+    static let insightsKey = "home.insightsCardClosedOn"
+    /// Settings' "Show promotions on Home", on by default.
+    static let promotionsKey = "home.showsPromotions"
+
+    /// Everything the campaign card shows, so any change in the feed --
+    /// under the same id or a new one -- is a different fingerprint. New
+    /// art behind the same image URL is not: the feed changes the URL with
+    /// the art.
+    static func fingerprint(_ campaign: PrivateAICampaign) -> String {
+        [campaign.id, campaign.title, campaign.body, campaign.actionTitle, campaign.actionURL.absoluteString,
+         campaign.symbol, campaign.imageURL?.absoluteString ?? ""].joined(separator: "\u{1F}")
+    }
+
+    /// A campaign shows while promotions are on and it is not the one the
+    /// person closed, as it was then.
+    static func showsCampaign(_ fingerprint: String, closed: String, promotionsOn: Bool) -> Bool {
+        promotionsOn && fingerprint != closed
+    }
+
+    /// The day `date` falls on in the person's calendar, as "2026-10-27".
+    static func day(_ date: Date, calendar: Calendar = .current) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    /// The Insights card shows unless it was closed today: once a day.
+    static func showsInsights(closedOn: String, now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        closedOn != day(now, calendar: calendar)
+    }
+}
+
 private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
@@ -132,6 +175,14 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
+    /// The campaign closed with its X, as it was then (`fingerprint`): it
+    /// comes back when the feed changes it (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
+    /// The day the Insights card was closed with its X: it is back the
+    /// next day; the Insights tab stays where it is (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = ""
+    /// Settings' "Show promotions on Home": off, no campaign card.
+    @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -156,11 +207,14 @@ private struct HomeOverview: View {
     /// A native promotion, available from compiled copy before its remote refresh.
     @ViewBuilder
     private var campaign: some View {
-        if let campaign = campaignStore.campaign {
+        if let campaign = campaignStore.campaign,
+           HomeClosedCards.showsCampaign(
+               HomeClosedCards.fingerprint(campaign), closed: closedCampaign, promotionsOn: promotionsOn) {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaign,
                 title: campaign.title, subtitle: campaign.body,
-                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) }
+                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) },
+                closeLabel: MonitorWords.close, onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }
             ) {
                 if let image = campaignStore.image {
                     Image(nsImage: image)
@@ -204,10 +258,11 @@ private struct HomeOverview: View {
                 // Insights as a hero promotion, today's figures in its words
                 // and its graphic (owner, 2026-10-12: an upsell, not a bare
                 // way in).
-                if let insightsHeading {
+                if let insightsHeading, HomeClosedCards.showsInsights(closedOn: insightsClosedOn) {
                     GlassHeroCard(
                         gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights,
+                        closeLabel: MonitorWords.close, onClose: { insightsClosedOn = HomeClosedCards.day(Date()) }
                     ) {
                         HomeInsightsGraphic(glance: freshGlance)
                     } content: {
