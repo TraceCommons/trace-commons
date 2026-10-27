@@ -579,7 +579,11 @@ struct FlowMapScene: Equatable {
         // Stacked down from just under this computer, not centred: the
         // column reads as hanging from it.
         let room = max(band.upperBound - top, 1)
-        let step = min(58, max(40, room / max(CGFloat(weights.count), 1)))
+        // The + counts as one more line, and when the column and the +
+        // would pass the band the lines close up rather than push the +
+        // under the legend and zoom row (Kristi's #1681 review).
+        let units = CGFloat(weights.count) + (offersLink ? 1 : 0)
+        let step = min(58, max(offersLink ? 24 : 40, room / max(units, 1)))
         let radius: CGFloat = 12
         for (index, device) in shown.enumerated() {
             let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
@@ -606,7 +610,7 @@ struct FlowMapScene: Equatable {
             // Under the last device (and its "+N"), or where the first would
             // hang; held inside the map.
             let slot = CGFloat(shown.count) + (more > 0 ? 0.7 : 0)
-            let y = min(top + step * slot, space.height - 24)
+            let y = min(top + step * slot, band.upperBound)
             scene.addDevice = CGPoint(x: hub.at.x, y: y)
         }
         return scene

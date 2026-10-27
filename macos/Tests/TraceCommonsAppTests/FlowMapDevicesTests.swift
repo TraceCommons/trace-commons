@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCDesign
 @testable import TCShellCore
 import XCTest
@@ -166,13 +167,51 @@ final class FlowMapDevicesTests: XCTestCase {
         XCTAssertFalse(request.take(), "a second look starts nothing")
     }
 
+    /// Kristi's #1681 review: with Settings closed, the + opens a fresh
+    /// Devices section whose model has no client yet. A request taken then
+    /// would be spent on a link that cannot start, so the model takes it
+    /// only once attached, and then starts linking.
+    func test_aLinkRequestWaitsForTheModelToBeAttached() async throws {
+        let request = AccountDeviceLinkRequest()
+        request.ask()
+        let model = AccountDevicesModel()
+        let early = await model.linkIfRequested(request)
+        XCTAssertFalse(early, "no client: nothing starts")
+        XCTAssertTrue(request.pending, "and the request is kept for when it can")
+
+        let daemon = LinkDaemon()
+        model.attach(DaemonClient(daemon: daemon))
+        let started = Task { await model.linkIfRequested(request) }
+        let deadline = Date().addingTimeInterval(3)
+        while !daemon.methods.contains("account_device_code_mint"), Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        started.cancel()
+        XCTAssertTrue(daemon.methods.contains("account_device_code_mint"), "linking started: \(daemon.methods)")
+        XCTAssertFalse(request.pending, "taken once")
+    }
+
+    /// Kristi's #1681 review: in a wide pane the column is short, and the
+    /// + must stay inside the band, above the legend and zoom row.
+    func test_thePlusStaysInsideTheBandInAWidePane() throws {
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
+        let space = FlowMapScene.space(for: CGSize(width: 1700, height: 1000))
+        let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), space: space)
+            .addingDevices((1...4).map(device), offersLink: true)
+        let band = FlowMapScene.band(scene.space)
+        let plus = try XCTUnwrap(scene.addDevice)
+        XCTAssertLessThanOrEqual(plus.y, band.upperBound, "clear of the legend and zoom row")
+        let last = try XCTUnwrap(scene.nodes.last { $0.kind == .device })
+        XCTAssertGreaterThan(plus.y, last.at.y, "still under the last device")
+    }
+
     func test_thePlusOpensTheDevicesSectionAndStartsLinking() throws {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(".addingDevices(devicesOnMap, offersLink: devices.devices != nil && devices.surface != nil)"))
         XCTAssertTrue(window.contains("AccountDeviceLinkRequest.shared.ask()"))
         XCTAssertTrue(window.contains("OpenMonitor.request(.settings(.connection))"))
         let view = try MonitorNavigationTests.text("Views/AccountDevicesView.swift")
-        XCTAssertTrue(view.contains("if AccountDeviceLinkRequest.shared.take() { await model.linkServer() }"))
+        XCTAssertTrue(view.contains("await model.linkIfRequested()"))
         let map = try MonitorNavigationTests.text("Views/Monitor/FlowMapView.swift")
         XCTAssertTrue(map.contains("if let at = scene.addDevice, let onAddDevice {"))
     }
@@ -238,4 +277,27 @@ final class FlowMapDevicesTests: XCTestCase {
         XCTAssertTrue(window.contains("@StateObject private var devices = AccountDevicesModel()"))
         XCTAssertTrue(window.contains("devices.attach(model.payoutLinkDaemonClient)"))
     }
+}
+
+/// Answers the Devices section's calls: a code when one is minted, used at
+/// once when asked about, and an empty list.
+private final class LinkDaemon: DaemonCalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [String] = []
+    var methods: [String] { lock.withLock { seen } }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        lock.withLock { seen.append(method) }
+        switch method {
+        case "account_device_code_mint":
+            return #"{"id":1,"result":{"code_id":"c1","code":"tcd1_dA.s","expires_at":"2099-01-01T00:00:00Z"}}"#
+        case "account_device_code_status":
+            return #"{"id":1,"result":{"state":"redeemed","device_key_id":"sha256:cc"}}"#
+        default:
+            return #"{"id":1,"result":{"devices":[]}}"#
+        }
+    }
+
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }

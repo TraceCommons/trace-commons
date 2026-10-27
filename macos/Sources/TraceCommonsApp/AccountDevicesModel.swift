@@ -56,6 +56,18 @@ final class AccountDevicesModel: ObservableObject {
         link = .idle
     }
 
+    /// The Traces map's + asked to link a server: start it, once -- but
+    /// only once this model has a client to link with. Taken earlier, the
+    /// request would be spent on a link that returns at once (Kristi's
+    /// #1681 review): a section opened fresh by the + attaches its client
+    /// in `.task`, after its first update. Returns whether it started.
+    @discardableResult
+    func linkIfRequested(_ request: AccountDeviceLinkRequest = .shared) async -> Bool {
+        guard client != nil, request.take() else { return false }
+        await linkServer()
+        return true
+    }
+
     func refresh() async {
         generation &+= 1
         let current = generation
