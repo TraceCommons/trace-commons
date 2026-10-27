@@ -240,6 +240,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let fundingTitle: String
     public let fundingWhat: String
     public let fundingManage: String
+    /// The NEAR AI balance card's button to billing.
+    public let balanceAddFunds: String
     public let fundingRefresh: String
     public let fundingUnavailable: String
     public let balanceWhat: String
@@ -435,6 +437,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case fundingTitle = "funding_title"
         case fundingWhat = "funding_what"
         case fundingManage = "funding_manage"
+        case balanceAddFunds = "balance_add_funds"
         case fundingRefresh = "funding_refresh"
         case fundingUnavailable = "funding_unavailable"
         case balanceWhat = "balance_what"

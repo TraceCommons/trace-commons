@@ -649,6 +649,10 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("funding_unavailable")]
     public string FundingUnavailable { get; init; } = string.Empty;
 
+    /// <summary>The NEAR AI balance card's button to billing.</summary>
+    [JsonPropertyName("balance_add_funds")]
+    public string BalanceAddFunds { get; init; } = string.Empty;
+
     /// <summary>What the figures on the row are a fact about.</summary>
     [JsonPropertyName("balance_what")]
     public string BalanceWhat { get; init; } = string.Empty;
@@ -888,6 +892,7 @@ public sealed record PrivateInferenceCopy
             FundingManage,
             FundingRefresh,
             FundingUnavailable,
+            BalanceAddFunds,
             BalanceWhat,
             BalanceNoSession,
             BalanceSessionExpired,

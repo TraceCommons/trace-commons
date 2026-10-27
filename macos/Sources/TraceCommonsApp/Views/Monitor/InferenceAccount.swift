@@ -215,6 +215,9 @@ struct PrivateAIBalanceCard: View {
             content: {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     BalanceRow(copy: copy)
+                    // To billing, verified, as Settings' Manage billing
+                    // (owner, 2026-10-27); hidden while a sign-in is needed.
+                    FundingRow(copy: copy, style: .addFunds)
                     NearAiSignInControl(copy: copy)
                 }
             })

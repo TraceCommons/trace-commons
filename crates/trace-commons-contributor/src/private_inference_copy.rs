@@ -730,6 +730,8 @@ pub struct PrivateInferenceCopy {
     pub funding_manage: &'static str,
     pub funding_refresh: &'static str,
     pub funding_unavailable: &'static str,
+    /// The balance card's button to billing. [`BALANCE_ADD_FUNDS`].
+    pub balance_add_funds: &'static str,
     /// [`BALANCE_WHAT`].
     pub balance_what: &'static str,
     /// [`BALANCE_NO_SESSION`].
@@ -1809,6 +1811,10 @@ pub const FUNDING_WHAT: &str = "Opens billing for the organization shown above."
 pub const FUNDING_MANAGE: &str = "Manage billing";
 /// #1146's "Verify current account".
 pub const FUNDING_REFRESH: &str = "Check account";
+/// The NEAR AI balance card's button (owner, 2026-10-27): it opens the same
+/// verified billing page as [`FUNDING_MANAGE`]. "Funds", not "credits", so
+/// NEAR AI billing stays apart from contribution credit.
+pub const BALANCE_ADD_FUNDS: &str = "Add funds";
 /// #1146's "Account destination not read.", then the remedy, by the
 /// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
 /// verified. Refresh account to try again."
@@ -2477,6 +2483,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         funding_title: FUNDING_TITLE,
         funding_what: FUNDING_WHAT,
         funding_manage: FUNDING_MANAGE,
+        balance_add_funds: BALANCE_ADD_FUNDS,
         funding_refresh: FUNDING_REFRESH,
         funding_unavailable: FUNDING_UNAVAILABLE,
         balance_what: BALANCE_WHAT,
@@ -4904,7 +4911,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            180,
+            181,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -5185,11 +5192,21 @@ mod tests {
     /// is no convention here to generalise from, and a field added later is
     /// a fourth answer to a fourth question rather than a fourth instance of
     /// a pattern.
+    /// The balance card's Add funds (owner, 2026-10-27). "Funds", not
+    /// "credits": NEAR AI billing stays apart from contribution credit, as
+    /// [`FUNDING_MANAGE`] does.
+    #[test]
+    fn the_balance_card_offers_add_funds() {
+        assert_eq!(private_inference_copy().balance_add_funds, "Add funds");
+        assert_eq!(BALANCE_ADD_FUNDS, "Add funds");
+    }
+
     #[test]
     fn the_balance_row_carries_its_own_words() {
         let copy = private_inference_copy();
         for field in [
             copy.balance_title,
+            copy.balance_add_funds,
             copy.balance_what,
             copy.balance_no_session,
             copy.balance_session_expired,
