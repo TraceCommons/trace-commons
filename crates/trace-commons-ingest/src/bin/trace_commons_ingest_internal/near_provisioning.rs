@@ -687,7 +687,17 @@ async fn finish(
             identity,
         )
         .await
-        .ok()?;
+        .map_err(|error| trace_commons_server::account_onboarding::is_device_key_revoked(&error));
+    let provisioned = match provisioned {
+        Ok(provisioned) => provisioned,
+        Err(true) => {
+            return Some(no_store(api_error(
+                StatusCode::CONFLICT,
+                DEVICE_KEY_REVOKED,
+            )));
+        }
+        Err(false) => return None,
+    };
     Some(response(serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
@@ -1370,8 +1380,19 @@ async fn near_ai_finish(
             identity,
             state.near_ai_signup_policy_template.as_ref(),
         )
-        .await
-        .ok()?;
+        .await;
+    let provisioned = match provisioned {
+        Ok(provisioned) => provisioned,
+        // Shown by name: the device has proven it holds the key and a NEAR AI
+        // login for it, and the fact is about its own key.
+        Err(error) if trace_commons_server::account_onboarding::is_device_key_revoked(&error) => {
+            return Some(no_store(api_error(
+                StatusCode::CONFLICT,
+                DEVICE_KEY_REVOKED,
+            )));
+        }
+        Err(_) => return None,
+    };
     Some(response(serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
@@ -1421,6 +1442,12 @@ pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
 /// own device, and the label names no tenant or account. A client shows it
 /// rather than retrying; nothing was written, and no fresh key is minted.
 pub(super) const BIND_DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "device_key_registered_elsewhere";
+/// The label every sign-in finish answers with when the device's key was
+/// revoked by its account (`DELETE /v1/account/devices/{id}`). Like the one
+/// above, it is shown by name only after the device proved it holds the key,
+/// and it is a fact about that key alone. The device recovers by making a new
+/// key, which signs in as a new device; the revoked one is never revived.
+pub(super) const DEVICE_KEY_REVOKED: &str = "device_key_revoked";
 
 /// What a ceremony on these routes does for an account in `binding`: an
 /// unbound passkey account binds; a bound one enrolls a further device (a
@@ -1594,6 +1621,7 @@ pub(super) async fn near_ai_bind_finish_handler(
             [
                 BIND_DEVICE_KEY_REGISTERED_ELSEWHERE,
                 NEAR_AI_ACCOUNT_MISMATCH,
+                DEVICE_KEY_REVOKED,
             ]
             .contains(&stage)
             .then(|| no_store(api_error(StatusCode::CONFLICT, stage)))
@@ -1695,6 +1723,8 @@ async fn near_ai_bind_finish(
                     Some(NEAR_AI_ACCOUNT_MISMATCH)
                 } else if onboarding::is_device_key_registered_elsewhere(&error) {
                     Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
+                } else if onboarding::is_device_key_revoked(&error) {
+                    Some(DEVICE_KEY_REVOKED)
                 } else {
                     Some("enrol")
                 }
@@ -1728,6 +1758,8 @@ async fn near_ai_bind_finish(
             if trace_commons_server::account_onboarding::is_device_key_registered_elsewhere(&error)
             {
                 Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
+            } else if trace_commons_server::account_onboarding::is_device_key_revoked(&error) {
+                Some(DEVICE_KEY_REVOKED)
             } else {
                 Some("bind")
             }

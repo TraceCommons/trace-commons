@@ -238,6 +238,20 @@ pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
 }
 
+/// A sign-in presented a device key its account revoked
+/// (`DELETE /v1/account/devices/{id}`). Revocation is never undone; the
+/// device signs in again with a new key, as a new device. Named so the
+/// client can tell this from the uniform refusal and say so. Label-only.
+///
+/// Carried as `DatabaseError::Pool(DEVICE_KEY_REVOKED)`; test it with
+/// [`is_device_key_revoked`].
+pub const DEVICE_KEY_REVOKED: &str = "near_provisioning_device_key_revoked";
+
+/// Whether `error` is the [`DEVICE_KEY_REVOKED`] refusal.
+pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
+}
+
 /// An enrollment's login does not resolve to the session's own account.
 ///
 /// Decided inside the account's own tenant, under RLS, so the check never
@@ -255,7 +269,7 @@ pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) ->
     matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,
     pub account_id: uuid::Uuid,

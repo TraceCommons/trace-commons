@@ -8,6 +8,8 @@ use crate::account_onboarding::{
 // The device key is already registered under a different tenant. Public, in
 // `account_onboarding`, because bind shows this refusal to its caller.
 use crate::account_onboarding::DEVICE_KEY_REGISTERED_ELSEWHERE;
+// The device key was revoked by its account. Public for the same reason.
+use crate::account_onboarding::DEVICE_KEY_REVOKED;
 use crate::db::NewSession;
 use crate::near_account_identity::{NearAccountIdentity, random_near_tenant_id};
 use crate::near_ai_signup_policy::NearAiSignupPolicyTemplate;
@@ -59,19 +61,26 @@ async fn claim_provisioned_device_key(
     }
     let Some(row) = tx
         .query_opt(
-            "SELECT public_key, onboarding_origin, revoked_at IS NULL FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2",
+            // FOR SHARE: a revoke holds this row's lock until it commits, so
+            // the read waits and sees the revocation instead of racing it and
+            // leaving a live session on a revoked device.
+            "SELECT public_key, onboarding_origin, revoked_at IS NULL FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 FOR SHARE",
             &[&tenant, &device],
         )
         .await?
     else {
         return Err(named_refusal(DEVICE_KEY_REGISTERED_ELSEWHERE));
     };
-    // Same tenant, but revoked or recorded differently: never revive or
-    // rewrite it from here.
-    let same = row.get::<_, String>(0) == public_key
-        && row.get::<_, String>(1) == origin
-        && row.get::<_, bool>(2);
-    if same { Ok(()) } else { Err(refused()) }
+    // Same tenant, but recorded differently: never rewrite it from here.
+    if row.get::<_, String>(0) != public_key || row.get::<_, String>(1) != origin {
+        return Err(refused());
+    }
+    // The account revoked this key. Never revived; refused by name so the
+    // device knows to make a new key, which signs in as a new device.
+    if !row.get::<_, bool>(2) {
+        return Err(named_refusal(DEVICE_KEY_REVOKED));
+    }
+    Ok(())
 }
 
 /// Bind the proved wallet key to `account`, or accept the identical live
@@ -202,7 +211,7 @@ impl NearAiAnchorMaterial {
 /// No `trace_near_identities` row: that table binds a wallet public key to a
 /// NEAR account name, and this path has neither. A login proves an account,
 /// not a key. Returns the device key id and the principal.
-async fn attach_near_ai_login_device(
+pub(super) async fn attach_near_ai_login_device(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     account: &Uuid,
@@ -224,7 +233,7 @@ async fn attach_near_ai_login_device(
         .await?;
     }
     tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,account,&device,&anchor_hash]).await?;
-    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at]).await?;
+    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id) VALUES($1,$2,$3,$4,'native',$5,$6)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at,&device]).await?;
     Ok((device, principal))
 }
 
@@ -524,7 +533,7 @@ impl PgBackend {
         claim_provisioned_device_key(&tx, &tenant, &device, &public_key, "near").await?;
         link_provisioned_principal(&tx, &tenant, &account, &principal).await?;
         tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
-        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
+        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id) VALUES($1,$2,$3,$4,'native',$5,$6)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at,&device]).await?;
         tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_account_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near","admission":"not_granted"})]).await?;
         tx.commit().await?;
         Ok(Some(ProvisionedNearAccount {

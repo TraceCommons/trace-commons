@@ -8220,16 +8220,21 @@ key, tenant identity or secret-store reference.
 NEAR AI account: past a two-second wait it answers `renewal:"renewing"` and the
 renewal finishes in the background. `renewal:"failed"` carries the class in
 `renewal_failure` (see the staging tester guide's renewal log table) while the
-10-minute retry wait holds; otherwise both are null. `sign_in` is `"near_ai"`
+10-minute retry wait holds, and for `device_key_revoked` for as long as the
+enrolled key is the refused one; otherwise both are null. `sign_in` is `"near_ai"`
 for a device enrolled in a `nearai-` tenant, whose Sign in again is
 `near_ai_account_sign_in`, and null otherwise. `near_ai_account_sign_in` runs
 the provisioning ceremony again with the retained NEAR AI login, ignoring the
-retry wait and signing in a NEAR AI account whose session record was removed
+10-minute retry wait (but not a revoked key) and signing in a NEAR AI account whose session record was removed
 by sign-out; it refuses `near_ai_sign_in_required` when NEAR AI no longer
 accepts that login (the shell then signs in to NEAR AI and calls it again),
+`device_key_revoked` when the account unlinked this device (the commons
+never signs that key in again, so no ceremony runs; sign-out keeps the key,
+and only `unenroll` and a new enrollment, with a new key, recover),
 `near_ai_sign_in_not_near_ai_account`, `near_ai_sign_in_not_enrolled`,
 `commons_credential_storage_unavailable`, or
-`near_ai_sign_in_unavailable`.
+`near_ai_sign_in_unavailable`. `near_ai_account_enroll` and `account_bind` can
+refuse the same case as `near_ai_enroll_device_key_revoked`.
 
 `label` is optional, at most 64 characters. A no-config create/login may name
 an `ingest_url` only when its canonical origin equals the compiled production

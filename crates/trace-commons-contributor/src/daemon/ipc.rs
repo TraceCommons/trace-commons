@@ -377,6 +377,12 @@ pub const METHODS: &[&str] = &[
     "passkey_state",
     "account_contribution_status",
     "account_invite_redeem",
+    "account_devices_list",
+    "account_device_rename",
+    "account_device_revoke",
+    "account_device_code_mint",
+    "account_device_code_status",
+    "account_device_code_redeem",
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
@@ -3707,6 +3713,18 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "account_invite_redeem",
         "account-contribution-requires-async",
     ),
+    ("account_devices_list", "account-devices-requires-async"),
+    ("account_device_rename", "account-devices-requires-async"),
+    ("account_device_revoke", "account-devices-requires-async"),
+    ("account_device_code_mint", "account-devices-requires-async"),
+    (
+        "account_device_code_status",
+        "account-devices-requires-async",
+    ),
+    (
+        "account_device_code_redeem",
+        "account-devices-requires-async",
+    ),
     ("near_account_start", "near-signup-requires-async"),
     ("near_ai_account_enroll", "near-signup-requires-async"),
     ("near_ai_account_sign_in", "near-signup-requires-async"),
@@ -6794,6 +6812,12 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "passkey_state" => super::native_identity::handle(shared, req).await,
         "account_contribution_status" => crate::account_contribution::handle(shared, req).await,
         "account_invite_redeem" => crate::account_contribution::handle(shared, req).await,
+        "account_devices_list" => super::device_codes::handle_list(shared, req).await,
+        "account_device_rename" => super::device_codes::handle_rename(shared, req).await,
+        "account_device_revoke" => super::device_codes::handle_revoke(shared, req).await,
+        "account_device_code_mint" => super::device_codes::handle_mint(shared, req).await,
+        "account_device_code_status" => super::device_codes::handle_status(shared, req).await,
+        "account_device_code_redeem" => super::device_codes::handle_redeem(shared, req).await,
 
         "native_wallet_flow" => super::native_flow::handle_wallet(shared, req).await,
         "prepare_admission_session" => super::native_flow::admission_response(
@@ -18138,7 +18162,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 70);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 76);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18626,7 +18650,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 103, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 78, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

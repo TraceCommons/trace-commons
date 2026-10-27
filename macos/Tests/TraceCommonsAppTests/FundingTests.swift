@@ -137,6 +137,8 @@ private final class HostedFunding {
     private let copy: PrivateInferenceCopy
     var opened: [URL] = []
     var acceptOpen = true
+    /// The row's style: the Billing card, or the balance card's Add funds.
+    var style: FundingRow.Style = .card
 
     init() throws {
         _ = NSApplication.shared
@@ -148,7 +150,7 @@ private final class HostedFunding {
     }
 
     func show() {
-        hosting.rootView = AnyView(FundingRow(copy: copy).environmentObject(model)
+        hosting.rootView = AnyView(FundingRow(copy: copy, style: style).environmentObject(model)
             .environment(\.openURL, OpenURLAction { [weak self] url in
                 guard let self else { return .discarded }
                 self.opened.append(url)
@@ -184,7 +186,11 @@ private final class HostedFunding {
         // centred on its height (owner, 2026-10-10), inside the test's 24pt
         // padding and the card's own: this point falls inside the button.
         let bounds = hosting.bounds
-        let point = NSPoint(x: bounds.width - 24 - GlassTokens.Space.cardPaddingHorizontal - 30, y: bounds.height / 2)
+        // Add funds is the button alone, at its own size, which the test's
+        // fixed-width frame centres.
+        let point = style == .addFunds
+            ? NSPoint(x: bounds.width / 2, y: bounds.height / 2)
+            : NSPoint(x: bounds.width - 24 - GlassTokens.Space.cardPaddingHorizontal - 30, y: bounds.height / 2)
         XCTAssertNotNil(hosting.hitTest(hosting.convert(point, from: nil)))
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
@@ -396,6 +402,34 @@ final class FundingTests: XCTestCase {
             XCTAssertNil(afterShutdown)
             XCTAssertEqual(daemon.calls.count, 1)
         }
+    }
+
+    /// The NEAR AI balance card's Add funds (owner, 2026-10-27): the same
+    /// bound read as Manage billing, then exactly the verified credits page.
+    @MainActor
+    func testHostedAddFundsOpensTheVerifiedCreditsPage() async throws {
+        let view = try HostedFunding()
+        view.style = .addFunds
+        defer { view.close() }
+        try await prime(view)
+        let entered = expectation(description: "Add funds reaches the daemon")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        try await view.press()
+        await fulfillment(of: [entered], timeout: 2)
+        try assertLastFundingCall(view, bound: true)
+        try await view.draw()
+        XCTAssertEqual(view.opened.map(\.absoluteString), [try XCTUnwrap(expected().browserURL).absoluteString])
+    }
+
+    /// Add funds is offered only with a verified destination, and never in
+    /// place of a sign-in: signed out, the balance card's own Sign in is
+    /// the way forward, and an unread account has nowhere to send money.
+    func testAddFundsShowsOnlyWithAVerifiedDestinationAndNoSignInNeeded() throws {
+        let destination = try expected()
+        XCTAssertTrue(FundingRow.showsAddFunds(destination: destination, signInNeeded: false))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: destination, signInNeeded: true))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: nil, signInNeeded: false))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: nil, signInNeeded: true))
     }
 
     @MainActor

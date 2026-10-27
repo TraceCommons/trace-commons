@@ -21,6 +21,9 @@ struct InsightsView: View {
     private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
+    /// The Monitor window's inspector, which shows the open Sessions trace
+    /// (`InsightsInspector`); `nil` opens it under its row instead.
+    private let inspector: InsightsInspector?
     @State private var source = "codex"
 
     /// `daemon` is the app's live client, for the week from the daemon's
@@ -28,7 +31,8 @@ struct InsightsView: View {
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
-                    subscriptions: SubscriptionUsageModel? = nil) {
+                    subscriptions: SubscriptionUsageModel? = nil,
+                    inspector: InsightsInspector? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider in
@@ -92,7 +96,8 @@ struct InsightsView: View {
                                                        watchedDrill: watchedDrill, watchedLabel: watchedLabel),
                   turnOffRecapCard: turnOff,
                   subscriptionModel: subscriptions,
-                  subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter))
+                  subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
+                  inspector: inspector)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -108,7 +113,8 @@ struct InsightsView: View {
                     initialTab: InsightsTab = .overview,
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
                     subscriptionModel: SubscriptionUsageModel? = nil,
-                    subscriptionFallback: SubscriptionUsageModel? = nil) {
+                    subscriptionFallback: SubscriptionUsageModel? = nil,
+                    inspector: InsightsInspector? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -122,6 +128,7 @@ struct InsightsView: View {
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
+        self.inspector = inspector
     }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
@@ -188,7 +195,9 @@ struct InsightsView: View {
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
                                     analysis: model.canAnalyzeSessions ? model : nil,
-                                    openAnalysis: { tab = .analyze })
+                                    openAnalysis: { tab = .analyze },
+                                    detailInInspector: inspector != nil,
+                                    opened: { inspector?.personOpened() })
             case .analyze: content
             }
         }
@@ -206,6 +215,8 @@ struct InsightsView: View {
             sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() }
         }
         .onAppear { showSampleWeekIfAsked() }
+        // The open Sessions trace is the inspector's while Sessions is shown.
+        .onChange(of: tab, initial: true) { _, shown in showSessionDetail(shown) }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
         }
@@ -223,6 +234,20 @@ struct InsightsView: View {
         .onDisappear {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
             patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
+            inspector?.clear()
+        }
+    }
+
+    /// Hands the inspector the Sessions details while Sessions is `shown`,
+    /// and takes them back on any other tab.
+    private func showSessionDetail(_ shown: InsightsTab) {
+        guard let inspector else { return }
+        guard shown == .sessions else { inspector.clear(); return }
+        inspector.show(sessionsModel) { [model, sessionsModel] in
+            InsightsSessionDetail(model: sessionsModel, copy: model.copy,
+                                  notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
+                                  analysis: model.canAnalyzeSessions ? model : nil,
+                                  openAnalysis: { tab = .analyze })
         }
     }
 

@@ -1050,3 +1050,43 @@ async fn enrolling_an_enrolled_device_is_still_refused() {
     assert_eq!(refusal(&response), Some("near_ai_enroll_already_enrolled"));
     assert_eq!(fx.ceremonies(), (0, 0));
 }
+
+#[tokio::test]
+async fn a_revoked_key_runs_no_further_ceremony_and_a_new_key_is_not_held_back() {
+    let fx = Fixture::new(Session::Expired).await;
+    let enrolled = fx
+        .shared
+        .store
+        .load_config()
+        .unwrap()
+        .unwrap()
+        .device_key_id;
+    super::remember_if_revoked(
+        &fx.shared.store,
+        super::FAILURE_DEVICE_KEY_REVOKED,
+        &enrolled,
+    );
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), Some(super::FAILURE_DEVICE_KEY_REVOKED));
+    assert_eq!(fx.ceremonies(), (0, 0), "no start, no finish");
+    assert!(!super::may_renew(&fx.shared));
+    assert_eq!(
+        super::last_failure(&fx.shared),
+        Some(super::FAILURE_DEVICE_KEY_REVOKED)
+    );
+
+    // Sign-out keeps the device key, so the key stays revoked.
+    let _ = fx.call("account_sign_out", json!({})).await;
+    assert!(super::key_revoked(&fx.shared.store), "sign-out keeps it");
+
+    // A late answer for an old key, after the device enrolled a new one,
+    // does not hold the new key back.
+    super::remember_if_revoked(
+        &fx.shared.store,
+        super::FAILURE_DEVICE_KEY_REVOKED,
+        "an-older-key",
+    );
+    assert!(!super::key_revoked(&fx.shared.store));
+}

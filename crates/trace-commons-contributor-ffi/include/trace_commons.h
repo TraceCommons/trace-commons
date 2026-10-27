@@ -2652,6 +2652,12 @@ char*       tc_inference_connection_copy_json(void);
  */
 char*       tc_payout_link_copy_json(void);
 
+/* The Devices section's words (consent_copy::account_devices_copy), every
+ * one a draft for owner review. Templates carry {device}, {code} or {when}.
+ * NULL only on a caught panic.
+ */
+char*       tc_account_devices_copy_json(void);
+
 /* The Flow 1 grant screens' sentences for the configuration in config_dir
  * (consent_copy::automatic_contribution_copy). The core chooses the
  * disclosure: exactly one of patterns_only and model_scrubbed is present.

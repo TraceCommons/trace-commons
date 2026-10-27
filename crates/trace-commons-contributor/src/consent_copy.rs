@@ -2585,6 +2585,96 @@ pub fn payout_link_copy() -> PayoutLinkCopy {
     }
 }
 
+/// The Devices section (owner decision 2026-10-27: a laptop mints a
+/// one-time code, the server redeems it with `login --code`). Every string
+/// is a DRAFT, NEEDS APPROVAL. Templates carry one placeholder each:
+/// `{device}`, `{code}` or `{when}` (already formatted by the shell).
+pub const ACCOUNT_DEVICES_TITLE: &str = "Devices";
+pub const ACCOUNT_DEVICES_BODY: &str =
+    "Computers and servers signed in to your account. Each one uploads with its own key.";
+pub const ACCOUNT_DEVICES_THIS_DEVICE: &str = "This device";
+pub const ACCOUNT_DEVICES_UNNAMED: &str = "Unnamed device";
+pub const ACCOUNT_DEVICES_LAST_SEEN: &str = "Last seen {when}";
+pub const ACCOUNT_DEVICES_LINK_BUTTON: &str = "Link a server";
+pub const ACCOUNT_DEVICES_LINK_ACCESSIBILITY_NAME: &str =
+    "Link a server or another computer to your account with a one-time code";
+pub const ACCOUNT_DEVICES_LINK_BODY: &str = "On the server, run this command. The code works once, within 10 minutes. Anyone who has it can join your account.";
+pub const ACCOUNT_DEVICES_CODE_COMMAND: &str = "trace-commons-contributor login --code {code}";
+pub const ACCOUNT_DEVICES_COPY_BUTTON: &str = "Copy command";
+pub const ACCOUNT_DEVICES_COPIED: &str = "Copied";
+pub const ACCOUNT_DEVICES_WAITING: &str = "Waiting for the server to use the code";
+pub const ACCOUNT_DEVICES_LINKED: &str = "Server linked.";
+pub const ACCOUNT_DEVICES_EXPIRED: &str = "The code expired before it was used.";
+pub const ACCOUNT_DEVICES_DONE_BUTTON: &str = "Done";
+pub const ACCOUNT_DEVICES_UNLINK_BUTTON: &str = "Unlink";
+pub const ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME: &str = "Unlink {device}";
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM: &str =
+    "Unlink {device}? It is signed out and can't upload or renew its sign-in.";
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON: &str = "Unlink";
+pub const ACCOUNT_DEVICES_CANCEL_BUTTON: &str = "Cancel";
+pub const ACCOUNT_DEVICES_SESSION_ENDED: &str = PAYOUT_LINK_SESSION_ENDED;
+pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes at once. Try again in a few minutes.";
+pub const ACCOUNT_DEVICES_FAILED: &str = PAYOUT_LINK_FAILED;
+
+/// Every Devices string, in one payload, for the shells
+/// (`tc_account_devices_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AccountDevicesCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub this_device: &'static str,
+    pub unnamed: &'static str,
+    pub last_seen: &'static str,
+    pub link_button: &'static str,
+    pub link_accessibility_name: &'static str,
+    pub link_body: &'static str,
+    pub code_command: &'static str,
+    pub copy_button: &'static str,
+    pub copied: &'static str,
+    pub waiting: &'static str,
+    pub linked: &'static str,
+    pub expired: &'static str,
+    pub done_button: &'static str,
+    pub unlink_button: &'static str,
+    pub unlink_accessibility_name: &'static str,
+    pub unlink_confirm: &'static str,
+    pub unlink_confirm_button: &'static str,
+    pub cancel_button: &'static str,
+    pub session_ended: &'static str,
+    pub too_many: &'static str,
+    pub failed: &'static str,
+}
+
+/// The Devices words.
+#[must_use]
+pub fn account_devices_copy() -> AccountDevicesCopy {
+    AccountDevicesCopy {
+        title: ACCOUNT_DEVICES_TITLE,
+        body: ACCOUNT_DEVICES_BODY,
+        this_device: ACCOUNT_DEVICES_THIS_DEVICE,
+        unnamed: ACCOUNT_DEVICES_UNNAMED,
+        last_seen: ACCOUNT_DEVICES_LAST_SEEN,
+        link_button: ACCOUNT_DEVICES_LINK_BUTTON,
+        link_accessibility_name: ACCOUNT_DEVICES_LINK_ACCESSIBILITY_NAME,
+        link_body: ACCOUNT_DEVICES_LINK_BODY,
+        code_command: ACCOUNT_DEVICES_CODE_COMMAND,
+        copy_button: ACCOUNT_DEVICES_COPY_BUTTON,
+        copied: ACCOUNT_DEVICES_COPIED,
+        waiting: ACCOUNT_DEVICES_WAITING,
+        linked: ACCOUNT_DEVICES_LINKED,
+        expired: ACCOUNT_DEVICES_EXPIRED,
+        done_button: ACCOUNT_DEVICES_DONE_BUTTON,
+        unlink_button: ACCOUNT_DEVICES_UNLINK_BUTTON,
+        unlink_accessibility_name: ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME,
+        unlink_confirm: ACCOUNT_DEVICES_UNLINK_CONFIRM,
+        unlink_confirm_button: ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON,
+        cancel_button: ACCOUNT_DEVICES_CANCEL_BUTTON,
+        session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
+        too_many: ACCOUNT_DEVICES_TOO_MANY,
+        failed: ACCOUNT_DEVICES_FAILED,
+    }
+}
+
 /// `template` with `{org_name}` filled in.
 #[must_use]
 pub fn render_org_name(template: &str, org_name: &str) -> String {
@@ -2611,6 +2701,28 @@ mod tests {
         );
         let all = [copy.title, copy.matching, copy.nothing_sent, copy.credit].join(" ");
         assert!(!all.to_lowercase().contains("earn"), "{all}");
+    }
+
+    /// The command the Devices card shows is the one the CLI parses, and
+    /// every template carries its placeholder.
+    #[test]
+    fn the_devices_copy_names_the_real_command() {
+        let copy = account_devices_copy();
+        assert_eq!(
+            copy.code_command,
+            "trace-commons-contributor login --code {code}"
+        );
+        assert!(copy.unlink_confirm.contains("{device}"));
+        assert!(copy.unlink_accessibility_name.contains("{device}"));
+        assert!(copy.last_seen.contains("{when}"));
+        let value = serde_json::to_value(copy).unwrap();
+        assert!(
+            value
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|v| { v.as_str().is_some_and(|s| !s.trim().is_empty()) })
+        );
     }
 
     #[test]

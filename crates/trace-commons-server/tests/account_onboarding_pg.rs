@@ -1577,3 +1577,903 @@ async fn a_near_ai_device_claim_honours_consent_up_to_the_template() {
     task.abort();
     old_task.abort();
 }
+
+/// Two laptops signing in with one NEAR AI login land on one account, and
+/// that account can list, rename and revoke them; another account can do
+/// none of it.
+#[tokio::test]
+async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed_and_revoked() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("devices").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+
+    let laptop = fresh_keypair();
+    let laptop_session = session_hash("devices-laptop");
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&laptop),
+            native_session(&laptop_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the first laptop provisions");
+    let second_laptop = fresh_keypair();
+    let second_session = session_hash("devices-second");
+    let second = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&second_laptop),
+            native_session(&second_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the second laptop provisions");
+    assert_eq!(second.tenant_id, first.tenant_id);
+    assert_eq!(
+        second.account_id, first.account_id,
+        "one NEAR AI login is one account, whichever laptop signs in"
+    );
+    assert_ne!(second.device_key_id, first.device_key_id);
+    let (tenant, account) = (first.tenant_id.clone(), first.account_id);
+
+    let devices = db
+        .list_account_devices(&tenant, account, Some(&laptop_session))
+        .await
+        .unwrap();
+    let ids: Vec<&str> = devices.iter().map(|d| d.device_key_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![first.device_key_id.as_str(), second.device_key_id.as_str()]
+    );
+    assert!(devices.iter().all(|d| d.onboarding_origin == "near_ai"));
+    assert!(devices.iter().all(|d| d.last_seen_at.is_some()));
+    assert_eq!(
+        devices.iter().map(|d| d.this_device).collect::<Vec<_>>(),
+        vec![true, false],
+        "only the device whose session asked is this device"
+    );
+    assert!(
+        db.list_account_devices(&tenant, account, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|d| !d.this_device)
+    );
+
+    // Rename, and clear.
+    assert!(
+        db.rename_account_device(&tenant, account, &second.device_key_id, Some("zaki-server"))
+            .await
+            .unwrap()
+    );
+    let labels: Vec<Option<String>> = db
+        .list_account_devices(&tenant, account, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.label)
+        .collect();
+    assert_eq!(labels, vec![None, Some("zaki-server".to_string())]);
+
+    // Another account sees none of these devices and changes nothing.
+    let (other_login, other_task) = stub_near_ai_login("devices-other").await;
+    let other_device = fresh_keypair();
+    let other = db
+        .provision_near_ai_login(
+            &other_login,
+            &device_bytes(&other_device),
+            native_session(&session_hash("devices-other")),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("another account provisions");
+    let other_ids: Vec<String> = db
+        .list_account_devices(&other.tenant_id, other.account_id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.device_key_id)
+        .collect();
+    assert_eq!(other_ids, vec![other.device_key_id.clone()]);
+    for tenant_id in [&tenant, &other.tenant_id] {
+        assert!(
+            !db.rename_account_device(tenant_id, other.account_id, &second.device_key_id, None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            db.revoke_account_device(
+                tenant_id,
+                other.account_id,
+                &second.device_key_id,
+                "account-actor:other",
+                None
+            )
+            .await
+            .unwrap(),
+            trace_commons_server::db::RevokeAccountDeviceResult::default(),
+            "a foreign device is not found and nothing changes"
+        );
+    }
+
+    // Revoke the second laptop: its key, grant and session end; the first
+    // laptop is untouched.
+    let result = db
+        .revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        trace_commons_server::db::RevokeAccountDeviceResult {
+            removed: true,
+            sessions_revoked: 1,
+            grants_revoked: 1,
+            unattributed_sessions_revoked: 0,
+        }
+    );
+    let remaining: Vec<String> = db
+        .list_account_devices(&tenant, account, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.device_key_id)
+        .collect();
+    assert_eq!(remaining, vec![first.device_key_id.clone()]);
+    let key_revoked: bool = admin
+        .query_one(
+            "SELECT revoked_at IS NOT NULL FROM device_keys WHERE device_key_id = $1",
+            &[&second.device_key_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(key_revoked);
+    let grants = signup_grants(&admin, &tenant, &second.device_key_id).await;
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].0, "revoked");
+    assert_eq!(
+        signup_grants(&admin, &tenant, &first.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)]
+    );
+    assert!(
+        db.validate_session(&tenant, &second_session)
+            .await
+            .unwrap()
+            .is_none(),
+        "the revoked device's session no longer validates"
+    );
+    assert!(
+        db.validate_session(&tenant, &laptop_session)
+            .await
+            .unwrap()
+            .is_some(),
+        "the other laptop stays signed in"
+    );
+    assert!(
+        !db.revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            None
+        )
+        .await
+        .unwrap()
+        .removed,
+        "revoking twice finds nothing the second time"
+    );
+    assert!(
+        !db.rename_account_device(&tenant, account, &second.device_key_id, Some("again"))
+            .await
+            .unwrap(),
+        "a revoked device cannot be renamed"
+    );
+    task.abort();
+    other_task.abort();
+}
+
+/// A signed-in laptop mints a code, a headless server redeems it and joins
+/// the same account, and only that server can renew its session by key.
+#[tokio::test]
+async fn a_code_minted_on_a_laptop_links_a_server_that_alone_renews_by_key() {
+    use trace_commons_server::db::{
+        DeviceSignInOutcome, MintAccountDeviceCodeOutcome, NewAccountDeviceCode,
+    };
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("device-code").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let laptop = fresh_keypair();
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&laptop),
+            native_session(&session_hash("code-laptop")),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the laptop provisions");
+    let (tenant, account) = (first.tenant_id.clone(), first.account_id);
+    let mint = |code_hash: String, nonce: String, minter: String, cap: i64| {
+        let tenant = tenant.clone();
+        let db = &db;
+        async move {
+            db.mint_account_device_code(NewAccountDeviceCode {
+                tenant_id: &tenant,
+                account_id: account,
+                minter_device_key_id: &minter,
+                mint_nonce_hash: &nonce,
+                code_hash: &code_hash,
+                label: Some("zaki-server"),
+                expires_at: Utc::now() + Duration::minutes(10),
+                outstanding_cap: cap,
+            })
+            .await
+            .unwrap()
+        }
+    };
+
+    // Only an active device of the account can mint.
+    let stranger = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &device_bytes(&fresh_keypair()),
+    );
+    assert_eq!(
+        mint(hash("c0"), hash("n0"), stranger, 3).await,
+        MintAccountDeviceCodeOutcome::MinterNotADevice
+    );
+    let code_hash = hash("code-1");
+    let MintAccountDeviceCodeOutcome::Minted { code_id } = mint(
+        code_hash.clone(),
+        hash("n1"),
+        first.device_key_id.clone(),
+        3,
+    )
+    .await
+    else {
+        panic!("the laptop mints");
+    };
+    assert_eq!(
+        mint(hash("code-2"), hash("n1"), first.device_key_id.clone(), 3).await,
+        MintAccountDeviceCodeOutcome::NonceReused,
+        "a mint proof's nonce is accepted once"
+    );
+    assert_eq!(
+        mint(hash("code-3"), hash("n3"), first.device_key_id.clone(), 1).await,
+        MintAccountDeviceCodeOutcome::TooManyOutstanding
+    );
+    let status = db
+        .account_device_code_status(&tenant, account, code_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.expired);
+    assert_eq!(status.redeemed_device_key_id, None);
+
+    // A wrong code finds nothing; the right one links the server.
+    let server = fresh_keypair();
+    let server_session = session_hash("code-server");
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &hash("not-a-code"),
+            &device_bytes(&server),
+            native_session(&server_session),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    let DeviceSignInOutcome::SignedIn(linked) = db
+        .redeem_account_device_code(
+            &tenant,
+            &code_hash,
+            &device_bytes(&server),
+            native_session(&server_session),
+            Some(&template),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the server redeems");
+    };
+    assert_eq!(linked.account_id, account);
+    assert_eq!(linked.anchor_hash, first.anchor_hash);
+    assert!(
+        db.validate_session(&tenant, &server_session)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        signup_grants(&admin, &tenant, &linked.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)]
+    );
+    let devices = db
+        .list_account_devices(&tenant, account, Some(&server_session))
+        .await
+        .unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[1].device_key_id, linked.device_key_id);
+    assert_eq!(devices[1].label.as_deref(), Some("zaki-server"));
+    assert!(devices[1].this_device);
+    assert_eq!(
+        db.account_device_code_status(&tenant, account, code_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .redeemed_device_key_id,
+        Some(linked.device_key_id.clone())
+    );
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &code_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-again")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound,
+        "a code is spent by its first redeem"
+    );
+
+    // The server joined by code, so it cannot mint one in turn.
+    assert_eq!(
+        mint(
+            hash("code-relay"),
+            hash("n-relay"),
+            linked.device_key_id.clone(),
+            3
+        )
+        .await,
+        MintAccountDeviceCodeOutcome::MinterNotADevice,
+        "a code-joined device never mints"
+    );
+
+    // Unauthenticated paths never create a tenant: a redeem or renewal naming
+    // an unknown tenant finds nothing and writes no tenant row.
+    let unknown_tenant = format!("nearai-unknown-{}", uuid::Uuid::new_v4().simple());
+    assert_eq!(
+        db.redeem_account_device_code(
+            &unknown_tenant,
+            &code_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-unknown-tenant")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    assert_eq!(
+        db.renew_device_session(
+            &unknown_tenant,
+            &device_bytes(&server),
+            &hash("r-unknown"),
+            native_session(&session_hash("renew-unknown-tenant")),
+            Duration::zero(),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    let tenant_rows: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&unknown_tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(tenant_rows, 0, "no tenant row for an unknown tenant");
+
+    // Renewal: the laptop joined by NEAR AI, not by code, and is refused.
+    let renew = |key: [u8; 32], nonce: String, interval: Duration| {
+        let tenant = tenant.clone();
+        let db = &db;
+        async move {
+            let token = session_hash("renewed");
+            let outcome = db
+                .renew_device_session(&tenant, &key, &nonce, native_session(&token), interval)
+                .await
+                .unwrap();
+            (outcome, token)
+        }
+    };
+    assert_eq!(
+        renew(device_bytes(&laptop), hash("r0"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NotFound
+    );
+    let (outcome, token) = renew(device_bytes(&server), hash("r1"), Duration::zero()).await;
+    assert!(matches!(outcome, DeviceSignInOutcome::SignedIn(ref p) if p.account_id == account));
+    assert!(
+        db.validate_session(&tenant, &token)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r1"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NonceReused
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r2"), Duration::minutes(10))
+            .await
+            .0,
+        DeviceSignInOutcome::TooSoon
+    );
+
+    // Revoking the server ends its renewal; revoking the laptop voids the
+    // codes it minted.
+    assert!(
+        db.revoke_account_device(
+            &tenant,
+            account,
+            &linked.device_key_id,
+            "account-actor:me",
+            None
+        )
+        .await
+        .unwrap()
+        .removed
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r3"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NotFound
+    );
+    let late_hash = hash("code-late");
+    assert!(matches!(
+        mint(
+            late_hash.clone(),
+            hash("n4"),
+            first.device_key_id.clone(),
+            3
+        )
+        .await,
+        MintAccountDeviceCodeOutcome::Minted { .. }
+    ));
+    assert!(
+        db.revoke_account_device(
+            &tenant,
+            account,
+            &first.device_key_id,
+            "account-actor:me",
+            None
+        )
+        .await
+        .unwrap()
+        .removed
+    );
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &late_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-late")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    task.abort();
+}
+
+/// A revoked device's key is refused by name when it signs in again, a new
+/// key on the same machine joins as a new device, and nothing the revoke
+/// could not see keeps the old key signed in: an unkeyed native session
+/// from before V139 ends with it, the caller's own and browser sessions do
+/// not, and an expired grant is left as it was.
+#[tokio::test]
+async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("revoked-again").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+
+    let laptop = fresh_keypair();
+    let laptop_session = session_hash("revoked-again-laptop");
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&laptop),
+            native_session(&laptop_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the laptop provisions");
+    let lost = fresh_keypair();
+    let lost_session = session_hash("revoked-again-lost");
+    let second = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&lost),
+            native_session(&lost_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the second device provisions");
+    let (tenant, account) = (first.tenant_id.clone(), first.account_id);
+
+    // Sessions that name no device key: a native one from before V139 (the
+    // lost device's, as far as anyone can tell), the caller's own native one,
+    // and a browser passkey one.
+    let unkeyed = |kind: &'static str, label: &'static str| {
+        let admin = &admin;
+        let tenant = tenant.clone();
+        async move {
+            let token = session_hash(label);
+            admin
+                .execute(
+                    "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at)
+                     VALUES($1,$2,$3,$4,$5,now() + interval '1 hour')",
+                    &[&tenant, &uuid::Uuid::new_v4(), &account, &token, &kind],
+                )
+                .await
+                .unwrap();
+            token
+        }
+    };
+    let legacy_session = unkeyed("native", "revoked-again-legacy").await;
+    let caller_session = unkeyed("native", "revoked-again-caller").await;
+    let browser_session = unkeyed("passkey", "revoked-again-browser").await;
+    // A native session from a passkey sign-in names its passkey.
+    let passkey_native_session = session_hash("revoked-again-passkey-native");
+    admin
+        .execute(
+            "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,auth_credential_id,expires_at)
+             VALUES($1,$2,$3,$4,'native','passkey-credential-1',now() + interval '1 hour')",
+            &[&tenant, &uuid::Uuid::new_v4(), &account, &passkey_native_session],
+        )
+        .await
+        .unwrap();
+    // A second grant on the device, already expired: not the revoke's to
+    // rewrite or count.
+    let principal: String = admin
+        .query_one(
+            "SELECT principal_ref FROM trace_near_provisioned_devices WHERE device_key_id = $1",
+            &[&second.device_key_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let expired_grant = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenant_access_grants(tenant_id,grant_id,principal_ref,role,status,issued_at,updated_at)
+             VALUES($1,$2,$3,'contributor','expired',now() - interval '2 days',now() - interval '1 day')",
+            &[&tenant, &expired_grant, &principal],
+        )
+        .await
+        .unwrap();
+
+    let result = db
+        .revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            Some(&caller_session),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        trace_commons_server::db::RevokeAccountDeviceResult {
+            removed: true,
+            sessions_revoked: 1,
+            grants_revoked: 1,
+            unattributed_sessions_revoked: 1,
+        },
+        "the unkeyed native session ends with the device; the caller's own and \
+         the browser session do not, and the expired grant is not counted"
+    );
+    for (token, live, what) in [
+        (&legacy_session, false, "the pre-V139 native session ends"),
+        (&caller_session, true, "the caller's own session is spared"),
+        (
+            &browser_session,
+            true,
+            "a browser session is not a device session",
+        ),
+        (
+            &passkey_native_session,
+            true,
+            "a native passkey session is its passkey's, not a device's",
+        ),
+    ] {
+        assert_eq!(
+            db.validate_session(&tenant, token).await.unwrap().is_some(),
+            live,
+            "{what}"
+        );
+    }
+    let (status, revoked_at_set, updated_recently): (String, bool, bool) = {
+        let row = admin
+            .query_one(
+                "SELECT status, revoked_at IS NOT NULL, updated_at > now() - interval '1 hour'
+                   FROM trace_tenant_access_grants WHERE grant_id = $1",
+                &[&expired_grant],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1), row.get(2))
+    };
+    assert_eq!(
+        (status.as_str(), revoked_at_set, updated_recently),
+        ("expired", false, false),
+        "an expired grant is left as it was"
+    );
+    let revoked_grant_updated: bool = admin
+        .query_one(
+            "SELECT bool_and(updated_at > now() - interval '1 hour')
+               FROM trace_tenant_access_grants
+              WHERE principal_ref = $1 AND status = 'revoked'",
+            &[&principal],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        revoked_grant_updated,
+        "the revoked grant's updated_at moves"
+    );
+
+    assert!(
+        db.validate_session(&tenant, &laptop_session)
+            .await
+            .unwrap()
+            .is_some(),
+        "the other device stays signed in"
+    );
+
+    // Signing in again with the revoked key is refused by name and writes
+    // nothing.
+    let retry_session = session_hash("revoked-again-retry");
+    let error = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&lost),
+            native_session(&retry_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect_err("a revoked key never signs in again");
+    assert!(
+        trace_commons_server::account_onboarding::is_device_key_revoked(&error),
+        "refused by name, got {error}"
+    );
+    let retry_sessions: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_sessions WHERE token_hash = $1",
+            &[&retry_session],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(retry_sessions, 0);
+
+    // A new key on the same machine joins the account as a new device.
+    let rekeyed = fresh_keypair();
+    let rekeyed_session = session_hash("revoked-again-rekeyed");
+    let third = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&rekeyed),
+            native_session(&rekeyed_session),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("a new key signs in");
+    assert_eq!(
+        (third.tenant_id.as_str(), third.account_id),
+        (tenant.as_str(), account)
+    );
+    let ids: Vec<String> = db
+        .list_account_devices(&tenant, account, Some(&rekeyed_session))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.this_device)
+        .map(|d| d.device_key_id)
+        .collect();
+    assert_eq!(ids, vec![third.device_key_id.clone()]);
+    task.abort();
+}
+
+/// A revoke that is committing while a renewal by key, or a redeem of a code
+/// the revoked laptop minted, reads the key holds that read back until it
+/// commits, and the read then sees the key revoked: no keyed session on a
+/// revoked key, and no device joined under a revoked laptop.
+#[tokio::test]
+async fn a_revoke_in_flight_holds_back_a_renewal_and_a_redeem_until_it_commits() {
+    use trace_commons_server::db::{
+        DeviceSignInOutcome, MintAccountDeviceCodeOutcome, NewAccountDeviceCode,
+    };
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("device-code-race").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let laptop = fresh_keypair();
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&laptop),
+            native_session(&session_hash("race-laptop")),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the laptop provisions");
+    let (tenant, account) = (first.tenant_id.clone(), first.account_id);
+    let salt = uuid::Uuid::new_v4().simple().to_string();
+    let mint = |label: &str| {
+        let code_hash = hash(&format!("race-code-{label}-{salt}"));
+        let nonce = hash(&format!("race-nonce-{label}-{salt}"));
+        let tenant = tenant.clone();
+        let minter = first.device_key_id.clone();
+        let db = &db;
+        async move {
+            let outcome = db
+                .mint_account_device_code(NewAccountDeviceCode {
+                    tenant_id: &tenant,
+                    account_id: account,
+                    minter_device_key_id: &minter,
+                    mint_nonce_hash: &nonce,
+                    code_hash: &code_hash,
+                    label: None,
+                    expires_at: Utc::now() + Duration::minutes(10),
+                    outstanding_cap: 5,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                MintAccountDeviceCodeOutcome::Minted { .. }
+            ));
+            code_hash
+        }
+    };
+    let server_code = mint("server").await;
+    let late_code = mint("late").await;
+    let server = fresh_keypair();
+    let DeviceSignInOutcome::SignedIn(linked) = db
+        .redeem_account_device_code(
+            &tenant,
+            &server_code,
+            &device_bytes(&server),
+            native_session(&session_hash("race-server")),
+            Some(&template),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the server redeems");
+    };
+
+    // The blocker plays the revoke: it updates the key row and holds the
+    // lock until it commits.
+    let blocker_backend = PgBackend::new(&config(url.clone())).await.unwrap();
+    let mut blocker = blocker_backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let held = std::time::Duration::from_millis(400);
+
+    // Renewal by key while the server's revoke is in flight.
+    let tx = blocker.transaction().await.unwrap();
+    tx.execute(
+        "UPDATE device_keys SET revoked_at = now() WHERE device_key_id = $1",
+        &[&linked.device_key_id],
+    )
+    .await
+    .unwrap();
+    let renewed_token = session_hash("race-renewed");
+    let server_key = device_bytes(&server);
+    let renew_nonce = hash(&format!("race-renew-{salt}"));
+    let renewal = db.renew_device_session(
+        &tenant,
+        &server_key,
+        &renew_nonce,
+        native_session(&renewed_token),
+        Duration::zero(),
+    );
+    tokio::pin!(renewal);
+    assert!(
+        tokio::time::timeout(held, &mut renewal).await.is_err(),
+        "the renewal waits on the revoke's row lock"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(renewal.await.unwrap(), DeviceSignInOutcome::NotFound);
+    let renewed: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_sessions WHERE token_hash = $1",
+            &[&renewed_token],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(renewed, 0, "no keyed session on the revoked key");
+
+    // A redeem of the laptop's code while the laptop's revoke is in flight.
+    let tx = blocker.transaction().await.unwrap();
+    tx.execute(
+        "UPDATE device_keys SET revoked_at = now() WHERE device_key_id = $1",
+        &[&first.device_key_id],
+    )
+    .await
+    .unwrap();
+    let joiner = fresh_keypair();
+    let joiner_key = device_bytes(&joiner);
+    let joiner_session = session_hash("race-joiner");
+    let redeem = db.redeem_account_device_code(
+        &tenant,
+        &late_code,
+        &joiner_key,
+        native_session(&joiner_session),
+        Some(&template),
+    );
+    tokio::pin!(redeem);
+    assert!(
+        tokio::time::timeout(held, &mut redeem).await.is_err(),
+        "the redeem waits on the minter's row lock"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(redeem.await.unwrap(), DeviceSignInOutcome::NotFound);
+    let joined: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_device_codes
+              WHERE code_hash = $1 AND redeemed_at IS NOT NULL",
+            &[&late_code],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(joined, 0, "no device joined under the revoked laptop");
+    task.abort();
+}

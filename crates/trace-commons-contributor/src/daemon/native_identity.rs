@@ -210,6 +210,10 @@ pub(super) async fn authenticated(
         // bound to. It names no account, and nothing was written.
         if error.server_label() == Some("near_ai_account_mismatch") {
             anyhow!("account-enrol-mismatch")
+        } else if error.server_label() == Some(super::nearai_onboarding::DEVICE_KEY_REVOKED_WIRE) {
+            // This device's key was revoked by its account: never revived,
+            // so the device unenrolls and enrolls again with a new key.
+            anyhow!(super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED)
         } else {
             anyhow!("account-request-refused")
         }
@@ -859,6 +863,9 @@ fn ipc_label(error: &str) -> &'static str {
         "account-bind-refused" => "account-bind-refused",
         "account-enrol-mismatch" => "account-enrol-mismatch",
         "near_ai_enroll_no_session" => "near_ai_enroll_no_session",
+        super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED => {
+            super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED
+        }
         _ => "account-unavailable",
     }
 }

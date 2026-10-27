@@ -9,6 +9,8 @@ struct ConnectionSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             connection
             ContributionAccountCard()
+            // The devices linked to this account, and Link a server.
+            AccountDevicesView()
             LegacyMigrationSettingsCard()
         }
     }

@@ -22,6 +22,11 @@ import TCShellCore
 /// Laid out for the main pane (direction B, 2026-10-15): the chart takes
 /// the pane's width and the markers are listed under it. Hovering a turn,
 /// or pressing a marker, reads that turn out in the legend.
+///
+/// In the Monitor window the open trace's details (`InsightsSessionDetail`)
+/// are the inspector's, to the right of the list, as a Traces session's
+/// card is (Ron's feedback, Insights PM 2026-10-26); elsewhere they open
+/// under the row as before.
 struct InsightsSessionsTab: View {
     let model: InsightsSessionsModel
     /// Saved snapshots, newest first, for the session picker under feed S.
@@ -37,8 +42,12 @@ struct InsightsSessionsTab: View {
     var analysis: InsightsModel? = nil
     /// Opens Analyze once the saved snapshot is its detail.
     var openAnalysis: () -> Void = {}
-    /// The turn being read; `nil` reads the whole session.
-    @State private var readTurn: Int?
+    /// The open trace's details are drawn in the window's inspector
+    /// (`InsightsInspector`), not under its row.
+    var detailInInspector = false
+    /// The person opened a trace (`InsightsInspector.personOpened`); not
+    /// called for a trace picked for them or a row closed.
+    var opened: () -> Void = {}
     /// The feed row the arrow keys are on (Full Keyboard Access).
     @State private var keyRow: String?
     /// The feed row at the top of the scroll: when the list is read again
@@ -46,7 +55,12 @@ struct InsightsSessionsTab: View {
     @State private var anchorRow: String?
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
-    private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
+
+    /// The open trace's details, under its row (or the saved picker).
+    private var inlineDetail: some View {
+        InsightsSessionDetail(model: model, copy: copy, notice: notice, analysis: analysis,
+                              openAnalysis: openAnalysis, inline: true)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -87,15 +101,13 @@ struct InsightsSessionsTab: View {
             if !choices.isEmpty {
                 GlassSelect(text("analytics_drill_session"), selection: Binding(
                     get: { model.selected ?? "" },
-                    set: { model.select($0); readTurn = nil }
+                    set: { model.select($0); opened() }
                 ), options: choices.map { GlassPickerOption($0.title, value: $0.value) })
             }
-            if let drill = model.drill {
-                drillContent(drill)
-            } else if model.failed || choices.isEmpty {
+            if !detailInInspector { inlineDetail }
+            if choices.isEmpty && (detailInInspector || (model.drill == nil && !model.failed)) {
                 Text(text("analytics_unavailable")).insightsError()
             }
-            if model.busy { GlassSpinner() }
         }
     }
 
@@ -111,7 +123,7 @@ struct InsightsSessionsTab: View {
                 #endif
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     feedRow(row)
-                    if model.selected == row.sessionRef { expanded(row) }
+                    if !detailInInspector && model.selected == row.sessionRef { inlineDetail }
                 }
                 .id(row.sessionRef)
                 .onAppear {
@@ -138,7 +150,7 @@ struct InsightsSessionsTab: View {
         }
         .onKeyPress(.return) {
             guard let keyRow, rows.contains(where: { $0.sessionRef == keyRow }) else { return .ignored }
-            readTurn = nil
+            if model.selected != keyRow { opened() }
             model.toggle(keyRow)
             return .handled
         }
@@ -154,8 +166,8 @@ struct InsightsSessionsTab: View {
     private func feedRow(_ row: DaemonData.InsightsWatchedSession) -> some View {
         let open = model.selected == row.sessionRef
         return Button {
-            readTurn = nil
             keyRow = row.sessionRef
+            if !open { opened() }
             model.toggle(row.sessionRef)
         } label: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -181,8 +193,10 @@ struct InsightsSessionsTab: View {
             .padding(.horizontal, GlassTokens.Space.s4)
             .contentShape(Rectangle())
             .insightsRowCard()
+            // The arrow keys' row, and the open one, ringed in the
+            // selection.
             .overlay {
-                if keyRow == row.sessionRef {
+                if keyRow == row.sessionRef || open {
                     RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
                         .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
                 }
@@ -243,6 +257,112 @@ struct InsightsSessionsTab: View {
         .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
     }
 
+    /// The foot of the feed: the loading row while the next page is read,
+    /// the unavailable line and a retry control if it could not be, and nothing at the end.
+    @ViewBuilder
+    private func feedFoot(empty: Bool) -> some View {
+        if model.loadingMore {
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassSpinner()
+                Text(text("analytics_sessions_loading_more")).insightsCaption()
+            }
+            .accessibilityElement(children: .combine)
+        } else if model.pageFailed {
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(text("analytics_sessions_page_failed")).insightsError()
+                Button(text("analytics_sessions_retry")) { model.retry() }
+            }
+        } else if empty {
+            if model.busy { GlassSpinner() } else { Text(text("analytics_unavailable")).insightsError() }
+        }
+    }
+}
+
+/// Where Insights hands the Monitor window's inspector the Sessions tab's
+/// details: filled while Sessions is on screen, empty otherwise. The window
+/// draws `detail` in the inspector and, as for a Traces session, opens the
+/// inspector when the person opens a trace (`demandKey`), never when a
+/// trace is picked for them or the tab is shown again.
+@Observable @MainActor
+final class InsightsInspector {
+    /// The Sessions model whose open trace the inspector shows.
+    private(set) var sessions: InsightsSessionsModel?
+    /// Builds the details. Called in the inspector's body, so what it reads
+    /// (the notice, whether Analyze & save is offered) keeps them current.
+    private(set) var detail: (@MainActor () -> InsightsSessionDetail)?
+
+    func show(_ sessions: InsightsSessionsModel, detail: @escaping @MainActor () -> InsightsSessionDetail) {
+        self.sessions = sessions
+        self.detail = detail
+    }
+
+    func clear() {
+        sessions = nil
+        detail = nil
+    }
+
+    /// How many times the person has opened a trace in this window. Kept
+    /// through `clear()` and `show(_:detail:)`, so the demand is the same
+    /// key whichever tab is shown and changes only when they open one.
+    private(set) var opens = 0
+
+    /// The person opened a trace: a row clicked or entered open, or a
+    /// saved snapshot picked.
+    func personOpened() { opens += 1 }
+
+    /// The inspector's demand (`InspectorDemand`): a new key for each trace
+    /// the person opens, and none before the first.
+    var demandKey: String? { opens > 0 ? "insights-session-open:\(opens)" : nil }
+}
+
+/// The open trace's details: for a watched trace its Analyze & save and
+/// its drill, for a saved one the picked snapshot's drill. In the window's
+/// inspector (`InsightsInspector`) while Sessions is shown, with the tab's
+/// explainer while no trace is open; under the open row otherwise
+/// (`inline`).
+struct InsightsSessionDetail: View {
+    let model: InsightsSessionsModel
+    let copy: [String: String]
+    var notice: String? = nil
+    var analysis: InsightsModel? = nil
+    var openAnalysis: () -> Void = {}
+    /// Drawn under the open row, lined up past its harness tile.
+    var inline = false
+    /// The turn being read; `nil` reads the whole session.
+    @State private var readTurn: Int?
+
+    private func text(_ key: String) -> String { copy[key] ?? "" }
+    private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+            if let watched = model.watched {
+                if let row = watched.first(where: { $0.sessionRef == model.selected }) {
+                    expanded(row)
+                } else if !inline {
+                    Text(text("analytics_sessions_explainer_watched"))
+                        .insightsNote()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                if let drill = model.drill {
+                    drillContent(drill)
+                } else if model.failed {
+                    Text(text("analytics_unavailable")).insightsError()
+                } else if !inline && model.selected == nil && !model.busy {
+                    Text(text("analytics_sessions_explainer_saved"))
+                        .insightsNote()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if model.busy { GlassSpinner() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSurface()
+        // Another trace reads from its whole session.
+        .onChange(of: model.selected) { _, _ in readTurn = nil }
+    }
+
     /// The open row's Analyze & save, then its drill beneath it: the drill
     /// once read, the unavailable line if it could not be, a spinner
     /// meanwhile.
@@ -293,28 +413,9 @@ struct InsightsSessionsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        // Lined up under the label, past the harness tile, as the labels are.
-        .padding(.leading, GlassTokens.Size.toolTile + GlassTokens.Space.s4)
-    }
-
-    /// The foot of the feed: the loading row while the next page is read,
-    /// the unavailable line and a retry control if it could not be, and nothing at the end.
-    @ViewBuilder
-    private func feedFoot(empty: Bool) -> some View {
-        if model.loadingMore {
-            HStack(spacing: GlassTokens.Space.s3) {
-                GlassSpinner()
-                Text(text("analytics_sessions_loading_more")).insightsCaption()
-            }
-            .accessibilityElement(children: .combine)
-        } else if model.pageFailed {
-            HStack(spacing: GlassTokens.Space.s3) {
-                Text(text("analytics_sessions_page_failed")).insightsError()
-                Button(text("analytics_sessions_retry")) { model.retry() }
-            }
-        } else if empty {
-            if model.busy { GlassSpinner() } else { Text(text("analytics_unavailable")).insightsError() }
-        }
+        // Under the row, lined up under the label, past the harness tile, as
+        // the labels are.
+        .padding(.leading, inline ? GlassTokens.Size.toolTile + GlassTokens.Space.s4 : 0)
     }
 
     // MARK: A drill

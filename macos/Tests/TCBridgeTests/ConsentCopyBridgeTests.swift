@@ -62,4 +62,21 @@ final class ConsentCopyBridgeTests: XCTestCase {
         }
         XCTAssertTrue(copy.body.contains("{org_name}"))
     }
+
+    /// The Devices section's live export is exactly the fields this shell
+    /// consumes and decodes whole.
+    func testTheAccountDevicesCopyDecodesFromTheLiveExport() {
+        guard let json = TCConsentCopy.accountDevicesCopyJSON(),
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let copy = AccountDevicesCopy.decode(fromJSON: json)
+        else {
+            XCTFail("the live devices payload must decode")
+            return
+        }
+        XCTAssertEqual(object.keys.sorted(), AccountDevicesCopy.consumedFields.sorted())
+        XCTAssertTrue(copy.codeCommand.contains("{code}"))
+        XCTAssertTrue(copy.unlinkConfirm.contains("{device}"))
+        XCTAssertTrue(copy.lastSeen.contains("{when}"))
+    }
 }

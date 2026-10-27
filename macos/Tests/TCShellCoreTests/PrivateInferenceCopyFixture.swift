@@ -129,6 +129,7 @@ enum PrivateInferenceCopyFixture {
          "funding_title":"FUNDING-TITLE",
          "funding_what":"FUNDING-WHAT",
          "funding_manage":"FUNDING-MANAGE",
+         "balance_add_funds":"BALANCE-ADD-FUNDS",
          "funding_refresh":"FUNDING-REFRESH",
          "funding_unavailable":"FUNDING-UNAVAILABLE",
          "balance_what":"BALANCE-WHAT",

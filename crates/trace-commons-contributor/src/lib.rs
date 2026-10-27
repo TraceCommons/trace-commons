@@ -85,6 +85,7 @@ pub mod insights {
         }
     }
 }
+pub(crate) mod devices_cli;
 pub mod install_guides;
 pub mod issuer_client;
 pub mod managed;
