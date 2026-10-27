@@ -43,11 +43,8 @@ pub(crate) const OPEN_PROMPT: &str = "Open this address in your browser to sign 
 /// Printed when no browser on this machine can reach the person: over SSH,
 /// or on a Linux machine with no display. The sign-in finishes on a loopback
 /// address, so the browser on their own computer needs the port forwarded.
-pub(crate) const REMOTE_INTRO: &str = "No browser on this machine can reach you, so sign in from your own computer. Step 2 works only while step 1 is running.";
-/// Printed after the address: the browser's error when step 1 is missing
-/// names `127.0.0.1`, which reads as a dead end rather than a missing
-/// forward.
-pub(crate) const REMOTE_CANT_CONNECT: &str = "If your browser can't connect to 127.0.0.1 after signing in, the step 1 command isn't running on your computer. Start it, then run login again.";
+pub(crate) const REMOTE_INTRO: &str =
+    "No browser on this machine can reach you, so sign in from your own computer:";
 /// Stands in for the host in the printed `ssh` command.
 pub(crate) const REMOTE_HOST_PLACEHOLDER: &str = "<this-machine>";
 /// The invite route, named wherever the NEAR AI route is taken by default.
@@ -205,10 +202,9 @@ pub(crate) fn print_sign_in_address(
             )?;
             writeln!(
                 out,
-                "  2. With step 1 running, open this address in your computer's browser within 5 minutes:"
+                "  2. Open this address in your computer's browser within 5 minutes:"
             )?;
             writeln!(out, "       {url}")?;
-            writeln!(out, "{REMOTE_CANT_CONNECT}")?;
         }
         _ if plan.open => {
             writeln!(out, "{OPENING}")?;
@@ -842,12 +838,6 @@ mod tests {
         });
         assert_eq!(opened, 0, "{out}");
         assert!(out.contains(REMOTE_INTRO), "{out}");
-        // The way out of the browser's "can't connect" comes after the
-        // address it applies to.
-        assert!(
-            out.find(URL).unwrap() < out.find(REMOTE_CANT_CONNECT).unwrap(),
-            "{out}"
-        );
         assert!(
             out.contains(&format!(
                 "ssh -N -o ExitOnForwardFailure=yes -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
