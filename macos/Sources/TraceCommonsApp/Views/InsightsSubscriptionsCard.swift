@@ -2,7 +2,7 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// Provider limits are current account facts, independent of the week picker.
+/// Captured provider limits remain independent of the week picker.
 struct InsightsSubscriptionsCard: View {
     let model: SubscriptionUsageModel
     let copy: [String: String]
@@ -12,14 +12,9 @@ struct InsightsSubscriptionsCard: View {
     var body: some View {
         if model.isVisible, !text("analytics_subscriptions_title").isEmpty {
             VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(text("analytics_subscriptions_title")).insightsTitle()
-                    Spacer(minLength: GlassTokens.Space.s3)
-                    GlassRefreshButton(text("analytics_subscriptions_refresh_accessibility"),
-                                       isRefreshing: model.isRefreshing) { model.refresh() }
-                        .disabled(!model.changingProviders.isEmpty)
-                }
-                Text(text("analytics_subscriptions_current")).insightsCaption()
+                Text(text("analytics_subscriptions_title")).insightsTitle()
+                Text(text(model.supportedProviders.contains(where: { $0.provider == "claude" })
+                          ? "analytics_subscriptions_captured_limits" : "analytics_subscriptions_current")).insightsCaption()
                 VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                     if let failure = model.failureKey {
                         Text(text(failure)).insightsError()
@@ -40,7 +35,19 @@ struct InsightsSubscriptionsCard: View {
     private func providerSection(_ provider: DaemonData.SubscriptionUsageProvider) -> some View {
         let name = text("analytics_subscriptions_provider_" + provider.provider)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Text(name).insightsHeading()
+            HStack(alignment: .firstTextBaseline) {
+                Text(name).insightsHeading()
+                if provider.provider == "codex", provider.logins.isEmpty {
+                    Spacer(minLength: GlassTokens.Space.s3)
+                    refreshButton(provider: provider.provider, login: nil, label: name)
+                }
+            }
+            if provider.provider == "claude" {
+                Text(text("analytics_subscriptions_claude_captured"))
+                    .insightsCaption().fixedSize(horizontal: false, vertical: true)
+                Text(text("analytics_subscriptions_claude_detail"))
+                    .insightsCaption().fixedSize(horizontal: false, vertical: true)
+            }
             if provider.refreshing, provider.logins.isEmpty {
                 Text(text("analytics_subscriptions_reading")).insightsCaption()
             }
@@ -50,16 +57,32 @@ struct InsightsSubscriptionsCard: View {
                 }
             }
             if !provider.refreshing, provider.logins.isEmpty {
-                Text(text("analytics_subscriptions_no_logins")).insightsCaption()
+                Text(InsightsOverviewWords.fill(text("analytics_subscriptions_no_logins"), ["harness": name])).insightsCaption()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func refreshButton(provider: String, login: String?, label: String) -> some View {
+        let name = text("analytics_subscriptions_provider_" + provider)
+        let accessibility = InsightsOverviewWords.fill(text("analytics_subscriptions_refresh_login_accessibility"),
+                                                       ["harness": name, "login": label])
+        return GlassRefreshButton(accessibility, small: true,
+                                  isRefreshing: model.isRefreshing(provider: provider, login: login)) {
+            model.refresh(provider: provider, login: login)
+        }
+        .disabled(!model.canRefresh(provider: provider, login: login))
+    }
+
     private func loginSection(_ login: DaemonData.SubscriptionUsageLogin, provider: String, now: Date) -> some View {
         let words = InsightsSubscriptionWords.login(login, provider: provider, now: now, copy: copy)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Text(words.label).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            HStack(alignment: .firstTextBaseline) {
+                Text(words.label).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: GlassTokens.Space.s3)
+                refreshButton(provider: provider, login: login.id, label: words.label)
+            }
             if let freshness = words.freshness {
                 Text(freshness).insightsCaption().fixedSize(horizontal: false, vertical: true)
             }
@@ -122,6 +145,22 @@ enum InsightsSubscriptionWords {
         let name = text("analytics_subscriptions_provider_" + provider)
         let state: String?
         switch login.reason {
+        case "captured_on_refresh" where provider == "claude":
+            state = nil
+        case "credentials_expired" where provider == "claude", "auth_expired" where provider == "claude":
+            state = text("analytics_subscriptions_claude_expired")
+        case "auth_missing" where provider == "claude":
+            state = text("analytics_subscriptions_claude_auth_missing")
+        case "scope_missing":
+            state = text("analytics_subscriptions_claude_scope")
+        case "keychain_needs_permission" where provider == "claude":
+            state = text("analytics_subscriptions_claude_keychain_denied")
+        case "credential_read_timeout":
+            state = text("analytics_subscriptions_claude_keychain_pending")
+        case "auth_changed" where provider == "claude":
+            state = text("analytics_subscriptions_claude_auth_changed")
+        case "request_timeout", "rate_limited":
+            state = text("analytics_subscriptions_" + (login.reason ?? "unavailable"))
         case "credentials_missing", "credentials_expired", "sign_in_required", "unsupported_login", "authentication_failed",
              "auth_missing", "auth_expired", "auth_changed":
             state = fill("analytics_subscriptions_sign_in", ["harness": name])
@@ -130,7 +169,7 @@ enum InsightsSubscriptionWords {
         case "native_tool_running":
             state = text("analytics_subscriptions_native_tool_running")
         case "base_url_refused", "invalid_response", "no_logins", "native_storage_unsupported":
-            state = text("analytics_subscriptions_" + (login.reason ?? "unavailable"))
+            state = fill("analytics_subscriptions_" + (login.reason ?? "unavailable"), ["harness": name])
         case "not_checked", "not_observed":
             state = text("analytics_subscriptions_not_checked")
         case "keychain_unavailable", "keychain_locked", "keychain_permission_required", "keychain_needs_permission":
@@ -140,7 +179,7 @@ enum InsightsSubscriptionWords {
         }
         // A refused refresh may retain an earlier measurement. Its age and
         // the current failure both matter; neither replaces the other.
-        let freshness = login.stale
+        let freshness = login.stale && login.reason != "captured_on_refresh"
             ? text(state == nil ? "analytics_subscriptions_stale" : "analytics_subscriptions_cached") : nil
         let windows = login.windows.enumerated().map { index, window -> Window in
             let label: String

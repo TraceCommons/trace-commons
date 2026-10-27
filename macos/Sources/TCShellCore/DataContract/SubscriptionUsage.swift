@@ -49,9 +49,10 @@ extension DaemonData {
         public let stale: Bool
         public let windows: [SubscriptionUsageWindow]
         public let bankedResets: Int?
+        public let refreshing: Bool?
 
         enum CodingKeys: String, CodingKey {
-            case id, label, state, reason, stale, windows
+            case id, label, state, reason, stale, windows, refreshing
             case defaultLogin = "default_login"
             case updatedAt = "updated_at"
             case bankedResets = "banked_resets"
@@ -60,7 +61,7 @@ extension DaemonData {
         public init(id: String, label: String, defaultLogin: Bool = false,
                     state: String, reason: String? = nil, updatedAt: Date? = nil,
                     stale: Bool = false, windows: [SubscriptionUsageWindow] = [],
-                    bankedResets: Int? = nil) {
+                    bankedResets: Int? = nil, refreshing: Bool? = nil) {
             self.id = id
             self.label = label
             self.defaultLogin = defaultLogin
@@ -69,6 +70,7 @@ extension DaemonData {
             self.updatedAt = updatedAt
             self.stale = stale
             self.windows = windows
+            self.refreshing = refreshing
             self.bankedResets = bankedResets.flatMap { $0 >= 0 ? $0 : nil }
         }
 
@@ -82,6 +84,7 @@ extension DaemonData {
             updatedAt = try? container.decodeIfPresent(Date.self, forKey: .updatedAt)
             stale = try container.decode(Bool.self, forKey: .stale)
             windows = try container.decode([SubscriptionUsageWindow].self, forKey: .windows)
+            refreshing = try? container.decodeIfPresent(Bool.self, forKey: .refreshing)
             let count = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
             bankedResets = count.flatMap { $0 >= 0 ? $0 : nil }
         }

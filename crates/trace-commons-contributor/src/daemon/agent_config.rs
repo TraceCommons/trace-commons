@@ -88,7 +88,7 @@ pub(crate) fn schema() -> Value {
     }
     properties.insert("subscription_usage_claude_enabled".into(), json!({
         "type":"boolean", "const":false, "examples":[false],
-        "description":"Claude subscription acquisition is unavailable. Only false is accepted to clear an earlier preference."
+        "description":"Legacy cleanup field; only false is accepted. Claude usage is available on explicit Refresh without this preference."
     }));
     for key in ["claude_root", "codex_root"] {
         properties.insert(key.into(), json!({

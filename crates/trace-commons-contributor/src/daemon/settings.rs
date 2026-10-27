@@ -690,7 +690,7 @@ pub struct DaemonSettings {
     /// Explicit permission to read native Codex subscription usage; display only.
     #[serde(default)]
     pub subscription_usage_codex_enabled: bool,
-    /// Legacy cleanup flag. Claude acquisition is disabled pending review.
+    /// Legacy cleanup flag; Claude usage no longer requires an opt-in.
     #[serde(default)]
     pub subscription_usage_claude_enabled: bool,
 
@@ -2186,7 +2186,7 @@ pub fn apply_settings_object(
             }
             "subscription_usage_claude_enabled" => {
                 // Keep false available to clear earlier preferences, but never
-                // grant credential access to the gated provider.
+                // revive an obsolete opt-in flag; explicit Refresh controls the read.
                 if value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)? {
                     return Err(ERR_SETTINGS_INVALID_VALUE);
                 }
@@ -5545,7 +5545,7 @@ mod tests {
         }
     }
     #[test]
-    fn subscription_usage_claude_cannot_be_enabled_while_gated() {
+    fn subscription_usage_claude_legacy_preference_is_cleanup_only() {
         let mut settings = DaemonSettings::default();
         assert_eq!(
             apply_settings_object(

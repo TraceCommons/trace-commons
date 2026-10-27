@@ -1,6 +1,7 @@
 //! Current native subscription limits. Credentials and account fingerprints
 //! stay in memory and never cross IPC; the display reads a bounded snapshot.
 
+mod claude;
 pub(super) mod providers;
 
 use chrono::{DateTime, Duration, Utc};
@@ -39,6 +40,8 @@ pub(super) struct LoginSpec {
     pub native_executable: Option<PathBuf>,
     /// The exact native override string; None names the native default login.
     pub config_dir: Option<String>,
+    /// Exact native secure-storage override, independent of the account config.
+    pub secure_storage_dir: Option<String>,
     /// Native-account metadata revision, never a provider account identifier.
     pub metadata_revision: Option<String>,
     /// Credential-free native file revision, separate from the managed binding.
@@ -61,6 +64,8 @@ pub(super) struct Window {
 pub(super) struct Identity {
     pub account: Option<String>,
     pub email: Option<String>,
+    /// Independent namespace: a same-account organization switch is a conflict.
+    pub organization: Option<String>,
 }
 
 impl Identity {
@@ -74,6 +79,11 @@ impl Identity {
                 .as_ref()
                 .zip(other.email.as_ref())
                 .is_some_and(|(a, b)| a != b)
+            || self
+                .organization
+                .as_ref()
+                .zip(other.organization.as_ref())
+                .is_some_and(|(a, b)| a != b)
     }
 }
 
@@ -83,6 +93,7 @@ impl From<&str> for Identity {
         Self {
             account: Some(value.into()),
             email: None,
+            organization: None,
         }
     }
 }
@@ -92,6 +103,7 @@ impl From<String> for Identity {
         Self {
             account: Some(value),
             email: None,
+            organization: None,
         }
     }
 }
@@ -144,6 +156,7 @@ pub(crate) struct UsageService {
     state: Mutex<State>,
     permits: Arc<Semaphore>,
     collector: Collector,
+    changed: tokio::sync::Notify,
     timeout: std::time::Duration,
 }
 
@@ -157,10 +170,11 @@ impl Default for UsageService {
         Self {
             state: Mutex::new(State::default()),
             permits: global_probe_permits(),
+            changed: tokio::sync::Notify::new(),
             collector: Arc::new(|login, interactive, lease| {
                 Box::pin(async move { providers::collect(&login, interactive, lease).await })
             }),
-            timeout: std::time::Duration::from_secs(45),
+            timeout: std::time::Duration::from_secs(240),
         }
     }
 }
@@ -176,8 +190,6 @@ impl Provider {
 
 impl State {
     fn synchronize(&mut self, enabled: [bool; 2], logins: Vec<LoginSpec>) {
-        // Claude is gated until the provider terms review is resolved.
-        let enabled = [enabled[0], false];
         self.enabled = enabled;
         self.truncated = logins
             .iter()
@@ -196,7 +208,10 @@ impl State {
                 entry.login.provider != login.provider
                     || entry.login.root != login.root
                     || entry.login.config_dir != login.config_dir
+                    || entry.login.secure_storage_dir != login.secure_storage_dir
                     || entry.login.metadata_revision != login.metadata_revision
+                    || (login.provider == Provider::Claude
+                        && entry.login.native_revision != login.native_revision)
             });
             if replace {
                 self.next_generation = self.next_generation.wrapping_add(1);
@@ -231,6 +246,7 @@ impl State {
         now: DateTime<Utc>,
         manual: bool,
         provider: Option<Provider>,
+        login: Option<&str>,
     ) -> Vec<Claim> {
         if !manual {
             return Vec::new();
@@ -238,7 +254,10 @@ impl State {
         self.entries
             .values_mut()
             .filter_map(|entry| {
-                if provider.is_some_and(|provider| entry.login.provider != provider) {
+                if entry.login.provider != provider.unwrap_or(Provider::Codex)
+                    || login.is_some_and(|id| entry.login.id != id)
+                    || (entry.login.provider == Provider::Claude && login.is_none())
+                {
                     return None;
                 }
                 let interval = MANUAL_FLOOR_SECONDS;
@@ -318,9 +337,11 @@ impl State {
                     .filter(|count| *count <= i64::MAX as u64);
                 entry.reading = Some(reading);
                 entry.measured_at = Some(now);
-                entry.reason = None;
+                entry.reason =
+                    (entry.login.provider == Provider::Claude).then_some("captured_on_refresh");
             }
-            Err(failure) => {
+            Err(mut failure) => {
+                failure.reason = providers::normalize_failure_reason(failure.reason);
                 let changed_identity = failure.identity.as_ref().is_some_and(|identity| {
                     entry
                         .reading
@@ -334,6 +355,15 @@ impl State {
                 if authentication || changed_identity {
                     entry.reading = None;
                     entry.measured_at = None;
+                }
+                if matches!(
+                    failure.reason,
+                    "credential_read_timeout"
+                        | "credential_check_timeout"
+                        | "keychain_needs_permission"
+                        | "timeout"
+                ) {
+                    entry.last_started = None;
                 }
                 entry.reason = Some(failure.reason);
             }
@@ -352,7 +382,7 @@ impl State {
     }
 
     fn value(&self, now: DateTime<Utc>) -> Value {
-        let providers: Vec<_> = [Provider::Codex].into_iter().map(|provider| {
+        let providers: Vec<_> = [Provider::Codex, Provider::Claude].into_iter().map(|provider| {
             let mut entries: Vec<_> = self.entries.values().filter(|entry| entry.login.provider == provider).collect();
             entries.sort_by(|a,b| (!a.login.default_login, &a.login.id).cmp(&(!b.login.default_login, &b.login.id)));
             let logins: Vec<_> = entries.into_iter().map(|entry| {
@@ -367,7 +397,7 @@ impl State {
                 }).collect();
                 json!({"id":entry.login.id,"label":entry.login.label,"default_login":entry.login.default_login,
                     "state":if reading.is_some() {"observed"} else {"unknown"},"reason":entry.reason,
-                    "updated_at":entry.measured_at,"stale":stale,"windows":windows,
+                    "updated_at":entry.measured_at,"stale":stale,"windows":windows,"refreshing":entry.refreshing,
                     "banked_resets":reading.and_then(|reading| reading.banked_resets)})
             }).collect();
             json!({"provider":provider,"enabled":self.enabled[provider.index()],
@@ -392,74 +422,83 @@ fn native_login(
 ) -> Option<LoginSpec> {
     let (folder, id, label) = match provider {
         Provider::Codex => (".codex", "codex-default", "Codex"),
-        Provider::Claude => return None,
+        Provider::Claude => (".claude", "claude-default", "Claude"),
     };
     let root = match &config_dir {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        Some(_) if provider == Provider::Claude => home?.join(folder),
         Some(_) => return None,
         None => home?.join(folder),
     };
-    Some(LoginSpec {
+    let mut login = LoginSpec {
         provider,
         metadata_revision: None,
-        native_revision: Some(native_metadata_revision(&root)),
+        native_revision: None,
         root,
         id: id.into(),
         label: label.into(),
         default_login: true,
         config_dir,
+        secure_storage_dir: None,
         native_executable: None,
-    })
+    };
+    login.native_revision = Some(login_revision(&login));
+    Some(login)
 }
 
 /// A credential-free invalidation revision. Atomic replacement, same-length
 /// rewrites and signout are all changes. Keychain contents are never queried.
-fn native_metadata_revision(root: &std::path::Path) -> String {
-    fn revision(path: &std::path::Path) -> String {
-        match std::fs::metadata(path) {
-            Ok(metadata) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    format!(
-                        "{}:{}:{}:{}:{}:{}",
-                        metadata.len(),
-                        metadata.mtime(),
-                        metadata.mtime_nsec(),
-                        metadata.ctime(),
-                        metadata.ctime_nsec(),
-                        metadata.ino()
-                    )
-                }
-                #[cfg(not(unix))]
-                {
-                    format!(
-                        "{}:{:?}:{:?}",
-                        metadata.len(),
-                        metadata.modified(),
-                        metadata.created()
-                    )
-                }
+fn file_revision(path: &std::path::Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    metadata.len(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                    metadata.ino()
+                )
             }
-            Err(error) => format!("{:?}", error.kind()),
+            #[cfg(not(unix))]
+            {
+                format!(
+                    "{}:{:?}:{:?}",
+                    metadata.len(),
+                    metadata.modified(),
+                    metadata.created()
+                )
+            }
         }
+        Err(error) => format!("{:?}", error.kind()),
     }
+}
+
+fn native_metadata_revision(root: &std::path::Path) -> String {
     format!(
         "{}|{}",
-        revision(&root.join("auth.json")),
-        revision(&root.join("config.toml"))
+        file_revision(&root.join("auth.json")),
+        file_revision(&root.join("config.toml"))
     )
+}
+
+fn login_revision(login: &LoginSpec) -> String {
+    match login.provider {
+        Provider::Codex => native_metadata_revision(&login.root),
+        Provider::Claude => claude::metadata_revision(login),
+    }
 }
 
 fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
     let enabled = shared
         .settings
         .lock()
-        .map(|s| [s.subscription_usage_codex_enabled, false])
-        .unwrap_or([false, false]);
-    if !enabled[0] {
-        return (enabled, Vec::new());
-    }
+        .map(|s| [s.subscription_usage_codex_enabled, true])
+        .unwrap_or([false, true]);
     let mut logins = Vec::new();
     // Executable discovery is deferred to explicit refresh. Background work
     // only stats native files; it never reads auth/config contents or Keychain.
@@ -469,6 +508,18 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
         std::env::var("CODEX_HOME").ok(),
     ) {
         logins.push(login);
+    }
+    if let Some(mut login) = native_login(
+        Provider::Claude,
+        dirs::home_dir(),
+        std::env::var("CLAUDE_CONFIG_DIR").ok(),
+    ) {
+        login.secure_storage_dir = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok();
+        login.native_revision = Some(login_revision(&login));
+        // Detection only: no credential contents or Keychain queries on status.
+        if login.root.is_dir() || claude::account_path(&login).is_file() {
+            logins.push(login);
+        }
     }
     let accounts = shared
         .managed
@@ -495,7 +546,7 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
             .dir()
             .join("managed-profiles")
             .join(account.id.to_string());
-        logins.push(LoginSpec {
+        let mut login = LoginSpec {
             provider,
             config_dir: Some(root.to_string_lossy().into_owned()),
             root: root.clone(),
@@ -506,9 +557,12 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
                 "{:?}:{:?}",
                 account.auth_state, account.verified_at
             )),
-            native_revision: Some(native_metadata_revision(&root)),
+            native_revision: None,
+            secure_storage_dir: None,
             native_executable: None,
-        });
+        };
+        login.native_revision = Some(login_revision(&login));
+        logins.push(login);
     }
     (enabled, logins)
 }
@@ -523,6 +577,7 @@ fn synchronize(shared: &DaemonShared) {
         state.synchronize(enabled, logins);
         state.expire(Utc::now());
     }
+    shared.subscription_usage.changed.notify_waiters();
 }
 
 fn schedule(
@@ -531,6 +586,7 @@ fn schedule(
     manual: bool,
     interactive: bool,
     provider: Option<Provider>,
+    login: Option<&str>,
 ) {
     synchronize(shared);
     if shared.dev_dry_run {
@@ -540,7 +596,7 @@ fn schedule(
     let claims = service
         .state
         .lock()
-        .map(|mut state| state.claims(now, manual, provider))
+        .map(|mut state| state.claims(now, manual, provider, login))
         .unwrap_or_default();
     if claims.is_empty() {
         return;
@@ -566,17 +622,28 @@ fn schedule(
                     {
                         return;
                     }
-                    let result = tokio::time::timeout(
-                        service.timeout,
-                        (service.collector)(claim.login.clone(), interactive, Arc::clone(&lease)),
-                    )
-                    .await
-                    .unwrap_or({
-                        Err(ProbeFailure {
-                            reason: "timeout",
-                            identity: None,
-                        })
-                    });
+                    let canceled = async {
+                        loop {
+                            let changed = service.changed.notified();
+                            tokio::pin!(changed);
+                            changed.as_mut().enable();
+                            if !service.state.lock().map(|state| state.current(&claim)).unwrap_or(false) {
+                                return;
+                            }
+                            changed.await;
+                        }
+                    };
+                    // Cancellation wins if a late native permission result and
+                    // unenroll/rebinding arrive together. Dropping the collector
+                    // stops before HTTP; its native thread retains the lease.
+                    let result = tokio::select! {
+                        biased;
+                        () = canceled => return,
+                        answer = tokio::time::timeout(
+                            if claim.login.provider == Provider::Codex { service.timeout.min(std::time::Duration::from_secs(45)) } else { service.timeout },
+                            (service.collector)(claim.login.clone(), interactive, Arc::clone(&lease)),
+                        ) => answer.unwrap_or(Err(ProbeFailure { reason: "timeout", identity: None })),
+                    };
                     // An account may have been removed or a switch turned off while
                     // the provider read was in flight. Synchronize before publish.
                     synchronize(&shared);
@@ -612,6 +679,17 @@ pub(super) fn settings_changed(shared: &DaemonShared) {
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
 }
 
+/// Unenroll discards every cached reading and invalidates all in-flight generations.
+/// Available native Claude profiles may reappear later, with no retained reading.
+pub(super) fn forget_readings(shared: &DaemonShared) {
+    if let Ok(mut state) = shared.subscription_usage.state.lock() {
+        state.entries.clear();
+        state.next_generation = state.next_generation.wrapping_add(1);
+    }
+    shared.subscription_usage.changed.notify_waiters();
+    shared.publish(EVENT_STATUS_CHANGED, json!({}));
+}
+
 /// Background ticks synchronize metadata only; explicit Refresh owns all probes.
 pub(super) fn tick(shared: &DaemonShared, _now: DateTime<Utc>) {
     synchronize(shared);
@@ -621,18 +699,21 @@ pub(super) fn handle(shared: &DaemonShared, req: &Request) -> Response {
     let Some(params) = req.params.as_object() else {
         return Response::err(req.id, ERR_BAD_PARAMS, "subscription-usage-params-invalid");
     };
-    if params
-        .keys()
-        .any(|key| !matches!(key.as_str(), "refresh" | "interactive" | "provider"))
-        || ["refresh", "interactive"]
-            .iter()
-            .any(|key| params.get(*key).is_some_and(|value| !value.is_boolean()))
+    if params.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "refresh" | "interactive" | "provider" | "login"
+        )
+    }) || ["refresh", "interactive"]
+        .iter()
+        .any(|key| params.get(*key).is_some_and(|value| !value.is_boolean()))
     {
         return Response::err(req.id, ERR_BAD_PARAMS, "subscription-usage-params-invalid");
     }
     let provider = match params.get("provider") {
         None => None,
         Some(Value::String(value)) if value == "codex" => Some(Provider::Codex),
+        Some(Value::String(value)) if value == "claude" => Some(Provider::Claude),
         Some(_) => {
             return Response::err(
                 req.id,
@@ -656,9 +737,40 @@ pub(super) fn handle(shared: &DaemonShared, req: &Request) -> Response {
             "subscription-usage-interactive-needs-refresh",
         );
     }
+    let login = match params.get("login") {
+        None => None,
+        Some(Value::String(id))
+            if !id.is_empty()
+                && id.len() <= 128
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') =>
+        {
+            Some(id.as_str())
+        }
+        Some(_) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, "subscription-usage-login-invalid");
+        }
+    };
+    synchronize(shared);
+    if login.is_some_and(|id| {
+        provider.is_none()
+            || !shared
+                .subscription_usage
+                .state
+                .lock()
+                .map(|state| {
+                    state
+                        .entries
+                        .get(id)
+                        .is_some_and(|entry| Some(entry.login.provider) == provider)
+                })
+                .unwrap_or(false)
+    }) || (refresh && provider == Some(Provider::Claude) && login.is_none())
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "subscription-usage-login-invalid");
+    }
     let now = Utc::now();
     if refresh {
-        schedule(shared, now, true, interactive, provider);
+        schedule(shared, now, true, interactive, provider, login);
     } else {
         synchronize(shared);
     }
@@ -688,6 +800,7 @@ mod tests {
             label: id.into(),
             default_login: id == "default",
             config_dir: None,
+            secure_storage_dir: None,
             metadata_revision: None,
             native_revision: None,
             native_executable: None,
@@ -710,7 +823,7 @@ mod tests {
     fn prepared() -> (State, Claim) {
         let mut state = State::default();
         state.synchronize([true, false], vec![login("default")]);
-        let claim = state.claims(now(), true, None).pop().unwrap();
+        let claim = state.claims(now(), true, None, None).pop().unwrap();
         (state, claim)
     }
 
@@ -726,7 +839,7 @@ mod tests {
         let (mut state, claim) = prepared();
         state.complete(&claim, Ok(reading("a", now() + Duration::days(1))), now());
         state.synchronize([false, false], vec![login("default")]);
-        assert!(state.claims(now(), true, None).is_empty());
+        assert!(state.claims(now(), true, None, None).is_empty());
         assert!(state.entries.is_empty());
         assert_eq!(state.value(now())["providers"][0]["enabled"], false);
     }
@@ -737,7 +850,7 @@ mod tests {
         state.synchronize([true, false], vec![login("default")]);
         state.complete(&claim, Ok(reading("old", now() + Duration::days(1))), now());
         assert!(state.entries["default"].reading.is_none());
-        let next = state.claims(now(), true, None).pop().unwrap();
+        let next = state.claims(now(), true, None, None).pop().unwrap();
         state.synchronize([true, false], vec![]);
         state.complete(&next, Ok(reading("old", now() + Duration::days(1))), now());
         assert!(state.entries.is_empty());
@@ -832,7 +945,7 @@ mod tests {
         original.native_revision = Some("before".into());
         let mut state = State::default();
         state.synchronize([true, false], vec![original.clone()]);
-        let claim = state.claims(now(), true, None).pop().unwrap();
+        let claim = state.claims(now(), true, None, None).pop().unwrap();
         let mut rotated = original.clone();
         rotated.native_revision = Some("after".into());
         state.synchronize([true, false], vec![rotated.clone()]);
@@ -855,7 +968,7 @@ mod tests {
         for changed_binding in [false, true] {
             let mut state = State::default();
             state.synchronize([true, false], vec![original.clone()]);
-            let claim = state.claims(now(), true, None).pop().unwrap();
+            let claim = state.claims(now(), true, None, None).pop().unwrap();
             let mut current = original.clone();
             current.native_revision = Some("after".into());
             if changed_binding {
@@ -892,6 +1005,7 @@ mod tests {
                 identity: Some(Identity {
                     account: None,
                     email: Some("email-a".into()),
+                    organization: None,
                 }),
             }),
             now(),
@@ -904,6 +1018,7 @@ mod tests {
                 identity: Some(Identity {
                     account: None,
                     email: Some("email-b".into()),
+                    organization: None,
                 }),
             }),
             now(),
@@ -945,34 +1060,139 @@ mod tests {
     #[test]
     fn manual_floor_poll_interval_and_parallel_requests_coalesce() {
         let (mut state, claim) = prepared();
-        assert!(state.claims(now(), true, None).is_empty());
+        assert!(state.claims(now(), true, None, None).is_empty());
         state.complete(&claim, Ok(reading("a", now() + Duration::days(1))), now());
         assert!(
             state
-                .claims(now() + Duration::seconds(59), true, None)
+                .claims(now() + Duration::seconds(59), true, None, None)
                 .is_empty()
         );
         assert!(
             state
-                .claims(now() + Duration::minutes(14), false, None)
+                .claims(now() + Duration::minutes(14), false, None, None)
                 .is_empty()
         );
         assert_eq!(
             state
-                .claims(now() + Duration::minutes(15), true, None)
+                .claims(now() + Duration::minutes(15), true, None, None)
                 .len(),
             1
         );
     }
     #[test]
-    fn claude_is_gated_even_when_legacy_settings_enable_it() {
+    fn claude_is_available_without_a_legacy_opt_in() {
         let mut state = State::default();
         let mut claude = login("claude-default");
         claude.provider = Provider::Claude;
         state.synchronize([true, true], vec![login("default"), claude]);
-        assert_eq!(state.entries.len(), 1);
-        assert!(state.claims(now(), true, Some(Provider::Claude)).is_empty());
-        assert_eq!(state.value(now())["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.value(now())["providers"][1]["enabled"], true);
+    }
+
+    #[test]
+    fn claude_refresh_is_scoped_and_permission_retry_is_immediate() {
+        let mut state = State::default();
+        let mut first = login("claude-default");
+        first.provider = Provider::Claude;
+        let mut second = first.clone();
+        second.id = "saved-claude".into();
+        state.synchronize([true, true], vec![login("default"), first, second]);
+        assert_eq!(state.claims(now(), true, None, None).len(), 1);
+        assert!(
+            state
+                .claims(now(), false, Some(Provider::Claude), Some("claude-default"))
+                .is_empty()
+        );
+        assert!(
+            state
+                .claims(now(), true, Some(Provider::Claude), None)
+                .is_empty()
+        );
+        let claims = state.claims(now(), true, Some(Provider::Claude), Some("saved-claude"));
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].login.id, "saved-claude");
+        state.complete(
+            &claims[0],
+            Err(ProbeFailure {
+                reason: "credential_read_timeout",
+                identity: None,
+            }),
+            now(),
+        );
+        assert_eq!(
+            state
+                .claims(now(), true, Some(Provider::Claude), Some("saved-claude"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn claude_metadata_change_cancels_generation_and_allows_immediate_refresh() {
+        let mut original = login("claude-default");
+        original.provider = Provider::Claude;
+        original.native_revision = Some("before".into());
+        let mut state = State::default();
+        state.synchronize([false, true], vec![original.clone()]);
+        let claim = state
+            .claims(now(), true, Some(Provider::Claude), Some("claude-default"))
+            .pop()
+            .unwrap();
+        original.native_revision = Some("new-account".into());
+        state.synchronize([false, true], vec![original]);
+        assert!(!state.current(&claim));
+        state.complete(&claim, Ok(reading("old", now() + Duration::days(1))), now());
+        assert!(state.entries["claude-default"].reading.is_none());
+        assert_eq!(
+            state
+                .claims(now(), true, Some(Provider::Claude), Some("claude-default"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn organization_switch_invalidates_same_account_stale_reading() {
+        let (mut state, claim) = prepared();
+        let mut answer = reading("same-account", now() + Duration::days(1));
+        answer.identity.organization = Some("organization-a".into());
+        state.complete(&claim, Ok(answer), now());
+        state.complete(
+            &claim,
+            Err(ProbeFailure {
+                reason: "unavailable",
+                identity: Some(Identity {
+                    account: Some("same-account".into()),
+                    email: None,
+                    organization: Some("organization-b".into()),
+                }),
+            }),
+            now(),
+        );
+        assert!(state.entries["default"].reading.is_none());
+    }
+
+    #[test]
+    fn known_credential_change_discards_retained_reading() {
+        let (mut state, claim) = prepared();
+        state.complete(
+            &claim,
+            Ok(reading("account-a", now() + Duration::days(1))),
+            now(),
+        );
+        state.complete(
+            &claim,
+            Err(ProbeFailure {
+                reason: "credential_changed",
+                identity: None,
+            }),
+            now(),
+        );
+        assert!(state.entries["default"].reading.is_none());
+        assert_eq!(
+            state.value(now())["providers"][0]["logins"][0]["windows"],
+            json!([])
+        );
     }
 
     #[test]
@@ -983,7 +1203,7 @@ mod tests {
             (0..MAX_LOGINS + 8).map(|i| login(&i.to_string())).collect(),
         );
         assert_eq!(state.entries.len(), MAX_LOGINS);
-        let claims = state.claims(now(), true, None);
+        let claims = state.claims(now(), true, None, None);
         state.complete(
             &claims[0],
             Ok(reading("a", now() + Duration::days(1))),
@@ -1014,7 +1234,12 @@ mod integration_tests {
         let login = native_login(Provider::Codex, None, Some("/fake/codex-work".into())).unwrap();
         assert_eq!(login.root, PathBuf::from("/fake/codex-work"));
         assert!(login.default_login);
-        assert!(native_login(Provider::Claude, Some(PathBuf::from("/fake")), None).is_none());
+        assert_eq!(
+            native_login(Provider::Claude, Some(PathBuf::from("/fake")), None)
+                .unwrap()
+                .root,
+            PathBuf::from("/fake/.claude")
+        );
     }
 
     #[test]
@@ -1048,7 +1273,7 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn enabled_background_status_and_settings_never_probe_and_claude_is_refused() {
+    async fn enabled_background_status_and_settings_never_probe_and_claude_requires_login() {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
         let (_dir, shared) = shared(Arc::new(move |_, _, _| {
@@ -1074,7 +1299,7 @@ mod integration_tests {
         )
         .result
         .unwrap();
-        assert_eq!(status["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(status["providers"].as_array().unwrap().len(), 2);
         assert_eq!(status["providers"][0]["enabled"], true);
         assert_eq!(status["providers"][0]["refreshing"], false);
         let response = handle(
@@ -1106,6 +1331,7 @@ mod integration_tests {
             state: Mutex::new(State::default()),
             permits: Arc::new(Semaphore::new(MAX_PROBES)),
             collector,
+            changed: tokio::sync::Notify::new(),
             timeout,
         });
         Arc::get_mut(&mut shared).unwrap().dev_dry_run = dev_dry_run;
@@ -1229,7 +1455,7 @@ mod integration_tests {
                     .lock()
                     .unwrap()
                     .subscription_usage_codex_enabled = true;
-                schedule(&shared, Utc::now(), true, true, None);
+                schedule(&shared, Utc::now(), true, true, None, None);
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     while entered.load(Ordering::SeqCst) == 0 {
                         tokio::task::yield_now().await;
@@ -1306,7 +1532,7 @@ mod integration_tests {
             .lock()
             .unwrap()
             .subscription_usage_codex_enabled = true;
-        schedule(&shared, Utc::now(), true, true, None);
+        schedule(&shared, Utc::now(), true, true, None, None);
         let timed_out = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let count = shared
@@ -1356,6 +1582,12 @@ mod integration_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn provider_io_is_detached_bounded_and_disabling_discards_inflight_data() {
+        struct ActiveGuard(Arc<AtomicUsize>);
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         let calls = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -1375,10 +1607,10 @@ mod integration_tests {
             );
             Box::pin(async move {
                 let running = a.fetch_add(1, Ordering::SeqCst) + 1;
+                let _active = ActiveGuard(Arc::clone(&a));
                 p.fetch_max(running, Ordering::SeqCst);
                 n.fetch_add(1, Ordering::SeqCst);
                 g.acquire().await.unwrap().forget();
-                a.fetch_sub(1, Ordering::SeqCst);
                 Ok(Reading {
                     windows: vec![],
                     banked_resets: Some(3),
@@ -1404,7 +1636,7 @@ mod integration_tests {
             .lock()
             .unwrap()
             .subscription_usage_codex_enabled = true;
-        schedule(&shared, Utc::now(), true, true, None);
+        schedule(&shared, Utc::now(), true, true, None, None);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while calls.load(Ordering::SeqCst) < MAX_PROBES {
                 tokio::task::yield_now().await;
@@ -1437,7 +1669,8 @@ mod integration_tests {
                 .lock()
                 .unwrap()
                 .entries
-                .is_empty()
+                .values()
+                .all(|entry| entry.login.provider != Provider::Codex)
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1470,7 +1703,7 @@ mod integration_tests {
             params: json!({"refresh":true,"interactive":true,"provider":"codex"}),
         };
         let value = handle(&shared, &req).result.unwrap();
-        assert_eq!(value["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(value["providers"].as_array().unwrap().len(), 2);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while observed.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
@@ -1490,6 +1723,287 @@ mod integration_tests {
             )
             .error
             .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_is_default_available_and_only_selected_login_refreshes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let (_dir, shared) = shared(Arc::new(move |login, interactive, _| {
+            seen.lock().unwrap().push((login.id, interactive));
+            Box::pin(async {
+                Ok(Reading {
+                    windows: vec![],
+                    banked_resets: None,
+                    identity: "fixture-owner".into(),
+                    native_revision: None,
+                })
+            })
+        }));
+        let mut ids = Vec::new();
+        for label in ["one", "two"] {
+            let mut managed = shared.managed.lock().unwrap();
+            let accounts = &mut managed.as_mut().unwrap().accounts;
+            let account = accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, label)
+                .unwrap();
+            accounts.update_auth(account.id, AuthState::Ready).unwrap();
+            ids.push(account.id.to_string());
+        }
+        assert!(
+            !shared
+                .settings
+                .lock()
+                .unwrap()
+                .subscription_usage_claude_enabled
+        );
+        let snapshot = handle(
+            &shared,
+            &Request {
+                id: 1,
+                method: "subscription_usage".into(),
+                params: json!({}),
+            },
+        )
+        .result
+        .unwrap();
+        assert_eq!(snapshot["providers"][1]["enabled"], true);
+        assert!(calls.lock().unwrap().is_empty());
+        for params in [
+            json!({"refresh":true,"provider":"claude"}),
+            json!({"refresh":true,"provider":"claude","login":"../../other"}),
+            json!({"refresh":true,"provider":"claude","login":"unknown"}),
+            json!({"refresh":true,"login":ids[0]}),
+            json!({"refresh":true,"provider":"codex","login":ids[0]}),
+        ] {
+            assert!(
+                handle(
+                    &shared,
+                    &Request {
+                        id: 2,
+                        method: "subscription_usage".into(),
+                        params
+                    }
+                )
+                .error
+                .is_some()
+            );
+        }
+        assert!(handle(&shared, &Request { id: 3, method: "subscription_usage".into(), params: json!({"refresh":true,"interactive":true,"provider":"claude","login":ids[1]}) }).error.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if shared
+                    .subscription_usage
+                    .state
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&ids[1])
+                    .is_some_and(|entry| entry.reading.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![(ids[1].clone(), true)]);
+        let state = shared.subscription_usage.state.lock().unwrap();
+        assert_eq!(state.entries[&ids[1]].reason, Some("captured_on_refresh"));
+        assert!(state.entries[&ids[0]].reading.is_none());
+        drop(state);
+        forget_readings(&shared);
+        synchronize(&shared);
+        assert!(
+            shared
+                .subscription_usage
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .values()
+                .all(|entry| entry.reading.is_none())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forget_during_permission_wait_cancels_before_network_and_retains_lease() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let network = Arc::new(AtomicUsize::new(0));
+        let (release, started, sent) = (
+            Arc::clone(&gate),
+            Arc::clone(&entered),
+            Arc::clone(&network),
+        );
+        let (_dir, shared) = shared(Arc::new(move |_, _, lease| {
+            let (release, started, sent) = (
+                Arc::clone(&release),
+                Arc::clone(&started),
+                Arc::clone(&sent),
+            );
+            Box::pin(async move {
+                providers::native_read(lease, move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let mut done = release.0.lock().unwrap();
+                    while !*done {
+                        done = release.1.wait(done).unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                sent.fetch_add(1, Ordering::SeqCst);
+                Err(ProbeFailure {
+                    reason: "unavailable",
+                    identity: None,
+                })
+            })
+        }));
+        let id = {
+            let mut managed = shared.managed.lock().unwrap();
+            let accounts = &mut managed.as_mut().unwrap().accounts;
+            let account = accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "saved")
+                .unwrap();
+            accounts.update_auth(account.id, AuthState::Ready).unwrap();
+            account.id.to_string()
+        };
+        schedule(
+            &shared,
+            Utc::now(),
+            true,
+            true,
+            Some(Provider::Claude),
+            Some(&id),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while entered.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        forget_readings(&shared);
+        synchronize(&shared);
+        assert_eq!(shared.subscription_usage.permits.available_permits(), 0);
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while shared.subscription_usage.permits.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(network.load(Ordering::SeqCst), 0);
+        assert!(
+            shared
+                .subscription_usage
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .values()
+                .all(|entry| entry.reading.is_none())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_verify_during_permission_wait_cancels_without_a_usage_tick() {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let network = Arc::new(AtomicUsize::new(0));
+        let (release, started, sent) = (
+            Arc::clone(&gate),
+            Arc::clone(&entered),
+            Arc::clone(&network),
+        );
+        let (_dir, shared) = shared(Arc::new(move |_, _, lease| {
+            let (release, started, sent) = (
+                Arc::clone(&release),
+                Arc::clone(&started),
+                Arc::clone(&sent),
+            );
+            Box::pin(async move {
+                providers::native_read(lease, move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let mut done = release.0.lock().unwrap();
+                    while !*done {
+                        done = release.1.wait(done).unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                sent.fetch_add(1, Ordering::SeqCst);
+                Err(ProbeFailure {
+                    reason: "unavailable",
+                    identity: None,
+                })
+            })
+        }));
+        let id = {
+            let mut managed = shared.managed.lock().unwrap();
+            let accounts = &mut managed.as_mut().unwrap().accounts;
+            let account = accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "saved")
+                .unwrap();
+            accounts.update_auth(account.id, AuthState::Ready).unwrap();
+            account.id.to_string()
+        };
+        schedule(
+            &shared,
+            Utc::now(),
+            true,
+            true,
+            Some(Provider::Claude),
+            Some(&id),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while entered.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shared
+            .managed
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .inspect_profile_override = Some(|_| Ok(AuthState::SignInRequired));
+        let response = super::super::managed::handle(
+            &shared,
+            &Request {
+                id: 1,
+                method: "managed_account_verify".into(),
+                params: json!({"account_id":id}),
+            },
+        );
+        assert!(response.error.is_none());
+
+        assert_eq!(shared.subscription_usage.permits.available_permits(), 0);
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while shared.subscription_usage.permits.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(network.load(Ordering::SeqCst), 0);
+        assert!(
+            shared
+                .subscription_usage
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .values()
+                .all(|entry| entry.reading.is_none())
         );
     }
 
