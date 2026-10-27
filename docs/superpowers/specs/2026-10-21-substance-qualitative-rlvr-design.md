@@ -7,10 +7,10 @@ Date: 2026-10-21.
 This design sets the substance terms, weights, and floors from market research.
 It does not fit them to value, because no objective measure of trace value
 exists today (section 2). Most parameters are set: they are stated, defensible
-assumptions. Two are calibrated against a pinned real corpus, because they are
-defined relative to the score distribution. Calibration also runs statistical
-tests on that corpus that show how much each assumption moves the score
-(section 7). A real buyer signal replaces the assumptions later (section 7).
+assumptions. One, a saturation ceiling, is calibrated against a pinned real
+corpus, because it is defined relative to the score distribution. Calibration
+also runs statistical tests on that corpus that show how much each assumption
+moves the score (section 7). A real buyer signal replaces the assumptions later (section 7).
 
 The design targets one buyer: the reinforcement learning lab that post-trains
 agents (the RLVR lab, section 4). It is model-free. It reads the trace
@@ -349,8 +349,8 @@ forces substance to 0. The composite only ranks a trace. One threshold gates:
 substance_passed = substance >= substance_floor
 ```
 
-So the pass or fail of an edge case, such as a tool-free trace, is the floor
-decision of section 11. It is not a property of the formula.
+So the pass or fail of an edge case, such as a tool-free trace, is set by the
+floor (section 6). It is not a property of the formula.
 
 `g(novelty)` is the existing novelty half of credit quality, unchanged.
 
@@ -373,8 +373,8 @@ them today.
 
 ## 6. Parameters
 
-Every set parameter has a starting value and a rationale. Each calibrated
-parameter has a starting percentile, or an owner decision (section 11).
+Every set parameter has a starting value and a rationale. The calibrated
+parameter has a starting percentile.
 Parameters fall into two classes:
 
 - Set. The value is fixed by judgment from the research of section 3 and from
@@ -382,8 +382,8 @@ Parameters fall into two classes:
   rationale. Calibration reports how much each set parameter moves the score,
   but does not choose its value (section 7).
 - Calibrated. The value is defined relative to the real score distribution, so
-  calibration sets it from the pinned corpus (section 7). Only `sub_ceil` and
-  `substance_floor` are calibrated.
+  calibration sets it from the pinned corpus (section 7). Only `sub_ceil` is
+  calibrated.
 
 Every value is provisional: a real buyer signal revises it (section 7).
 
@@ -401,7 +401,7 @@ Every value is provisional: a real buyer signal revises it (section 7).
 | `sub_ceil` | calibrated: 90th percentile | Substance saturation ceiling in `q`. At the 90th percentile of substance over the pinned corpus, the top tenth of real traces gets full substance credit, and the rest spread across the curve. The percentile is a judgment. |
 | `sub_floor_mult` | 0.25 | Substance floor in `q`. |
 | `att_floor_mult` | 0.90 | Attestation weight floor inside substance. An attested trace scores about 11 percent above the same trace unattested (1.0 against 0.9): "slightly higher," as the design intends. |
-| `substance_floor` | calibrated: owner decision | The pass threshold. The owner sets its percentile from the distribution report (section 11). A floor at percentile p fails at most p percent of the pinned corpus. Tied scores make it fail fewer, and every tool-free trace with a prompt has the same score. |
+| `substance_floor` | 0.12 | The pass threshold. Every trace with an initial prompt passes: the lowest such score is 0.1242, a tool-free trace without attestation (`0.30 * 0.46 * 0.90`). A trace with no initial prompt and no paired call fails: it scores at most 0.111 (`0.30 * 0.37 * 1.0`), because with no paired call the argument share and the result share sum to at most 1. So credit, not the gate, ranks a tool-free trace low. Whether a tool-free trace fails is a later decision, made from real pilot traffic. |
 
 Every parameter lives in the bundle configuration. The bundle id hashes them.
 The server never changes them at run time. A change to any parameter produces a
@@ -417,15 +417,13 @@ Set parameters are fixed by judgment. Calibration does not choose their values;
 it measures how much each one moves the score, so a reader knows which
 assumptions matter.
 
-Calibrated parameters are defined relative to the score distribution, so
-calibration sets them from it. `sub_ceil` is the 90th percentile of substance
-over the pinned corpus. `substance_floor` is the percentile of substance over
-the same corpus that the owner sets from the distribution report (check 3,
-section 11).
+The calibrated parameter is defined relative to the score distribution, so
+calibration sets it from that distribution. `sub_ceil` is the 90th percentile
+of substance over the pinned corpus.
 
-Calibration runs offline. It writes the calibrated values into the bundle
+Calibration runs offline. It writes the calibrated value into the bundle
 configuration and produces a calibration report. The report records the corpus
-pin, the calibrated values, and the result of every check below. Two new
+pin, the calibrated value, and the result of every check below. Two new
 `pipeline.py` commands do this (section 8.2). `pipeline.py dataset generate`
 builds the guardrail fixture of check 1 from the pinned corpus. Until the
 generator exists, check 1 runs on synthetic bases that the test code builds.
@@ -442,12 +440,12 @@ report. Neither runs a model, an embedder, or the index. Four checks apply.
    call can only raise work, and it cannot lower either replay share
    (section 5.2). Every floor is above 0, so no term vetoes a trace.
 3. Real-corpus distribution. Report the distribution of substance and of each
-   term over the pinned corpus. This distribution is the input to the
-   calibrated parameters. No fit runs, so it makes no generalization claim.
+   term over the pinned corpus. This distribution is the input to `sub_ceil`.
+   No fit runs, so it makes no generalization claim.
 4. Sensitivity analysis. For each set parameter, score the pinned corpus at half
    and at double its value, holding the others fixed. For each term, score the
-   corpus with that term removed. Each variant recalibrates `sub_ceil` and
-   `substance_floor` at the same percentiles, so the comparison isolates the
+   corpus with that term removed. Each variant recalibrates `sub_ceil` at the
+   same percentile and keeps `substance_floor`, so the comparison isolates the
    change. Compare each variant with the baseline on three measures: the
    Spearman rank correlation of substance, the gate flip rate (the share of
    traces whose `substance_passed` changes), and the credit shift (the median
@@ -705,8 +703,8 @@ Changes:
 - Attestation enters substance as a light binary weight from the stored witness
   provenance class, read at Score time. This removes scores from the V89
   label-only contract. It is an incentive to use attested inference.
-- Set parameters are fixed by judgment. Only `sub_ceil` and `substance_floor`
-  are calibrated on the pinned corpus, and a sensitivity analysis shows which
+- Set parameters are fixed by judgment. Only `sub_ceil` is calibrated on the
+  pinned corpus, and a sensitivity analysis shows which
   assumptions move the score.
 - The fabrication vectors are a pairwise regression guardrail, not the
   acceptance criterion. The fit, the false-positive gate, the dumb-feature
@@ -754,12 +752,6 @@ What stays the same:
 These decisions change the model and need an owner ruling before a substance
 package is promoted.
 
-- The `substance_floor` percentile. Set it from the distribution report
-  (section 7, check 3). It also decides whether a tool-free trace passes: such
-  a trace ranks low on work and earns at most the prompt share on replay
-  (section 5.4). A floor at percentile p fails at most p percent of the pinned
-  corpus. Every tool-free trace with a prompt has the same score, so where such
-  traces are common, many percentiles give the same floor.
 - The attestation weight. `att_floor_mult = 0.90` gives an attested trace about
   11 percent more substance. Confirm that this is the intended size, or set
   another.
