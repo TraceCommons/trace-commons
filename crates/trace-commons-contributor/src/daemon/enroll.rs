@@ -32,25 +32,25 @@ const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "debugging_evaluation",
         "Debugging and evaluation",
-        "Researchers read traces to find where coding agents fail, and score agents against each other.",
+        "Researchers can read your traces to study errors and compare coding agents.",
         true,
     ),
     (
         "benchmark_only",
         "Create benchmarks",
-        "Parts of your traces may become benchmark problems that agents are scored against.",
+        "Turn parts of your traces into tests for coding agents.",
         true,
     ),
     (
         "ranking_training",
         "Train evaluators",
-        "Used to train models that rank or grade what an agent produced. Not models that write code.",
+        "Train models that rank or grade coding-agent answers.",
         true,
     ),
     (
         "model_training",
         "Train coding models",
-        "Your traces become training data for models that write code, potentially including commercial ones.",
+        "Train models that write code, including commercial models.",
         true,
     ),
     (
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(
             tags,
             [
-                ("debugging_evaluation", "required"),
+                ("debugging_evaluation", "required to share"),
                 ("benchmark_only", "data use"),
                 ("ranking_training", "data use"),
                 ("model_training", "data use"),

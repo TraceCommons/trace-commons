@@ -116,7 +116,7 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source.contains("ForEach(UsesScreenLayout.handleScopes(options))"))
         XCTAssertTrue(source.contains("Text(copy.uses.rewardOpportunities"))
         XCTAssertEqual(try copy().uses.rewardOpportunities,
-                       "Allow all data uses to maximize your reward opportunities.")
+                       "To earn credit for traces, allow Train coding models. Creating benchmarks and training evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.")
         let profile = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PublicProfileSection.swift"), encoding: .utf8)
