@@ -1308,6 +1308,12 @@ pub struct MonitorHomeHistoryCopy {
     /// (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
     pub missions_action: &'static str,
     pub insights_action: &'static str,
+    /// Settings' switch for Home's promotion card (owner, 2026-10-27):
+    /// off, the campaign card never shows. Its card heading, the switch
+    /// and the line under it. DRAFT, NEEDS APPROVAL.
+    pub promotions_title: &'static str,
+    pub promotions_toggle: &'static str,
+    pub promotions_caption: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1618,6 +1624,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             campaign_action: "Try it",
             missions_action: "Review drafts",
             insights_action: "See insights",
+            promotions_title: "Home",
+            promotions_toggle: "Show promotions on Home",
+            promotions_caption: "News from NEAR AI, such as a new model. A promotion you close comes back only when it changes.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
