@@ -2263,14 +2263,12 @@ class PackageCommandTests(_CorpusRunCase):
 
     def test_package_variables_hold_the_substance_selection(self):
         """SQ-17: `package --bundle production` passes the Score selection
-        and its five calibration variables, so the writer builds the
+        and its three calibration variables, so the writer builds the
         substance package when the env file selects it. No other variable
         is new: a key, an endpoint or a database URL never reaches it."""
         selection = (
             "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE",
             "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS",
-            "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS",
-            "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE",
             "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
             "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST",
         )
@@ -8389,7 +8387,6 @@ _SUBSTANCE_VARIABLES = frozenset(
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH",
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH",
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH",
-        "TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE",
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH",
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH",
     }
@@ -8427,7 +8424,6 @@ class EvaluateCommandTests(_CorpusRunCase):
         """The driver: a report and its values, as `substance_evaluate_run`
         writes them for the pin of `setUp`."""
         self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
-        floor = int(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE"])
         source = _fake_hash("source_digest")
         report = {
             "schema": "trace_commons.substance_calibration_report.v1",
@@ -8436,20 +8432,16 @@ class EvaluateCommandTests(_CorpusRunCase):
             "calibrated": {
                 "sub_ceil_micros": 812_000,
                 "sub_ceil_percentile": 90,
-                "substance_floor_micros": 140_000,
-                "substance_floor_percentile": floor,
             },
         }
         report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
         Path(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH"]).write_bytes(report_bytes)
         values = {
             "sub_ceil_micros": 812_000,
-            "substance_floor_micros": 140_000,
             "calibration": {
                 "corpus_pin_digest": source,
                 "report_digest": _digest(report_bytes),
                 "sub_ceil_percentile": 90,
-                "substance_floor_percentile": floor,
             },
         }
         Path(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH"]).write_text(json.dumps(values, indent=2) + "\n")
@@ -8459,26 +8451,8 @@ class EvaluateCommandTests(_CorpusRunCase):
         with mock.patch.object(pipeline, "export_compare_corpus", self._fake_export):
             return self._main(["evaluate", *argv], cargo=self._driver)
 
-    def test_evaluate_requires_a_floor_percentile(self):
-        with self.assertRaises(SystemExit) as ctx:
-            self._evaluate(["--pin", str(self.pin)])
-        self.assertEqual(ctx.exception.code, 2)
-        self.assertEqual(self.calls, [], "refused before any export or cargo call")
-
-    def test_evaluate_refuses_a_floor_percentile_above_100(self):
-        for percentile in ("101", "-1"):
-            with self.subTest(percentile=percentile):
-                self.calls.clear()
-                code = self._evaluate(["--pin", str(self.pin), "--floor-percentile", percentile])
-                self.assertEqual(code, 1)
-                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: evaluate_floor_percentile_invalid")
-                self.assertEqual(self.calls, [], "refused before any export or cargo call")
-        with self.assertRaises(SystemExit) as ctx:
-            self._evaluate(["--pin", str(self.pin), "--floor-percentile", "ten"])
-        self.assertEqual(ctx.exception.code, 2)
-
     def test_evaluate_runs_the_ignored_driver(self):
-        code = self._evaluate(["--pin", str(self.pin), "--floor-percentile", "10"])
+        code = self._evaluate(["--pin", str(self.pin)])
 
         self.assertEqual(code, 0, self.stderr.getvalue())
         [(_, pin_path, name, local_dir, release)] = [call for call in self.calls if call[0] == "export"]
@@ -8495,9 +8469,8 @@ class EvaluateCommandTests(_CorpusRunCase):
         self.assertTrue(exact)
         self.assertTrue(ignored)
         self.assertEqual(cargo_args, (*_INGEST_ARGS, "--release"))
-        # The six variables and nothing else: the driver needs no database.
+        # The five variables and nothing else: the driver needs no database.
         self.assertEqual({key for key in env if key.startswith("TRACE_COMMONS_")}, _SUBSTANCE_VARIABLES)
-        self.assertEqual(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE"], "10")
         export_dir = self.run.run_dir / "compare" / "substance"
         for variable, path in (
             ("BOOTSTRAP_PATH", export_dir / "bootstrap-compare.jsonl"),
@@ -8514,7 +8487,7 @@ class EvaluateCommandTests(_CorpusRunCase):
             lines,
             [
                 "SubstanceEvaluateOK: report=substance-calibration-report.json "
-                "values=substance-calibrated-values.json sub_ceil=812000 floor=140000"
+                "values=substance-calibrated-values.json sub_ceil=812000"
             ],
         )
         local = self.tmp / "local"
@@ -8525,7 +8498,7 @@ class EvaluateCommandTests(_CorpusRunCase):
 
     def test_evaluate_local_dir_replaces_the_pins_directory(self):
         other = self.tmp / "jsonl"
-        code = self._evaluate(["--pin", str(self.pin), "--floor-percentile", "10", "--local-dir", str(other)])
+        code = self._evaluate(["--pin", str(self.pin), "--local-dir", str(other)])
         self.assertEqual(code, 0, self.stderr.getvalue())
         [(_, _, _, local_dir, _)] = [call for call in self.calls if call[0] == "export"]
         self.assertEqual(Path(local_dir), other.resolve())
@@ -8537,7 +8510,7 @@ class EvaluateCommandTests(_CorpusRunCase):
 
         self.stdout, self.stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(pipeline, "export_compare_corpus", self._fake_export):
-            code = self._main(["evaluate", "--pin", str(self.pin), "--floor-percentile", "10"], cargo=tampered)
+            code = self._main(["evaluate", "--pin", str(self.pin)], cargo=tampered)
         self.assertEqual(code, 1)
         self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: substance_evaluate_outputs_mismatch")
         self.assertFalse((self.tmp / "local" / "substance-calibrated-values.json").exists())

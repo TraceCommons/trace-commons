@@ -2045,8 +2045,8 @@ async fn pipeline_restore_seed() {
 /// The tool calls of the drill's trace under a substance package: 20 paired
 /// calls over 8 tools, each with its own arguments and a result. With the
 /// fixture's prompt, its substance is `900_000` unattested (both terms 1,
-/// the attestation factor 0.90), so it passes any calibrated floor: no
-/// corpus trace scores above `900_000`.
+/// the attestation factor 0.90), so it passes the set floor of `120_000`
+/// (`SUBSTANCE_FLOOR_MICROS`).
 fn substance_drill_tool_calls()
 -> Vec<trace_commons_protocol::trace_contribution::RawTraceCaptureToolCall> {
     (0..20)
@@ -3034,7 +3034,7 @@ async fn production_restore_drill_resumes_once_without_credit_over_doubles() {
 
 /// The production restore drill over doubles under the production
 /// substance test package: the seed's two runs carry the drill's tool-call trace
-/// ([`seed_envelopes`]), which passes the calibrated floor, so the pending
+/// ([`seed_envelopes`]), which passes the set floor, so the pending
 /// run has an index write and legs to settle, and the resume completes it
 /// once. The service runs under the corpus runtime's gate, whose novelty
 /// values are the package's. Ignored for the reason
@@ -3100,7 +3100,7 @@ fn restore_awards_credit_reads_the_substance_award() {
 
 /// The drill's substance envelope, after the contributor side's redaction,
 /// still holds 20 paired calls over 8 tools and the prompt, so it scores
-/// `900_000` unattested, which no calibrated floor exceeds. A package of
+/// `900_000` unattested, above the set floor of `120_000`. A package of
 /// another family keeps the fixture envelopes.
 #[tokio::test]
 async fn substance_drill_envelopes_score_900_000_unattested() {

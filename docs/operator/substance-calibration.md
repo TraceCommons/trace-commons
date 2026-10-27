@@ -1,20 +1,17 @@
 # Calibrating the substance Score
 
 > **Status: the tooling exists.** `pipeline.py evaluate` runs offline. It
-> needs no database, no model, no embedder and no vector index. The
-> floor percentile is an open owner decision; a run with any other
-> percentile only shows that the command works.
+> needs no database, no model, no embedder and no vector index.
 
-The substance Score (`trace_commons.score.substance.v1`) has two calibrated
-values. Each one comes from the distribution of substance over a pinned
-corpus:
+The substance Score (`trace_commons.score.substance.v1`) has one calibrated
+value and one set floor:
 
 - `sub_ceil`: the ceiling of the substance half of credit quality. It is the
-  90th percentile of substance.
+  90th percentile of substance over a pinned corpus.
 - `substance_floor`: the substance gate. A trace passes at or above it. It is
-  the percentile of substance that the owner sets.
+  not calibrated. The spec sets it at 120,000 (section 6).
 
-`pipeline.py evaluate` measures the distribution and writes the two values.
+`pipeline.py evaluate` measures the distribution and writes `sub_ceil`.
 The design is in the qualitative substance spec,
 `docs/superpowers/specs/2026-10-21-substance-qualitative-rlvr-design.md`
 (draft PR #1472): the parameters are in its section 6, the checks in its
@@ -57,26 +54,29 @@ no record.
   store holds for every pipeline trace today. The attestation factor is then
   0.90 for every trace, so it scales all traces the same and does not change
   the ranking.
-- No choice of the floor. The owner sets the floor percentile.
+- No floor. The floor is a set parameter, not a calibrated one.
 
-## The floor percentile is an owner decision
+## The floor is set at 120,000
 
-The owner sets the `substance_floor` percentile from the distribution report
-(spec section 11, the open owner decisions). A floor at percentile `p` fails
-at most `p` percent of the pinned corpus. The floor also decides whether a
-tool-free trace passes: such a trace ranks low on work and gets at most the
-prompt share on replay.
+The spec sets `substance_floor` at 120,000 (section 6). The production
+package holds that value (`SUBSTANCE_FLOOR_MICROS`). No run of `evaluate`
+changes it. At the spec values:
 
-Give the percentile as `--floor-percentile`, from 0 to 100. The command
-refuses a value outside that range (`evaluate_floor_percentile_invalid`).
-It has no default.
+- A trace with an initial prompt scores at least 124,200. That is the score
+  of a tool-free, unattested trace with a prompt (0.30 x 0.46 x 0.90). It
+  passes.
+- A trace with no initial prompt and no paired call scores at most 111,000
+  (0.30 x 0.37 x 1.0). With no paired call, the argument share and the
+  result share add up to at most 1. It fails.
+
+On the 10k pin the lowest substance is 124,200, so the floor fails no trace
+of the pin.
 
 ## Run `evaluate`
 
 ```bash
 python3 scripts/operator/pipeline.py evaluate \
-  --pin docs/superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json \
-  --floor-percentile 10
+  --pin docs/superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json
 ```
 
 This pin is the 10k HF pin: 1,000 bootstrap traces and 9,000 holdout
@@ -88,16 +88,14 @@ The command uses Cargo's optimized build for the export and for the test.
 A pass prints one line:
 
 ```text
-SubstanceEvaluateOK: report=.local/substance-calibration-report.json values=.local/substance-calibrated-values.json sub_ceil=<micros> floor=<micros>
+SubstanceEvaluateOK: report=.local/substance-calibration-report.json values=.local/substance-calibrated-values.json sub_ceil=<micros>
 ```
 
 The two files are also in the run directory. A failure prints one
 `PipelineFailure:` line with a label.
 
-`.local/` holds the files of the last `evaluate` run only. A trial run with
-another percentile replaces the values file of the run that you chose, so
-copy that file before a trial run, or run `evaluate` again with the chosen
-percentile.
+`.local/` holds the files of the last `evaluate` run only. A new run
+replaces the values file, so copy the file that you keep before a new run.
 
 ## The two files
 
@@ -116,12 +114,11 @@ and micros only:
 | `guardrail` | The recipe id, `source`, and for each transform the pair count, the met count and the term that moved most. |
 | `monotonicity` | `sweep_passed` and `floors_above_zero`. |
 | `distribution` | For `substance`, `work` and `replay`: min, p10, p25, p50, p75, p90, max and mean, in micros. And `tool_free_count`. |
-| `calibrated` | `sub_ceil_micros` at percentile 90, and `substance_floor_micros` at the given percentile. |
+| `calibrated` | `sub_ceil_micros` and `sub_ceil_percentile` (90). |
 
-`substance-calibrated-values.json` holds the two values and their
-provenance: `sub_ceil_micros`, `substance_floor_micros`, and `calibration`
-(`corpus_pin_digest`, `report_digest`, `sub_ceil_percentile`,
-`substance_floor_percentile`).
+`substance-calibrated-values.json` holds the calibrated value and its
+provenance: `sub_ceil_micros`, and `calibration` (`corpus_pin_digest`,
+`report_digest`, `sub_ceil_percentile`).
 
 ### Read the distribution
 
@@ -130,27 +127,22 @@ All values are in micros: 1,000,000 is 1.0.
 - Substance is never 0. At the spec values, its lowest possible value is
   27,000 (0.30 x 0.10 x 0.90): a trace with no tool call and no prompt.
 - `tool_free_count` is the number of traces with no tool call. A tool-free
-  trace has a substance of at most 124,200 at the spec values
-  (0.30 x 0.46 x 0.90, a trace with a prompt). A floor above that value
-  fails every tool-free trace.
+  trace with a prompt has a substance of 124,200 at the spec values
+  (0.30 x 0.46 x 0.90). That is above the floor of 120,000, so it passes.
 - The `work` and `replay` rows are the raw terms, before their floors. Work
   near 0 for most traces means that few traces have paired calls. Replay
   near 0.40 (400,000) means a prompt with few arguments or results on the
   calls.
-- A gap between two percentiles of substance is a place where a small change
-  of the floor percentile moves many traces.
-
-The owner reads the substance row to set the floor percentile. Then run
-`evaluate` again with that percentile, and keep the values file of that run.
 
 ## The values file is the input to the production package
 
-The production substance package takes `sub_ceil`, `substance_floor` and the
-calibration provenance from the values file. The bundle id hashes them, so a
+The production substance package takes three values from the values file:
+`sub_ceil`, the corpus pin digest and the report digest. It sets
+`substance_floor` at 120,000 itself. The bundle id hashes all of them, so a
 new `evaluate` run with other values gives a new bundle id.
 
-- The switch, in order: copy the values into the six variables of the
-  deployment env file, deploy, promote the substance package, install the
+- The switch, in order: copy the three values into the deployment env file
+  and select `substance`, deploy, promote the substance package, install the
   new default-routing set, and activate each tenant that is still on the
   compatibility bundle. See "Switch the default package to substance" in
   [pipeline-activation.md](pipeline-activation.md#switch-the-default-package-to-substance).

@@ -3523,9 +3523,9 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
     .expect("the production test package builds")
 }
 
-/// The calibrated values of the production substance test package, as the six
+/// The calibrated value of the production substance test package, as the four
 /// selection variables of [`production_substance_package_build_needs_no_network`]
-/// give them.
+/// give it.
 pub(super) fn production_test_substance_values()
 -> trace_commons_server::versioned_pipeline_substance::CalibratedSubstanceValues {
     use trace_commons_server::versioned_pipeline_substance::{
@@ -3533,12 +3533,10 @@ pub(super) fn production_test_substance_values()
     };
     CalibratedSubstanceValues {
         sub_ceil_micros: 600_000,
-        substance_floor_micros: 120_000,
         calibration: SubstanceCalibration {
             corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
             report_digest: format!("sha256:{}", "b".repeat(64)),
             sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-            substance_floor_percentile: 25,
         },
     }
 }
@@ -3632,7 +3630,6 @@ fn production_package_build_needs_no_network() {
     assert!(production_bundle_package(&lookup, &zero).is_err());
 }
 
-/// SQ-17: with the six selection variables of the env file set,
 /// The production compatibility package over the pilot's descriptors and
 /// gate (the package variables of `deploy/pilot-gcp/ingest.env.template`,
 /// with its `NoveltyUtility` delta of 0) keeps the bundle id that `main`
@@ -3694,8 +3691,6 @@ fn production_substance_package_build_needs_no_network() {
         ),
         ("TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE", "substance"),
         ("TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS", "600000"),
-        ("TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS", "120000"),
-        ("TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE", "25"),
         (
             "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
             corpus.as_str(),
@@ -3743,13 +3738,13 @@ fn production_substance_package_build_needs_no_network() {
 
     // The selection without one of its calibration variables builds no
     // package.
-    let no_floor = |var: &str| {
-        (var != "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS")
+    let no_ceiling = |var: &str| {
+        (var != "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS")
             .then(|| lookup(var))
             .flatten()
     };
     assert_eq!(
-        production_bundle_package(&no_floor, &gate)
+        production_bundle_package(&no_ceiling, &gate)
             .unwrap_err()
             .to_string(),
         PIPELINE_SUBSTANCE_CALIBRATION_MISSING_LABEL

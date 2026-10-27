@@ -1118,7 +1118,7 @@ async fn production_assembler_refuses_what_it_must() {
     );
 }
 
-/// The calibrated values of the substance default package in these tests.
+/// The calibrated value of the substance default package in these tests.
 fn substance_values()
 -> trace_commons_server::versioned_pipeline_substance::CalibratedSubstanceValues {
     use trace_commons_server::versioned_pipeline_substance::{
@@ -1126,12 +1126,10 @@ fn substance_values()
     };
     CalibratedSubstanceValues {
         sub_ceil_micros: 600_000,
-        substance_floor_micros: 120_000,
         calibration: SubstanceCalibration {
             corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
             report_digest: format!("sha256:{}", "b".repeat(64)),
             sub_ceil_percentile: 90,
-            substance_floor_percentile: 25,
         },
     }
 }

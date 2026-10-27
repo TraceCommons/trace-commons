@@ -68,6 +68,11 @@ pub const SUBSTANCE_SUB_CEIL_PERCENTILE: u32 = 90;
 /// local reference, the production configuration and the calibration driver
 /// share.
 pub const SUBSTANCE_SUB_FLOOR_MULT_MICROS: u32 = 250_000;
+/// The `substance_floor` of spec section 6, in micros: a set parameter, not
+/// calibrated. At the RLVR parameters every trace with an initial prompt
+/// scores at least 124,200, so it passes, and a trace with no initial
+/// prompt and no paired call scores at most 111,000, so it fails.
+pub const SUBSTANCE_FLOOR_MICROS: u64 = 120_000;
 
 const MICROS: u32 = 1_000_000;
 
@@ -427,23 +432,21 @@ impl SubstanceNoveltyConfig {
     }
 }
 
-/// What the offline calibration (`evaluate`) measured the calibrated values
-/// on: the pinned corpus, the report, and the two percentiles.
+/// What the offline calibration (`evaluate`) measured the calibrated value
+/// on: the pinned corpus, the report, and the percentile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubstanceCalibration {
     pub corpus_pin_digest: String,
     pub report_digest: String,
     pub sub_ceil_percentile: u32,
-    pub substance_floor_percentile: u32,
 }
 
-/// The values the offline calibration writes, with their provenance.
+/// The value the offline calibration writes, with its provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CalibratedSubstanceValues {
     pub sub_ceil_micros: u64,
-    pub substance_floor_micros: u64,
     pub calibration: SubstanceCalibration,
 }
 
@@ -458,7 +461,8 @@ pub struct SubstanceScoreConfig {
     pub params: SubstanceParams,
     /// The ceiling of the substance half of `cq4`. Calibrated.
     pub sub_ceil_micros: u64,
-    /// The substance gate: a trace passes at or above it. Calibrated.
+    /// The substance gate: a trace passes at or above it. Set (spec
+    /// section 6): [`SUBSTANCE_FLOOR_MICROS`] in a production configuration.
     pub substance_floor_micros: u64,
     pub sub_floor_mult_micros: u32,
     pub calibration: Option<SubstanceCalibration>,
@@ -498,11 +502,10 @@ impl SubstanceScoreConfig {
         }
     }
 
-    /// This configuration with the calibrated ceiling and floor, and the
-    /// calibration they came from.
+    /// This configuration with the calibrated ceiling, and the calibration
+    /// it came from.
     pub fn with_calibrated(mut self, values: &CalibratedSubstanceValues) -> Self {
         self.sub_ceil_micros = values.sub_ceil_micros;
-        self.substance_floor_micros = values.substance_floor_micros;
         self.calibration = Some(values.calibration.clone());
         self
     }
@@ -544,8 +547,7 @@ impl SubstanceScoreConfig {
             anyhow::ensure!(
                 !calibration.corpus_pin_digest.trim().is_empty()
                     && !calibration.report_digest.trim().is_empty()
-                    && calibration.sub_ceil_percentile <= 100
-                    && calibration.substance_floor_percentile <= 100,
+                    && calibration.sub_ceil_percentile <= 100,
                 PIPELINE_BUNDLE_INVALID_LABEL
             );
         }
@@ -711,12 +713,11 @@ pub fn substance_package(
 
 /// The production substance configuration (SQ-17, SQ-18): production
 /// compatible, the witness class not read, the RLVR parameters, the
-/// `sub_floor_mult` of spec section 6, the novelty values of `main_gate`
-/// ([`SubstanceNoveltyConfig::from_main_gate`]), and the calibrated values.
-/// Refuses a gate with no novelty floor
+/// `sub_floor_mult` and the `substance_floor` of spec section 6, the
+/// novelty values of `main_gate` ([`SubstanceNoveltyConfig::from_main_gate`]),
+/// and the calibrated ceiling. Refuses a gate with no novelty floor
 /// (`compatibility_main_gate_floors_missing`), an invalid configuration
-/// with its own label (`compatibility_zero_floor` among them), and any
-/// other configuration that is not qualifiable
+/// with its own label, and any other configuration that is not qualifiable
 /// (`bundle_configuration_not_qualifiable`).
 pub fn production_substance_config(
     main_gate: &MainGateConfig,
@@ -732,7 +733,7 @@ pub fn production_substance_config(
         witness_source: SubstanceWitnessSource::NotRead,
         params: SubstanceParams::rlvr_v1(),
         sub_ceil_micros: 0,
-        substance_floor_micros: 0,
+        substance_floor_micros: SUBSTANCE_FLOOR_MICROS,
         sub_floor_mult_micros: SUBSTANCE_SUB_FLOOR_MULT_MICROS,
         calibration: None,
         novelty: SubstanceNoveltyConfig::from_main_gate(main_gate),
@@ -1372,6 +1373,35 @@ mod tests {
         assert!(result.evidence.fixed_awards.is_empty());
     }
 
+    /// Spec section 6: under the set floor, a tool-free trace with an
+    /// initial prompt passes at 124,200, and a trace with no initial prompt
+    /// and no tool call fails.
+    #[tokio::test]
+    async fn the_set_floor_passes_a_prompted_trace_and_fails_an_unprompted_one() {
+        let mut config = SubstanceScoreConfig::local_reference();
+        config.substance_floor_micros = SUBSTANCE_FLOOR_MICROS;
+
+        let prompted = score(&config, &serde_json::to_vec(&prompt_only()).unwrap())
+            .await
+            .unwrap();
+        let evidence = &prompted.result().evidence;
+        assert_eq!(evidence.substance_tool_calls, Some(0));
+        assert_eq!(evidence.substance_micros, Some(124_200));
+        assert_eq!(evidence.substance_passed, Some(true));
+
+        let mut reply = event("reply", TraceContributionEventType::AssistantMessage);
+        reply.redacted_content = Some("done".to_string());
+        let bare = envelope(vec![reply]);
+        assert!(!project_tool_calls(&bare).has_initial_prompt);
+        let unprompted = score(&config, &serde_json::to_vec(&bare).unwrap())
+            .await
+            .unwrap();
+        let evidence = &unprompted.result().evidence;
+        assert_eq!(evidence.substance_tool_calls, Some(0));
+        assert_eq!(evidence.substance_micros, Some(27_000));
+        assert_eq!(evidence.substance_passed, Some(false));
+    }
+
     /// Spec section 8.3, Settle: the legacy gate-decision row builds from
     /// substance evidence, with no perplexity and no tail fraction (NULL,
     /// V139) and `cq4`.
@@ -1700,12 +1730,10 @@ mod tests {
     fn calibrated_values() -> CalibratedSubstanceValues {
         CalibratedSubstanceValues {
             sub_ceil_micros: 600_000,
-            substance_floor_micros: 300_000,
             calibration: SubstanceCalibration {
                 corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
                 report_digest: format!("sha256:{}", "b".repeat(64)),
                 sub_ceil_percentile: 90,
-                substance_floor_percentile: 25,
             },
         }
     }
@@ -1713,6 +1741,7 @@ mod tests {
     fn production(values: &CalibratedSubstanceValues) -> SubstanceScoreConfig {
         let mut config = SubstanceScoreConfig::local_reference();
         config.qualification = CompatibilityQualification::ProductionCompatible;
+        config.substance_floor_micros = SUBSTANCE_FLOOR_MICROS;
         config.with_calibrated(values)
     }
 
@@ -1721,7 +1750,7 @@ mod tests {
         let values = calibrated_values();
         let config = production(&values);
         assert_eq!(config.sub_ceil_micros, 600_000);
-        assert_eq!(config.substance_floor_micros, 300_000);
+        assert_eq!(config.substance_floor_micros, SUBSTANCE_FLOOR_MICROS);
         assert_eq!(config.calibration, Some(values.calibration.clone()));
         assert!(config.is_qualifiable());
         let package = substance_package(
@@ -1735,7 +1764,7 @@ mod tests {
 
         let mut uncalibrated = SubstanceScoreConfig::local_reference();
         uncalibrated.qualification = CompatibilityQualification::ProductionCompatible;
-        uncalibrated.substance_floor_micros = 300_000;
+        uncalibrated.substance_floor_micros = SUBSTANCE_FLOOR_MICROS;
         assert!(uncalibrated.validate().is_ok());
         assert!(!uncalibrated.is_qualifiable());
 
@@ -1769,9 +1798,8 @@ mod tests {
     /// are both zero, stays valid because it is not production-compatible.
     #[test]
     fn a_production_config_with_zero_floors_is_refused() {
-        let mut values = calibrated_values();
-        values.substance_floor_micros = 0;
-        let zero = production(&values);
+        let mut zero = production(&calibrated_values());
+        zero.substance_floor_micros = 0;
         assert_eq!(zero.novelty.novelty_floor_micros, 0);
         let error = zero.validate().expect_err("both floors zero is refused");
         assert_eq!(error.to_string(), COMPATIBILITY_ZERO_FLOOR_LABEL);
@@ -2022,9 +2050,10 @@ mod tests {
 
     /// The production configuration: production compatible, the witness
     /// class not read, the RLVR parameters, the one `sub_floor_mult`, the
-    /// gate's novelty values and the calibrated values. It is qualifiable,
-    /// and it refuses a gate with no novelty floor, both floors zero, and a
-    /// calibration that is not at the 90th percentile.
+    /// set `substance_floor`, the gate's novelty values and the calibrated
+    /// ceiling. It is qualifiable, and it refuses a gate with no novelty
+    /// floor and a calibration that is not at the 90th percentile. A gate
+    /// whose novelty floor is zero is accepted: the set floor is positive.
     #[test]
     fn production_substance_config_holds_the_production_values() {
         let values = calibrated_values();
@@ -2050,7 +2079,8 @@ mod tests {
             SubstanceNoveltyConfig::from_main_gate(&DISTINCT_GATE)
         );
         assert_eq!(config.sub_ceil_micros, values.sub_ceil_micros);
-        assert_eq!(config.substance_floor_micros, values.substance_floor_micros);
+        assert_eq!(config.substance_floor_micros, SUBSTANCE_FLOOR_MICROS);
+        assert_eq!(SUBSTANCE_FLOOR_MICROS, 120_000);
         assert_eq!(config.calibration, Some(values.calibration.clone()));
         assert!(config.is_qualifiable());
 
@@ -2067,15 +2097,12 @@ mod tests {
         );
         let mut zero_floor = DISTINCT_GATE;
         zero_floor.novelty_floor_micros = Some(0);
-        let mut zero_values = values.clone();
-        zero_values.substance_floor_micros = 0;
         assert_eq!(
-            label(&zero_floor, &zero_values),
-            COMPATIBILITY_ZERO_FLOOR_LABEL
+            production_substance_config(&zero_floor, &values)
+                .unwrap()
+                .substance_floor_micros,
+            SUBSTANCE_FLOOR_MICROS
         );
-        // Either floor positive is enough.
-        production_substance_config(&zero_floor, &values).unwrap();
-        production_substance_config(&DISTINCT_GATE, &zero_values).unwrap();
         let mut other_percentile = values.clone();
         other_percentile.calibration.sub_ceil_percentile = 95;
         assert_eq!(

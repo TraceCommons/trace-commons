@@ -4,8 +4,8 @@
 //! Offline calibration checks of the substance Score: the pairwise regression
 //! guardrail of spec section 7.1 (check 1) on synthetic bases, the
 //! monotonicity sweep (check 2), and [`evaluate`], which runs both and the
-//! real-corpus distribution (check 3) and calibrates `sub_ceil` and
-//! `substance_floor` from it.
+//! real-corpus distribution (check 3) and calibrates `sub_ceil` from it.
+//! `substance_floor` is a set parameter (spec section 6), not calibrated.
 //!
 //! The committed fixture, the corpus bases, `dataset generate` of
 //! section 7.1 and the sensitivity analysis (check 4) are in the later plan.
@@ -568,7 +568,6 @@ pub const SUBSTANCE_CALIBRATION_REPORT_SCHEMA: &str =
     "trace_commons.substance_calibration_report.v1";
 
 pub const EVALUATE_CORPUS_EMPTY_LABEL: &str = "evaluate_corpus_empty";
-pub const EVALUATE_FLOOR_PERCENTILE_INVALID_LABEL: &str = "evaluate_floor_percentile_invalid";
 pub const EVALUATE_PARAMS_INVALID_LABEL: &str = "evaluate_params_invalid";
 pub const EVALUATE_GUARDRAIL_FAILED_LABEL: &str = "evaluate_guardrail_failed";
 pub const EVALUATE_MONOTONICITY_FAILED_LABEL: &str = "evaluate_monotonicity_failed";
@@ -579,16 +578,13 @@ pub const EVALUATE_REPORT_UNSERIALIZABLE_LABEL: &str = "evaluate_report_unserial
 pub const EVALUATE_CHECKS: [&str; 3] = ["guardrail", "monotonicity", "distribution"];
 
 /// What [`evaluate`] reads: one projection for each trace of the pinned
-/// corpus, the pin, the set parameters, and the owner's floor percentile.
+/// corpus, the pin, and the set parameters.
 #[derive(Debug, Clone)]
 pub struct EvaluateInputs {
     pub projections: Vec<ToolCallProjection>,
     pub corpus_pin_digest: String,
     pub params: SubstanceParams,
     pub sub_floor_mult_micros: u32,
-    /// The percentile of substance over the corpus that `substance_floor`
-    /// comes from (spec section 11), from 0 to 100.
-    pub substance_floor_percentile: u32,
 }
 
 /// Check 1 in the report: the synthetic guardrail at the evaluated
@@ -656,13 +652,11 @@ pub struct DistributionCheckReport {
     pub tool_free_count: u64,
 }
 
-/// The two calibrated values and their percentiles.
+/// The calibrated value and its percentile.
 #[derive(Debug, Clone, Serialize)]
 pub struct CalibratedValuesReport {
     pub sub_ceil_micros: u64,
     pub sub_ceil_percentile: u32,
-    pub substance_floor_micros: u64,
-    pub substance_floor_percentile: u32,
 }
 
 /// The calibration report (spec section 7). It holds labels, digests,
@@ -692,7 +686,7 @@ impl SubstanceCalibrationReport {
     }
 }
 
-/// What [`evaluate`] gives: the report, and the calibrated values with the
+/// What [`evaluate`] gives: the report, and the calibrated value with the
 /// digest of that report.
 #[derive(Debug, Clone)]
 pub struct SubstanceEvaluation {
@@ -714,16 +708,13 @@ pub fn percentile_micros(sorted: &[u64], p: u32) -> u64 {
 }
 
 /// Checks 1 to 3 of spec section 7 over the projections of a pinned corpus,
-/// and the two calibrated values: `sub_ceil` at the 90th percentile of
-/// substance and `substance_floor` at the owner's percentile. Every
-/// projection is scored as `Unattested` (SQ-13). A check that fails refuses
-/// the whole run, so no value comes from parameters that fail a check.
+/// and the calibrated value: `sub_ceil` at the 90th percentile of
+/// substance. Every projection is scored as `Unattested` (SQ-13). A check
+/// that fails refuses the whole run, so no value comes from parameters that
+/// fail a check.
 pub fn evaluate(inputs: &EvaluateInputs) -> Result<SubstanceEvaluation, &'static str> {
     if inputs.projections.is_empty() {
         return Err(EVALUATE_CORPUS_EMPTY_LABEL);
-    }
-    if inputs.substance_floor_percentile > 100 {
-        return Err(EVALUATE_FLOOR_PERCENTILE_INVALID_LABEL);
     }
     let params = &inputs.params;
     if params.validate().is_err() || inputs.sub_floor_mult_micros > 1_000_000 {
@@ -768,7 +759,6 @@ pub fn evaluate(inputs: &EvaluateInputs) -> Result<SubstanceEvaluation, &'static
     replay.sort_unstable();
 
     let sub_ceil_micros = percentile_micros(&substance, SUBSTANCE_SUB_CEIL_PERCENTILE);
-    let substance_floor_micros = percentile_micros(&substance, inputs.substance_floor_percentile);
     let report = SubstanceCalibrationReport {
         schema: SUBSTANCE_CALIBRATION_REPORT_SCHEMA,
         corpus_pin_digest: inputs.corpus_pin_digest.clone(),
@@ -792,8 +782,6 @@ pub fn evaluate(inputs: &EvaluateInputs) -> Result<SubstanceEvaluation, &'static
         calibrated: CalibratedValuesReport {
             sub_ceil_micros,
             sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-            substance_floor_micros,
-            substance_floor_percentile: inputs.substance_floor_percentile,
         },
     };
     let report_digest = format!(
@@ -802,12 +790,10 @@ pub fn evaluate(inputs: &EvaluateInputs) -> Result<SubstanceEvaluation, &'static
     );
     let values = CalibratedSubstanceValues {
         sub_ceil_micros,
-        substance_floor_micros,
         calibration: SubstanceCalibration {
             corpus_pin_digest: inputs.corpus_pin_digest.clone(),
             report_digest,
             sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-            substance_floor_percentile: inputs.substance_floor_percentile,
         },
     };
     Ok(SubstanceEvaluation { report, values })
@@ -1022,13 +1008,12 @@ mod tests {
             .collect()
     }
 
-    fn inputs(projections: Vec<ToolCallProjection>, floor_percentile: u32) -> EvaluateInputs {
+    fn inputs(projections: Vec<ToolCallProjection>) -> EvaluateInputs {
         EvaluateInputs {
             projections,
             corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
             params: params(),
             sub_floor_mult_micros: 250_000,
-            substance_floor_percentile: floor_percentile,
         }
     }
 
@@ -1055,16 +1040,14 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_calibrates_both_values() {
+    fn evaluate_calibrates_the_ceiling() {
         let projections = hundred_projections();
         let sorted = sorted_substance(&projections);
-        let evaluation = evaluate(&inputs(projections, 25)).expect("evaluates");
+        let evaluation = evaluate(&inputs(projections)).expect("evaluates");
         let values = &evaluation.values;
-        // Nearest rank over 100 values: p90 is index 89, p25 index 24.
+        // Nearest rank over 100 values: p90 is index 89.
         assert_eq!(values.sub_ceil_micros, sorted[89]);
-        assert_eq!(values.substance_floor_micros, sorted[24]);
         assert_eq!(values.calibration.sub_ceil_percentile, 90);
-        assert_eq!(values.calibration.substance_floor_percentile, 25);
         assert_eq!(
             values.calibration.corpus_pin_digest,
             format!("sha256:{}", "a".repeat(64))
@@ -1093,10 +1076,6 @@ mod tests {
         assert_eq!(report.distribution.substance.max_micros, sorted[99]);
         assert_eq!(report.distribution.substance.p90_micros, sorted[89]);
         assert_eq!(report.calibrated.sub_ceil_micros, values.sub_ceil_micros);
-        assert_eq!(
-            report.calibrated.substance_floor_micros,
-            values.substance_floor_micros
-        );
 
         crate::versioned_pipeline_substance::SubstanceScoreConfig::local_reference()
             .with_calibrated(values)
@@ -1105,44 +1084,26 @@ mod tests {
     }
 
     #[test]
-    fn a_floor_at_p_fails_at_most_p_percent() {
-        let projections = hundred_projections();
-        let sorted = sorted_substance(&projections);
-        let evaluation = evaluate(&inputs(projections, 30)).expect("evaluates");
-        let floor = evaluation.values.substance_floor_micros;
-        let failed = sorted.iter().filter(|value| **value < floor).count();
-        assert!(
-            failed as f64 / sorted.len() as f64 <= 0.30,
-            "{failed} of {} below the floor",
-            sorted.len()
-        );
-    }
-
-    #[test]
     fn evaluate_refuses_bad_inputs() {
         assert_eq!(
-            evaluate(&inputs(Vec::new(), 10)).unwrap_err(),
+            evaluate(&inputs(Vec::new())).unwrap_err(),
             "evaluate_corpus_empty"
         );
-        assert_eq!(
-            evaluate(&inputs(hundred_projections(), 101)).unwrap_err(),
-            "evaluate_floor_percentile_invalid"
-        );
-        let mut bad = inputs(hundred_projections(), 10);
+        let mut bad = inputs(hundred_projections());
         bad.params.m_work_micros = 0;
         assert_eq!(evaluate(&bad).unwrap_err(), "evaluate_params_invalid");
     }
 
     #[test]
     fn the_report_digest_names_the_report() {
-        let first = evaluate(&inputs(hundred_projections(), 10)).expect("evaluates");
+        let first = evaluate(&inputs(hundred_projections())).expect("evaluates");
         let value = serde_json::to_value(&first.report).unwrap();
         let bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&value).unwrap();
         assert_eq!(
             first.values.calibration.report_digest,
             format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
         );
-        let second = evaluate(&inputs(hundred_projections(), 10)).expect("evaluates");
+        let second = evaluate(&inputs(hundred_projections())).expect("evaluates");
         assert_eq!(
             first.values.calibration.report_digest,
             second.values.calibration.report_digest

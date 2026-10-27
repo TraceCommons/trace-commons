@@ -4321,12 +4321,10 @@ mod tests {
         };
         let values = CalibratedSubstanceValues {
             sub_ceil_micros: 600_000,
-            substance_floor_micros: 120_000,
             calibration: SubstanceCalibration {
                 corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
                 report_digest: format!("sha256:{}", "b".repeat(64)),
                 sub_ceil_percentile: 90,
-                substance_floor_percentile: 25,
             },
         };
         let mut other_percentile = production_substance_config(&main_gate, &values).unwrap();

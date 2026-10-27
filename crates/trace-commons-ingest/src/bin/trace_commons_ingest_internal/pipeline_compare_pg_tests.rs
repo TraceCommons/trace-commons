@@ -2287,8 +2287,6 @@ const SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR: &str =
     "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH";
 const SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH";
 const SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH";
-const SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR: &str =
-    "TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE";
 const SUBSTANCE_EVALUATE_REPORT_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH";
 const SUBSTANCE_EVALUATE_VALUES_PATH_VAR: &str = "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH";
 
@@ -2300,23 +2298,19 @@ struct SubstanceEvaluateConfig {
     bootstrap: PathBuf,
     holdout: PathBuf,
     manifest: PathBuf,
-    floor_percentile: u32,
     report_path: PathBuf,
     values_path: PathBuf,
 }
 
 impl SubstanceEvaluateConfig {
-    /// `Ok(None)` when none of the six variables is set (nothing to run).
+    /// `Ok(None)` when none of the five variables is set (nothing to run).
     /// When one is set, each must be set and not empty
-    /// (`substance_evaluate_environment_incomplete`). A floor percentile
-    /// that is not a whole number is `substance_evaluate_floor_percentile_invalid`;
-    /// `evaluate` refuses one above 100.
+    /// (`substance_evaluate_environment_incomplete`).
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
-        const VARS: [&str; 6] = [
+        const VARS: [&str; 5] = [
             SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR,
             SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR,
             SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR,
-            SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR,
             SUBSTANCE_EVALUATE_REPORT_PATH_VAR,
             SUBSTANCE_EVALUATE_VALUES_PATH_VAR,
         ];
@@ -2331,17 +2325,12 @@ impl SubstanceEvaluateConfig {
         let bootstrap = required(SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR)?;
         let holdout = required(SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR)?;
         let manifest = required(SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR)?;
-        let floor_percentile = required(SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR)?;
         let report = required(SUBSTANCE_EVALUATE_REPORT_PATH_VAR)?;
         let values = required(SUBSTANCE_EVALUATE_VALUES_PATH_VAR)?;
-        let floor_percentile = floor_percentile
-            .parse::<u32>()
-            .map_err(|_| "substance_evaluate_floor_percentile_invalid")?;
         Ok(Some(Self {
             bootstrap: PathBuf::from(bootstrap),
             holdout: PathBuf::from(holdout),
             manifest: PathBuf::from(manifest),
-            floor_percentile,
             report_path: PathBuf::from(report),
             values_path: PathBuf::from(values),
         }))
@@ -2372,10 +2361,9 @@ async fn project_corpus(
 
 /// `pipeline.py evaluate`. Checks the two corpus files against the export
 /// manifest, projects each trace, runs `evaluate` at the RLVR parameters
-/// with `sub_floor_mult` 0.25 and the floor percentile of the environment,
-/// and writes two files: the canonical bytes of the report, whose SHA-256
-/// is the `report_digest` of the values, and the pretty JSON of the
-/// calibrated values. It needs no database: it reads only the corpus.
+/// with `sub_floor_mult` 0.25, and writes two files: the canonical bytes of
+/// the report, whose SHA-256 is the `report_digest` of the values, and the
+/// pretty JSON of the calibrated values. It needs no database: it reads only the corpus.
 #[tokio::test]
 #[ignore = "the implementation of `pipeline.py evaluate`: run it through that command"]
 async fn substance_evaluate_run() {
@@ -2419,7 +2407,6 @@ async fn substance_evaluate_run() {
         corpus_pin_digest: pin.digests["source"].clone(),
         params: SubstanceParams::rlvr_v1(),
         sub_floor_mult_micros: SUBSTANCE_SUB_FLOOR_MULT_MICROS,
-        substance_floor_percentile: config.floor_percentile,
     })
     .unwrap_or_else(fail);
     let report_bytes = evaluation.report.canonical_bytes().unwrap_or_else(fail);
@@ -2572,7 +2559,6 @@ fn the_evaluate_environment_is_complete_or_absent() {
         (SUBSTANCE_EVALUATE_BOOTSTRAP_PATH_VAR, "b.jsonl"),
         (SUBSTANCE_EVALUATE_HOLDOUT_PATH_VAR, "h.jsonl"),
         (SUBSTANCE_EVALUATE_MANIFEST_PATH_VAR, "m.json"),
-        (SUBSTANCE_EVALUATE_FLOOR_PERCENTILE_VAR, "10"),
         (SUBSTANCE_EVALUATE_REPORT_PATH_VAR, "r.json"),
         (SUBSTANCE_EVALUATE_VALUES_PATH_VAR, "v.json"),
     ];
@@ -2585,7 +2571,6 @@ fn the_evaluate_environment_is_complete_or_absent() {
     };
     assert_eq!(from(&[]), Ok(None));
     let config = from(&all).unwrap().unwrap();
-    assert_eq!(config.floor_percentile, 10);
     assert_eq!(config.values_path, PathBuf::from("v.json"));
     for index in 0..all.len() {
         let mut missing = all.to_vec();
@@ -2601,12 +2586,6 @@ fn the_evaluate_environment_is_complete_or_absent() {
             Err("substance_evaluate_environment_incomplete")
         );
     }
-    let mut word = all.to_vec();
-    word[3].1 = "ten";
-    assert_eq!(
-        from(&word),
-        Err("substance_evaluate_floor_percentile_invalid")
-    );
 }
 
 #[test]

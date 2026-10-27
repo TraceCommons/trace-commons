@@ -233,23 +233,17 @@ pub fn production_compatibility_package(
 /// Selects the deployment's default package (SQ-17): `compatibility`, also
 /// when unset, or `substance`.
 pub const TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE: &str = "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE";
-/// The calibrated values of a substance default package
-/// ([`CalibratedSubstanceValues`]), as the offline calibration writes them
+/// The calibrated value of a substance default package
+/// ([`CalibratedSubstanceValues`]), as the offline calibration writes it
 /// (`docs/operator/substance-calibration.md`).
 pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS: &str =
     "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS";
-pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS: &str =
-    "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS";
-pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE: &str =
-    "TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE";
 pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST: &str =
     "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST";
 pub const TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST: &str =
     "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST";
-const SUBSTANCE_CALIBRATION_VARS: [&str; 5] = [
+const SUBSTANCE_CALIBRATION_VARS: [&str; 3] = [
     TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS,
-    TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS,
-    TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE,
     TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST,
     TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST,
 ];
@@ -275,12 +269,12 @@ pub enum ProductionScoreSelection {
 /// unset, blank or `compatibility` selects the compatibility package, and
 /// then any calibration variable that is set refuses
 /// (`pipeline_substance_calibration_unexpected`): a value the package would
-/// not hold is never read as if it applied. `substance` needs all five
-/// calibration variables, the two micros and the percentile as
-/// non-negative integers and the two digests as `sha256:<hex>`; a missing
-/// or unparsable one refuses (`pipeline_substance_calibration_missing`).
-/// `sub_ceil_percentile` is always the 90th. Any other selection refuses
-/// (`pipeline_production_score_invalid`).
+/// not hold is never read as if it applied. `substance` needs all three
+/// calibration variables, the micros as a non-negative integer and the two
+/// digests as `sha256:<hex>`; a missing or unparsable one refuses
+/// (`pipeline_substance_calibration_missing`). `sub_ceil_percentile` is
+/// always the 90th, and `substance_floor` is set, not read. Any other
+/// selection refuses (`pipeline_production_score_invalid`).
 pub fn production_score_selection_from_lookup(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> anyhow::Result<ProductionScoreSelection> {
@@ -314,18 +308,12 @@ pub fn production_score_selection_from_lookup(
             Ok(ProductionScoreSelection::Substance(
                 CalibratedSubstanceValues {
                     sub_ceil_micros: micros(TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS)?,
-                    substance_floor_micros: micros(TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS)?,
                     calibration: SubstanceCalibration {
                         corpus_pin_digest: digest(
                             TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST,
                         )?,
                         report_digest: digest(TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST)?,
                         sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-                        substance_floor_percentile: read(
-                            TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE,
-                        )
-                        .and_then(|raw| raw.parse::<u32>().ok())
-                        .ok_or_else(missing)?,
                     },
                 },
             ))
@@ -1454,12 +1442,10 @@ mod tests {
     fn calibrated_values() -> CalibratedSubstanceValues {
         CalibratedSubstanceValues {
             sub_ceil_micros: 600_000,
-            substance_floor_micros: 120_000,
             calibration: SubstanceCalibration {
                 corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
                 report_digest: format!("sha256:{}", "b".repeat(64)),
                 sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-                substance_floor_percentile: 25,
             },
         }
     }
@@ -1552,7 +1538,7 @@ mod tests {
     }
 
     /// `production_score_selection_from_lookup` reads the selection and all
-    /// five calibration variables, and refuses a missing or unparsable
+    /// three calibration variables, and refuses a missing or unparsable
     /// value, a calibration value with no substance selection, and an
     /// unknown selection.
     #[test]
@@ -1574,8 +1560,6 @@ mod tests {
         let report = format!("sha256:{}", "b".repeat(64));
         let calibration: Vec<(&str, &str)> = vec![
             (TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS, "600000"),
-            (TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS, "120000"),
-            (TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE, "25"),
             (TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST, &corpus),
             (TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST, &report),
         ];
@@ -1716,7 +1700,7 @@ mod tests {
 
     /// A substance selection the configuration refuses is refused by
     /// `production_package` with the configuration's label: a gate with no
-    /// novelty floor, both floors zero, and an out-of-range ceiling.
+    /// novelty floor, and an out-of-range ceiling.
     #[test]
     fn production_package_refuses_an_unusable_substance_selection() {
         let parts = double_parts();
@@ -1735,14 +1719,6 @@ mod tests {
         assert_eq!(
             refusal(&no_floor, calibrated_values()),
             crate::versioned_pipeline_compat::COMPATIBILITY_MAIN_GATE_FLOORS_MISSING_LABEL
-        );
-        let mut zero_floor = MAIN_GATE;
-        zero_floor.novelty_floor_micros = Some(0);
-        let mut zero_values = calibrated_values();
-        zero_values.substance_floor_micros = 0;
-        assert_eq!(
-            refusal(&zero_floor, zero_values),
-            crate::versioned_pipeline_compat::COMPATIBILITY_ZERO_FLOOR_LABEL
         );
         let mut zero_ceiling = calibrated_values();
         zero_ceiling.sub_ceil_micros = 0;

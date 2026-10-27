@@ -637,13 +637,13 @@ python3 scripts/operator/pipeline.py promote assemble --run-id R --mechanics-run
 ```
 
 `package --bundle production` builds the package that the env file selects.
-It reads `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` and the five
+It reads `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` and the three
 `TRACE_COMMONS_PIPELINE_SUBSTANCE_*` calibration variables with the
 descriptor and gate variables, and passes nothing else from the file. With
 no selection, or with `compatibility`, it builds the compatibility package,
 as before. With `substance`, it builds the calibrated substance package: the
 same descriptors, the novelty values of the env file's gate, and the
-calibrated values of the five variables. A selection with a missing
+calibrated values of the three variables. A selection with a missing
 calibration variable builds no package
 (`pipeline_substance_calibration_missing`). The deployed ingest builds its
 default package from the same variables, so the two packages are the same.
@@ -654,7 +654,7 @@ package. A substance package holds no perplexity or tail floor, so each
 harness runs it under its own gate, and the assembly refuses a gate whose
 novelty values are not the package's. The restore drill sends a trace with
 20 paired tool calls over 8 tools under a substance package, so that both
-runs pass the calibrated floor. The switch from the compatibility package to
+runs pass the set floor. The switch from the compatibility package to
 the substance package is in
 [`pipeline-activation.md`](pipeline-activation.md#switch-the-default-package-to-substance).
 

@@ -185,7 +185,6 @@ pub fn production_package_pins(package: &BundlePackage) -> anyhow::Result<Produc
             );
             let values = CalibratedSubstanceValues {
                 sub_ceil_micros: config.sub_ceil_micros,
-                substance_floor_micros: config.substance_floor_micros,
                 calibration: config.calibration.ok_or_else(invalid)?,
             };
             (
@@ -625,19 +624,17 @@ mod tests {
         assert_eq!(label(&other), HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL);
     }
 
-    /// The calibrated values of the production substance test package.
+    /// The calibrated value of the production substance test package.
     fn substance_values() -> CalibratedSubstanceValues {
         use crate::versioned_pipeline_substance::{
             SUBSTANCE_SUB_CEIL_PERCENTILE, SubstanceCalibration,
         };
         CalibratedSubstanceValues {
             sub_ceil_micros: 600_000,
-            substance_floor_micros: 120_000,
             calibration: SubstanceCalibration {
                 corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
                 report_digest: format!("sha256:{}", "b".repeat(64)),
                 sub_ceil_percentile: SUBSTANCE_SUB_CEIL_PERCENTILE,
-                substance_floor_percentile: 25,
             },
         }
     }
@@ -656,8 +653,8 @@ mod tests {
     }
 
     /// A substance package gives back its descriptors and its calibrated
-    /// values, and no gate: it holds only the novelty values of one. The
-    /// pins rebuild it, also when its calibrated values are other ones, and
+    /// value, and no gate: it holds only the novelty values of one. The
+    /// pins rebuild it, also when its calibrated value is another one, and
     /// the gate they rebuild it under holds the package's novelty values.
     #[test]
     fn production_package_pins_round_trip_a_substance_package() {
@@ -700,8 +697,7 @@ mod tests {
         );
 
         let mut other = substance_values();
-        other.substance_floor_micros = 240_000;
-        other.calibration.substance_floor_percentile = 50;
+        other.sub_ceil_micros = 700_000;
         let package = pilot_substance_package(other.clone());
         assert_eq!(
             production_package_pins(&package).unwrap().score_selection,
@@ -795,7 +791,7 @@ mod tests {
         let other = substance_package(&fixed, &scorer, &embedder).unwrap();
         assert_eq!(label(&other), HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL);
 
-        // No calibration: there are no calibrated values to read.
+        // No calibration: there is no calibrated value to read.
         let mut uncalibrated = config.clone();
         uncalibrated.calibration = None;
         let uncalibrated = substance_package(&uncalibrated, &scorer, &embedder).unwrap();

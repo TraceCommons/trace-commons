@@ -1851,24 +1851,22 @@ Unset the three variables after that boot.
 
 ## Switch the default package to substance
 
-The deployment selects its default package with six variables in its env
+The deployment selects its default package with four variables in its env
 file. A tenant runs its active bundle, so a new default package does not
 move a tenant that is already active on the compatibility bundle. Each such
 tenant moves with its own `activate`. Do these steps in this order.
 
-1. Calibrate. Run `pipeline.py evaluate` and give the distribution report to
-   the owner. The owner sets the floor percentile. Run `evaluate` again with
-   that percentile and keep its values file
-   ([substance-calibration.md](substance-calibration.md)).
-2. Set the six variables in the deployment env file, from that values file.
+1. Calibrate. Run `pipeline.py evaluate` and keep its values file
+   ([substance-calibration.md](substance-calibration.md)). The floor is not
+   calibrated: the spec sets it at 120,000 (section 6), and the package
+   holds that value.
+2. Set the four variables in the deployment env file, from that values file.
    Keep the gate variables as they are.
 
    | Variable | Value |
    |---|---|
    | `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` | `substance` |
    | `TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS` | `sub_ceil_micros` |
-   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_MICROS` | `substance_floor_micros` |
-   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_FLOOR_PERCENTILE` | `calibration.substance_floor_percentile` |
    | `TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST` | `calibration.corpus_pin_digest` |
    | `TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST` | `calibration.report_digest` |
 
@@ -1883,7 +1881,7 @@ tenant moves with its own `activate`. Do these steps in this order.
    `pipeline_bundle_not_qualified` until step 6 reaches them.
 4. Promote the substance package. Run `pipeline.py package --bundle
    production --env-file ENV` with the deployment env file: it builds the
-   substance package from the six variables. Then run the `promote` cycle on
+   substance package from the four variables. Then run the `promote` cycle on
    that package, up to `assemble`
    ([pipeline-qualification.md](pipeline-qualification.md#the-production-run-pipelinepy-promote)).
 5. Install the new default-routing set: the `assemble` output, swapped into
@@ -1914,7 +1912,7 @@ the gate variables stay in the env file.
 Both routes need signed results for the compatibility package on the running
 revision, so a rollback needs a full compatibility promotion on the new
 revision. Its `pipeline_production_adapters` result comes from one boot of the
-new revision whose env file has none of the six substance variables: that
+new revision whose env file has none of the four substance variables: that
 boot's default package is the compatibility package. A boot with
 `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` unset and a calibration variable
 still set refuses to start (`pipeline_substance_calibration_unexpected`). If

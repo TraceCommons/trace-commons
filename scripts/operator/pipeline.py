@@ -326,17 +326,10 @@ def build_parser():
 
     evaluate_parser = subparsers.add_parser(
         "evaluate",
-        help="Calibrate the substance Score on one pin: checks 1 to 3 and the two calibrated values (offline)",
+        help="Calibrate the substance Score on one pin: checks 1 to 3 and the calibrated sub_ceil (offline)",
     )
     evaluate_parser.add_argument(
         "--pin", required=True, help="A comparison pin (an HF pin descriptor with with_events: true)."
-    )
-    evaluate_parser.add_argument(
-        "--floor-percentile",
-        dest="floor_percentile",
-        type=int,
-        required=True,
-        help="The percentile of substance that substance_floor comes from, 0 to 100 (the owner's decision).",
     )
     evaluate_parser.add_argument(
         "--local-dir",
@@ -1090,12 +1083,12 @@ def _is_micros(value):
     return type(value) is int and 0 <= value <= 1_000_000
 
 
-def _require_substance_outputs(report_bytes, values, exported, floor_percentile):
+def _require_substance_outputs(report_bytes, values, exported):
     """The two files of a driver run that passed belong together and to this
     run: the report has its schema and names the export's source digest,
-    and the values carry the digest of the report bytes, the two
-    percentiles, the source digest, and the micros that the report names.
-    Anything else is `substance_evaluate_outputs_mismatch`."""
+    and the values carry the digest of the report bytes, the percentile,
+    the source digest, and the micros that the report names. Anything else
+    is `substance_evaluate_outputs_mismatch`."""
     try:
         report = json.loads(report_bytes)
     except ValueError as error:
@@ -1109,28 +1102,22 @@ def _require_substance_outputs(report_bytes, values, exported, floor_percentile)
         and report.get("corpus_pin_digest") == exported.pin["source_digest"]
         and report.get("trace_count") == exported.trace_count
         and _is_micros(values.get("sub_ceil_micros"))
-        and _is_micros(values.get("substance_floor_micros"))
         and calibration.get("report_digest") == sha256_digest(report_bytes)
         and calibration.get("corpus_pin_digest") == exported.pin["source_digest"]
         and calibration.get("sub_ceil_percentile") == 90
-        and calibration.get("substance_floor_percentile") == floor_percentile
-        and calibrated.get("sub_ceil_micros") == values["sub_ceil_micros"]
-        and calibrated.get("substance_floor_micros") == values["substance_floor_micros"],
+        and calibrated.get("sub_ceil_micros") == values["sub_ceil_micros"],
         "substance_evaluate_outputs_mismatch",
     )
 
 
 def run_evaluate(args, run):
-    """`evaluate --pin PIN --floor-percentile P`: exports the pin with its
-    session events, checks the export against the pin, and runs the
-    substance driver once, with Cargo's optimized build for the two. The
-    driver needs no database. It writes the canonical calibration report and
-    the calibrated values in the run directory; both go under `.local/`
-    after the tree is examined again, and the values file is the input of
-    the production package. `--local-dir` replaces the local JSONL
-    directory that the pin names. A floor percentile outside 0 to 100 is
-    `evaluate_floor_percentile_invalid`, before any export."""
-    require(0 <= args.floor_percentile <= 100, "evaluate_floor_percentile_invalid")
+    """`evaluate --pin PIN`: exports the pin with its session events,
+    checks the export against the pin, and runs the substance driver once,
+    with Cargo's optimized build for the two. The driver needs no database.
+    It writes the canonical calibration report and the calibrated values in
+    the run directory; both go under `.local/` after the tree is examined
+    again, and the values file is the input of the production package.
+    `--local-dir` replaces the local JSONL directory that the pin names."""
     pin_path = Path(args.pin).resolve()
     _, pin_local_dir = _compare_pin(pin_path)
     local_dir = Path(args.local_dir).resolve() if args.local_dir is not None else pin_local_dir
@@ -1145,7 +1132,6 @@ def run_evaluate(args, run):
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH": str(exported.bootstrap),
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH": str(exported.holdout),
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH": str(exported.manifest),
-        "TRACE_COMMONS_SUBSTANCE_EVALUATE_FLOOR_PERCENTILE": str(args.floor_percentile),
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH": str(report_path),
         "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH": str(values_path),
     }
@@ -1163,7 +1149,7 @@ def run_evaluate(args, run):
     except OSError as error:
         raise ToolingError("substance_evaluate_report_missing") from error
     values = _read_json(values_path, "substance_evaluate_values_malformed")
-    _require_substance_outputs(report_bytes, values, exported, args.floor_percentile)
+    _require_substance_outputs(report_bytes, values, exported)
     # Before the files go under `.local/`: the values must come from the
     # code that the run started with.
     run.require_code_revision_unchanged()
@@ -1173,7 +1159,7 @@ def run_evaluate(args, run):
     atomic_write(local_values, values_path.read_bytes())
     print(
         f"SubstanceEvaluateOK: report={_shown(local_report)} values={_shown(local_values)} "
-        f"sub_ceil={values['sub_ceil_micros']} floor={values['substance_floor_micros']}"
+        f"sub_ceil={values['sub_ceil_micros']}"
     )
 
 
