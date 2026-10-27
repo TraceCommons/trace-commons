@@ -212,7 +212,7 @@ pub(super) async fn authenticated(
             anyhow!("account-enrol-mismatch")
         } else if error.server_label() == Some(super::nearai_onboarding::DEVICE_KEY_REVOKED_WIRE) {
             // This device's key was revoked by its account: never revived,
-            // so the device signs out and signs in again with a new key.
+            // so the device unenrolls and enrolls again with a new key.
             anyhow!(super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED)
         } else {
             anyhow!("account-request-refused")
