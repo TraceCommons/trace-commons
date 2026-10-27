@@ -2482,6 +2482,10 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
+    /// The account's live sessions that name no device key (issued before
+    /// V139, or by a sign-in with no device), which a device revoke cannot
+    /// attribute and so leaves alone.
+    pub unattributed_sessions: u64,
 }
 
 /// Outcome of [`Database::stage_merge_proposal`]: device B's login-link was

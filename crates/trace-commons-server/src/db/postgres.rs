@@ -4304,7 +4304,14 @@ impl Database for PgBackend {
                          OR (s.prev_token_hash = $1 AND s.prev_token_valid_until > now()))
                     AND s.expires_at > now()
                     AND s.revoked_at IS NULL
-                    AND s.last_seen_at > now() - INTERVAL '3 days'",
+                    AND s.last_seen_at > now() - INTERVAL '3 days'
+                    -- A session on a device its account revoked is dead even
+                    -- if the revoke's own session update missed it.
+                    AND NOT EXISTS (
+                        SELECT 1 FROM device_keys dk
+                         WHERE dk.tenant_id = s.tenant_id
+                           AND dk.device_key_id = s.device_key_id
+                           AND dk.revoked_at IS NOT NULL)",
                 &[
                     &token_hash,
                     &(interval_secs as f64),

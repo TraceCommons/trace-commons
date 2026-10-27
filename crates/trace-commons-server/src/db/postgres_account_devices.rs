@@ -105,8 +105,11 @@ impl PgBackend {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // Revoke the key first; its RETURNING row is the ownership check for
-        // the two writes after it, so a foreign or already-revoked device
-        // changes nothing.
+        // the writes after it, so a foreign or already-revoked device changes
+        // nothing. The row lock it takes is what a concurrent sign-in's
+        // `FOR SHARE` read of the key waits on (`claim_provisioned_device_key`),
+        // so a sign-in either commits its session before this transaction
+        // reads the sessions, or sees the key revoked and is refused.
         let revoked = tx
             .query_opt(
                 "UPDATE device_keys d
@@ -134,10 +137,11 @@ impl PgBackend {
                     SET status = 'revoked',
                         revoked_at = now(),
                         revoked_by_principal_ref = $2,
-                        reason = 'account_device_revoked'
+                        reason = 'account_device_revoked',
+                        updated_at = now()
                   WHERE tenant_id = trace_current_tenant_id()
                     AND principal_ref = $1
-                    AND revoked_at IS NULL",
+                    AND status = 'active'",
                 &[&principal_ref, &actor_ref],
             )
             .await
@@ -154,11 +158,29 @@ impl PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        // Sessions issued before V139, or by a sign-in that names no device
+        // key, carry no `device_key_id`, so the update above cannot tell
+        // whether one belongs to the revoked device. Counted so the caller
+        // can offer to sign out everywhere instead of a plain success.
+        let unattributed_sessions: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_sessions
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND device_key_id IS NULL
+                    AND revoked_at IS NULL
+                    AND expires_at > now()",
+                &[&account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(crate::db::RevokeAccountDeviceResult {
             removed: true,
             sessions_revoked,
             grants_revoked,
+            unattributed_sessions: u64::try_from(unattributed_sessions).unwrap_or(0),
         })
     }
 }
