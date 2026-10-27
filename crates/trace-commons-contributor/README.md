@@ -75,12 +75,13 @@ it.
 
    ```bash
    trace-commons-contributor login
-   # No browser on this machine can reach you, so sign in from your own computer:
+   # No browser on this machine can reach you, so sign in from your own computer. Step 2 works only while step 1 is running.
    #   1. In a terminal on your computer, forward the sign-in port and leave it running:
    #        ssh -N -o ExitOnForwardFailure=yes -L <port>:127.0.0.1:<port> <this-machine>
    #      Put the host you SSH to in place of <this-machine>.
-   #   2. Open this address in your computer's browser within 5 minutes:
+   #   2. With step 1 running, open this address in your computer's browser within 5 minutes:
    #        http://127.0.0.1:<port>/...
+   # If your browser can't connect to 127.0.0.1 after signing in, the step 1 command isn't running on your computer. Start it, then run login again.
    ```
 
    Open the address exactly as printed, with `127.0.0.1` and the same port
