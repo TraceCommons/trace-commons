@@ -31,3 +31,7 @@ pub mod os_secret_store;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod windows;
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod native_process_group;

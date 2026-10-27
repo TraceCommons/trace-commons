@@ -38,10 +38,38 @@ impl PgBackend {
                             AND s.device_key_id = d.device_key_id
                             AND s.revoked_at IS NULL
                             AND $2::text IS NOT NULL
-                            AND (s.token_hash = $2 OR s.prev_token_hash = $2)) AS this_device
+                            AND (s.token_hash = $2 OR s.prev_token_hash = $2)) AS this_device,
+                        contributed.traces AS contributed_traces,
+                        contributed.last_at AS last_contributed_at
                    FROM trace_near_provisioned_devices n
                    JOIN device_keys d
                      ON d.tenant_id = n.tenant_id AND d.device_key_id = n.device_key_id
+                   -- What the device has contributed that still stands: its
+                   -- submissions under its own principal or an upload
+                   -- principal bound to it (V135), while that principal is
+                   -- linked to this account. The statuses are History's
+                   -- accepted, submitted (received, no verdict yet) and
+                   -- quarantined; a status not named here is not counted.
+                   CROSS JOIN LATERAL (
+                       SELECT count(*) AS traces, max(s.received_at) AS last_at
+                         FROM trace_submissions s
+                        WHERE s.tenant_id = trace_current_tenant_id()
+                          AND s.status IN ('received', 'accepted', 'quarantined')
+                          AND s.withdrawn_at IS NULL
+                          AND s.revoked_at IS NULL
+                          AND s.purged_at IS NULL
+                          AND EXISTS (SELECT 1 FROM trace_account_principals p
+                                       WHERE p.tenant_id = n.tenant_id
+                                         AND p.principal_ref = n.principal_ref
+                                         AND p.account_id = n.account_id
+                                         AND p.unlinked_at IS NULL)
+                          AND (s.auth_principal_ref = n.principal_ref
+                               OR s.auth_principal_ref IN (
+                                   SELECT u.upload_principal_ref
+                                     FROM trace_device_upload_principals u
+                                    WHERE u.tenant_id = n.tenant_id
+                                      AND u.device_key_id = d.device_key_id))
+                   ) contributed
                   WHERE n.tenant_id = trace_current_tenant_id()
                     AND n.account_id = $1
                     AND d.revoked_at IS NULL
@@ -61,6 +89,8 @@ impl PgBackend {
                 created_at: row.get("created_at"),
                 last_seen_at: row.get("last_seen_at"),
                 this_device: row.get("this_device"),
+                contributed_traces: row.get("contributed_traces"),
+                last_contributed_at: row.get("last_contributed_at"),
             })
             .collect())
     }

@@ -94,6 +94,11 @@ public struct AccountDevice: Decodable, Equatable, Hashable, Identifiable, Senda
     public let origin: String?
     public let lastSeenAt: String?
     public let thisDevice: Bool
+    /// How many of the device's traces still stand in the commons, as the
+    /// server counts them; nil from a server too old to say, never 0.
+    public let contributedTraces: Int?
+    /// When the newest of those was received (RFC 3339 text).
+    public let lastContributedAt: String?
 
     public var id: String { deviceKeyId }
 
@@ -102,17 +107,22 @@ public struct AccountDevice: Decodable, Equatable, Hashable, Identifiable, Senda
         case deviceKeyId = "device_key_id"
         case lastSeenAt = "last_seen_at"
         case thisDevice = "this_device"
+        case contributedTraces = "contributed_traces"
+        case lastContributedAt = "last_contributed_at"
     }
 
     public init(
         deviceKeyId: String, label: String? = nil, origin: String? = nil,
-        lastSeenAt: String? = nil, thisDevice: Bool = false
+        lastSeenAt: String? = nil, thisDevice: Bool = false,
+        contributedTraces: Int? = nil, lastContributedAt: String? = nil
     ) {
         self.deviceKeyId = deviceKeyId
         self.label = label
         self.origin = origin
         self.lastSeenAt = lastSeenAt
         self.thisDevice = thisDevice
+        self.contributedTraces = contributedTraces
+        self.lastContributedAt = lastContributedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -122,6 +132,8 @@ public struct AccountDevice: Decodable, Equatable, Hashable, Identifiable, Senda
         origin = try c.decodeIfPresent(String.self, forKey: .origin)
         lastSeenAt = try c.decodeIfPresent(String.self, forKey: .lastSeenAt)
         thisDevice = try c.decodeIfPresent(Bool.self, forKey: .thisDevice) ?? false
+        contributedTraces = try c.decodeIfPresent(Int.self, forKey: .contributedTraces)
+        lastContributedAt = try c.decodeIfPresent(String.self, forKey: .lastContributedAt)
     }
 }
 

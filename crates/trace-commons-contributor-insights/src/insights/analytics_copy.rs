@@ -1,14 +1,17 @@
 //! The token analytics words: tabs, the Overview, Patterns and Sessions
 //! cards, the glance card and tip, the weekly summary card and Settings.
 //!
-//! Every entry but the Models card's (section 24, drafted 2026-10-21 for
-//! review) is approved: Ron approved the words in his 2026-10-11 owner
-//! review of #1287 (owner decision D17), and the owner adopted that review.
-//! User-facing words say "trace", not "session", except the Sessions tab
+//! The subscription-limit entries and Models card (section 24) were added
+//! after the original copy review. The other entries are approved: Ron
+//! approved the words in his 2026-10-11 owner review of #1287 (owner decision
+//! D17), and the owner adopted that review.
+//! Trace-related words say "trace", not "session", except the Sessions tab
 //! (with its card title, drill-down column header and Analyze's lines that
-//! name it) and the context tip's "current session". No shell authors any of these sentences; each reads
-//! this table through `ui_copy()` (`tc_insights_copy_json`, or the `copy`
-//! operation of `tc_insights_call`).
+//! name it) and the context tip's "current session". A subscription provider's
+//! Session quota window is a separate concept, not a name for a trace.
+//! No shell authors any of these sentences; each reads this table through
+//! `ui_copy()` (`tc_insights_copy_json`, or the `copy` operation of
+//! `tc_insights_call`).
 //!
 //! Every number or name a sentence carries is a `{name}` hole from
 //! [`ANALYTICS_PLACEHOLDERS`]; the shell fills it and adds nothing else.
@@ -81,6 +84,111 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_input_each_turn", "Input sent each turn"),
     ("analytics_your_week", "Your week · {range}"),
     ("analytics_sample_data", "Sample data"),
+    // Current native subscription limits; separate from historical analytics.
+    ("analytics_subscriptions_title", "Subscription limits"),
+    ("analytics_subscriptions_current", "Current account limits"),
+    ("analytics_subscriptions_provider_codex", "Codex"),
+    ("analytics_subscriptions_provider_claude", "Claude"),
+    ("analytics_subscriptions_read", "Read usage"),
+    ("analytics_subscriptions_stop", "Stop reading"),
+    (
+        "analytics_subscriptions_refresh_accessibility",
+        "Refresh subscription limits",
+    ),
+    (
+        "analytics_subscriptions_read_accessibility",
+        "Read {harness} subscription usage",
+    ),
+    (
+        "analytics_subscriptions_stop_accessibility",
+        "Stop reading {harness} subscription usage",
+    ),
+    (
+        "analytics_subscriptions_read_detail",
+        "Enable usage reading in Settings; only Refresh asks the native app for usage.",
+    ),
+    ("analytics_subscriptions_setting_codex", "Read Codex usage"),
+    (
+        "analytics_subscriptions_codex_detail",
+        "On Refresh, Trace Commons reads the saved Codex sign-in file for your default and saved managed subscription profiles to ask the Codex app for usage. Codex may renew its own sign-in. There are no background credential reads.",
+    ),
+    (
+        "analytics_subscriptions_not_checked",
+        "Refresh to read current usage.",
+    ),
+    (
+        "analytics_subscriptions_native_tool_running",
+        "Close Codex, then Refresh to read usage.",
+    ),
+    (
+        "analytics_subscriptions_base_url_refused",
+        "This Codex configuration uses an unsupported server address.",
+    ),
+    (
+        "analytics_subscriptions_invalid_response",
+        "Codex returned usage this app cannot read.",
+    ),
+    (
+        "analytics_subscriptions_no_logins",
+        "No saved Codex sign-in was found.",
+    ),
+    ("analytics_subscriptions_window_hours", "{n} hours"),
+    ("analytics_subscriptions_window_hour", "1 hour"),
+    ("analytics_subscriptions_window_minutes", "{n} minutes"),
+    ("analytics_subscriptions_window_minute", "1 minute"),
+    ("analytics_subscriptions_window_days", "{n} days"),
+    ("analytics_subscriptions_window_day", "1 day"),
+    (
+        "analytics_subscriptions_window_unknown",
+        "Duration not reported",
+    ),
+    (
+        "analytics_subscriptions_native_storage_unsupported",
+        "Usage is unavailable for this Codex sign-in storage. Check limits in Codex.",
+    ),
+    ("analytics_subscriptions_default_login", "Default login"),
+    ("analytics_subscriptions_session", "Session"),
+    ("analytics_subscriptions_weekly", "Weekly"),
+    ("analytics_subscriptions_model", "Model limit"),
+    ("analytics_subscriptions_banked", "Banked resets"),
+    ("analytics_subscriptions_banked_count", "{n} available"),
+    ("analytics_subscriptions_remaining", "{n} remaining"),
+    ("analytics_subscriptions_resets", "Resets {time}"),
+    ("analytics_subscriptions_checked", "Checked {time}"),
+    (
+        "analytics_subscriptions_stale",
+        "Last reading; refresh to check current usage.",
+    ),
+    (
+        "analytics_subscriptions_sign_in",
+        "Sign in with {harness} to read usage.",
+    ),
+    (
+        "analytics_subscriptions_native_tool",
+        "Install or sign in with {harness} to read usage.",
+    ),
+    (
+        "analytics_subscriptions_keychain",
+        "Refresh to allow Keychain access for {harness} usage.",
+    ),
+    ("analytics_subscriptions_cached", "Last reading."),
+    ("analytics_subscriptions_reading", "Reading usage…"),
+    (
+        "analytics_subscriptions_not_reported",
+        "Limits aren't reported for this account.",
+    ),
+    (
+        "analytics_subscriptions_unavailable",
+        "Usage couldn't be read.",
+    ),
+    (
+        "analytics_subscriptions_change_failed",
+        "The usage setting couldn't be saved.",
+    ),
+    (
+        "analytics_subscriptions_truncated",
+        "Some saved logins aren't shown.",
+    ),
     // 2. Coverage.
     (
         "analytics_coverage_line",

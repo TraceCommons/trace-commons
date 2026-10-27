@@ -271,6 +271,7 @@ struct MonitorWindowView: View {
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
+                                 subscriptions: model.subscriptionUsageModel,
                                  inspector: insightsInspector)
                 }
             } footer: {

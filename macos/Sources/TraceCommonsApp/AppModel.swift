@@ -1362,7 +1362,20 @@ final class AppModel: ObservableObject {
     /// one subscription and both sides see the same frames. `nil` while no
     /// daemon is running. Published, so a screen holding `daemonData` sees
     /// a daemon restart replace the client rather than keep a finished one.
-    @Published private(set) var liveData: LiveDaemonClient?
+    @Published private(set) var liveData: LiveDaemonClient? {
+        didSet {
+            subscriptionUsageModel = liveData.map { client in
+                SubscriptionUsageModel(reader: { refresh, interactive, provider in
+                    try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
+                }, writer: { provider, on in
+                    try await client.setSubscriptionUsage(provider: provider, on: on)
+                })
+            }
+        }
+    }
+    /// Settings and Insights share permission and current readings. Only
+    /// Overview observes it; Settings reads metadata and saves consent.
+    @Published private(set) var subscriptionUsageModel: SubscriptionUsageModel?
     var daemonData: (any DaemonDataClient)? { liveData }
     private var undoTask: Task<Void, Never>?
 

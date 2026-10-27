@@ -12,6 +12,9 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    @State private var fallbackSubscriptionModel: SubscriptionUsageModel
+    private let sharedSubscriptionModel: SubscriptionUsageModel?
+    private var subscriptionModel: SubscriptionUsageModel { sharedSubscriptionModel ?? fallbackSubscriptionModel }
     @State private var tab: InsightsTab
     /// "Turn off" on the weekly summary card: the daemon's setting, its only
     /// switch. `nil` without a daemon.
@@ -28,8 +31,18 @@ struct InsightsView: View {
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
+                    subscriptions: SubscriptionUsageModel? = nil,
                     inspector: InsightsInspector? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
+        var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
+            { @Sendable refresh, interactive, provider in
+                try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
+            }
+        }
+        var subscriptionWriter: SubscriptionUsageModel.Writer? = daemon.map { client in
+            { @Sendable provider, on in try await client.setSubscriptionUsage(provider: provider, on: on) }
+        }
+        var subscriptions = subscriptions
         var service: InsightsModel.Service = { request in try await router.call(request) }
         var weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { @Sendable isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
@@ -65,6 +78,9 @@ struct InsightsView: View {
             weekReader = nil
             watchedReader = nil
             sessionAnalyzer = nil
+            subscriptionReader = nil
+            subscriptionWriter = nil
+            subscriptions = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -78,7 +94,10 @@ struct InsightsView: View {
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
                                                        watchedDrill: watchedDrill, watchedLabel: watchedLabel),
-                  turnOffRecapCard: turnOff, inspector: inspector)
+                  turnOffRecapCard: turnOff,
+                  subscriptionModel: subscriptions,
+                  subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
+                  inspector: inspector)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -93,6 +112,8 @@ struct InsightsView: View {
                     sessionsModel: InsightsSessionsModel? = nil,
                     initialTab: InsightsTab = .overview,
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
+                    subscriptionModel: SubscriptionUsageModel? = nil,
+                    subscriptionFallback: SubscriptionUsageModel? = nil,
                     inspector: InsightsInspector? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
@@ -103,6 +124,8 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        self.sharedSubscriptionModel = subscriptionModel
+        _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
         self.inspector = inspector
@@ -153,6 +176,7 @@ struct InsightsView: View {
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
                     models: model.modelAnswers,
+                    subscriptions: subscriptionModel,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -163,6 +187,7 @@ struct InsightsView: View {
                 // Each time, so labels set on Sessions since show, and one
                 // failed read hides the card only until the next.
                 .onAppear { model.refreshModelAnswers() }
+                .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)

@@ -1913,10 +1913,9 @@ mod tests {
         ] {
             assert!(!copy.contains_key(key), "{key} was removed");
         }
-        // User-facing copy says "trace", not "session", with two exceptions:
-        // the Sessions tab (with its card title, drill-down column header
-        // and Analyze's lines that send the person to it) and the context
-        // tip's "current session".
+        // Trace-related copy says "trace", not "session", except the Sessions
+        // tab and context tip. A provider quota's Session window is a separate
+        // concept, not a name for an uploaded trace.
         let exceptions = [
             "analytics_tab_sessions",
             "analytics_card_sessions",
@@ -1924,7 +1923,9 @@ mod tests {
             "analytics_analyze_empty",
             "analytics_analyze_how",
             "analytics_tip_context",
+            "analytics_subscriptions_session",
         ];
+        assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {
             if !exceptions.contains(key) {
                 assert!(!words.to_lowercase().contains("session"), "{key}: {words}");

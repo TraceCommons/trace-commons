@@ -67,6 +67,10 @@ pub(crate) fn schema() -> Value {
             "idle_offer_pending",
             "Whether the one-time idle-session notification offer remains pending.",
         ),
+        (
+            "subscription_usage_codex_enabled",
+            "Permit explicit Refresh to read file-backed native Codex subscription limits, including saved managed profiles. Codex may renew its own sign-in. Keyring and automatic credential storage are unsupported. No background credential reads, trace upload, or routing change.",
+        ),
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
             "insights_counter_pass",
@@ -82,6 +86,10 @@ pub(crate) fn schema() -> Value {
             json!({"type":"boolean","description":description,"examples":[false]}),
         );
     }
+    properties.insert("subscription_usage_claude_enabled".into(), json!({
+        "type":"boolean", "const":false, "examples":[false],
+        "description":"Claude subscription acquisition is unavailable. Only false is accepted to clear an earlier preference."
+    }));
     for key in ["claude_root", "codex_root"] {
         properties.insert(key.into(), json!({
             "type":["string","null"], "examples":[null],
