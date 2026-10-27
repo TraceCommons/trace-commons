@@ -11,6 +11,8 @@
 // crate it was extracted from, so the paths the operator docs cite change
 // only in the crate name.
 
+#[path = "trace_commons_ingest_internal/account_devices.rs"]
+mod account_devices_routes;
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
@@ -8668,6 +8670,8 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // status on the signed-in account session; no passkey (owner,
         // 2026-10-23).
         .merge(payout_link_routes::routes())
+        // The devices linked to the account: list, rename, revoke.
+        .merge(account_devices_routes::routes())
         .get("/v1/account/traces", account_traces_list_handler)
         .post(
             "/v1/account/source-sessions/status",

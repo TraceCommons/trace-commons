@@ -148,6 +148,7 @@ Each line has `at`, `trigger` (`automatic` or `sign_in`), `outcome`
 | `near_ai_unavailable` | NEAR AI could not be reached or answered something else. |
 | `commons_start_failed` | The commons refused or did not answer the ceremony's start. |
 | `commons_refused` | The commons refused the ceremony's finish. |
+| `device_key_revoked` | The account unlinked this device, and the commons refuses its key for good. Renewal and Sign in again stop for that key. Signing out does not help, because sign-out keeps the key: remove the enrollment (`trace-commons-contributor unenroll`), then enroll again, which links the device with a new key. |
 | `commons_answer_mismatch` | The commons answered for another account or tenant; nothing was stored. |
 | `commons_address_refused` | The enrolled commons address failed the signup allowlist. |
 | `local_check_failed` | A local check refused the ceremony or its answer (for example a clock far off). |

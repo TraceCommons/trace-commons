@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_binding.rs"]
 mod account_binding;
+#[path = "postgres_account_devices.rs"]
+mod account_devices;
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
@@ -1911,6 +1913,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         138,
         "account_trust_indexed_upload_frontiers",
         include_str!("../../../../migrations/V138__account_trust_indexed_upload_frontiers.sql"),
+    ),
+    // V139: the device a native session belongs to, and a contributor-chosen
+    // device label, for the account devices list.
+    (
+        139,
+        "account_devices",
+        include_str!("../../../../migrations/V139__account_devices.sql"),
     ),
 ];
 
@@ -5237,6 +5246,45 @@ impl Database for PgBackend {
         let strong = active_strong_authenticator_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(strong)
+    }
+
+    async fn list_account_devices(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session_token_hash: Option<&str>,
+    ) -> Result<Vec<crate::db::AccountDeviceSummary>, DatabaseError> {
+        self.account_devices(tenant_id, account_id, session_token_hash)
+            .await
+    }
+
+    async fn rename_account_device(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        device_key_id: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        self.rename_device_of_account(tenant_id, account_id, device_key_id, label)
+            .await
+    }
+
+    async fn revoke_account_device(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        device_key_id: &str,
+        actor_ref: &str,
+        caller_session_token_hash: Option<&str>,
+    ) -> Result<crate::db::RevokeAccountDeviceResult, DatabaseError> {
+        self.revoke_device_of_account(
+            tenant_id,
+            account_id,
+            device_key_id,
+            actor_ref,
+            caller_session_token_hash,
+        )
+        .await
     }
 
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {

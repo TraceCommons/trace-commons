@@ -64,6 +64,15 @@
 //! and no retry can fix it; the app offers Sign in again, which signs in to
 //! NEAR AI first.
 //!
+//! `device_key_revoked` is the other: the account revoked this device's
+//! key (`DELETE /v1/account/devices/{id}`), and the commons never revives
+//! one. Sign-out does not recover it: it removes the account session and
+//! keeps the device key. The device recovers by unenrolling (`unenroll`),
+//! which drops the key with the enrollment, then enrolling again, which
+//! makes a new key and joins as a new device. The class is sticky for that
+//! key ([`key_revoked`]): neither renewal nor Sign in again runs another
+//! ceremony for it.
+//!
 //! # Sign in again
 //!
 //! [`sign_in`] is the same ceremony run because the person asked
@@ -110,6 +119,49 @@ const RENEWAL_LOG_LINES: usize = 200;
 
 /// The class [`classify`] gives a refusal of the stored NEAR AI login.
 pub const FAILURE_NEAR_AI_SIGN_IN_REQUIRED: &str = "near_ai_sign_in_required";
+
+/// The class [`classify`] gives the commons refusing this device's key
+/// because its account revoked it. No retry, no NEAR AI sign-in and no
+/// sign-out fixes it: the device unenrolls, which drops the key, and enrolls
+/// again with a new one.
+pub const FAILURE_DEVICE_KEY_REVOKED: &str = "device_key_revoked";
+
+/// Whether the commons refused the enrolled device key as revoked. The
+/// marker ([`crate::config::DEVICE_KEY_REVOKED_FILE`]) names the refused key
+/// by digest, so it holds for that key only: a renewal of the old key that
+/// answers after an unenroll and a new enrollment leaves the new key alone.
+/// Every retry of the refused key would rotate the NEAR AI refresh token and
+/// spend the provisioning rate limit for an answer that cannot change.
+/// Unenroll removes the marker with the enrollment; sign-out does not.
+pub(crate) fn key_revoked(store: &crate::config::ConfigStore) -> bool {
+    let Ok(Some(marker)) = store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE) else {
+        return false;
+    };
+    let Ok(Some(cfg)) = store.load_config() else {
+        return false;
+    };
+    marker.trim_ascii() == revoked_key_digest(&cfg.device_key_id).as_bytes()
+}
+
+/// The marker's content: the refused key, by digest, never its id.
+fn revoked_key_digest(device_key_id: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"trace-commons/device-key-revoked/v1");
+    hash.update(device_key_id.as_bytes());
+    format!("sha256:{}", hex::encode(hash.finalize()))
+}
+
+/// Mark `device_key_id` revoked when `class` says so: the key the refused
+/// ceremony signed with, not whatever is enrolled when it answers. Best
+/// effort: without the marker the 10-minute backoff still bounds the
+/// retries.
+fn remember_if_revoked(store: &crate::config::ConfigStore, class: &str, device_key_id: &str) {
+    if class == FAILURE_DEVICE_KEY_REVOKED {
+        let mut marker = revoked_key_digest(device_key_id);
+        marker.push('\n');
+        let _ = store.write_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE, marker.as_bytes());
+    }
+}
 
 /// Per state directory: one renewal at a time, so the reads that arrive
 /// together renew once.
@@ -231,7 +283,8 @@ pub(crate) async fn account_session_for_read(
 /// retained NEAR AI login, and no refusal for this record and login inside
 /// the backoff. Checked so a read that cannot renew spawns nothing.
 fn may_renew(shared: &DaemonShared) -> bool {
-    near_ai_enrolled(shared)
+    !key_revoked(&shared.store)
+        && near_ai_enrolled(shared)
         && shared
             .settings
             .lock()
@@ -256,6 +309,9 @@ pub(crate) fn near_ai_enrolled(shared: &DaemonShared) -> bool {
 /// login, while its backoff holds. `None` after a renewal, a new NEAR AI
 /// sign-in, or the backoff.
 pub(crate) fn last_failure(shared: &DaemonShared) -> Option<&'static str> {
+    if key_revoked(&shared.store) {
+        return Some(FAILURE_DEVICE_KEY_REVOKED);
+    }
     let raw = commons_credentials::load(&shared.store, Kind::Account)
         .ok()
         .flatten()
@@ -284,6 +340,10 @@ pub(super) async fn sign_in(
     };
     if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) {
         return Err("near_ai_sign_in_not_near_ai_account");
+    }
+    // Revoked for good: no ceremony can sign this key in again.
+    if key_revoked(store) {
+        return Err(FAILURE_DEVICE_KEY_REVOKED);
     }
     if let Ok(Some(session)) = super::withdraw::account_session(shared) {
         return Ok(session);
@@ -342,8 +402,10 @@ pub(super) async fn sign_in(
             let class = classify(&error);
             record(shared, Trigger::SignIn, Some(class));
             failed(store.dir(), attempt_key(shared, &raw), class);
+            remember_if_revoked(store, class, &identity.device_key_id);
             Err(match class {
                 FAILURE_NEAR_AI_SIGN_IN_REQUIRED => FAILURE_NEAR_AI_SIGN_IN_REQUIRED,
+                FAILURE_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
                 _ => "near_ai_sign_in_unavailable",
             })
         }
@@ -385,6 +447,7 @@ pub(crate) fn classify(error: &anyhow::Error) -> &'static str {
         "near_ai_enroll_token_unavailable" => "near_ai_unavailable",
         "near_ai_enroll_start_failed" => "commons_start_failed",
         "near_ai_enroll_verification_failed" => "commons_refused",
+        super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
         "near_ai_enroll_endpoint_refused" => "commons_address_refused",
         "account-enrollment-mismatch" => "commons_answer_mismatch",
         // The device proof (a ceremony window this clock refuses) or the
@@ -598,6 +661,7 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
             // Keyed after the attempt, so the NEAR AI rotation it made is
             // the login a retry would present.
             failed(store.dir(), attempt_key(shared, &raw), class);
+            remember_if_revoked(store, class, &identity.device_key_id);
             false
         }
     }
@@ -650,3 +714,33 @@ fn clear_failed(dir: &std::path::Path) {
 #[cfg(test)]
 #[path = "account_session_renewal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod revoked_key_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_revoked_class_is_remembered_and_unenroll_removes_it() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        remember_if_revoked(&store, "commons_refused", "key-a");
+        assert!(matches!(
+            store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE),
+            Ok(None)
+        ));
+        remember_if_revoked(&store, FAILURE_DEVICE_KEY_REVOKED, "key-a");
+        let marker = store
+            .read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&marker).contains("key-a"),
+            "the marker names the key by digest only"
+        );
+        assert!(!key_revoked(&store), "no enrollment, nothing to hold back");
+        store.remove_enrollment_files().unwrap();
+        assert!(matches!(
+            store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE),
+            Ok(None)
+        ));
+    }
+}
