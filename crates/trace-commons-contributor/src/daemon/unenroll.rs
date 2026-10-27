@@ -230,6 +230,9 @@ fn clear_insights_counter(shared: &DaemonShared) -> Result<(), (&'static str, &'
     // The setting goes off first, so the next watcher tick does not rebuild
     // under a new key the store this clears.
     let permission_revocation = turn_off_insights_readers(shared);
+    // Claude is available without an opt-in. Explicitly forget all readings
+    // and pending generations rather than relying on a preference change.
+    super::subscription_usage::forget_readings(shared);
     super::subscription_usage::settings_changed(shared);
     let counter_cleanup = shared
         .insights_counter

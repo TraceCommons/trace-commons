@@ -33,7 +33,7 @@ pub(super) async fn collect(
 ) -> Result<Reading, ProbeFailure> {
     match login.provider {
         Provider::Codex => collect_codex(login, interactive, lease).await,
-        Provider::Claude => Err(failure("provider_disabled", None)),
+        Provider::Claude => super::claude::collect(login, interactive, lease).await,
     }
 }
 
@@ -55,15 +55,25 @@ pub(super) async fn native_read<T: Send + 'static>(
     receiver.await.map_err(|_| "unavailable")
 }
 
-fn failure(reason: &'static str, identity: Option<Identity>) -> ProbeFailure {
-    ProbeFailure { reason, identity }
+pub(super) fn failure(reason: &'static str, identity: Option<Identity>) -> ProbeFailure {
+    ProbeFailure {
+        reason: normalize_failure_reason(reason),
+        identity,
+    }
 }
 
-fn fingerprint(value: &[u8]) -> String {
+pub(super) fn normalize_failure_reason(reason: &'static str) -> &'static str {
+    match reason {
+        "credential_changed" => "auth_changed",
+        other => other,
+    }
+}
+
+pub(super) fn fingerprint(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>, &'static str> {
+pub(super) fn read_file(path: &Path) -> Result<Vec<u8>, &'static str> {
     let file =
         trace_commons_contributor_platform::local_files::open_import_file(path).map_err(|_| {
             if path.exists() {
@@ -353,6 +363,7 @@ async fn collect_codex_when_idle(
         .map(|account| Identity {
             account: Some(account),
             email: None,
+            organization: None,
         });
     let executable = login
         .native_executable
@@ -568,6 +579,7 @@ async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
         .map(|s| Identity {
             account: None,
             email: Some(fingerprint(s.as_bytes())),
+            organization: None,
         });
     let limits = rpc(
         input,
@@ -789,7 +801,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gated_claude_never_touches_native_credentials_or_processes() {
+    async fn noninteractive_claude_never_queries_keychain() {
         let login = LoginSpec {
             provider: Provider::Claude,
             root: "/does/not/exist".into(),
@@ -798,6 +810,7 @@ mod tests {
             default_login: true,
             native_executable: None,
             config_dir: None,
+            secure_storage_dir: None,
             metadata_revision: None,
             native_revision: None,
         };
@@ -808,8 +821,8 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            collect(&login, true, lease).await.unwrap_err().reason,
-            "provider_disabled"
+            collect(&login, false, lease).await.unwrap_err().reason,
+            "keychain_needs_permission"
         );
     }
 
@@ -1106,7 +1119,8 @@ mod tests {
             error.identity,
             Some(Identity {
                 account: None,
-                email: Some(fingerprint(b"new@example.test"))
+                email: Some(fingerprint(b"new@example.test")),
+                organization: None
             })
         );
     }

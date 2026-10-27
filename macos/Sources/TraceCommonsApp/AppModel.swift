@@ -1365,8 +1365,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveData: LiveDaemonClient? {
         didSet {
             subscriptionUsageModel = liveData.map { client in
-                SubscriptionUsageModel(reader: { refresh, interactive, provider in
-                    try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
+                SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+                    try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: login)
                 }, writer: { provider, on in
                     try await client.setSubscriptionUsage(provider: provider, on: on)
                 })

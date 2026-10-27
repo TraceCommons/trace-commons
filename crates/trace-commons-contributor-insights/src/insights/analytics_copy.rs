@@ -55,6 +55,7 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "date",
     "time",
     "harness",
+    "login",
     "span",
     "label",
     "tokens",
@@ -89,6 +90,54 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_subscriptions_current", "Current account limits"),
     ("analytics_subscriptions_provider_codex", "Codex"),
     ("analytics_subscriptions_provider_claude", "Claude"),
+    (
+        "analytics_subscriptions_captured_limits",
+        "Last captured account limits",
+    ),
+    (
+        "analytics_subscriptions_claude_detail",
+        "Refresh uses this saved Claude Code sign-in to ask Anthropic for usage. macOS may ask for Claude Code-credentials. Always Allow grants continuing access to that sign-in; this app still reads it only on Refresh.",
+    ),
+    (
+        "analytics_subscriptions_claude_captured",
+        "Captured on Refresh. Refresh again after changing Claude accounts.",
+    ),
+    (
+        "analytics_subscriptions_refresh_login_accessibility",
+        "Refresh {harness} usage for {login}",
+    ),
+    (
+        "analytics_subscriptions_claude_expired",
+        "The saved Claude usage token expired. Open Claude Code, then choose Refresh.",
+    ),
+    (
+        "analytics_subscriptions_claude_auth_missing",
+        "Claude usage credentials aren't available. Open Claude Code, then choose Refresh.",
+    ),
+    (
+        "analytics_subscriptions_claude_scope",
+        "This Claude sign-in cannot read usage. Check usage in Claude Code.",
+    ),
+    (
+        "analytics_subscriptions_claude_keychain_denied",
+        "Keychain access wasn't granted. Choose Refresh to try again.",
+    ),
+    (
+        "analytics_subscriptions_claude_keychain_pending",
+        "Keychain access hasn't finished. Check for a macOS prompt before choosing Refresh again.",
+    ),
+    (
+        "analytics_subscriptions_claude_auth_changed",
+        "Claude credentials changed while usage was read. Choose Refresh again.",
+    ),
+    (
+        "analytics_subscriptions_request_timeout",
+        "The usage request timed out. Choose Refresh to try again.",
+    ),
+    (
+        "analytics_subscriptions_rate_limited",
+        "Usage checks are temporarily limited. Try Refresh later.",
+    ),
     ("analytics_subscriptions_read", "Read usage"),
     ("analytics_subscriptions_stop", "Stop reading"),
     (
@@ -126,11 +175,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_invalid_response",
-        "Codex returned usage this app cannot read.",
+        "{harness} returned usage this app cannot read.",
     ),
     (
         "analytics_subscriptions_no_logins",
-        "No saved Codex sign-in was found.",
+        "No saved {harness} sign-in was found.",
     ),
     ("analytics_subscriptions_window_hours", "{n} hours"),
     ("analytics_subscriptions_window_hour", "1 hour"),

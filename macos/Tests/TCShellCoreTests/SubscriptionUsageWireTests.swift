@@ -3,7 +3,7 @@ import XCTest
 @testable import TCShellCore
 
 final class SubscriptionUsageWireTests: XCTestCase {
-    func testSettingsDeclareBothOptInsAndPreserveOlderDaemonAbsence() throws {
+    func testSettingsPreserveLegacyValuesAndOlderDaemonAbsence() throws {
         let decoder = DaemonDataDecoding.decoder()
         let current = try decoder.decode(DaemonData.Settings.self, from: Data(
             #"{"subscription_usage_codex_enabled":true,"subscription_usage_claude_enabled":false}"#.utf8))
@@ -20,6 +20,7 @@ final class SubscriptionUsageWireTests: XCTestCase {
         let login = try XCTUnwrap(result.providers.first?.logins.first)
         XCTAssertNotNil(login.updatedAt)
         XCTAssertNil(login.bankedResets)
+        XCTAssertNil(login.refreshing)
         XCTAssertNil(login.windows[0].usedPermille)
         XCTAssertNil(login.windows[0].resetsAt)
         XCTAssertEqual(login.windows[1].usedPermille, 300)
@@ -46,18 +47,44 @@ final class SubscriptionUsageWireTests: XCTestCase {
         for provider in ["claude", "unrecognized"] {
             do {
                 try await client.setSubscriptionUsage(provider: provider, on: true)
-                XCTFail("unsupported provider must not become a settings key")
-            } catch let error as DaemonDataError {
-                XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
-            }
-            do {
-                _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: provider)
-                XCTFail("unsupported provider must not launch a probe")
+                XCTFail("only Codex retains an app opt-in setting")
             } catch let error as DaemonDataError {
                 XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
             }
         }
+        do {
+            _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "unrecognized")
+            XCTFail("unsupported provider must not launch a probe")
+        } catch let error as DaemonDataError {
+            XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
+        }
         XCTAssertEqual(transport.recorded().count, 3)
+    }
+
+    func testClaudeRefreshSendsExactLoginAndRejectsMissingOrUnboundedSelectors() async throws {
+        let transport = SubscriptionUsageTransport()
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "claude", login: "claude-profile-123")
+        let call = try XCTUnwrap(transport.recorded().first)
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.1.utf8)) as? [String: Any])
+        XCTAssertEqual(params["provider"] as? String, "claude")
+        XCTAssertEqual(params["login"] as? String, "claude-profile-123")
+        XCTAssertEqual(params["interactive"] as? Bool, true)
+        for login in [nil, "", "line\nfeed", String(repeating: "x", count: 257)] as [String?] {
+            do {
+                _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "claude", login: login)
+                XCTFail("Claude must have a bounded exact selector")
+            } catch let error as DaemonDataError {
+                XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-login-invalid"))
+            }
+        }
+        XCTAssertEqual(transport.recorded().count, 1)
+    }
+
+    func testPerLoginRefreshingIsOptionalAndIndependent() throws {
+        let data = Data(#"{"schema_version":"trace_commons.subscription_usage.v1","providers":[{"provider":"claude","enabled":true,"refreshing":true,"logins":[{"id":"one","label":"One","default_login":true,"state":"unknown","stale":false,"windows":[],"refreshing":true},{"id":"two","label":"Two","default_login":false,"state":"unknown","stale":false,"windows":[],"refreshing":false}]}]}"#.utf8)
+        let usage = try DaemonDataDecoding.decoder().decode(DaemonData.SubscriptionUsage.self, from: data)
+        XCTAssertEqual(usage.providers[0].logins.map(\.refreshing), [true, false])
     }
 
     func testDurationIsOptionalPositiveAndPreservesNonstandardWindows() throws {

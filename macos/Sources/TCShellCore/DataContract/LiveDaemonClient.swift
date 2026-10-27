@@ -319,11 +319,25 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
-        guard provider == nil || provider == "codex" else {
+        return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
+    }
+
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?, login: String?) async throws -> DaemonData.SubscriptionUsage {
+        guard provider == nil || provider == "codex" || provider == "claude" else {
             throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        }
+        if let login {
+            guard provider != nil, !login.isEmpty, login.utf8.count <= 256,
+                  !login.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw DaemonDataError.daemon(code: "bad_params", message: "subscription-login-invalid")
+            }
+        }
+        guard !(refresh && provider == "claude" && login == nil) else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-login-invalid")
         }
         var params: [String: Any] = ["refresh": refresh, "interactive": refresh && interactive]
         if let provider { params["provider"] = provider }
+        if let login { params["login"] = login }
         return try await call("subscription_usage", params: params, as: DaemonData.SubscriptionUsage.self)
     }
 
