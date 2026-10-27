@@ -318,6 +318,23 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
+        guard provider == nil || provider == "codex" || provider == "claude" else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        }
+        var params: [String: Any] = ["refresh": refresh, "interactive": refresh && interactive]
+        if let provider { params["provider"] = provider }
+        return try await call("subscription_usage", params: params, as: DaemonData.SubscriptionUsage.self)
+    }
+
+    public func setSubscriptionUsage(provider: String, on: Bool) async throws {
+        guard provider == "codex" || provider == "claude" else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        }
+        _ = try await call("set_settings", params: ["subscription_usage_" + provider + "_enabled": on],
+                           as: DaemonData.NudgeAck.self)
+    }
+
     public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
                                      outcome: DaemonData.InsightsLabelChange) async throws
         -> DaemonData.InsightsSessionLabelAnswer {

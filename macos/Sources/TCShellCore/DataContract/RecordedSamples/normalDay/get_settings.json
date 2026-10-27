@@ -43,6 +43,8 @@
   "scrub_check_defaulted_on_upgrade": false,
   "insights_ledger_feed": true,
   "insights_context_threshold": null,
+  "subscription_usage_codex_enabled": false,
+  "subscription_usage_claude_enabled": false,
   "insights_counter_pass": false,
   "insights_recap_card_enabled": true,
   "suggestions_enabled": true,

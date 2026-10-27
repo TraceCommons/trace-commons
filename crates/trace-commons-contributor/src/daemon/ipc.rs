@@ -459,6 +459,7 @@ pub const METHODS: &[&str] = &[
     "insights_session_label",
     "insights_analyze_session",
     "insights_model_answers",
+    "subscription_usage",
     "inference_summary",
     "inference_call_proof",
     "model_spend",
@@ -572,6 +573,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "insights_session_drill",
     "insights_session_label",
     "insights_model_answers",
+    "subscription_usage",
     "inference_call_proof",
     "private_ai",
     "list_pending",
@@ -919,6 +921,7 @@ pub struct DaemonShared {
     pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
+    pub(crate) subscription_usage: Arc<super::subscription_usage::UsageService>,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
     pub state: Mutex<DaemonState>,
@@ -1547,6 +1550,7 @@ impl DaemonShared {
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
             inference_connection_lock: Mutex::new(()),
+            subscription_usage: Arc::new(Default::default()),
             payout_link: Mutex::new(Default::default()),
             pass_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
@@ -3863,6 +3867,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
         "insights_session_label" => super::insights_sessions::handle_session_label(shared, req),
         "insights_analyze_session" => super::insights_analyze::handle_analyze_session(shared, req),
+        "subscription_usage" => super::subscription_usage::handle(shared, req),
         "insights_model_answers" => {
             super::insights_model_answers::handle_model_answers(shared, req)
         }
@@ -6641,6 +6646,14 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
             // Released before the queue and policy are touched below; see
             // the top of this function.
             drop(commit);
+            if req.params.get("subscription_usage_codex_enabled").is_some()
+                || req
+                    .params
+                    .get("subscription_usage_claude_enabled")
+                    .is_some()
+            {
+                super::subscription_usage::settings_changed(shared);
+            }
             if managed_options_changed {
                 match super::managed::options_changed(shared) {
                     Ok(revision) => value["managed_revision"] = revision.into(),
@@ -18612,7 +18625,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 102, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 103, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 78, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

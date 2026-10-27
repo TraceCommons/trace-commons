@@ -105,6 +105,7 @@ pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
+pub(crate) mod subscription_usage;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
@@ -705,6 +706,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // holds up this tick; it reads and sends nothing but local
                 // files, so pause and dry-run do not hold it back.
                 let _ = settlement_estimate::tick(shared, now);
+                subscription_usage::tick(shared, now);
                 // NEAR AI credit arriving, and a balance sample for the
                 // 24-hour change: on its own schedule, a no-op without a
                 // NEAR AI sign-in. Reads only; sends nothing about traces.

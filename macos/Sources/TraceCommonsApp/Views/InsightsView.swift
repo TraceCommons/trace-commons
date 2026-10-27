@@ -12,6 +12,7 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    @State private var subscriptionModel: SubscriptionUsageModel
     @State private var tab: InsightsTab
     /// "Turn off" on the weekly summary card: the daemon's setting, its only
     /// switch. `nil` without a daemon.
@@ -26,6 +27,14 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
+        var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
+            { @Sendable refresh, interactive, provider in
+                try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
+            }
+        }
+        var subscriptionWriter: SubscriptionUsageModel.Writer? = daemon.map { client in
+            { @Sendable provider, on in try await client.setSubscriptionUsage(provider: provider, on: on) }
+        }
         var service: InsightsModel.Service = { request in try await router.call(request) }
         var weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { @Sendable isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
@@ -61,6 +70,8 @@ struct InsightsView: View {
             weekReader = nil
             watchedReader = nil
             sessionAnalyzer = nil
+            subscriptionReader = nil
+            subscriptionWriter = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -74,7 +85,8 @@ struct InsightsView: View {
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
                                                        watchedDrill: watchedDrill, watchedLabel: watchedLabel),
-                  turnOffRecapCard: turnOff)
+                  turnOffRecapCard: turnOff,
+                  subscriptionModel: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter))
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -88,7 +100,8 @@ struct InsightsView: View {
                     overviewModel: InsightsOverviewModel? = nil,
                     sessionsModel: InsightsSessionsModel? = nil,
                     initialTab: InsightsTab = .overview,
-                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
+                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
+                    subscriptionModel: SubscriptionUsageModel? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -98,6 +111,7 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _subscriptionModel = State(initialValue: subscriptionModel ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
     }
@@ -147,6 +161,7 @@ struct InsightsView: View {
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
                     models: model.modelAnswers,
+                    subscriptions: subscriptionModel,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -157,6 +172,7 @@ struct InsightsView: View {
                 // Each time, so labels set on Sessions since show, and one
                 // failed read hides the card only until the next.
                 .onAppear { model.refreshModelAnswers() }
+                .task { await subscriptionModel.observe() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)

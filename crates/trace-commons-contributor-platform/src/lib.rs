@@ -25,9 +25,15 @@
 #[doc(hidden)]
 pub mod credential_store;
 #[doc(hidden)]
+pub mod external_claude_credentials;
+#[doc(hidden)]
 pub mod local_files;
 #[doc(hidden)]
 pub mod os_secret_store;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod windows;
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod native_process_group;

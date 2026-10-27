@@ -687,6 +687,13 @@ pub struct DaemonSettings {
     #[serde(default = "default_insights_recap_card_enabled")]
     pub insights_recap_card_enabled: bool,
 
+    /// Explicit permission to read native Codex subscription usage; display only.
+    #[serde(default)]
+    pub subscription_usage_codex_enabled: bool,
+    /// Explicit permission to read native Claude subscription usage; display only.
+    #[serde(default)]
+    pub subscription_usage_claude_enabled: bool,
+
     /// Nudge: whether the app may show in-app suggestions -- the cards on
     /// Traces and History and the menu-bar panel row (`status.nudge`).
     /// Defaults to [`DEFAULT_SUGGESTIONS_ENABLED`]; a settings file written
@@ -1383,6 +1390,8 @@ impl Default for DaemonSettings {
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
             insights_recap_card_enabled: default_insights_recap_card_enabled(),
+            subscription_usage_codex_enabled: false,
+            subscription_usage_claude_enabled: false,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
@@ -2168,6 +2177,15 @@ pub fn apply_settings_object(
             // default; this is how a contributor turns it off.
             "insights_ledger_feed" => {
                 settings.insights_ledger_feed =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Current provider allowances; each reader is independently opt-in.
+            "subscription_usage_codex_enabled" => {
+                settings.subscription_usage_codex_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "subscription_usage_claude_enabled" => {
+                settings.subscription_usage_claude_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // Insights feed T (owner decision D4, open). Off by default.

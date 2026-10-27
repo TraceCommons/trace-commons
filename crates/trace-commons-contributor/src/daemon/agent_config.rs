@@ -67,6 +67,14 @@ pub(crate) fn schema() -> Value {
             "idle_offer_pending",
             "Whether the one-time idle-session notification offer remains pending.",
         ),
+        (
+            "subscription_usage_codex_enabled",
+            "Read native Codex subscription limits for display in Insights. Uses native authentication; no trace upload or routing change.",
+        ),
+        (
+            "subscription_usage_claude_enabled",
+            "Read native Claude subscription limits for display in Insights. Explicit refresh can request Keychain access; background reads never prompt.",
+        ),
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
             "insights_counter_pass",

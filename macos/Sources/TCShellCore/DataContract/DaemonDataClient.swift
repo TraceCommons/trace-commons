@@ -265,6 +265,12 @@ public protocol DaemonDataClient: Sendable {
     /// drawn.
     func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
 
+    /// Current native subscription usage, independent of the selected analytics week.
+    /// A refresh schedules provider reads and returns the held snapshot at once.
+    func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage
+    /// Opt in to or stop native subscription usage reads for one provider.
+    func setSubscriptionUsage(provider: String, on: Bool) async throws
+
     /// `insights_session_label`: set or clear the person's own task and
     /// outcome on one listed watched trace, by its `sessionRef`. Kept in
     /// the daemon's counter store only; never sent anywhere. Answers the
@@ -349,6 +355,19 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    public func subscriptionUsage(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {
+        try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: nil)
+    }
+
+    /// Older/sample clients do not acquire native credentials implicitly.
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
+        throw DaemonDataError.notAvailableYet(method: "subscription_usage")
+    }
+
+    public func setSubscriptionUsage(provider: String, on: Bool) async throws {
+        throw DaemonDataError.notAvailableYet(method: "subscription_usage")
+    }
+
     /// `list_pending` in queue order, every pending entry or one project's.
     public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
         try await listPending(projectId: projectId, filter: nil, order: nil)
