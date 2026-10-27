@@ -25,6 +25,7 @@ the link.
 | Bringing up the GCP pilot end-to-end | [`./pilot-gcp-deployment.md`](./pilot-gcp-deployment.md) |
 | Standing up the pilot operator dashboard | [`./pilot-dashboard.md`](./pilot-dashboard.md) |
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
+| Reducing staging awards and the onboarding preview fivefold | [`./staging-award-calibration.md`](./staging-award-calibration.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
