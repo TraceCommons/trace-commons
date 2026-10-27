@@ -593,6 +593,7 @@ async fn the_account_cascade_set_is_pinned() {
         "trace_webauthn_credentials",
         // Behind the unbound gate an unbound or closed account has no route
         // that writes these, but if one holds any, the reap deletes them too.
+        "trace_account_device_codes",
         "trace_account_inference_connections",
         "trace_account_merge_proposals",
         "trace_account_principals",

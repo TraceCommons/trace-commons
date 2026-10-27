@@ -60,3 +60,13 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_device_session_rene
 CREATE POLICY trace_corpus_tenant_isolation ON trace_device_session_renewals
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- Runtime grants, on V90's terms: the ingest runtime owns nothing and sees a
+-- new table only through what is granted here. Minting inserts a code;
+-- redeeming locks the row and stamps the two redemption columns; the status
+-- read selects. Renewal inserts a nonce and reads the last one.
+REVOKE ALL ON trace_account_device_codes, trace_device_session_renewals FROM PUBLIC;
+GRANT SELECT, INSERT ON trace_account_device_codes TO trace_ingest_runtime;
+GRANT UPDATE (redeemed_at, redeemed_device_key_id) ON trace_account_device_codes
+    TO trace_ingest_runtime;
+GRANT SELECT, INSERT ON trace_device_session_renewals TO trace_ingest_runtime;

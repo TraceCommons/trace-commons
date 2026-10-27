@@ -309,6 +309,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_holds",
     "trace_payout_audit",
     "trace_payout_reversal_hold_decisions",
+    "trace_account_device_codes",
+    "trace_device_session_renewals",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -8619,6 +8621,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
@@ -8666,6 +8669,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
