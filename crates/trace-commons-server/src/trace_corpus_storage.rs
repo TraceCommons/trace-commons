@@ -2075,8 +2075,16 @@ pub struct TraceGateDecisionRow {
     pub submission_id: Uuid,
     pub gate_policy_version: String,
     pub gate_version_hash: String,
-    pub perplexity_micros: i64,
-    pub tail_fraction_micros: i64,
+    /// The representative perplexity, in micros. `None` means no perplexity
+    /// was measured (migration V139): a substance Settle row stores NULL,
+    /// because its Score runs no perplexity scorer. Every legacy writer
+    /// stores a value. Readers MUST NOT default `None` to 0, which reads as
+    /// a measured perplexity.
+    pub perplexity_micros: Option<i64>,
+    /// The tail fraction, in micros. `None` exactly when
+    /// `perplexity_micros` is `None` (migration V139), with the same rule
+    /// for readers.
+    pub tail_fraction_micros: Option<i64>,
     pub perplexity_passed: bool,
     pub novelty_score_micros: i64,
     pub nearest_neighbor_hash: String,
@@ -2195,7 +2203,8 @@ pub struct GateWorkItem {
 /// The peak/novelty are stored micros; NULLs map to 0 (below-floor -> q 0).
 /// Only decisions the gate actually scored are inputs: a row with perplexity 0
 /// (the skip-duplicate branch) is never enumerated, so its credit quality
-/// stays NULL, as the inline path leaves it.
+/// stays NULL, as the inline path leaves it. Nor is a row with no perplexity
+/// (NULL, V139), so `perplexity_micros` is always a measured value here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateCreditInput {
     pub tenant_id: String,
@@ -2380,6 +2389,12 @@ pub struct ContributorCapSignalRow {
 /// `decided_at` wins. `credit_quality_micros` is `None` until the shadow-mode
 /// credit-quality pass has scored the decision (migration V39).
 ///
+/// Only a decision row that holds a perplexity is read: a row with none (a
+/// substance Settle row, migration V139) is not a score these reads report,
+/// so `perplexity_micros` is always a measured value. A submission whose only
+/// decision has no perplexity reads as one with no decision, except in the
+/// scoped read, which says so in `OwnSubmissionScoreRow::has_gate_decision`.
+///
 /// Note that `submission_id` is derived from session content, so the same
 /// session uploaded by two contributors in different tenants shares one id
 /// and collapses to a single row here — deliberately, since the score is a
@@ -2405,17 +2420,30 @@ pub struct TraceScoreBySubmissionRow {
 /// One asked-about submission that the requesting principal actually owns,
 /// with its latest gate-decision score when there is one.
 ///
-/// The scoped score-attestation read returns one of these per owned id.
-/// `score: None` is the "submitted, not scored yet" state that had no
-/// representation anywhere before: the unscoped enumeration inner-joins the
-/// decision table, so a submission awaiting the gate driver is simply absent
-/// and indistinguishable from one that was never uploaded. Ids the principal
-/// does not own are not returned at all, and the caller reports them as
-/// `unknown` without saying whether they exist elsewhere.
+/// The scoped score-attestation read returns one of these per owned id, in
+/// one of three states:
+///
+/// - `score: Some(_)`: the latest decision that holds a perplexity.
+/// - `score: None` and `has_gate_decision: true`: the submission has gate
+///   decisions, but none holds a perplexity (a substance Settle row,
+///   migration V139). It was scored, but `trace_commons.score_attestation.v2`
+///   cannot sign that score; `trace_commons.pipeline_score_attestation.v1`
+///   does.
+/// - `score: None` and `has_gate_decision: false`: the "submitted, not scored
+///   yet" state that had no representation anywhere before. The unscoped
+///   enumeration inner-joins the decision table, so a submission awaiting the
+///   gate driver is simply absent there and indistinguishable from one that
+///   was never uploaded.
+///
+/// Ids the principal does not own are not returned at all, and the caller
+/// reports them as `unknown` without saying whether they exist elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnSubmissionScoreRow {
     pub submission_id: Uuid,
     pub score: Option<TraceScoreBySubmissionRow>,
+    /// True when the submission has at least one gate decision, with or
+    /// without a perplexity. Always true when `score` is `Some`.
+    pub has_gate_decision: bool,
 }
 
 /// The credit-bearing slice of a submission's latest gate decision, as the

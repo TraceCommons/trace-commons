@@ -151,6 +151,7 @@ async fn production_pipeline_for(options: &IngestOptions) -> PipelineService {
         },
         components,
         score_policies: options.score_policies().clone(),
+        score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
     })
     .expect("the production assembly builds over doubles")
 }

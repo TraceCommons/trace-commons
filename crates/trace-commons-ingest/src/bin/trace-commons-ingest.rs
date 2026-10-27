@@ -18477,19 +18477,23 @@ struct ScoreAttestationResponse {
     attestation: String,
 }
 
-/// A scoped attestation, plus the two counts a client needs to decide
-/// whether to keep waiting.
+/// A scoped attestation, plus the counts a client needs to decide whether to
+/// keep waiting.
 ///
 /// The counts are a convenience for the CLI's bounded wait and its
 /// "N of M traces scored, K pending" line; they are NOT the attestation.
 /// Anything a collector relies on must be read from the signed payload,
-/// which carries the same information in `submissions` and `pending`.
+/// which carries the same information in `submissions`, `pending`,
+/// `unknown` and `scored_without_perplexity`. `scored_without_perplexity`
+/// is always present here, 0 when there is none, although the signed
+/// payload omits an empty list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScopedScoreAttestationResponse {
     attestation: String,
     scored: usize,
     pending: usize,
     unknown: usize,
+    scored_without_perplexity: usize,
 }
 
 /// Body of a SCOPED score-attestation request.
@@ -18645,7 +18649,7 @@ async fn scoped_score_attestation_handler(
     };
 
     // Dedupe while preserving the caller's order, so a repeated id cannot
-    // inflate the signed document and the three output lists read back in
+    // inflate the signed document and the four output lists read back in
     // the order they were asked about.
     let mut requested: Vec<Uuid> = Vec::with_capacity(body.submission_ids.len());
     let mut seen: BTreeSet<Uuid> = BTreeSet::new();
@@ -18673,14 +18677,14 @@ async fn scoped_score_attestation_handler(
         })?;
     let owned_by_id = owned
         .into_iter()
-        .map(|row| (row.submission_id, row.score))
+        .map(|row| (row.submission_id, (row.score, row.has_gate_decision)))
         .collect::<BTreeMap<_, _>>();
 
     let mut submissions = Vec::new();
     let mut scope = ScoreAttestationScope::default();
     for submission_id in requested {
         match owned_by_id.get(&submission_id) {
-            Some(Some(row)) => submissions.push(ScoreAttestationSubmissionEntry {
+            Some((Some(row), _)) => submissions.push(ScoreAttestationSubmissionEntry {
                 submission_id: row.submission_id,
                 credit_quality_micros: row.credit_quality_micros,
                 perplexity_micros: row.perplexity_micros,
@@ -18692,10 +18696,15 @@ async fn scoped_score_attestation_handler(
                     row.chunks_capped,
                 ),
             }),
+            // Owned, with gate decisions, none with a perplexity (a
+            // substance Settle row, V139). It is scored, so it is not
+            // pending; a v2 entry requires a perplexity, so it is listed
+            // here, and the pipeline score attestation signs its score.
+            Some((None, true)) => scope.scored_without_perplexity.push(submission_id),
             // Owned, no gate decision yet. Scoring is asynchronous, so this
             // is the common state moments after an upload, and saying so is
             // the whole point of the scoped form.
-            Some(None) => scope.pending.push(submission_id),
+            Some((None, false)) => scope.pending.push(submission_id),
             // Not owned. Never says whether it exists.
             None => scope.unknown.push(submission_id),
         }
@@ -18704,6 +18713,7 @@ async fn scoped_score_attestation_handler(
     let scored = submissions.len();
     let pending = scope.pending.len();
     let unknown = scope.unknown.len();
+    let scored_without_perplexity = scope.scored_without_perplexity.len();
     let token = sign_scoped_score_attestation(
         attestation,
         tenant.tenant_id(),
@@ -18726,6 +18736,7 @@ async fn scoped_score_attestation_handler(
         scored,
         pending,
         unknown,
+        scored_without_perplexity,
     }))
 }
 
@@ -57846,8 +57857,10 @@ async fn evaluate_and_record_gate(
         submission_id,
         gate_policy_version: decision.gate_policy_version.clone(),
         gate_version_hash: decision.gate_version_hash.clone(),
-        perplexity_micros: i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
-        tail_fraction_micros: i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
+        perplexity_micros: Some(i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX)),
+        tail_fraction_micros: Some(
+            i64::try_from(decision.tail_fraction_micros).unwrap_or(i64::MAX),
+        ),
         perplexity_passed: decision.perplexity_passed,
         novelty_score_micros: i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
         nearest_neighbor_hash: decision.nearest_neighbor_hash.clone(),
@@ -60596,8 +60609,8 @@ async fn score_one_submission(
                             submission_id: item.submission_id,
                             gate_policy_version: "skip_duplicate".to_string(),
                             gate_version_hash: String::new(),
-                            perplexity_micros: 0,
-                            tail_fraction_micros: 0,
+                            perplexity_micros: Some(0),
+                            tail_fraction_micros: Some(0),
                             perplexity_passed: true,
                             novelty_score_micros: novelty_micros,
                             nearest_neighbor_hash: String::new(),

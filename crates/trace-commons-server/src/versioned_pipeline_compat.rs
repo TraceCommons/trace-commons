@@ -36,7 +36,9 @@ use trace_commons_gate_api::{
 use trace_commons_gate_enclave::chunk_aggregate::{
     aggregate_chunked_novelty, aggregate_chunked_perplexity,
 };
-use trace_commons_gate_enclave::chunker::{ChunkerConfig, chunk_envelope_plaintext};
+use trace_commons_gate_enclave::chunker::{
+    ChunkPlan, ChunkerConfig, TraceChunk, chunk_envelope_plaintext,
+};
 use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
 use uuid::Uuid;
 
@@ -107,7 +109,7 @@ pub enum CompatibilityQualification {
 /// a placeholder: this task's Score policy never awards from it directly (it
 /// awards `novelty_utility_microcredits` instead); a later task's bundle
 /// constructor pins the manifest's `trace_credit` descriptor from this value.
-fn default_trace_credit_instrument() -> PipelineInstrumentAwardConfig {
+pub(crate) fn default_trace_credit_instrument() -> PipelineInstrumentAwardConfig {
     PipelineInstrumentAwardConfig {
         instrument_id: TRACE_CREDIT_INSTRUMENT_ID.to_string(),
         atomic_units: AtomicUnits::ZERO,
@@ -410,159 +412,319 @@ impl CompatibilityScorePolicy {
             self.config.chunk_min_tokens,
             self.config.perplexity_floor_micros,
         );
-        let snapshot = self
-            .index_reader
-            .snapshot(tenant, &self.config.index_id)
-            .map_err(|_| transient("index_unavailable"))?;
-        let mut embeddings = Vec::with_capacity(plan.chunks.len());
-        let mut chunk_novelty_micros = Vec::with_capacity(plan.chunks.len());
-        let mut neighbors = Vec::new();
-        for chunk in &plan.chunks {
-            let embedding = embed_chunk_mean_pooled(self.embedder.as_ref(), &chunk.text)
-                .map_err(|_| transient("embedder_unavailable"))?;
-            let found = self
-                .index_reader
-                .nearest(
-                    tenant,
-                    &self.config.index_id,
-                    &embedding,
-                    self.config.top_k as usize,
-                    Some(input.registry_revision_id),
-                )
-                .map_err(|_| transient("index_unavailable"))?;
-            let max_similarity = found
-                .iter()
-                .map(|n| n.similarity)
-                .fold(f32::NEG_INFINITY, f32::max);
-            let novelty = if max_similarity.is_finite() {
-                (1.0 - max_similarity).max(0.0)
-            } else {
-                1.0
-            };
-            chunk_novelty_micros.push((novelty.clamp(0.0, 2.0) * 1_000_000.0) as u64);
-            neighbors.extend(found);
-            embeddings.push(embedding);
-        }
         let token_counts: Vec<u64> = chunk_scores.iter().map(|s| s.tokens).collect();
-        let (novelty_score_micros, peak_novelty_micros) = aggregate_chunked_novelty(
-            &chunk_novelty_micros,
+        let novelty_config = self.config.novelty_scoring();
+        let novelty = evaluate_novelty(
+            self.embedder.as_ref(),
+            self.index_reader.as_ref(),
+            tenant,
+            input.registry_revision_id,
+            &plan.chunks,
             &token_counts,
-            self.config.chunk_min_tokens,
-        );
+            &novelty_config,
+        )?;
         let quality_passed = perplexity.representative_perplexity_micros
             >= self.config.perplexity_floor_micros
             && perplexity.tail_fraction_micros >= self.config.tail_fraction_floor_micros;
-        let novelty_passed = novelty_score_micros >= self.config.novelty_floor_micros;
         let constants = constants_at(now);
         let shadow = credit_quality(
             i64::try_from(perplexity.representative_perplexity_micros).unwrap_or(i64::MAX),
             i64::try_from(perplexity.peak_perplexity_micros).unwrap_or(i64::MAX),
-            i64::try_from(novelty_score_micros).unwrap_or(i64::MAX),
+            i64::try_from(novelty.novelty_score_micros).unwrap_or(i64::MAX),
             constants,
         );
         // P3-D7: membership ignores anomaly_withheld, as main does. It is
         // shadow-only credit-quality evidence, never a gate.
-        let mut entries = Vec::new();
-        if quality_passed && novelty_passed {
-            for (index, (chunk, embedding)) in plan.chunks.iter().zip(embeddings).enumerate() {
-                if chunk_novelty_micros[index] < self.config.embed_insert_novelty_micros {
-                    continue;
-                }
-                entries.push(SealedIndexEntry {
-                    // The chunk's ORIGINAL position in the trace, not its
-                    // position among the surviving (post-cap) chunks: the
-                    // stored command must hold exact original chunk numbers.
-                    chunk: chunk.chunk_index,
-                    content_hash: dependency_content_hash(chunk.text.as_bytes()),
-                    embedding,
-                });
-            }
-        }
-        let command = if entries.is_empty() {
-            None
-        } else {
-            Some(
-                SealedIndexCommand::new(
-                    &self.config.index_id,
-                    input.registry_revision_id,
-                    &self.config.projection_id,
-                    self.embedder.model_id(),
-                    entries,
-                )
-                .map_err(|_| permanent("score_output_invalid"))?,
-            )
-        };
-        // P3-D6: the award is the configured NoveltyUtility delta, never q.
-        let awards =
-            if quality_passed && novelty_passed && self.config.novelty_utility_microcredits > 0 {
-                InstrumentAwards::new(vec![
-                    InstrumentAward::new(
-                        InstrumentId::trace_credit(),
-                        AtomicUnits::from_raw(u128::from(self.config.novelty_utility_microcredits)),
-                    )
-                    .map_err(|_| permanent("score_output_invalid"))?,
-                ])
-            } else {
-                InstrumentAwards::new(Vec::new())
-            }
-            .map_err(|_| permanent("score_output_invalid"))?;
-        let neighbor_bytes = serde_json::to_vec(
-            &neighbors
-                .iter()
-                .map(|n| {
-                    serde_json::json!({
-                        "entry_id": n.entry_id,
-                        "similarity_micros": (n.similarity.clamp(-1.0, 1.0) * 1_000_000.0).round() as i64,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|_| permanent("score_output_invalid"))?;
-        let mut evidence = ScoreEvidence::fixed(awards.clone());
-        evidence.embedding_artifact_hash = command
-            .as_ref()
-            .map(SealedIndexCommand::content_hash)
-            .transpose()
-            .map_err(|_| permanent("score_output_invalid"))?;
-        evidence.index_id = Some(self.config.index_id.clone());
-        evidence.index_snapshot_id = Some(snapshot.snapshot_id);
-        evidence.index_snapshot_hash = Some(snapshot.snapshot_hash);
-        evidence.index_cardinality = Some(snapshot.cardinality);
+        let mut outcome = apply_novelty_rule(
+            quality_passed,
+            novelty,
+            &plan,
+            &novelty_config,
+            self.embedder.model_id(),
+            input,
+        )?;
+        let evidence = &mut outcome.evidence;
         evidence.scorer_model_id = Some(self.config.scorer_model_id.clone());
-        evidence.embedder_model_id = Some(self.embedder.model_id().to_string());
-        evidence.projection_id = Some(self.config.projection_id.clone());
-        evidence.projection_input_hash = Some(input.source_content_hash.clone());
         evidence.perplexity_micros = Some(perplexity.representative_perplexity_micros);
         evidence.tail_fraction_micros = Some(perplexity.tail_fraction_micros);
-        evidence.novelty_score_micros = Some(novelty_score_micros);
         evidence.peak_perplexity_micros = Some(perplexity.peak_perplexity_micros);
-        evidence.peak_novelty_micros = Some(peak_novelty_micros);
         evidence.quality_passed = Some(quality_passed);
-        evidence.novelty_passed = Some(novelty_passed);
-        evidence.nearest_neighbor_hash = Some(hash_neighbors(&neighbors));
         evidence.coverage_tokens = Some(perplexity.tokens_scored);
-        let chunk_count =
-            u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
-        evidence.chunk_count = Some(chunk_count);
-        evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
-        evidence.chunks_capped = Some(plan.chunks_capped);
-        evidence.include_eligible = Some(command.is_some());
         evidence.credit_quality_micros = Some(u64::try_from(shadow.q_micros.max(0)).unwrap_or(0));
         evidence.credit_quality_version = Some(constants.version);
-        evidence.neighbor_artifact_hash = Some(dependency_content_hash(&neighbor_bytes));
-        let decision = ScoreDecision::for_bundle(&self.manifest, awards.clone())
-            .map_err(|_| permanent("score_output_invalid"))?;
-        let result = PhaseResult {
-            decision,
-            evidence,
-            evaluation: ScoreEvaluation {
-                rule_id: COMPATIBILITY_SCORE_RULE.to_string(),
-                awards,
-            },
-        };
-        ScoreOutput::new(result, command, Some(neighbor_bytes))
-            .map_err(|_| permanent("score_output_invalid"))
+        novelty_score_output(&self.manifest, COMPATIBILITY_SCORE_RULE, outcome)
     }
+}
+
+/// What [`apply_novelty_rule`] decides for one trace: the index command, the
+/// awards, the evidence with the shared novelty, index and chunk fields
+/// filled, and the neighbour artifact. A Score policy adds its own evidence
+/// fields, then builds its output with [`novelty_score_output`].
+pub(crate) struct NoveltyRuleOutcome {
+    pub command: Option<SealedIndexCommand>,
+    pub awards: InstrumentAwards,
+    pub evidence: ScoreEvidence,
+    pub neighbor_bytes: Vec<u8>,
+}
+
+/// The membership and award rule that the compatibility and substance Score
+/// policies share. A trace is eligible when the policy's own gate
+/// (`quality_passed`) and the novelty gate both pass. An eligible trace
+/// proposes its index command, and earns the configured `NoveltyUtility`
+/// delta when that delta is above 0. The evidence holds the awards, the
+/// index command hash, the index snapshot, the embedder and projection, the
+/// novelty values, the chunk counts and `include_eligible`; the policy's own
+/// gate, its coverage and its credit quality are left to the caller.
+pub(crate) fn apply_novelty_rule(
+    quality_passed: bool,
+    novelty: NoveltyEvaluation,
+    plan: &ChunkPlan,
+    config: &NoveltyScoringConfig,
+    embedder_model_id: &str,
+    input: &ScoreInput,
+) -> Result<NoveltyRuleOutcome, PolicyError> {
+    let novelty_score_micros = novelty.novelty_score_micros;
+    let novelty_passed = novelty_score_micros >= config.novelty_floor_micros;
+    let eligible = quality_passed && novelty_passed;
+    let command = if eligible {
+        novelty_index_command(
+            &novelty,
+            &plan.chunks,
+            config,
+            embedder_model_id,
+            input.registry_revision_id,
+        )?
+    } else {
+        None
+    };
+    // P3-D6: the award is the configured NoveltyUtility delta, never q.
+    let awards = if eligible && config.novelty_utility_microcredits > 0 {
+        InstrumentAwards::new(vec![
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(u128::from(config.novelty_utility_microcredits)),
+            )
+            .map_err(|_| permanent("score_output_invalid"))?,
+        ])
+    } else {
+        InstrumentAwards::new(Vec::new())
+    }
+    .map_err(|_| permanent("score_output_invalid"))?;
+    let mut evidence = ScoreEvidence::fixed(awards.clone());
+    evidence.embedding_artifact_hash = command
+        .as_ref()
+        .map(SealedIndexCommand::content_hash)
+        .transpose()
+        .map_err(|_| permanent("score_output_invalid"))?;
+    evidence.index_id = Some(config.index_id.clone());
+    evidence.index_snapshot_id = Some(novelty.snapshot.snapshot_id);
+    evidence.index_snapshot_hash = Some(novelty.snapshot.snapshot_hash);
+    evidence.index_cardinality = Some(novelty.snapshot.cardinality);
+    evidence.embedder_model_id = Some(embedder_model_id.to_string());
+    evidence.projection_id = Some(config.projection_id.clone());
+    evidence.projection_input_hash = Some(input.source_content_hash.clone());
+    evidence.novelty_score_micros = Some(novelty_score_micros);
+    evidence.peak_novelty_micros = Some(novelty.peak_novelty_micros);
+    evidence.novelty_passed = Some(novelty_passed);
+    evidence.nearest_neighbor_hash = Some(novelty.nearest_neighbor_hash);
+    let chunk_count =
+        u32::try_from(plan.chunks.len()).map_err(|_| permanent("score_output_invalid"))?;
+    evidence.chunk_count = Some(chunk_count);
+    evidence.total_chunk_count = Some(chunk_count.saturating_add(plan.dropped_chunk_count));
+    evidence.chunks_capped = Some(plan.chunks_capped);
+    evidence.include_eligible = Some(command.is_some());
+    evidence.neighbor_artifact_hash = Some(novelty.neighbor_artifact_hash);
+    Ok(NoveltyRuleOutcome {
+        command,
+        awards,
+        evidence,
+        neighbor_bytes: novelty.neighbor_bytes,
+    })
+}
+
+/// Builds the Score output of `outcome` under `manifest`, with `rule_id`.
+pub(crate) fn novelty_score_output(
+    manifest: &BundleManifest,
+    rule_id: &str,
+    outcome: NoveltyRuleOutcome,
+) -> Result<ScoreOutput, PolicyError> {
+    let NoveltyRuleOutcome {
+        command,
+        awards,
+        evidence,
+        neighbor_bytes,
+    } = outcome;
+    let decision = ScoreDecision::for_bundle(manifest, awards.clone())
+        .map_err(|_| permanent("score_output_invalid"))?;
+    let result = PhaseResult {
+        decision,
+        evidence,
+        evaluation: ScoreEvaluation {
+            rule_id: rule_id.to_string(),
+            awards,
+        },
+    };
+    ScoreOutput::new(result, command, Some(neighbor_bytes))
+        .map_err(|_| permanent("score_output_invalid"))
+}
+
+/// The novelty values a Score policy reads from its configuration. The
+/// compatibility and substance Score policies both build one, so both run
+/// the same novelty code ([`evaluate_novelty`], [`novelty_index_command`])
+/// and the same membership and award rule ([`apply_novelty_rule`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NoveltyScoringConfig {
+    pub index_id: String,
+    pub projection_id: String,
+    pub top_k: u32,
+    pub chunk_min_tokens: u64,
+    pub embed_insert_novelty_micros: u64,
+    pub novelty_floor_micros: u64,
+    pub novelty_utility_microcredits: u64,
+}
+
+impl CompatibilityBundleConfig {
+    pub(crate) fn novelty_scoring(&self) -> NoveltyScoringConfig {
+        NoveltyScoringConfig {
+            index_id: self.index_id.clone(),
+            projection_id: self.projection_id.clone(),
+            top_k: self.top_k,
+            chunk_min_tokens: self.chunk_min_tokens,
+            embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+            novelty_floor_micros: self.novelty_floor_micros,
+            novelty_utility_microcredits: self.novelty_utility_microcredits,
+        }
+    }
+}
+
+/// Everything [`evaluate_novelty`] computes for one trace, from the index
+/// snapshot through the neighbour artifact.
+#[derive(Debug, Clone)]
+pub(crate) struct NoveltyEvaluation {
+    /// The index generation the neighbour reads compared against.
+    pub snapshot: IndexSnapshot,
+    /// One exact embedding per chunk, in chunk order.
+    pub embeddings: Vec<Vec<f32>>,
+    /// One novelty per chunk, in chunk order, in micros.
+    pub chunk_novelty_micros: Vec<u64>,
+    pub novelty_score_micros: u64,
+    pub peak_novelty_micros: u64,
+    pub nearest_neighbor_hash: String,
+    /// The neighbour artifact: every neighbour found, as JSON.
+    pub neighbor_bytes: Vec<u8>,
+    pub neighbor_artifact_hash: String,
+}
+
+/// Reads the index snapshot, embeds each chunk, reads its nearest
+/// neighbours, and aggregates the per-chunk novelty with `token_weights`
+/// (one weight per chunk). A failed index read is `index_unavailable`, a
+/// failed embedding `embedder_unavailable`, both transient.
+pub(crate) fn evaluate_novelty(
+    embedder: &dyn IdentifiedEmbedder,
+    index_reader: &dyn IdentifiedIndexReader,
+    tenant: &TenantStorageRef,
+    registry_revision_id: Uuid,
+    chunks: &[TraceChunk],
+    token_weights: &[u64],
+    config: &NoveltyScoringConfig,
+) -> Result<NoveltyEvaluation, PolicyError> {
+    let snapshot = index_reader
+        .snapshot(tenant, &config.index_id)
+        .map_err(|_| transient("index_unavailable"))?;
+    let mut embeddings = Vec::with_capacity(chunks.len());
+    let mut chunk_novelty_micros = Vec::with_capacity(chunks.len());
+    let mut neighbors = Vec::new();
+    for chunk in chunks {
+        let embedding = embed_chunk_mean_pooled(embedder, &chunk.text)
+            .map_err(|_| transient("embedder_unavailable"))?;
+        let found = index_reader
+            .nearest(
+                tenant,
+                &config.index_id,
+                &embedding,
+                config.top_k as usize,
+                Some(registry_revision_id),
+            )
+            .map_err(|_| transient("index_unavailable"))?;
+        let max_similarity = found
+            .iter()
+            .map(|n| n.similarity)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let novelty = if max_similarity.is_finite() {
+            (1.0 - max_similarity).max(0.0)
+        } else {
+            1.0
+        };
+        chunk_novelty_micros.push((novelty.clamp(0.0, 2.0) * 1_000_000.0) as u64);
+        neighbors.extend(found);
+        embeddings.push(embedding);
+    }
+    let (novelty_score_micros, peak_novelty_micros) = aggregate_chunked_novelty(
+        &chunk_novelty_micros,
+        token_weights,
+        config.chunk_min_tokens,
+    );
+    let neighbor_bytes = serde_json::to_vec(
+        &neighbors
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "entry_id": n.entry_id,
+                    "similarity_micros": (n.similarity.clamp(-1.0, 1.0) * 1_000_000.0).round() as i64,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| permanent("score_output_invalid"))?;
+    Ok(NoveltyEvaluation {
+        snapshot,
+        embeddings,
+        chunk_novelty_micros,
+        novelty_score_micros,
+        peak_novelty_micros,
+        nearest_neighbor_hash: hash_neighbors(&neighbors),
+        neighbor_artifact_hash: dependency_content_hash(&neighbor_bytes),
+        neighbor_bytes,
+    })
+}
+
+/// The index command of a trace whose gates passed: the chunks whose
+/// novelty is at or above `embed_insert_novelty_micros`, with their exact
+/// embeddings. `None` when no chunk qualifies. The caller calls it only
+/// when both gates pass.
+pub(crate) fn novelty_index_command(
+    evaluation: &NoveltyEvaluation,
+    chunks: &[TraceChunk],
+    config: &NoveltyScoringConfig,
+    embedder_model_id: &str,
+    registry_revision_id: Uuid,
+) -> Result<Option<SealedIndexCommand>, PolicyError> {
+    let mut entries = Vec::new();
+    for (index, (chunk, embedding)) in chunks.iter().zip(&evaluation.embeddings).enumerate() {
+        if evaluation.chunk_novelty_micros[index] < config.embed_insert_novelty_micros {
+            continue;
+        }
+        entries.push(SealedIndexEntry {
+            // The chunk's ORIGINAL position in the trace, not its
+            // position among the surviving (post-cap) chunks: the
+            // stored command must hold exact original chunk numbers.
+            chunk: chunk.chunk_index,
+            content_hash: dependency_content_hash(chunk.text.as_bytes()),
+            embedding: embedding.clone(),
+        });
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    SealedIndexCommand::new(
+        &config.index_id,
+        registry_revision_id,
+        &config.projection_id,
+        embedder_model_id,
+        entries,
+    )
+    .map(Some)
+    .map_err(|_| permanent("score_output_invalid"))
 }
 
 fn hash_neighbors(neighbors: &[NearestNeighbor]) -> String {
@@ -2231,5 +2393,101 @@ mod tests {
         let mut changed_index = expected;
         changed_index.initial_index = "seeded".to_string();
         assert!(compare_compatibility_baseline(&changed_index).is_err());
+    }
+
+    /// The SHA-256 of the evidence and decision that
+    /// [`compatibility_evidence_is_unchanged_by_the_novelty_extraction`]
+    /// produces, captured from `evaluate` before its novelty code moved into
+    /// [`evaluate_novelty`] and [`novelty_index_command`].
+    const COMPATIBILITY_EVIDENCE_CHARACTERIZATION_SHA256: &str =
+        "sha256:fb483bff42a8bbbc2e5e0dffd83b8020ba8270184901081844fcbe0d507c28c3";
+
+    /// The novelty code of `CompatibilityScorePolicy::evaluate` moved into
+    /// shared functions that the substance Score also runs. The move must
+    /// not change one byte of the compatibility evidence: the reference
+    /// scorer and embedder, an index seeded with one entry (the embedding
+    /// of the first chunk, so one chunk is below the insert threshold and
+    /// the other is above it), and one envelope of two chunks give the
+    /// evidence and decision whose hash was captured before the move.
+    #[test]
+    fn compatibility_evidence_is_unchanged_by_the_novelty_extraction() {
+        let config = CompatibilityBundleConfig::local_reference();
+        let first: String = (0..200)
+            .map(|i| format!("alpha step {i} reads the config; "))
+            .collect();
+        let second: String = (0..200)
+            .map(|i| format!("beta tool {i} returns rows; "))
+            .collect();
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "events": [
+                { "event_type": "user_message", "redacted_content": first },
+                {
+                    "event_type": "tool_result",
+                    "tool_name": "shell",
+                    "redacted_content": second,
+                },
+            ],
+        }))
+        .unwrap();
+        let plan = chunk_envelope_plaintext(
+            &envelope,
+            &ChunkerConfig {
+                target_tokens: config.chunk_target_tokens as usize,
+                max_tokens: config.chunk_max_tokens as usize,
+                chunk_cap: config.chunk_cap as usize,
+            },
+        );
+        assert_eq!(plan.chunks.len(), 2, "the envelope must give two chunks");
+
+        let input = score_input(&envelope);
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let index = IsolatedPipelineIndex::new();
+        let seed = SealedIndexCommand::new(
+            &config.index_id,
+            Uuid::from_u128(9),
+            &config.projection_id,
+            embedder.model_id(),
+            vec![SealedIndexEntry {
+                chunk: 0,
+                content_hash: dependency_content_hash(plan.chunks[0].text.as_bytes()),
+                embedding: embed_chunk_mean_pooled(embedder.as_ref(), &plan.chunks[0].text)
+                    .unwrap(),
+            }],
+        )
+        .unwrap();
+        let (key, entry) = seed
+            .keyed_entries(&input.tenant_storage_ref)
+            .next()
+            .unwrap();
+        index
+            .upsert(&key, &entry.embedding, &entry.content_hash)
+            .unwrap();
+
+        let policy = CompatibilityScorePolicy::new(
+            manifest_pinning_trace_credit(&config),
+            config.clone(),
+            Arc::new(ReferencePerplexityScorer::new()),
+            embedder,
+            index,
+        )
+        .unwrap()
+        .with_clock(|| QWEN3_8_EFFECTIVE_FROM_UNIX + 86_400);
+        let output = policy.evaluate(&input).unwrap();
+        let result = output.result();
+        let bytes = serde_json::to_vec(&(&result.evidence, &result.decision)).unwrap();
+        let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
+        assert_eq!(result.evidence.chunk_count, Some(2));
+        assert_eq!(
+            output
+                .index_command()
+                .expect("the second chunk is novel")
+                .entries()
+                .iter()
+                .map(|entry| entry.chunk)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the seeded first chunk stays below the insert threshold"
+        );
+        assert_eq!(actual, COMPATIBILITY_EVIDENCE_CHARACTERIZATION_SHA256);
     }
 }

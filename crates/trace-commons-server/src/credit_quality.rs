@@ -6,6 +6,10 @@
 //! (anti-Goodhart), with a peak-vs-representative anomaly term used ONLY as a
 //! fraud flag — never a bonus. Shadow-only: nothing here settles or pays.
 
+use serde::{Deserialize, Serialize};
+
+use crate::versioned_pipeline_substance::{graded, sat, to_micros};
+
 /// Pinned, versioned calibration constants. `*_CEIL` and `anomaly_*` are
 /// calibration outputs; the V1 defaults are seeded from the 2026-07-12 27B
 /// distribution (perplexity p90 ~= 38.5) and refined by the on-pilot
@@ -164,6 +168,21 @@ fn graded_floor(sat: f64, floor_mult_micros: i64) -> f64 {
     floor_mult + (1.0 - floor_mult) * sat
 }
 
+/// The novelty half `g` of credit quality: the graded floor over the
+/// saturating novelty term. [`credit_quality`] and
+/// [`substance_credit_quality`] share it.
+pub(crate) fn novelty_half(
+    nov_rep_micros: i64,
+    nov_floor_micros: i64,
+    nov_ceil_micros: i64,
+    nov_floor_mult_micros: i64,
+) -> f64 {
+    graded_floor(
+        saturating_term(nov_rep_micros, nov_floor_micros, nov_ceil_micros),
+        nov_floor_mult_micros,
+    )
+}
+
 pub fn credit_quality(
     ppl_rep_micros: i64,
     ppl_peak_micros: i64,
@@ -174,8 +193,10 @@ pub fn credit_quality(
         saturating_term(ppl_rep_micros, k.ppl_floor_micros, k.ppl_ceil_micros),
         k.ppl_floor_mult_micros,
     );
-    let g = graded_floor(
-        saturating_term(nov_rep_micros, k.nov_floor_micros, k.nov_ceil_micros),
+    let g = novelty_half(
+        nov_rep_micros,
+        k.nov_floor_micros,
+        k.nov_ceil_micros,
         k.nov_floor_mult_micros,
     );
 
@@ -203,6 +224,68 @@ pub fn credit_quality(
         anomaly_ratio_micros,
         anomaly_withheld: withheld,
     }
+}
+
+/// The credit quality version of the substance Score
+/// (`trace_commons.score.substance.v1`), `cq4`. It is not an era of
+/// [`CREDIT_QUALITY_SCHEDULE`]: the schedule maps a decision time to the
+/// perplexity calibration of the compatibility Score, and `cq4` reads no
+/// perplexity. Its parameters come from the bundle configuration.
+pub const CREDIT_QUALITY_VERSION_SUBSTANCE: i32 = 4;
+
+/// The novelty half's parameters for `cq4`, held in the bundle
+/// configuration instead of a code constant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoveltyCreditParams {
+    pub nov_floor_micros: i64,
+    pub nov_ceil_micros: i64,
+    pub nov_floor_mult_micros: i64,
+}
+
+impl NoveltyCreditParams {
+    /// The novelty values of [`CREDIT_QUALITY_CONSTANTS_V3`].
+    pub fn cq3() -> Self {
+        Self {
+            nov_floor_micros: CREDIT_QUALITY_CONSTANTS_V3.nov_floor_micros,
+            nov_ceil_micros: CREDIT_QUALITY_CONSTANTS_V3.nov_ceil_micros,
+            nov_floor_mult_micros: CREDIT_QUALITY_CONSTANTS_V3.nov_floor_mult_micros,
+        }
+    }
+}
+
+/// The substance half `h` of `cq4` (substance spec, section 5.4):
+/// `graded(sat(substance, sub_ceil), sub_floor_mult)`, in real units. A
+/// zero `sub_ceil_micros` counts as one micro, so a degenerate ceiling
+/// cannot divide by zero.
+pub fn substance_credit_half(
+    substance_micros: u64,
+    sub_ceil_micros: u64,
+    sub_floor_mult_micros: u32,
+) -> f64 {
+    let substance = substance_micros as f64 / 1_000_000.0;
+    let sub_ceil = sub_ceil_micros.max(1) as f64 / 1_000_000.0;
+    let sub_floor_mult = (f64::from(sub_floor_mult_micros) / 1_000_000.0).clamp(0.0, 1.0);
+    graded(sat(substance, sub_ceil), sub_floor_mult)
+}
+
+/// `cq4`: `q = h * g` in micros, clamped to `[0, 1_000_000]`. It has no
+/// anomaly term, because it reads no perplexity.
+pub fn substance_credit_quality(
+    substance_micros: u64,
+    nov_rep_micros: i64,
+    sub_ceil_micros: u64,
+    sub_floor_mult_micros: u32,
+    novelty: &NoveltyCreditParams,
+) -> u64 {
+    let h = substance_credit_half(substance_micros, sub_ceil_micros, sub_floor_mult_micros);
+    let g = novelty_half(
+        nov_rep_micros,
+        novelty.nov_floor_micros,
+        novelty.nov_ceil_micros,
+        novelty.nov_floor_mult_micros,
+    );
+    to_micros(h * g)
 }
 
 #[cfg(test)]
@@ -526,6 +609,97 @@ mod tests {
         assert_eq!(
             CREDIT_QUALITY_ACTIVE.version,
             s[s.len() - 1].constants.version
+        );
+    }
+
+    /// `credit_quality` now takes its novelty half from `novelty_half`. With
+    /// the perplexity term saturated (`f = 1`) and no anomaly (`a = 1`),
+    /// `q` is the novelty half alone, so V3's `q` pins the shared half at
+    /// values computed by hand from the V3 constants.
+    #[test]
+    fn credit_quality_v3_is_unchanged_by_the_shared_novelty_half() {
+        let ppl = V3.ppl_ceil_micros;
+        for (nov, expected) in [
+            (0, 300_000),
+            (m(0.5), 300_000),
+            (m(0.75), 685_238),
+            (m(0.9), 880_890),
+            (m(1.0), 1_000_000),
+            (m(1.5), 1_000_000),
+        ] {
+            let q = credit_quality(ppl, ppl, nov, &V3);
+            assert!(!q.anomaly_withheld);
+            assert_eq!(q.q_micros, expected, "novelty {nov}");
+            let g = novelty_half(
+                nov,
+                V3.nov_floor_micros,
+                V3.nov_ceil_micros,
+                V3.nov_floor_mult_micros,
+            );
+            assert_eq!((g * 1_000_000.0).round() as i64, expected);
+        }
+    }
+
+    #[test]
+    fn substance_credit_half_matches_the_spec() {
+        assert_eq!(
+            to_micros(substance_credit_half(435_557, 1_000_000, 250_000)),
+            641_208
+        );
+        for sub_ceil in [1, 250_000, 1_000_000, 5_000_000] {
+            assert_eq!(substance_credit_half(0, sub_ceil, 250_000), 0.25);
+        }
+        for (substance, sub_ceil) in [
+            (1_000_000, 1_000_000),
+            (2_000_000, 1_000_000),
+            (700_000, 600_000),
+        ] {
+            assert_eq!(substance_credit_half(substance, sub_ceil, 250_000), 1.0);
+        }
+    }
+
+    #[test]
+    fn substance_credit_quality_is_h_times_g() {
+        let novelty = NoveltyCreditParams::cq3();
+        assert_eq!(novelty.nov_floor_micros, V3.nov_floor_micros);
+        assert_eq!(novelty.nov_ceil_micros, V3.nov_ceil_micros);
+        assert_eq!(novelty.nov_floor_mult_micros, V3.nov_floor_mult_micros);
+        let (substance, sub_ceil, sub_floor_mult) = (435_557, 1_000_000, 250_000);
+        let h = substance_credit_half(substance, sub_ceil, sub_floor_mult);
+        for nov in [m(0.2), m(0.75), m(1.2)] {
+            let q = substance_credit_quality(substance, nov, sub_ceil, sub_floor_mult, &novelty);
+            let g = novelty_half(
+                nov,
+                novelty.nov_floor_micros,
+                novelty.nov_ceil_micros,
+                novelty.nov_floor_mult_micros,
+            );
+            assert_eq!(q, to_micros(h * g), "novelty {nov}");
+            assert!(q <= 1_000_000);
+        }
+        // By hand from the spec formula: h = 0.25 + 0.75 * ln(1.435557) /
+        // ln(2) = 0.641208, g = 0.30 + 0.70 * ln(1.25) / ln(1.5) =
+        // 0.685238 (cq3 novelty 0.75), q = h * g = 0.439380.
+        let q = substance_credit_quality(substance, m(0.75), sub_ceil, sub_floor_mult, &novelty);
+        assert!(q.abs_diff(439_380) <= 1, "hand-computed q, got {q}");
+        // The extremes stay inside `[0, 1_000_000]`.
+        assert_eq!(
+            substance_credit_quality(u64::MAX, i64::MAX, 1, 0, &novelty),
+            1_000_000
+        );
+        assert_eq!(
+            substance_credit_quality(0, i64::MIN, u64::MAX, 0, &novelty),
+            0
+        );
+    }
+
+    #[test]
+    fn the_schedule_does_not_hold_cq4() {
+        assert_eq!(CREDIT_QUALITY_VERSION_SUBSTANCE, 4);
+        assert!(
+            CREDIT_QUALITY_SCHEDULE
+                .iter()
+                .all(|era| era.constants.version != 4)
         );
     }
 }

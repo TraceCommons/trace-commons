@@ -273,12 +273,19 @@ impl DecisionsFetcher for PgDecisionsFetcher {
         // tail_fraction_micros. The `idx_trace_gate_decisions_submission`
         // index is `(tenant_id, submission_id, decided_at DESC)`, which is
         // close enough that the DISTINCT ON pattern is cheap.
+        //
+        // A row with no tail fraction (NULL, V139) measured none: a
+        // substance Settle row, whatever its credit quality version (4, or
+        // NULL on a duplicate-withheld run). It is filtered before DISTINCT
+        // ON, so the latest row WITH a tail fraction is the one read, and a
+        // submission with none gives no value.
         let rows = self
             .client
             .query(
                 "SELECT DISTINCT ON (submission_id) submission_id, tail_fraction_micros \
                  FROM trace_gate_decisions \
                  WHERE submission_id = ANY($1) \
+                 AND tail_fraction_micros IS NOT NULL \
                  ORDER BY submission_id, decided_at DESC",
                 &[&uuids],
             )
@@ -543,5 +550,108 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].submission_id, "a");
         assert_eq!(rows[1].source_domain_tag, "math");
+    }
+
+    /// SQ-11, V139: a substance Settle row stores no tail fraction (NULL),
+    /// so the read gives no value for it, whatever its credit quality
+    /// version: 4, or NULL on a duplicate-withheld run. A submission whose
+    /// latest row is a substance row reads its latest row with a tail
+    /// fraction. Needs a role that reads `trace_gate_decisions` across
+    /// tenants, as the subcommand does.
+    #[tokio::test]
+    async fn tail_floor_reads_skip_substance_rows() {
+        let Ok(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL") else {
+            eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL not configured");
+            return;
+        };
+        use trace_commons_server::db::Database as _;
+        trace_commons_server::db::postgres::PgBackend::new(
+            &trace_commons_server::config::DatabaseConfig::from_postgres_url(&url, 1),
+        )
+        .await
+        .expect("connect the migration pool")
+        .run_migrations()
+        .await
+        .expect("run migrations");
+        let fetcher = PgDecisionsFetcher::connect(&url).await.expect("connect");
+        let tenant = format!("tail-floor-{}", uuid::Uuid::new_v4());
+        let substance = uuid::Uuid::new_v4();
+        let duplicate_substance = uuid::Uuid::new_v4();
+        let perplexity = uuid::Uuid::new_v4();
+        let rescored = uuid::Uuid::new_v4();
+        fetcher
+            .client
+            .execute(
+                "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+                &[&tenant],
+            )
+            .await
+            .expect("insert tenant");
+        let hash = "a".repeat(64);
+        // (submission, perplexity and tail fraction, credit quality version,
+        // a substance Settle row, hours before now).
+        let rows: [(uuid::Uuid, Option<i64>, Option<i32>, bool, i32); 5] = [
+            (substance, None, Some(4), true, 0),
+            (duplicate_substance, None, None, true, 0),
+            (perplexity, Some(250_000), Some(1), false, 0),
+            // A legacy row, then a newer substance row for the same
+            // submission: the legacy row is the latest with a tail fraction.
+            (rescored, Some(300_000), Some(3), false, 1),
+            (rescored, None, Some(4), true, 0),
+        ];
+        for (submission, tail, version, substance_row, hours_ago) in rows {
+            let (source, run_id) = if substance_row {
+                ("pipeline_settle", Some(uuid::Uuid::new_v4()))
+            } else {
+                ("legacy_gate", None)
+            };
+            fetcher
+                .client
+                .execute(
+                    "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                        gate_policy_version,gate_version_hash,perplexity_micros,
+                        tail_fraction_micros,perplexity_passed,novelty_score_micros,
+                        nearest_neighbor_hash,novelty_passed,embedding_evidence_hash,
+                        attestation_chain_hash,credit_quality_calibration_version,
+                        source,pipeline_run_id,decided_at)
+                     VALUES($1,$2,$3,'gate-fixture',$4,$5,$5,TRUE,1,$4,TRUE,$4,$4,$6,
+                        $7,$8,NOW() - ($9::int * INTERVAL '1 hour'))",
+                    &[
+                        &tenant,
+                        &uuid::Uuid::new_v4(),
+                        &submission,
+                        &hash,
+                        &tail,
+                        &version,
+                        &source,
+                        &run_id,
+                        &hours_ago,
+                    ],
+                )
+                .await
+                .expect("insert gate decision");
+        }
+        let found = fetcher
+            .fetch_tail_fraction_micros(&[
+                substance.to_string(),
+                duplicate_substance.to_string(),
+                perplexity.to_string(),
+                rescored.to_string(),
+            ])
+            .await
+            .expect("fetch");
+        assert_eq!(
+            found,
+            BTreeMap::from([
+                (perplexity.to_string(), 250_000_i64),
+                (rescored.to_string(), 300_000_i64),
+            ]),
+            "no value for a substance row, with credit quality version 4 or NULL"
+        );
+        fetcher
+            .client
+            .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+            .await
+            .expect("remove the fixture tenant");
     }
 }

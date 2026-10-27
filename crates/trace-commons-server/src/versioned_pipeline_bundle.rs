@@ -37,11 +37,14 @@ use crate::versioned_pipeline_blocking::run_score_evaluation;
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
-    CompatibilityBundleConfig, CompatibilityScorePolicy, CompatibilitySettlePolicy,
+    CompatibilityBundleConfig, CompatibilityScorePolicy, CompatibilitySettlePolicy, MainGateConfig,
 };
 use crate::versioned_pipeline_index::IsolatedPipelineIndex;
 use crate::versioned_pipeline_score_registry::{
     ScorePolicyDependencies, ScorePolicyFactory, ScorePolicyRegistry,
+};
+use crate::versioned_pipeline_substance::{
+    SUBSTANCE_SCORE_IMPLEMENTATION, SubstanceScoreConfig, SubstanceScorePolicy,
 };
 
 /// Test-index identity the minimal Score policy proposes entries against.
@@ -532,8 +535,8 @@ impl MinimalPolicyBundle {
     /// controls: the tenant's Score lock, the `trace_gate_decisions` row,
     /// and `main`'s duplicate short-circuits
     /// ([`score_runs_under_runtime_controls`]). True for the compatibility
-    /// Score policy and for every Score policy a registry supplies; false
-    /// only for the minimal reference.
+    /// and substance Score policies and for every Score policy a registry
+    /// supplies; false only for the minimal reference.
     pub fn score_runs_under_runtime_controls(&self) -> bool {
         score_runs_under_runtime_controls(&self.package.manifest.score.implementation_id)
     }
@@ -624,54 +627,15 @@ impl MinimalPolicyBundle {
         embedder: &dyn IdentifiedEmbedder,
     ) -> anyhow::Result<BundlePackage> {
         config.validate()?;
-        let config_bytes = serde_json::to_vec(config)?;
-        let config_hash = dependency_content_hash(&config_bytes);
-        let scorer_descriptor = scorer.content_descriptor();
-        let embedder_descriptor = embedder.content_descriptor();
-        let scorer_hash = dependency_content_hash(&scorer_descriptor);
-        let embedder_hash = dependency_content_hash(&embedder_descriptor);
-
-        let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
-            policy_id: format!("trace_commons.{phase}.compatibility"),
-            implementation_id: implementation_id.to_string(),
-            configuration_hash: config_hash.clone(),
-            data_artifact_hashes: Vec::new(),
-            projection_ids: Vec::new(),
-        };
-
-        let mut instruments = BTreeMap::new();
-        instruments.insert(
-            InstrumentId::trace_credit(),
-            config.instrument.descriptor.clone(),
-        );
-
-        let manifest = BundleManifest {
-            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
-            admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
-            review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
-            score: PolicyRef {
-                policy_id: "trace_commons.score.compatibility".to_string(),
-                implementation_id: COMPATIBILITY_SCORE_IMPLEMENTATION.to_string(),
-                configuration_hash: config_hash.clone(),
-                data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
-                projection_ids: vec![config.projection_id.clone()],
-            },
-            settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
-            instruments,
-        };
-
-        let mut artifacts = BTreeMap::new();
-        artifacts.insert(config_hash, config_bytes);
-        artifacts.insert(scorer_hash, scorer_descriptor);
-        artifacts.insert(embedder_hash, embedder_descriptor);
-
-        let package = BundlePackage {
-            bundle_id: manifest.bundle_id()?,
-            manifest,
-            artifacts,
-        };
-        package.validate()?;
-        Ok(package)
+        compatibility_family_package(
+            serde_json::to_vec(config)?,
+            "trace_commons.score.compatibility",
+            COMPATIBILITY_SCORE_IMPLEMENTATION,
+            &config.projection_id,
+            &config.instrument.descriptor,
+            scorer,
+            embedder,
+        )
     }
 
     /// Builds a runnable bundle from `package` and the runtime dependencies
@@ -679,8 +643,9 @@ impl MinimalPolicyBundle {
     /// value the package's Score policy ref names and stores; a substituted
     /// or changed dependency is refused rather than silently accepted.
     /// `package`'s four implementation ids must be entirely one known
-    /// family -- all minimal or all compatibility -- or the package is not
-    /// runnable by this bundle at all.
+    /// family -- all minimal, all compatibility, or the compatibility
+    /// Admission, Review and Settle with the substance Score -- or the
+    /// package is not runnable by this bundle at all.
     ///
     /// This is [`Self::from_package_with_runtime_and_score_policies`] with an
     /// empty Score policy registry, which is what the open build runs.
@@ -821,6 +786,46 @@ impl MinimalPolicyBundle {
                 settle: Arc::new(CompatibilitySettlePolicy),
                 trace_credit_event: PipelineTraceCreditEvent::NoveltyUtility,
             })
+        } else if implementation_ids
+            == [
+                COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+                COMPATIBILITY_REVIEW_IMPLEMENTATION,
+                SUBSTANCE_SCORE_IMPLEMENTATION,
+                COMPATIBILITY_SETTLE_IMPLEMENTATION,
+            ]
+        {
+            let config_bytes = package
+                .artifacts
+                .get(&package.manifest.score.configuration_hash)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let config: SubstanceScoreConfig = serde_json::from_slice(config_bytes)
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            // As the compatibility arm (Ruling S4): refuse at bind time a
+            // package whose manifest does not pin `trace_credit` to this
+            // config's own instrument descriptor.
+            anyhow::ensure!(
+                package
+                    .manifest
+                    .instruments
+                    .get(&InstrumentId::trace_credit())
+                    == Some(&config.novelty.instrument.descriptor),
+                PIPELINE_BUNDLE_INVALID_LABEL
+            );
+            // The scorer is checked above to prove it matches the named
+            // dependency; the substance Score policy does not call it, so it
+            // is not held by the bundle.
+            let score =
+                SubstanceScorePolicy::new(package.manifest.clone(), config, embedder, index_reader)
+                    .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+
+            Ok(Self {
+                package,
+                admission: Arc::new(MinimalAdmissionPolicy),
+                review: Arc::new(MinimalReviewPolicy),
+                score: Arc::new(score),
+                settle: Arc::new(CompatibilitySettlePolicy),
+                trace_credit_event: PipelineTraceCreditEvent::NoveltyUtility,
+            })
         } else if let Some(factory) = registered_score_factory(&package, score_policies) {
             let configuration = package
                 .artifacts
@@ -849,6 +854,73 @@ impl MinimalPolicyBundle {
             anyhow::bail!("bundle_policy_not_runnable")
         }
     }
+}
+
+/// Builds an unsigned package of the compatibility family: the
+/// compatibility Admission, Review and Settle policies, and the Score policy
+/// `score_policy_id` / `score_implementation_id`. It names `config_bytes`,
+/// `scorer` and `embedder` by content hash, projects under `projection_id`,
+/// and pins `trace_credit` to `trace_credit_descriptor`, so the Score
+/// policy's awards are accepted at Score time (`ScoreDecision::for_bundle`,
+/// Ruling S3). `MinimalPolicyBundle::compatibility_package` and
+/// `versioned_pipeline_substance::substance_package` both build through it,
+/// after each validates its own configuration.
+pub(crate) fn compatibility_family_package(
+    config_bytes: Vec<u8>,
+    score_policy_id: &str,
+    score_implementation_id: &str,
+    projection_id: &str,
+    trace_credit_descriptor: &InstrumentDescriptor,
+    scorer: &dyn IdentifiedPerplexityScorer,
+    embedder: &dyn IdentifiedEmbedder,
+) -> anyhow::Result<BundlePackage> {
+    let config_hash = dependency_content_hash(&config_bytes);
+    let scorer_descriptor = scorer.content_descriptor();
+    let embedder_descriptor = embedder.content_descriptor();
+    let scorer_hash = dependency_content_hash(&scorer_descriptor);
+    let embedder_hash = dependency_content_hash(&embedder_descriptor);
+
+    let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
+        policy_id: format!("trace_commons.{phase}.compatibility"),
+        implementation_id: implementation_id.to_string(),
+        configuration_hash: config_hash.clone(),
+        data_artifact_hashes: Vec::new(),
+        projection_ids: Vec::new(),
+    };
+
+    let mut instruments = BTreeMap::new();
+    instruments.insert(
+        InstrumentId::trace_credit(),
+        trace_credit_descriptor.clone(),
+    );
+
+    let manifest = BundleManifest {
+        format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+        admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
+        review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
+        score: PolicyRef {
+            policy_id: score_policy_id.to_string(),
+            implementation_id: score_implementation_id.to_string(),
+            configuration_hash: config_hash.clone(),
+            data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
+            projection_ids: vec![projection_id.to_string()],
+        },
+        settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
+        instruments,
+    };
+
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(config_hash, config_bytes);
+    artifacts.insert(scorer_hash, scorer_descriptor);
+    artifacts.insert(embedder_hash, embedder_descriptor);
+
+    let package = BundlePackage {
+        bundle_id: manifest.bundle_id()?,
+        manifest,
+        artifacts,
+    };
+    package.validate()?;
+    Ok(package)
 }
 
 /// Whether a bundle whose Score policy ref names `score_implementation_id`
@@ -902,6 +974,35 @@ fn is_compatibility_family(package: &BundlePackage) -> bool {
     ]
 }
 
+/// Whether `package` is the substance bundle: the compatibility Admission,
+/// Review and Settle policies with the substance Score policy.
+fn is_substance_family(package: &BundlePackage) -> bool {
+    [
+        package.manifest.admission.implementation_id.as_str(),
+        package.manifest.review.implementation_id.as_str(),
+        package.manifest.score.implementation_id.as_str(),
+        package.manifest.settle.implementation_id.as_str(),
+    ] == [
+        COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+        COMPATIBILITY_REVIEW_IMPLEMENTATION,
+        SUBSTANCE_SCORE_IMPLEMENTATION,
+        COMPATIBILITY_SETTLE_IMPLEMENTATION,
+    ]
+}
+
+/// The substance configuration `package` binds, when it is the substance
+/// bundle; `None` for any other bundle, or when the configuration does not
+/// decode (construction refuses that package).
+pub fn package_substance_config(package: &BundlePackage) -> Option<SubstanceScoreConfig> {
+    if !is_substance_family(package) {
+        return None;
+    }
+    let config_bytes = package
+        .artifacts
+        .get(&package.manifest.score.configuration_hash)?;
+    serde_json::from_slice(config_bytes).ok()
+}
+
 /// The compatibility configuration `package` binds, when its four policies
 /// are the compatibility bundle's; `None` for any other bundle, or when the
 /// configuration does not decode (construction refuses that package).
@@ -915,17 +1016,51 @@ pub fn package_compatibility_config(package: &BundlePackage) -> Option<Compatibi
     serde_json::from_slice(config_bytes).ok()
 }
 
+/// Whether the compatibility family binds `package`: the compatibility
+/// bundle or the substance bundle. Both settle a `NoveltyUtility` award
+/// under the compatibility Settle policy, and both hold `main`'s gate
+/// configuration ([`package_matches_main_gate`]).
+pub fn binds_compatibility_family(package: &BundlePackage) -> bool {
+    is_compatibility_family(package) || is_substance_family(package)
+}
+
+/// Whether `package` holds `main`'s gate configuration `main_gate`, by its
+/// gate values only: a compatibility package
+/// (`CompatibilityBundleConfig::matches_main_gate`) and a substance package
+/// (`SubstanceNoveltyConfig::matches_main_gate`, the same rule over the
+/// values it holds) alike. Neither compares projection or index ids, which
+/// the gate does not carry; the production ids are pinned where the
+/// production package is built. A substance package whose configuration
+/// does not decode matches nothing. A package of any other family holds no
+/// gate configuration, so nothing is compared. The startup checks and
+/// `PipelineService::check_runnable_package` compare through this one
+/// function, with `pipeline_runtime_main_gate_config_mismatch`.
+pub fn package_matches_main_gate(package: &BundlePackage, main_gate: &MainGateConfig) -> bool {
+    if let Some(config) = package_compatibility_config(package) {
+        return config.matches_main_gate(main_gate);
+    }
+    if is_substance_family(package) {
+        return package_substance_config(package)
+            .is_some_and(|config| config.novelty.matches_main_gate(main_gate));
+    }
+    true
+}
+
 /// Whether `package`'s own configuration may be qualified for production:
 /// a compatibility package's configuration must be qualifiable
-/// (`CompatibilityBundleConfig::is_qualifiable`); a package of another
-/// family carries no such configuration. A compatibility package whose
-/// configuration is missing or does not decode is not qualifiable: it fails
-/// closed (wave 2, fix round 1; review M1), since construction refuses it
-/// too. Both the per-bundle qualification
+/// (`CompatibilityBundleConfig::is_qualifiable`), and so must a substance
+/// package's (`SubstanceScoreConfig::is_qualifiable`); a package of another
+/// family carries no such configuration. A compatibility or substance
+/// package whose configuration is missing or does not decode is not
+/// qualifiable: it fails closed (wave 2, fix round 1; review M1), since
+/// construction refuses it too. Both the per-bundle qualification
 /// (`PipelineService::bundle_qualification`, which startup reads) and
 /// `PipelineQualificationStore::qualify_bundle` read it from the package
 /// itself.
 pub fn package_configuration_is_qualifiable(package: &BundlePackage) -> bool {
+    if is_substance_family(package) {
+        return package_substance_config(package).is_some_and(|config| config.is_qualifiable());
+    }
     if !is_compatibility_family(package) {
         return true;
     }

@@ -25,9 +25,11 @@ from .errors import ToolingError, require
 _KEY = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
 # What the production package is built from: the scorer and embedder
-# descriptors (spec A-D4, A-D5) and `main`'s gate configuration, exactly the
-# variables `pipeline_main_gate_config_from_env` and the descriptor parsers
-# of `production_assembly.rs` read.
+# descriptors (spec A-D4, A-D5), `main`'s gate configuration, and the Score
+# selection with its calibrated substance values (SQ-17), exactly the
+# variables `pipeline_main_gate_config_from_env`, the descriptor parsers of
+# `production_assembly.rs` and `production_score_selection_from_lookup`
+# read.
 PACKAGE_VARIABLES = (
     "TRACE_COMMONS_NEAR_AI_MODEL",
     "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF",
@@ -46,6 +48,10 @@ PACKAGE_VARIABLES = (
     "TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS",
     "TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS",
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA",
+    "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE",
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS",
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
+    "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST",
 )
 
 # What a production-mode harness reads: `PipelineGateComponents::from_env`

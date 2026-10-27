@@ -9,6 +9,10 @@ convention: hash-only, label-only operational surfaces).
 `compare` sends the traces of one pin through the old gate path of `main`
 and through the versioned pipeline, and reports each difference
 (`pipeline_tooling.comparison`).
+
+`evaluate` calibrates the substance Score on the traces of one pin, offline,
+and writes the calibration report and the calibrated values
+(`docs/operator/substance-calibration.md`).
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package
 # writer, two more ignored tests beside the package writer.
 ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
 KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
-BUNDLES = ("minimal", "compatibility")
+BUNDLES = ("minimal", "compatibility", "substance")
 # `package` also builds the production package (spec B-D5), from the
 # deployment's env file; `run` never serves it as a built-in bundle.
 PACKAGE_BUNDLES = (*BUNDLES, "production")
@@ -189,6 +193,13 @@ QUALIFY_CORPUS_RUNS = (
 COMPARE_HARNESS = "ingest::app::tests::pipeline_compare_pg_tests::pipeline_compare_run"
 COMPARE_LOCAL_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json"
 COMPARE_RISK_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json"
+
+# `evaluate`: the ignored test that projects each trace of a pin and
+# calibrates the substance Score over the projections. It needs no database.
+SUBSTANCE_EVALUATE_DRIVER = "ingest::app::tests::pipeline_compare_pg_tests::substance_evaluate_run"
+SUBSTANCE_REPORT_SCHEMA = "trace_commons.substance_calibration_report.v1"
+SUBSTANCE_REPORT_NAME = "substance-calibration-report.json"
+SUBSTANCE_VALUES_NAME = "substance-calibrated-values.json"
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -312,6 +323,21 @@ def build_parser():
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
     compare_parser.set_defaults(handler=run_compare)
+
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="Calibrate the substance Score on one pin: checks 1 to 3 and the calibrated sub_ceil (offline)",
+    )
+    evaluate_parser.add_argument(
+        "--pin", required=True, help="A comparison pin (an HF pin descriptor with with_events: true)."
+    )
+    evaluate_parser.add_argument(
+        "--local-dir",
+        dest="local_dir",
+        default=None,
+        help="Export from this local JSONL directory instead of the one the pin names.",
+    )
+    evaluate_parser.set_defaults(handler=run_evaluate)
 
     qualify_parser = subparsers.add_parser(
         "qualify", help="Run every required pipeline check and write one qualification report (local evidence)"
@@ -1050,6 +1076,90 @@ def run_compare(args, run):
         f"PipelineCompareOK: traces={report['compared_count']} equal={report['equal_count']} "
         f"permitted={report['permitted_total']} unexplained=0 "
         f"partial={'true' if report['partial'] else 'false'} seconds={seconds} run={run.run_id} report={shown}"
+    )
+
+
+def _is_micros(value):
+    return type(value) is int and 0 <= value <= 1_000_000
+
+
+def _require_substance_outputs(report_bytes, values, exported):
+    """The two files of a driver run that passed belong together and to this
+    run: the report has its schema and names the export's source digest,
+    and the values carry the digest of the report bytes, the percentile,
+    the source digest, and the micros that the report names. Anything else
+    is `substance_evaluate_outputs_mismatch`."""
+    try:
+        report = json.loads(report_bytes)
+    except ValueError as error:
+        raise ToolingError("substance_evaluate_outputs_mismatch") from error
+    calibration = values.get("calibration") if isinstance(values, dict) else None
+    calibrated = report.get("calibrated") if isinstance(report, dict) else None
+    require(
+        isinstance(calibration, dict)
+        and isinstance(calibrated, dict)
+        and report.get("schema") == SUBSTANCE_REPORT_SCHEMA
+        and report.get("corpus_pin_digest") == exported.pin["source_digest"]
+        and report.get("trace_count") == exported.trace_count
+        and _is_micros(values.get("sub_ceil_micros"))
+        and calibration.get("report_digest") == sha256_digest(report_bytes)
+        and calibration.get("corpus_pin_digest") == exported.pin["source_digest"]
+        and calibration.get("sub_ceil_percentile") == 90
+        and calibrated.get("sub_ceil_micros") == values["sub_ceil_micros"],
+        "substance_evaluate_outputs_mismatch",
+    )
+
+
+def run_evaluate(args, run):
+    """`evaluate --pin PIN`: exports the pin with its session events,
+    checks the export against the pin, and runs the substance driver once,
+    with Cargo's optimized build for the two. The driver needs no database.
+    It writes the canonical calibration report and the calibrated values in
+    the run directory; both go under `.local/` after the tree is examined
+    again, and the values file is the input of the production package.
+    `--local-dir` replaces the local JSONL directory that the pin names."""
+    pin_path = Path(args.pin).resolve()
+    _, pin_local_dir = _compare_pin(pin_path)
+    local_dir = Path(args.local_dir).resolve() if args.local_dir is not None else pin_local_dir
+    exported = _compare_input(
+        export_compare_corpus(
+            run, pin_path, child_environment({}), name="substance", local_dir=local_dir, release=True
+        )
+    )
+    report_path = run.run_dir / SUBSTANCE_REPORT_NAME
+    values_path = run.run_dir / SUBSTANCE_VALUES_NAME
+    extra = {
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH": str(exported.bootstrap),
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH": str(exported.holdout),
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH": str(exported.manifest),
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH": str(report_path),
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH": str(values_path),
+    }
+    cargo_test(
+        run,
+        "substance_evaluate",
+        (*INGEST_TEST_ARGS, "--release"),
+        SUBSTANCE_EVALUATE_DRIVER,
+        child_environment(extra),
+        exact=True,
+        ignored=True,
+    )
+    try:
+        report_bytes = report_path.read_bytes()
+    except OSError as error:
+        raise ToolingError("substance_evaluate_report_missing") from error
+    values = _read_json(values_path, "substance_evaluate_values_malformed")
+    _require_substance_outputs(report_bytes, values, exported)
+    # Before the files go under `.local/`: the values must come from the
+    # code that the run started with.
+    run.require_code_revision_unchanged()
+    local_report = LOCAL_DIR / SUBSTANCE_REPORT_NAME
+    local_values = LOCAL_DIR / SUBSTANCE_VALUES_NAME
+    atomic_write(local_report, report_bytes)
+    atomic_write(local_values, values_path.read_bytes())
+    print(
+        f"SubstanceEvaluateOK: report={_shown(local_report)} values={_shown(local_values)} "
+        f"sub_ceil={values['sub_ceil_micros']}"
     )
 
 

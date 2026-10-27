@@ -113,7 +113,10 @@ pub(crate) fn pipeline_runtime_selection_from_env() -> anyhow::Result<PipelineRu
 
 /// The production pipeline assembly behind ingest's assembler seam: maps
 /// the context onto [`assemble_production_pipeline`], the library
-/// constructor.
+/// constructor, with the default package's Score selected from the
+/// environment (SQ-17, [`production_score_selection_from_lookup`]) beside
+/// the descriptors the components read. A refused selection stops the start
+/// with its label.
 pub(crate) struct ProductionPipelineAssembler;
 
 impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
@@ -121,28 +124,42 @@ impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
         &self,
         context: pipeline_runtime::IngestPipelineRuntimeContext,
     ) -> anyhow::Result<Arc<PipelineService>> {
-        let components = context
-            .components
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!(PIPELINE_PRODUCTION_COMPONENTS_MISSING_LABEL))?;
-        Ok(Arc::new(assemble_production_pipeline(
-            ProductionPipelineInputs {
-                backend: context.backend,
-                artifact_store: context.artifact_store,
-                object_store_name: context.object_store_name,
-                lease_config: context.lease_config,
-                novelty_utility_checks: context.novelty_utility_checks,
-                unqualified_routing_allowed: context.unqualified_routing_allowed,
-                main_gate: context.main_gate,
-                components,
-                score_policies: context.score_policies,
-            },
-        )?))
+        assemble_production_runtime(
+            context,
+            production_score_selection_from_lookup(&std_env_lookup)?,
+        )
     }
 
     fn needs_gate_components(&self) -> bool {
         true
     }
+}
+
+/// [`ProductionPipelineAssembler`] with `score_selection` given rather than
+/// read from the environment: the context mapped onto
+/// [`assemble_production_pipeline`].
+pub(crate) fn assemble_production_runtime(
+    context: pipeline_runtime::IngestPipelineRuntimeContext,
+    score_selection: ProductionScoreSelection,
+) -> anyhow::Result<Arc<PipelineService>> {
+    let components = context
+        .components
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!(PIPELINE_PRODUCTION_COMPONENTS_MISSING_LABEL))?;
+    Ok(Arc::new(assemble_production_pipeline(
+        ProductionPipelineInputs {
+            backend: context.backend,
+            artifact_store: context.artifact_store,
+            object_store_name: context.object_store_name,
+            lease_config: context.lease_config,
+            novelty_utility_checks: context.novelty_utility_checks,
+            unqualified_routing_allowed: context.unqualified_routing_allowed,
+            main_gate: context.main_gate,
+            components,
+            score_policies: context.score_policies,
+            score_selection,
+        },
+    )?))
 }
 
 /// Builds the production pipeline's gate components through the library's

@@ -2151,11 +2151,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
 
     /// The scoped counterpart of `list_own_gate_decision_scores`: for each of
     /// `submission_ids` OWNED by `(tenant_id, auth_principal_ref)`, return
-    /// its latest gate-decision score, or `None` when it has not been scored
-    /// yet. Ids the principal does not own are simply absent from the
-    /// result, whether they belong to another principal or to nobody — the
-    /// caller must not be able to tell those apart, or this becomes a probe
-    /// for other contributors' submission ids.
+    /// its latest gate-decision score that holds a perplexity, or `None` when
+    /// there is none. `has_gate_decision` tells a submission whose decisions
+    /// all hold no perplexity from one with no decision yet (see
+    /// `OwnSubmissionScoreRow`). Ids the principal does not own are simply
+    /// absent from the result, whether they belong to another principal or
+    /// to nobody — the caller must not be able to tell those apart, or this
+    /// becomes a probe for other contributors' submission ids.
     ///
     /// `submission_ids` is the ONLY caller-supplied input; the identity pair
     /// still comes from the authenticated request context, never from the

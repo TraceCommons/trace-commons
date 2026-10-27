@@ -58,11 +58,13 @@ PHASES = ("admission", "review", "score", "settle")
 
 # The check ids the harness may emit (`pipeline_corpus_pg_tests`'s
 # `CORPUS_CHECK_IDS`). `pipeline_http_corpus_package` is not a required check
-# (controller ruling PF-1).
+# (controller ruling PF-1), and neither is `pipeline_http_corpus_substance`
+# (owner decision O-3: permitted).
 CORPUS_CHECK_IDS = frozenset(
     {
         "pipeline_http_corpus_minimal",
         "pipeline_http_corpus_compatibility",
+        "pipeline_http_corpus_substance",
         "pipeline_http_corpus_hf_local",
         "pipeline_http_corpus_package",
     }

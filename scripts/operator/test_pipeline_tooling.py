@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 
 import pipeline
-from pipeline_tooling import cargo, catalog, checks, comparison, corpus, environment, errors, results
+from pipeline_tooling import cargo, catalog, checks, comparison, corpus, environment, envfile, errors, results
 from pipeline_tooling import report as report_module
 
 
@@ -2252,6 +2252,50 @@ class PackageCommandTests(_CorpusRunCase):
 
         # `run` serves no production bundle: its package comes from `package`.
         self.assertNotIn("production", pipeline.BUNDLES)
+
+    def test_substance_is_a_built_in_bundle(self):
+        self.assertIn("substance", pipeline.BUNDLES)
+        self.assertIn("substance", pipeline.PACKAGE_BUNDLES)
+
+    def test_substance_corpus_check_is_permitted_not_required(self):
+        self.assertIn("pipeline_http_corpus_substance", corpus.CORPUS_CHECK_IDS)
+        self.assertNotIn("pipeline_http_corpus_substance", checks.REQUIRED_CORPUS_CHECK_IDS)
+
+    def test_package_variables_hold_the_substance_selection(self):
+        """SQ-17: `package --bundle production` passes the Score selection
+        and its three calibration variables, so the writer builds the
+        substance package when the env file selects it. No other variable
+        is new: a key, an endpoint or a database URL never reaches it."""
+        selection = (
+            "TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST",
+            "TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST",
+        )
+        before = (
+            "TRACE_COMMONS_NEAR_AI_MODEL",
+            "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF",
+            "TRACE_COMMONS_EMBEDDER_MODEL_ID",
+            "TRACE_COMMONS_VECTOR_INDEX_DIM",
+            "TRACE_COMMONS_EMBEDDER_MAX_TOKENS",
+            "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM",
+            "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS",
+            "TRACE_COMMONS_GATE_TOP_K",
+            "TRACE_COMMONS_GATE_CHUNK_TARGET_TOKENS",
+            "TRACE_COMMONS_GATE_CHUNK_MAX_TOKENS",
+            "TRACE_COMMONS_GATE_CHUNK_CAP",
+            "TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS",
+            "TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS",
+            "TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS",
+            "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA",
+        )
+        for variable in selection:
+            with self.subTest(variable=variable):
+                self.assertIn(variable, envfile.PACKAGE_VARIABLES)
+        self.assertEqual(set(envfile.PACKAGE_VARIABLES), set(before) | set(selection))
+        self.assertEqual(len(envfile.PACKAGE_VARIABLES), len(before) + len(selection))
 
 
 # ---------------------------------------------------------------------------
@@ -8331,6 +8375,145 @@ class CompareCommandTests(_CorpusRunCase):
         self.assertEqual(self._failure(), "PipelineFailure: code_revision_changed")
         self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
         self.assertEqual(self._local_files(), [], "a refused run leaves no report that reads as a pass")
+
+
+# ---------------------------------------------------------------------------
+# The substance calibration: `pipeline.py evaluate`.
+# ---------------------------------------------------------------------------
+
+_SUBSTANCE_DRIVER = "ingest::app::tests::pipeline_compare_pg_tests::substance_evaluate_run"
+_SUBSTANCE_VARIABLES = frozenset(
+    {
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_BOOTSTRAP_PATH",
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_HOLDOUT_PATH",
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_MANIFEST_PATH",
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH",
+        "TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH",
+    }
+)
+
+
+class EvaluateCommandTests(_CorpusRunCase):
+    """`evaluate`, with the export and the driver replaced."""
+
+    def setUp(self):
+        super().setUp()
+        self.pin = self.tmp / "pin.json"
+        self.pin.write_text(json.dumps(_compare_pin()))
+
+    def _fake_export(self, run, pin_path, env, *, name, local_dir=None, release=False):
+        self.calls.append(("export", Path(pin_path), name, local_dir, release))
+        pin = json.loads(Path(pin_path).read_text())
+        output_dir = run.run_dir / "compare" / name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths = tuple(
+            output_dir / file for file in ("bootstrap-compare.jsonl", "holdout-compare.jsonl", "source-manifest.json")
+        )
+        for path in paths[:2]:
+            path.write_text("{}\n")
+        manifest = {
+            **{field: pin[field] for field in _COMPARE_DIGEST_FIELDS},
+            "source": {"with_events": True},
+            "sample_count": pin["bootstrap_count"] + pin["holdout_count"],
+            "contains_raw_trace_text": False,
+        }
+        paths[2].write_text(json.dumps(manifest))
+        return paths
+
+    def _driver(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        """The driver: a report and its values, as `substance_evaluate_run`
+        writes them for the pin of `setUp`."""
+        self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+        source = _fake_hash("source_digest")
+        report = {
+            "schema": "trace_commons.substance_calibration_report.v1",
+            "corpus_pin_digest": source,
+            "trace_count": 10,
+            "calibrated": {
+                "sub_ceil_micros": 812_000,
+                "sub_ceil_percentile": 90,
+            },
+        }
+        report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        Path(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH"]).write_bytes(report_bytes)
+        values = {
+            "sub_ceil_micros": 812_000,
+            "calibration": {
+                "corpus_pin_digest": source,
+                "report_digest": _digest(report_bytes),
+                "sub_ceil_percentile": 90,
+            },
+        }
+        Path(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_VALUES_PATH"]).write_text(json.dumps(values, indent=2) + "\n")
+
+    def _evaluate(self, argv):
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(pipeline, "export_compare_corpus", self._fake_export):
+            return self._main(["evaluate", *argv], cargo=self._driver)
+
+    def test_evaluate_runs_the_ignored_driver(self):
+        code = self._evaluate(["--pin", str(self.pin)])
+
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, pin_path, name, local_dir, release)] = [call for call in self.calls if call[0] == "export"]
+        self.assertEqual(pin_path, self.pin.resolve())
+        self.assertEqual(name, "substance")
+        self.assertEqual(
+            Path(local_dir), environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl"
+        )
+        self.assertIs(release, True)
+        [(_, step, cargo_args, test_filter, env, exact, ignored)] = self._cargo_calls()
+        self.assertEqual(step, "substance_evaluate")
+        self.assertEqual(test_filter, _SUBSTANCE_DRIVER)
+        self.assertEqual(pipeline.SUBSTANCE_EVALUATE_DRIVER, _SUBSTANCE_DRIVER)
+        self.assertTrue(exact)
+        self.assertTrue(ignored)
+        self.assertEqual(cargo_args, (*_INGEST_ARGS, "--release"))
+        # The five variables and nothing else: the driver needs no database.
+        self.assertEqual({key for key in env if key.startswith("TRACE_COMMONS_")}, _SUBSTANCE_VARIABLES)
+        export_dir = self.run.run_dir / "compare" / "substance"
+        for variable, path in (
+            ("BOOTSTRAP_PATH", export_dir / "bootstrap-compare.jsonl"),
+            ("HOLDOUT_PATH", export_dir / "holdout-compare.jsonl"),
+            ("MANIFEST_PATH", export_dir / "source-manifest.json"),
+            ("REPORT_PATH", self.run.run_dir / "substance-calibration-report.json"),
+            ("VALUES_PATH", self.run.run_dir / "substance-calibrated-values.json"),
+        ):
+            self.assertEqual(env[f"TRACE_COMMONS_SUBSTANCE_EVALUATE_{variable}"], str(path), variable)
+        self.assertFalse(any(call[0] == "invoke" for call in self.calls), "no container starts")
+
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(
+            lines,
+            [
+                "SubstanceEvaluateOK: report=substance-calibration-report.json "
+                "values=substance-calibrated-values.json sub_ceil=812000"
+            ],
+        )
+        local = self.tmp / "local"
+        self.assertEqual(
+            (local / "substance-calibration-report.json").read_bytes(),
+            (self.run.run_dir / "substance-calibration-report.json").read_bytes(),
+        )
+
+    def test_evaluate_local_dir_replaces_the_pins_directory(self):
+        other = self.tmp / "jsonl"
+        code = self._evaluate(["--pin", str(self.pin), "--local-dir", str(other)])
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, _, _, local_dir, _)] = [call for call in self.calls if call[0] == "export"]
+        self.assertEqual(Path(local_dir), other.resolve())
+
+    def test_evaluate_refuses_values_that_do_not_name_the_report(self):
+        def tampered(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self._driver(run, step, cargo_args, test_filter, env, exact=exact, ignored=ignored)
+            Path(env["TRACE_COMMONS_SUBSTANCE_EVALUATE_REPORT_PATH"]).write_bytes(b'{"schema":"other"}')
+
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(pipeline, "export_compare_corpus", self._fake_export):
+            code = self._main(["evaluate", "--pin", str(self.pin)], cargo=tampered)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: substance_evaluate_outputs_mismatch")
+        self.assertFalse((self.tmp / "local" / "substance-calibrated-values.json").exists())
 
 
 if __name__ == "__main__":

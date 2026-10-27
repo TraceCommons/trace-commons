@@ -304,11 +304,11 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
     // Multi-lens review L5-4 and Zaki review 3, Z3-3 (and Zaki review 1,
     // round 2, finding 14): a compatibility bundle holds `main`'s gate
     // configuration -- floors, index-insert threshold, top-k, chunk knobs and
-    // the `NoveltyUtility` delta -- never values the assembly picked.
+    // the `NoveltyUtility` delta -- never values the assembly picked. A
+    // substance bundle holds the same novelty, chunk and award values
+    // (SQ-18), compared through the same function.
     anyhow::ensure!(
-        service
-            .compatibility_config()
-            .is_none_or(|config| config.matches_main_gate(&main_gate)),
+        service.default_package_matches_main_gate(&main_gate),
         "pipeline_runtime_main_gate_config_mismatch"
     );
     // Ruling T15-12: a compatibility award applies `main`'s NoveltyUtility
@@ -321,7 +321,8 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
     // Zaki review 1, round 2, finding 15: a compatibility award's ledger
     // row names the pipeline's issuer, as `main`'s names its issuing gate
     // worker. A runtime that processes a tenant through the compatibility
-    // bundle cannot run without one.
+    // bundle, or the substance bundle that awards the same delta, cannot run
+    // without one.
     anyhow::ensure!(
         !(tenants_processed
             && service.binds_compatibility_bundle()

@@ -3032,7 +3032,9 @@ fn production_harness_service(
 /// The production assembler over `dependencies`, under the pins `pins_from`
 /// carries, refused unless it serves exactly `expected`. A real run passes
 /// the same package twice; the second argument exists so a test can show
-/// the refusal.
+/// the refusal. This harness has no gate of its own: a compatibility
+/// package runs under the gate it holds, a substance package under the gate
+/// its novelty values imply (`substance_package_gate`).
 fn production_harness_service_for(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -3040,11 +3042,25 @@ fn production_harness_service_for(
     pins_from: &BundlePackage,
     dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_server::versioned_pipeline_bundle::package_substance_config;
     use trace_commons_server::versioned_pipeline_harness::{
-        assemble_harness_production, harness_production_components, production_package_pins,
+        HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL, assemble_harness_production,
+        harness_production_components, production_package_pins, substance_package_gate,
     };
-    use trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs;
+    use trace_commons_server::versioned_pipeline_production::{
+        ProductionPipelineInputs, ProductionScoreSelection,
+    };
     let pins = production_package_pins(pins_from)?;
+    let main_gate = match &pins.score_selection {
+        ProductionScoreSelection::Compatibility => pins
+            .main_gate
+            .ok_or_else(|| anyhow::anyhow!(HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL))?,
+        ProductionScoreSelection::Substance(_) => substance_package_gate(
+            &package_substance_config(pins_from)
+                .ok_or_else(|| anyhow::anyhow!(HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL))?
+                .novelty,
+        ),
+    };
     let components = harness_production_components(
         &pins,
         dependencies,
@@ -3060,9 +3076,10 @@ fn production_harness_service_for(
             lease_config: PipelineLeaseConfig::default(),
             novelty_utility_checks: issuing_checks(),
             unqualified_routing_allowed: false,
-            main_gate: pins.main_gate,
+            main_gate,
             components,
             score_policies: Default::default(),
+            score_selection: pins.score_selection,
         },
     )?))
 }
@@ -3223,6 +3240,7 @@ async fn production_assembly_is_constructible_from_the_library() {
         },
         components,
         score_policies: Default::default(),
+        score_selection: trace_commons_server::versioned_pipeline_production::ProductionScoreSelection::Compatibility,
     })
     .expect("the production assembly builds over doubles");
     let candidate = service.default_package().clone();
@@ -45175,8 +45193,9 @@ struct GateDecisionRow {
     pipeline_run_id: Option<uuid::Uuid>,
     gate_policy_version: String,
     gate_version_hash: String,
-    perplexity_micros: i64,
-    tail_fraction_micros: i64,
+    /// NULL (V139) on a substance row, which measures no perplexity.
+    perplexity_micros: Option<i64>,
+    tail_fraction_micros: Option<i64>,
     peak_perplexity_micros: Option<i64>,
     perplexity_passed: bool,
     novelty_score_micros: i64,
@@ -45347,12 +45366,9 @@ async fn settle_writes_one_gate_decision_row_per_submission() {
         row.gate_version_hash,
         package.manifest.score.configuration_hash
     );
+    assert_eq!(row.perplexity_micros, micros(evidence.perplexity_micros));
     assert_eq!(
-        Some(row.perplexity_micros),
-        micros(evidence.perplexity_micros)
-    );
-    assert_eq!(
-        Some(row.tail_fraction_micros),
+        row.tail_fraction_micros,
         micros(evidence.tail_fraction_micros)
     );
     assert_eq!(
@@ -45825,7 +45841,7 @@ async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
     .unwrap();
     assert!(evidence.credit_quality_micros.is_some(), "{evidence:?}");
     assert_eq!(
-        Some(rows[0].perplexity_micros),
+        rows[0].perplexity_micros,
         evidence
             .perplexity_micros
             .map(|v| i64::try_from(v).unwrap())
@@ -46553,7 +46569,9 @@ async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
     let pipeline_row = gate_decision_rows(&tenant, run.submission_id).await;
     assert_eq!(pipeline_row.len(), 1);
     assert!(
-        pipeline_row[0].perplexity_micros > 0,
+        pipeline_row[0]
+            .perplexity_micros
+            .is_some_and(|micros| micros > 0),
         "a scored pipeline row"
     );
     let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
@@ -46639,7 +46657,10 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].source, "pipeline_settle");
     assert!(before[0].agent_prose_perplexity_micros.is_none());
-    let rewritten = before[0].perplexity_micros + 1_234_567;
+    let rewritten = before[0]
+        .perplexity_micros
+        .expect("a compatibility row holds a perplexity")
+        + 1_234_567;
 
     let touched = backend
         .update_trace_gate_decision_perplexity(
@@ -46702,7 +46723,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     assert_eq!(touched, 1);
     let legacy = gate_decision_rows(&tenant, legacy_submission).await;
     assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy[0].perplexity_micros, 7_000_000);
+    assert_eq!(legacy[0].perplexity_micros, Some(7_000_000));
     assert_eq!(legacy[0].peak_perplexity_micros, Some(8_000_000));
     assert!(!legacy[0].perplexity_passed);
     assert_eq!(legacy[0].agent_prose_perplexity_micros, Some(1));
@@ -46806,7 +46827,7 @@ async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
     assert_eq!(settled.state, PipelineRunState::Complete, "{settled:?}");
     let rows = gate_decision_rows(&tenant, scored.submission_id).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].perplexity_micros, i64::MAX);
+    assert_eq!(rows[0].perplexity_micros, Some(i64::MAX));
     assert_eq!(rows[0].peak_perplexity_micros, Some(i64::MAX));
     assert_eq!(rows[0].chunk_count, Some(i32::MAX));
 }
@@ -50648,7 +50669,7 @@ async fn a_registered_score_policy_writes_a_gate_decision_row() {
         )
         .unwrap();
         assert_eq!(
-            Some(row.perplexity_micros),
+            row.perplexity_micros,
             evidence
                 .perplexity_micros
                 .map(|value| i64::try_from(value).unwrap())
@@ -52324,4 +52345,79 @@ async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
         .unwrap()
         .expect("the run");
     assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+}
+
+/// SQ-11, spec 8.1, V139: a substance run completes Settle and writes its
+/// legacy row with NULL perplexity and tail fraction (its Score measures
+/// neither), the evidence `substance_passed` as its `perplexity_passed`,
+/// and credit quality version 4.
+#[tokio::test]
+async fn a_substance_run_settles_and_writes_its_legacy_row() {
+    use trace_commons_server::credit_quality::CREDIT_QUALITY_VERSION_SUBSTANCE;
+    use trace_commons_server::versioned_pipeline_substance::substance_candidate_package;
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let package = substance_candidate_package().expect("build the substance package");
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
+    .with_novelty_utility_checks(issuing_checks())
+    .build()
+    .expect("build a pipeline service over the substance package");
+    let tenant = format!("substance-row-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let score = score_outcome_of(&service, &tenant, run.run_id).await;
+    let evidence: ScoreEvidence = serde_json::from_value(score.evidence.clone()).unwrap();
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.source, "pipeline_settle");
+    assert_eq!(evidence.perplexity_micros, None, "{evidence:?}");
+    assert_eq!(evidence.tail_fraction_micros, None, "{evidence:?}");
+    assert_eq!(row.perplexity_micros, None, "no perplexity was measured");
+    assert_eq!(
+        row.tail_fraction_micros, None,
+        "no tail fraction was measured"
+    );
+    assert_eq!(
+        Some(row.perplexity_passed),
+        evidence.substance_passed,
+        "the legacy pass flag is the substance gate"
+    );
+    assert_eq!(
+        row.credit_quality_calibration_version,
+        Some(CREDIT_QUALITY_VERSION_SUBSTANCE)
+    );
+    assert_eq!(row.credit_quality_calibration_version, Some(4));
 }

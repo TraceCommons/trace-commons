@@ -1356,11 +1356,11 @@ fn has_text(content: Option<&String>) -> bool {
 /// measure could be satisfied by never recording an argument at all. Every
 /// emitter in the tree now puts arguments in the payload under one of
 /// [`REPLAY_ARGUMENT_KEYS`], and none of them puts arguments in `content`.
-fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
+pub fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
     payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
 }
 
-fn event_carries_result(event: &TraceContributionEvent) -> bool {
+pub fn event_carries_result(event: &TraceContributionEvent) -> bool {
     has_text(event.redacted_content.as_ref())
         || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
 }
@@ -1373,7 +1373,17 @@ fn event_carries_content(event: &TraceContributionEvent) -> bool {
         || payload_carries_any(&event.structured_payload, REPLAY_RESULT_KEYS)
 }
 
-fn replay_call_id(event: &TraceContributionEvent) -> Option<&str> {
+/// The first populated value under [`REPLAY_ARGUMENT_KEYS`] in the event's
+/// payload: the arguments a tool call was issued with.
+pub fn tool_call_arguments(event: &TraceContributionEvent) -> Option<&Value> {
+    let object = event.structured_payload.as_object()?;
+    REPLAY_ARGUMENT_KEYS
+        .iter()
+        .filter_map(|key| object.get(*key))
+        .find(|value| replay_value_is_populated(value))
+}
+
+pub fn replay_call_id(event: &TraceContributionEvent) -> Option<&str> {
     event.tool_call_id.as_deref().or_else(|| {
         event
             .structured_payload

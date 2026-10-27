@@ -1343,8 +1343,11 @@ not re-qualify. To shorten the window, raise the batch for the deploy.
 A tenant an operator activated by hand, or whose row an operator changed
 since (for example a `contain`), is not re-qualified by the loop. Qualify it
 through `POST /v1/admin/pipeline/qualifications` as before. A tenant whose
-active bundle is another bundle (after a rollback) is skipped with
-`pipeline_default_routing_requalify_bundle_differs`.
+active bundle is another bundle (after a rollback, or after a switch of the
+default package) is skipped with
+`pipeline_default_routing_requalify_bundle_differs`. After a switch of the
+default package, activate each such tenant on the new bundle by hand (see
+"Switch the default package to substance").
 
 ### Disarm
 
@@ -1812,9 +1815,13 @@ the embedder model is loaded once. The pipeline gets:
 
 The assembly never enables NEAR payout, whatever
 `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` says: a pipeline tenant cannot be paid out
-by this runtime. It binds the compatibility bundle with `main`'s gate
-configuration. A start whose descriptors would name values other than the ones
-the gate was built with refuses (`pipeline_scorer_descriptor_mismatch`,
+by this runtime. It binds the default package that
+`TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` selects, with `main`'s gate
+configuration: the compatibility bundle when the variable is unset or
+`compatibility`, and the calibrated substance bundle when it is `substance`
+(see "Switch the default package to substance" below). A start whose
+descriptors would name values other than the ones the gate was built with
+refuses (`pipeline_scorer_descriptor_mismatch`,
 `pipeline_embedder_descriptor_mismatch`).
 
 ### `pipeline_production_adapters`
@@ -1841,6 +1848,75 @@ there. A boot refused at any of those writes nothing:
   counts only. `runtime_identity_digest` is the value activation compares.
 
 Unset the three variables after that boot.
+
+## Switch the default package to substance
+
+The deployment selects its default package with four variables in its env
+file. A tenant runs its active bundle, so a new default package does not
+move a tenant that is already active on the compatibility bundle. Each such
+tenant moves with its own `activate`. Do these steps in this order.
+
+1. Calibrate. Run `pipeline.py evaluate` and keep its values file
+   ([substance-calibration.md](substance-calibration.md)). The floor is not
+   calibrated: the spec sets it at 120,000 (section 6), and the package
+   holds that value.
+2. Set the four variables in the deployment env file, from that values file.
+   Keep the gate variables as they are.
+
+   | Variable | Value |
+   |---|---|
+   | `TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` | `substance` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_SUB_CEIL_MICROS` | `sub_ceil_micros` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_CORPUS_PIN_DIGEST` | `calibration.corpus_pin_digest` |
+   | `TRACE_COMMONS_PIPELINE_SUBSTANCE_REPORT_DIGEST` | `calibration.report_digest` |
+
+   With `substance`, a missing or unparsable value refuses the start
+   (`pipeline_substance_calibration_missing`). With no selection or with
+   `compatibility`, a set calibration variable refuses the start
+   (`pipeline_substance_calibration_unexpected`).
+3. Deploy. As for every deploy, the new revision closes the intake of each
+   routed tenant until its active bundle has a qualification on that revision
+   (#1249; "After a deploy: the qualification is read again for each new
+   upload" above). Uploads of those tenants answer `503`
+   `pipeline_bundle_not_qualified` until step 6 reaches them.
+4. Promote the substance package. Run `pipeline.py package --bundle
+   production --env-file ENV` with the deployment env file: it builds the
+   substance package from the four variables. Then run the `promote` cycle on
+   that package, up to `assemble`
+   ([pipeline-qualification.md](pipeline-qualification.md#the-production-run-pipelinepy-promote)).
+5. Install the new default-routing set: the `assemble` output, swapped into
+   the results directory as in "After a deploy" under "Default routing". The
+   loop arms on the substance package. A tenant with no routing row is
+   activated on it.
+6. Activate the substance bundle for each tenant that is still on the
+   compatibility bundle: `POST /v1/admin/pipeline/qualifications` with the
+   signed substance package, then `POST /v1/admin/pipeline/activate` with its
+   `bundle_id` and the assembled results. The loop does not do this step: it
+   re-qualifies only a tenant whose active bundle is the armed bundle, and
+   skips the others with `pipeline_default_routing_requalify_bundle_differs`.
+
+Roll back one tenant at a time. The compatibility bundle stays runnable while
+the gate variables stay in the env file.
+
+- For a tenant that step 6 moved from the compatibility bundle to the
+  substance bundle, send `POST /v1/admin/pipeline/rollback` with the
+  compatibility `bundle_id`. Use `rollback`, not `activate`: `rollback` reads
+  no readiness, but `activate` is refused for every bundle while a run of the
+  tenant is in `retry` ("The order of checks" above, and `rollback` under
+  "Activate, roll back, contain, deactivate").
+- For a tenant that the loop activated first on the substance bundle, send
+  `POST /v1/admin/pipeline/activate` with the compatibility `bundle_id`. That
+  tenant has no earlier bundle, so `rollback` answers `409`
+  `earlier_qualified_bundle_required`.
+
+Both routes need signed results for the compatibility package on the running
+revision, so a rollback needs a full compatibility promotion on the new
+revision. Its `pipeline_production_adapters` result comes from one boot of the
+new revision whose env file has none of the four substance variables: that
+boot's default package is the compatibility package. A boot with
+`TRACE_COMMONS_PIPELINE_PRODUCTION_SCORE` unset and a calibration variable
+still set refuses to start (`pipeline_substance_calibration_unexpected`). If
+the rollback must be ready, do this compatibility promotion before step 6.
 
 ## Fail-closed dependency qualification
 
@@ -1943,7 +2019,12 @@ minimal reference (`score_runs_under_runtime_controls`):
   `nearest_neighbor_hash`. A registered policy whose evidence lacks one of
   them fails its run at Settle under
   `pipeline_gate_decision_evidence_incomplete` before any leg pays. The server
-  never fills one in.
+  never fills one in. An evidence that carries the substance fields is the
+  exception: substance measures no perplexity, so the evidence must carry
+  neither `perplexity_micros` nor `tail_fraction_micros`, and the row stores
+  NULL in both (V139). An evidence that carries either fails its run at
+  Settle under `pipeline_gate_decision_evidence_inconsistent` before any leg
+  pays.
 
 A registered policy can also record two more things on its Score output:
 
@@ -2821,8 +2902,9 @@ on it fails as above, and its revision is removed (N-7).
 
 A run with a paid leg (any `complete` leg: each carries a receipt) whose
 Settle commit is refused for good waits in
-**`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict` or
-`pipeline_gate_decision_evidence_incomplete`, and the run keeps that label.
+**`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict`,
+`pipeline_gate_decision_evidence_incomplete` or
+`pipeline_gate_decision_evidence_inconsistent`, and the run keeps that label.
 It is not failed, so its paid revision stays in the index. No claim selects
 it, and the contributor sees it as pending.
 
@@ -3577,6 +3659,9 @@ Settle checks a compatibility run's Score evidence before the index write or
 any settlement leg. Evidence that lacks a field the row needs fails the run
 terminally with `pipeline_gate_decision_evidence_incomplete`, with nothing
 paid and no row written; it is deterministic, so the run is not retried. A
+substance run's evidence carries no perplexity and no tail fraction, and its
+row stores NULL in both (V139); substance evidence that carries either fails
+the run the same way, with `pipeline_gate_decision_evidence_inconsistent`. A
 value too large for its column (the chunk aggregate saturates a perplexity
 on purpose) is stored saturated, as `main`'s gate writer stores it. If the
 submission already has a pipeline row naming another run, the commit fails

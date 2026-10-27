@@ -806,6 +806,7 @@ struct Boot {
     main_gate: trace_commons_server::versioned_pipeline_compat::MainGateConfig,
     components: Option<Arc<PipelineGateComponents>>,
     score_policies: ScorePolicyRegistry,
+    novelty_utility_checks: PipelineNoveltyUtilityChecks,
 }
 
 impl Boot {
@@ -822,6 +823,7 @@ impl Boot {
             main_gate: MAIN_GATE,
             components: Some(test_components(classifying_privacy())),
             score_policies: ScorePolicyRegistry::new(),
+            novelty_utility_checks: issuer_checks(),
         }
     }
 
@@ -854,7 +856,7 @@ impl Boot {
             None,
             StdDuration::from_secs(60),
             self.near_payout_controls,
-            &issuer_checks(),
+            &self.novelty_utility_checks,
             self.main_gate,
             self.components,
             self.score_policies,
@@ -1113,6 +1115,280 @@ async fn production_assembler_refuses_what_it_must() {
             .await
         ),
         "pipeline_production_components_missing"
+    );
+}
+
+/// The calibrated value of the substance default package in these tests.
+fn substance_values()
+-> trace_commons_server::versioned_pipeline_substance::CalibratedSubstanceValues {
+    use trace_commons_server::versioned_pipeline_substance::{
+        CalibratedSubstanceValues, SubstanceCalibration,
+    };
+    CalibratedSubstanceValues {
+        sub_ceil_micros: 600_000,
+        calibration: SubstanceCalibration {
+            corpus_pin_digest: format!("sha256:{}", "a".repeat(64)),
+            report_digest: format!("sha256:{}", "b".repeat(64)),
+            sub_ceil_percentile: 90,
+        },
+    }
+}
+
+/// The production assembler with the Score selection given instead of read
+/// from the environment, and, with `main_gate`, the context's gate
+/// configuration replaced first (an assembly that binds values other than
+/// `main`'s).
+struct SelectedScoreAssembler {
+    selection: ProductionScoreSelection,
+    main_gate: Option<trace_commons_server::versioned_pipeline_compat::MainGateConfig>,
+}
+
+impl SelectedScoreAssembler {
+    fn substance() -> Self {
+        Self {
+            selection: ProductionScoreSelection::Substance(substance_values()),
+            main_gate: None,
+        }
+    }
+}
+
+impl IngestPipelineRuntimeAssembler for SelectedScoreAssembler {
+    fn assemble(
+        &self,
+        mut context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        if let Some(main_gate) = self.main_gate {
+            context.main_gate = main_gate;
+        }
+        super::assemble_production_runtime(context, self.selection.clone())
+    }
+
+    fn needs_gate_components(&self) -> bool {
+        true
+    }
+}
+
+/// The startup checks accept a production service whose default package is
+/// the calibrated substance package under the rule they apply to the
+/// compatibility package: over doubles, a production-required boot is
+/// refused only for the scorer and embedder adapters, the test opt-in
+/// starts it, the package holds `main`'s gate values, its configuration
+/// is qualifiable, and it is a production package. A substance default
+/// package whose gate values are not `main`'s, or a processing runtime
+/// with no credit issuer, is refused with the compatibility label.
+#[tokio::test]
+async fn the_runtime_accepts_a_substance_default_package() {
+    let refusal =
+        |result: anyhow::Result<Arc<PipelineService>>| result.err().expect("refused").to_string();
+    assert_eq!(
+        refusal(
+            Boot::production()
+                .assemble(&SelectedScoreAssembler::substance())
+                .await
+        ),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+    let service = Boot::test_opt_in()
+        .assemble(&SelectedScoreAssembler::substance())
+        .await
+        .expect("the substance assembly over doubles starts with the test opt-in");
+
+    let components = test_components(classifying_privacy());
+    let parts = components.parts();
+    let selection = ProductionScoreSelection::Substance(substance_values());
+    let expected = production_package(
+        &parts.scorer_descriptor,
+        &parts.embedder_descriptor,
+        &MAIN_GATE,
+        &selection,
+    )
+    .unwrap();
+    assert_eq!(service.default_package(), &expected);
+    assert_eq!(
+        service.default_package().manifest.score.implementation_id,
+        trace_commons_server::versioned_pipeline_substance::SUBSTANCE_SCORE_IMPLEMENTATION
+    );
+    assert!(service.binds_compatibility_bundle());
+    assert!(service.compatibility_config().is_none());
+    assert!(service.default_package_matches_main_gate(&MAIN_GATE));
+    assert!(!service.payout_enabled());
+    pipeline_runtime::validate_pipeline_privacy_filter_requirement(true, &service).unwrap();
+
+    // `pipeline_runtime_is_production_qualified`: the same two blockers as
+    // the compatibility package over these doubles, so the configuration
+    // term passes.
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+    let qualification = service
+        .bundle_qualification(service.default_package())
+        .unwrap();
+    assert!(qualification.configuration_qualifiable);
+    assert_eq!(
+        qualification.blockers(),
+        vec![
+            "runtime_scorer_not_production",
+            "runtime_embedder_not_production"
+        ],
+        "{qualification:?}"
+    );
+    let compatibility = Boot::test_opt_in()
+        .assemble(&SelectedScoreAssembler {
+            selection: ProductionScoreSelection::Compatibility,
+            main_gate: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        compatibility
+            .bundle_qualification(compatibility.default_package())
+            .unwrap()
+            .blockers(),
+        qualification.blockers()
+    );
+    trace_commons_server::versioned_pipeline_qualification::validate_production_package(
+        service.default_package(),
+    )
+    .expect("the calibrated substance package is a production package");
+
+    // The main-gate check: novelty values other than `main`'s.
+    assert_eq!(
+        refusal(
+            Boot::test_opt_in()
+                .assemble(&SelectedScoreAssembler {
+                    main_gate: Some(
+                        trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+                            novelty_floor_micros: Some(400_000),
+                            ..MAIN_GATE
+                        }
+                    ),
+                    ..SelectedScoreAssembler::substance()
+                })
+                .await
+        ),
+        "pipeline_runtime_main_gate_config_mismatch"
+    );
+    // The issuer check: the substance package awards the same delta.
+    assert_eq!(
+        refusal(
+            Boot {
+                novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
+                ..Boot::test_opt_in()
+            }
+            .assemble(&SelectedScoreAssembler::substance())
+            .await
+        ),
+        "pipeline_credit_issuer_principal_missing"
+    );
+}
+
+/// `check_runnable_package` (startup's tenant bundles, and activation)
+/// refuses a substance package whose gate values (novelty floor,
+/// index-insert threshold, top-k, chunk values, award) are not the
+/// service's gate, with the label it gives a compatibility package that
+/// does not hold that gate. A
+/// gate with no novelty floor matches no substance package, and the
+/// perplexity and tail floors, which a substance package does not hold, are
+/// not compared.
+#[tokio::test]
+async fn a_substance_package_with_other_novelty_values_is_not_runnable() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+
+    let service = Boot::test_opt_in()
+        .assemble(&SelectedScoreAssembler::substance())
+        .await
+        .expect("the substance assembly over doubles starts with the test opt-in");
+    let components = test_components(classifying_privacy());
+    let parts = components.parts();
+    let substance = ProductionScoreSelection::Substance(substance_values());
+    let package_under = |main_gate: &MainGateConfig, selection: &ProductionScoreSelection| {
+        production_package(
+            &parts.scorer_descriptor,
+            &parts.embedder_descriptor,
+            main_gate,
+            selection,
+        )
+        .unwrap()
+    };
+    let own = package_under(&MAIN_GATE, &substance);
+    assert_eq!(
+        service.check_runnable_package(&own, &MAIN_GATE, false),
+        Ok(())
+    );
+
+    for (other, what) in [
+        (
+            MainGateConfig {
+                novelty_floor_micros: Some(400_000),
+                ..MAIN_GATE
+            },
+            "another novelty floor",
+        ),
+        (
+            MainGateConfig {
+                embed_insert_novelty_micros: 60_000,
+                ..MAIN_GATE
+            },
+            "another index-insert threshold",
+        ),
+        (
+            MainGateConfig {
+                top_k: 8,
+                ..MAIN_GATE
+            },
+            "another top-k",
+        ),
+        (
+            MainGateConfig {
+                chunk_cap: 8,
+                ..MAIN_GATE
+            },
+            "another chunk cap",
+        ),
+        (
+            MainGateConfig {
+                novelty_utility_microcredits: 2_500_000,
+                ..MAIN_GATE
+            },
+            "another award",
+        ),
+    ] {
+        assert_eq!(
+            service.check_runnable_package(&package_under(&other, &substance), &MAIN_GATE, false),
+            Err("pipeline_runtime_main_gate_config_mismatch"),
+            "{what}"
+        );
+        assert_eq!(
+            service.check_runnable_package(
+                &package_under(&other, &ProductionScoreSelection::Compatibility),
+                &MAIN_GATE,
+                false
+            ),
+            Err("pipeline_runtime_main_gate_config_mismatch"),
+            "{what}: the compatibility package's label"
+        );
+    }
+
+    assert_eq!(
+        service.check_runnable_package(
+            &own,
+            &MainGateConfig {
+                novelty_floor_micros: None,
+                ..MAIN_GATE
+            },
+            false
+        ),
+        Err("pipeline_runtime_main_gate_config_mismatch")
+    );
+    assert_eq!(
+        service.check_runnable_package(
+            &own,
+            &MainGateConfig {
+                perplexity_floor_micros: Some(1),
+                tail_fraction_floor_micros: Some(1),
+                ..MAIN_GATE
+            },
+            false
+        ),
+        Ok(())
     );
 }
 
