@@ -415,12 +415,19 @@ struct PrivateAIInspectorView: View {
         // otherwise, always beside the core's sentence.
         // The state right after the title (owner, 2026-10-20), not at the
         // row's far end.
-        return GlassTabHeading(copy.inspectorStatus) {
-            GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-                .multilineTextAlignment(.leading)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            GlassTabHeading(copy.inspectorStatus) {
+                GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            // What the destination is for, in the core's words.
+            Text(copy.subtitle)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the

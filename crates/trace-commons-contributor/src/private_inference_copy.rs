@@ -107,8 +107,7 @@
 pub const DESTINATION: &str = "Private AI";
 
 /// The one line under the destination's title saying what it is for.
-pub const SUBTITLE: &str =
-    "Send your tools' AI calls through this app to see them and pick who answers.";
+pub const SUBTITLE: &str = "Add a privacy layer to AI models you are already using.";
 
 /// The offer’s heading names the intended provider. The body explains that
 /// existing provider connections are not changed by enabling the service.

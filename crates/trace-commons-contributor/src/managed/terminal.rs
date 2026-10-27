@@ -565,6 +565,10 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
     }
 }
 
+/// The open-file limit a managed session's shell asks for: macOS's usual
+/// per-process ceiling (`kern.maxfilesperproc`'s floor on current releases).
+const OPEN_FILES_LIMIT: u32 = 10240;
+
 pub fn shell_command(
     helper: &Path,
     config: &Path,
@@ -581,8 +585,11 @@ pub fn shell_command(
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let helper = helper.to_str().ok_or(ManagedError::InvalidRequest)?;
     let config = config.to_str().ok_or(ManagedError::InvalidRequest)?;
+    // Terminal.app starts shells at launchd's soft open-file limit (256),
+    // which Claude Code outgrows at startup ("low max file descriptors").
+    // Raise it for this shell only; a refusal leaves the limit as it was.
     Ok(format!(
-        "{} --config-dir {} redeem-launch --session-id {} --ticket {}",
+        "ulimit -n {OPEN_FILES_LIMIT} 2>/dev/null; {} --config-dir {} redeem-launch --session-id {} --ticket {}",
         quote(helper),
         quote(config),
         session,
