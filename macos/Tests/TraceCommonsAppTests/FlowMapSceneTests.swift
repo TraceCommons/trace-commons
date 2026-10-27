@@ -683,6 +683,45 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
+    /// The library's and this computer's cards sit beside the station and
+    /// the pad (or the orb and the laptop), never over them (owner,
+    /// 2026-10-26): on the right in a field wide enough, else on the left,
+    /// and always inside the field.
+    func test_theLibraryAndThisComputerCardsSitBesideTheirDrawings() {
+        let card = GlassTokens.Size.nodeCardWidth
+        let library = FlowMapScene.Node(id: "library", kind: .library(active: true), at: .zero, radius: 22, label: "", detail: "")
+        let hub = FlowMapScene.Node(id: "hub", kind: .hub, at: .zero, radius: 16, label: "", detail: "")
+        // Drawn far wider than their discs on the Traces map, as discs
+        // elsewhere.
+        XCTAssertEqual(FlowMapView.drawnHalfWidth(library, traces: true, style: .launch), FlowMapView.stationSize.width / 2)
+        XCTAssertEqual(FlowMapView.drawnHalfWidth(library, traces: true, style: .standard), MapTransferDrawing.orbFrame / 2)
+        XCTAssertEqual(FlowMapView.drawnHalfWidth(hub, traces: true, style: .launch), FlowMapScene.padHalfWidth)
+        XCTAssertEqual(FlowMapView.drawnHalfWidth(library, traces: false, style: .launch), 22)
+
+        for (pane, side) in [(CGSize(width: 600, height: 800), "left"), (CGSize(width: 1500, height: 800), "right")] {
+            let space = FlowMapScene.space(for: pane)
+            let fit = FlowMapGeometry(size: pane, zoom: 1, space: space)
+            for style in [TracesMapStyle.launch, .standard] {
+                for (node, point) in [(library, FlowMapScene.library(in: space)), (hub, FlowMapScene.hub(in: space))] {
+                    let centre = fit.point(point).x
+                    let half = FlowMapView.drawnHalfWidth(node, traces: true, style: style) * fit.scale
+                    let x = FlowMapView.cardX(centre: centre, halfWidth: half, card: card, field: pane.width)
+                    let spans = (x - card / 2) ... (x + card / 2)
+                    let what = "\(node.id), \(style), \(pane.width) wide"
+                    XCTAssertFalse(spans.overlaps((centre - half) ... (centre + half)), what)
+                    XCTAssertGreaterThanOrEqual(spans.lowerBound, FlowMapView.cardMargin, what)
+                    XCTAssertLessThanOrEqual(spans.upperBound, pane.width - FlowMapView.cardMargin, what)
+                    XCTAssertEqual(x > centre ? "right" : "left", side, what)
+                }
+            }
+        }
+
+        // Neither side holds it whole: the roomier side, inside the field.
+        let x = FlowMapView.cardX(centre: 320, halfWidth: 60, card: card, field: 440)
+        XCTAssertLessThan(x, 320)
+        XCTAssertEqual(x - card / 2, FlowMapView.cardMargin)
+    }
+
     /// The Inference tab says what window its counts cover, from the hours
     /// the core reported, in the core's words; a dash when none was
     /// reported, never a default window.

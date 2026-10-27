@@ -4,7 +4,7 @@ import TCShellCore
 
 /// The flow map (R8 of #1173): a `FlowMapScene` drawn in a `Canvas`, with
 /// moving dashes on the arcs that carry something (none under Reduce
-/// Motion), and a node card on hover or click.
+/// Motion), and a node card on hover or keyboard focus.
 ///
 /// The drawing is a picture; the nodes are not. Each node is also an
 /// accessible button with its name and its card's detail as the value, so
@@ -40,7 +40,6 @@ struct FlowMapView: View {
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
-    @State private var pinned: String?
     /// Where the pointer is on the map, for the tool group's own hit tests
     /// (owner, 2026-10-19: the pile opens only over its card).
     @State private var pointer: CGPoint?
@@ -146,8 +145,6 @@ struct FlowMapView: View {
                 case .ended: pointer = nil
                 }
             }
-            // A click on the field, not a node, lets go of the pinned card.
-            .onTapGesture { pinned = nil }
             // The map's foot, fixed whatever its zoom or focus (owner,
             // 2026-10-12): the trace's card above, then the legend and the
             // zoom on one row. The legend wraps onto a second line before it
@@ -191,7 +188,6 @@ struct FlowMapView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityName)
         .onChange(of: scene) { _, scene in
-            if let pinned, !scene.nodes.contains(where: { $0.id == pinned }) { self.pinned = nil }
             if let focused, !scene.nodes.contains(where: { $0.id == focused }) { self.focused = nil }
         }
     }
@@ -489,9 +485,10 @@ struct FlowMapView: View {
     }
 
     /// The node whose ring and card are drawn: the hovered one, then the
-    /// one with keyboard focus, then the pinned one.
+    /// one with keyboard focus. A click keeps no card open (owner,
+    /// 2026-10-26).
     private var selection: String? {
-        hovered ?? focused ?? pinned
+        hovered ?? focused
     }
 
     /// The tool's logo in its tint, or its initials when it has none.
@@ -569,7 +566,6 @@ struct FlowMapView: View {
     private func target(_ node: FlowMapScene.Node, fit: FlowMapGeometry) -> some View {
         let side = max(24, (node.radius * 2 + 8) * fit.scale)
         return Button {
-            pinned = pinned == node.id ? nil : node.id
             if let onSelectFolder, let projectID = Self.folderID(node.id) { onSelectFolder(projectID) }
         } label: {
             Circle().fill(Color.clear).frame(width: side, height: side).contentShape(Circle())
@@ -586,7 +582,6 @@ struct FlowMapView: View {
         .allowsHitTesting(scene.stack == nil || !node.id.hasPrefix("tool:"))
         .accessibilityLabel(node.label)
         .accessibilityValue(node.detail)
-        .accessibilityAddTraits(pinned == node.id ? .isSelected : [])
         .position(fit.point(node.at))
     }
 
@@ -630,8 +625,8 @@ struct FlowMapView: View {
     private func card(_ node: FlowMapScene.Node, fit: FlowMapGeometry, in size: CGSize) -> some View {
         let centre = fit.point(node.at)
         let width = GlassTokens.Size.nodeCardWidth
-        // Beside the node, kept inside the field.
-        let x = min(max(width / 2 + 8, centre.x + node.radius * fit.scale + 12 + width / 2), size.width - width / 2 - 8)
+        let drawn = Self.drawnHalfWidth(node, traces: scene.stack != nil, style: mapStyle) * fit.scale
+        let x = Self.cardX(centre: centre.x, halfWidth: drawn, card: width, field: size.width)
         let y = min(max(48, centre.y - 24), size.height - 48)
         return GlassFloatingGroup {
             GlassNodeCard(node.cardTitle, detail: node.detail)
@@ -639,6 +634,38 @@ struct FlowMapView: View {
         .position(x: x, y: y)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    /// Half the width the map draws a node at, in design units: on the
+    /// Traces map the station or the orb for the library and the pad or
+    /// the laptop for this computer, far wider than their discs; elsewhere
+    /// the disc.
+    static func drawnHalfWidth(_ node: FlowMapScene.Node, traces: Bool, style: TracesMapStyle) -> CGFloat {
+        guard traces else { return node.radius }
+        switch node.kind {
+        case .library: return style == .launch ? stationSize.width / 2 : MapTransferDrawing.orbFrame / 2
+        case .hub: return FlowMapScene.padHalfWidth
+        default: return node.radius
+        }
+    }
+
+    /// The gap between a node's drawing and its card, and the card's least
+    /// distance from the field's edge.
+    static let cardGap: CGFloat = 12
+    static let cardMargin: CGFloat = 8
+
+    /// Where a node's card is centred across the field: beside the node's
+    /// drawing, never over it (owner, 2026-10-26: the cards covered the
+    /// station and the pad). On the right where the card fits whole, else
+    /// on the left; where neither side holds it, the roomier side, kept
+    /// inside the field. `centre` and `halfWidth` are in the field's points.
+    static func cardX(centre: CGFloat, halfWidth: CGFloat, card: CGFloat, field: CGFloat) -> CGFloat {
+        let right = centre + halfWidth + cardGap + card / 2
+        if right + card / 2 + cardMargin <= field { return right }
+        let left = centre - halfWidth - cardGap - card / 2
+        if left - card / 2 >= cardMargin { return left }
+        let x = field - centre > centre ? right : left
+        return min(max(card / 2 + cardMargin, x), field - card / 2 - cardMargin)
     }
 
     // MARK: Zoom
