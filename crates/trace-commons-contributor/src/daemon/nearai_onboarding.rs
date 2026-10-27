@@ -985,6 +985,12 @@ fn persist_for(
             &fresh
         }
     };
+    // A NEAR AI enrollment renews through its NEAR AI login, never by
+    // device key, so no joined-by-code marker may stand beside it. A code
+    // sign-in writes its marker after this returns.
+    store
+        .remove_daemon_file(super::device_codes::JOINED_BY_CODE_FILE)
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
     super::commons_credentials::replace(
         &store,
         expected,

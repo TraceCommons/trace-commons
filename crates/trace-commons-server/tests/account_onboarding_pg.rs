@@ -1928,6 +1928,56 @@ async fn a_code_minted_on_a_laptop_links_a_server_that_alone_renews_by_key() {
         "a code is spent by its first redeem"
     );
 
+    // The server joined by code, so it cannot mint one in turn.
+    assert_eq!(
+        mint(
+            hash("code-relay"),
+            hash("n-relay"),
+            linked.device_key_id.clone(),
+            3
+        )
+        .await,
+        MintAccountDeviceCodeOutcome::MinterNotADevice,
+        "a code-joined device never mints"
+    );
+
+    // Unauthenticated paths never create a tenant: a redeem or renewal naming
+    // an unknown tenant finds nothing and writes no tenant row.
+    let unknown_tenant = format!("nearai-unknown-{}", uuid::Uuid::new_v4().simple());
+    assert_eq!(
+        db.redeem_account_device_code(
+            &unknown_tenant,
+            &code_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-unknown-tenant")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    assert_eq!(
+        db.renew_device_session(
+            &unknown_tenant,
+            &device_bytes(&server),
+            &hash("r-unknown"),
+            native_session(&session_hash("renew-unknown-tenant")),
+            Duration::zero(),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    let tenant_rows: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&unknown_tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(tenant_rows, 0, "no tenant row for an unknown tenant");
+
     // Renewal: the laptop joined by NEAR AI, not by code, and is refused.
     let renew = |key: [u8; 32], nonce: String, interval: Duration| {
         let tenant = tenant.clone();

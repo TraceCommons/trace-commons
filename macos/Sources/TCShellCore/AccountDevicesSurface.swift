@@ -142,6 +142,14 @@ public struct DeviceCode: Decodable, Equatable, Sendable {
         self.code = code
         self.expiresAt = expiresAt
     }
+
+    /// `expiresAt` read as a date, or nil when the server's text is not
+    /// RFC 3339 (the miss cap then bounds the wait on its own).
+    public var expiryDate: Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
+    }
 }
 
 /// `account_device_code_status`: `pending`, `redeemed` or `expired`.
@@ -196,6 +204,24 @@ public enum DeviceLinkPhase: Equatable, Sendable {
     public var code: DeviceCode? {
         if case .waiting(let code) = self { return code }
         return nil
+    }
+
+    /// How many status asks in a row may go unanswered before the shell
+    /// stops asking and says it failed.
+    public static let maxMissedAnswers = 5
+
+    /// The phase once the clock reads `now`: a code past its expiry is
+    /// expired whether or not the daemon answered.
+    public func checked(at now: Date, for codeId: String) -> DeviceLinkPhase {
+        guard let code, code.codeId == codeId, let expiry = code.expiryDate, now >= expiry
+        else { return self }
+        return .expired
+    }
+
+    /// The phase after `missed` status asks in a row went unanswered.
+    public func afterMissed(_ missed: Int, for codeId: String) -> DeviceLinkPhase {
+        guard let code, code.codeId == codeId, missed >= Self.maxMissedAnswers else { return self }
+        return .refused(.failed)
     }
 
     /// The phase after one status answer for the code on screen. An answer

@@ -50,8 +50,11 @@ use crate::config::{ConfigStore, ContributorConfig};
 use crate::identity::DeviceIdentity;
 
 /// The marker a device that joined by code keeps in its state directory
-/// (module doc). Its body is not read.
-pub const JOINED_BY_CODE_FILE: &str = "joined-by-device-code";
+/// (module doc). An enrollment file, so sign-out and unenroll remove it.
+pub use crate::config::JOINED_BY_CODE_FILE;
+
+/// Refused: this device joined by code, and such a device never mints one.
+pub const ERR_JOINED_BY_CODE: &str = "device_code_joined_by_code";
 
 /// The account routes this module relays.
 const DEVICES_PATH: &str = "/v1/account/devices";
@@ -227,7 +230,7 @@ pub(super) async fn handle_list(shared: &DaemonShared, req: &Request) -> Respons
         Ok(call) => call,
         Err(response) => return *response,
     };
-    let devices = match (call.status, call.body) {
+    let mut devices = match (call.status, call.body) {
         (Some(StatusCode::OK), Some(body)) => match body.get("devices") {
             Some(Value::Array(devices)) => devices.clone(),
             _ => return unavailable(req, "account_devices_unavailable"),
@@ -236,7 +239,29 @@ pub(super) async fn handle_list(shared: &DaemonShared, req: &Request) -> Respons
             return unavailable(req, status_label(status, "account_devices_unavailable"));
         }
     };
+    let own = shared
+        .store
+        .load_config()
+        .ok()
+        .flatten()
+        .map(|cfg| cfg.device_key_id);
+    mark_this_device(&mut devices, own.as_deref());
     finish(req, json!({ "devices": devices }), call.persisted)
+}
+
+/// Flag this device in the commons's list by its key id as well as by the
+/// session the commons matched: a session issued before the commons
+/// recorded device keys matches nothing there, and this device must still
+/// show as this device so it is never offered an Unlink.
+fn mark_this_device(devices: &mut [Value], own_device_key_id: Option<&str>) {
+    let Some(own) = own_device_key_id else {
+        return;
+    };
+    for device in devices {
+        if device.get("device_key_id").and_then(Value::as_str) == Some(own) {
+            device["this_device"] = Value::Bool(true);
+        }
+    }
 }
 
 /// `account_device_rename {device_key_id, label?}`: a missing or blank
@@ -284,7 +309,20 @@ pub(super) async fn handle_revoke(shared: &DaemonShared, req: &Request) -> Respo
     };
     match call.status {
         Some(status) if status.is_success() => {
-            finish(req, json!({ "revoked": true }), call.persisted)
+            // Sessions from before the commons recorded which device made
+            // them cannot be ended by a device revoke; the count is relayed
+            // so a shell can offer to sign out everywhere.
+            let unattributed = call
+                .body
+                .as_ref()
+                .and_then(|body| body.get("unattributed_sessions"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            finish(
+                req,
+                json!({ "revoked": true, "unattributed_sessions": unattributed }),
+                call.persisted,
+            )
         }
         status => unavailable(req, status_label(status, "account_device_not_found")),
     }
@@ -297,6 +335,11 @@ pub(super) async fn handle_mint(shared: &DaemonShared, req: &Request) -> Respons
         Ok(label) => label,
         Err(response) => return *response,
     };
+    // A device that joined by code never mints one; the commons refuses it
+    // too. Refused here first so the person is told why.
+    if joined_by_code(&shared.store) {
+        return unavailable(req, ERR_JOINED_BY_CODE);
+    }
     let store = shared.store.clone();
     let Ok(Ok(Some(identity))) =
         tokio::task::spawn_blocking(move || DeviceIdentity::load(&store)).await
@@ -581,6 +624,40 @@ mod tests {
             status_label(Some(StatusCode::INTERNAL_SERVER_ERROR), "x"),
             "account_devices_unavailable"
         );
+    }
+
+    #[test]
+    fn this_device_is_flagged_by_its_key_even_when_its_session_is_unattributed() {
+        let mut devices = vec![
+            json!({"device_key_id": "sha256:aa", "this_device": false}),
+            json!({"device_key_id": "sha256:bb", "this_device": false}),
+        ];
+        mark_this_device(&mut devices, Some("sha256:bb"));
+        assert_eq!(devices[0]["this_device"], json!(false));
+        assert_eq!(devices[1]["this_device"], json!(true));
+        mark_this_device(&mut devices, None);
+        assert_eq!(devices[1]["this_device"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn a_device_that_joined_by_code_is_refused_a_mint_before_any_request() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        shared
+            .store
+            .write_daemon_file(JOINED_BY_CODE_FILE, b"1\n")
+            .unwrap();
+        let req = Request {
+            id: 7,
+            method: "account_device_code_mint".into(),
+            params: serde_json::json!({}),
+        };
+        let response = handle_mint(&shared, &req).await;
+        assert_eq!(
+            response.error.map(|error| error.message).as_deref(),
+            Some(ERR_JOINED_BY_CODE)
+        );
+        drop(dir);
     }
 
     #[test]

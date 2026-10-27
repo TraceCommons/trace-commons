@@ -14,7 +14,9 @@
 
 use super::account_onboarding::attach_near_ai_login_device;
 use super::*;
-use crate::account_onboarding::{DEVICE_KEY_REGISTERED_ELSEWHERE, ProvisionedNearAccount};
+use crate::account_onboarding::{
+    DEVICE_KEY_REGISTERED_ELSEWHERE, DEVICE_KEY_REVOKED, ProvisionedNearAccount,
+};
 use crate::db::{
     AccountDeviceCodeStatus, DeviceSignInOutcome, MintAccountDeviceCodeOutcome,
     NewAccountDeviceCode, NewSession,
@@ -23,7 +25,7 @@ use crate::near_ai_signup_policy::NearAiSignupPolicyTemplate;
 
 /// The refusals `attach_near_ai_login_device` names when the key cannot be
 /// linked to this account: held by another tenant, its principal linked to
-/// another account, or a revoked or differently recorded row in this tenant.
+/// another account, revoked, or differently recorded in this tenant.
 fn is_device_key_conflict(error: &DatabaseError) -> bool {
     matches!(
         error,
@@ -31,6 +33,7 @@ fn is_device_key_conflict(error: &DatabaseError) -> bool {
             if label == DEVICE_KEY_REGISTERED_ELSEWHERE
                 || label == "near_provisioning_device_bound_to_other_account"
                 || label == "near_provisioning_refused"
+                || label == DEVICE_KEY_REVOKED
     )
 }
 
@@ -50,7 +53,13 @@ impl PgBackend {
                   WHERE n.tenant_id = trace_current_tenant_id()
                     AND n.account_id = $1
                     AND d.device_key_id = $2
-                    AND d.revoked_at IS NULL",
+                    AND d.revoked_at IS NULL
+                    -- A device that joined by code never mints one: a code
+                    -- links a key that renews by itself, so a server that
+                    -- could mint could hand that on past its own revoke.
+                    AND NOT EXISTS (SELECT 1 FROM trace_account_device_codes c
+                                     WHERE c.tenant_id = n.tenant_id
+                                       AND c.redeemed_device_key_id = d.device_key_id)",
                 &[&code.account_id, &code.minter_device_key_id],
             )
             .await?;
@@ -138,7 +147,9 @@ impl PgBackend {
         session: NewSession<'_>,
         grant_template: Option<&NearAiSignupPolicyTemplate>,
     ) -> Result<DeviceSignInOutcome, DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
+        // No `ensure_trace_tenant`: this path is unauthenticated and the
+        // tenant is the caller's own text, so creating it here would let
+        // anyone commit tenant rows. A tenant with no code row finds nothing.
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // The row lock makes a second redeem of the same code wait, then find
@@ -246,7 +257,8 @@ impl PgBackend {
             device_public_key,
         );
         let public_key = base64::engine::general_purpose::STANDARD.encode(device_public_key);
-        self.ensure_trace_tenant(tenant_id).await?;
+        // No `ensure_trace_tenant`, as in redeem: the tenant is the caller's
+        // own text, and a tenant with no linked device finds nothing.
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // Eligible: an active key, recorded with this public key, provisioned
@@ -272,7 +284,8 @@ impl PgBackend {
                     AND EXISTS (SELECT 1 FROM trace_account_device_codes c
                                  WHERE c.tenant_id = n.tenant_id
                                    AND c.account_id = n.account_id
-                                   AND c.redeemed_device_key_id = d.device_key_id)",
+                                   AND c.redeemed_device_key_id = d.device_key_id)
+                    FOR SHARE OF d",
                 &[&device, &public_key],
             )
             .await?

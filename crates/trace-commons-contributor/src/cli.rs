@@ -679,7 +679,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             code,
         } => {
             let env_code = std::env::var(crate::devices_cli::CODE_ENV).ok();
-            if let Some(code) = crate::devices_cli::code_from(code.as_deref(), env_code.as_deref())
+            // The variable is a fallback for the flag only: any other route
+            // named on the command line, or an exported invite, wins, so a
+            // spent code left in the environment never hijacks a later login.
+            let other_route = grant.is_some()
+                || invite.is_some()
+                || no_browser
+                || allowed_hosts.is_some()
+                || std::env::var_os("TRACE_COMMONS_INVITE").is_some();
+            if let Some(code) =
+                crate::devices_cli::code_from(code.as_deref(), env_code.as_deref(), other_route)
             {
                 return crate::devices_cli::login_with_code(
                     &store,

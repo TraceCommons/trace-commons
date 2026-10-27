@@ -30,6 +30,10 @@ pub(crate) const CODE_ENV: &str = "TRACE_COMMONS_DEVICE_CODE";
 pub(crate) const CODE_DONE: &str =
     "Linked. This machine is enrolled in the same account and renews its own sign-in.";
 
+/// The error `login --code` ends with when this machine enrolled but could
+/// not record that it renews its own sign-in.
+pub(crate) const CODE_NO_RENEWAL: &str = "Linked, but this machine couldn't record that it renews its own sign-in, so it will be signed out in about 12 hours. Check that the state directory is writable, then run `trace-commons-contributor logout` and link it again with a new code.";
+
 /// A daemon answer's result, or its refusal label as the error.
 fn result(response: Response) -> Result<Value> {
     match response {
@@ -65,6 +69,9 @@ fn refusal_line(label: &str) -> String {
         }
         "device_code_too_many" | "device_code_rate_limited" | "account_devices_rate_limited" => {
             "Too many codes at once. Wait a few minutes and try again.".into()
+        }
+        "device_code_joined_by_code" => {
+            "This machine joined by code, so it can't make codes. Make one on a computer signed in with NEAR AI.".into()
         }
         "device_code_minter_not_a_device" => {
             "This device can't make codes for the account. Sign in again on it first.".into()
@@ -242,10 +249,20 @@ pub(crate) fn login_with_code_with(
     if saved.is_err() {
         bail!(crate::near_ai_login::CONSENT_NOT_SAVED)
     }
+    // Without the marker the daemon renews nothing, and the session lapses
+    // after 12 hours. Enrolled, but not as asked: say so and fail, so a
+    // provisioning script does not carry on.
+    let renews = enrolled
+        .get("renews_by_device_key")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if json {
         writeln!(out, "{}", serde_json::to_string_pretty(&enrolled)?)?;
-    } else {
+    } else if renews {
         writeln!(out, "{CODE_DONE}")?;
+    }
+    if !renews {
+        bail!(CODE_NO_RENEWAL)
     }
     Ok(())
 }
@@ -272,9 +289,14 @@ pub(crate) fn login_with_code(
     )
 }
 
-/// The code for `login --code`: the flag, or else [`CODE_ENV`].
-pub(crate) fn code_from(flag: Option<&str>, env: Option<&str>) -> Option<String> {
-    flag.or(env)
+/// The code for `login --code`: the flag, or else [`CODE_ENV`] when no
+/// other sign-in route was asked for (`other_route`).
+pub(crate) fn code_from(
+    flag: Option<&str>,
+    env: Option<&str>,
+    other_route: bool,
+) -> Option<String> {
+    flag.or(env.filter(|_| !other_route))
         .map(str::trim)
         .filter(|code| !code.is_empty())
         .map(str::to_string)
@@ -436,7 +458,9 @@ mod tests {
         let mut script = Script::new(vec![
             (
                 "account_device_code_redeem",
-                ok(json!({"enrolled": true, "tenant_id": "nearai-x"})),
+                ok(
+                    json!({"enrolled": true, "tenant_id": "nearai-x", "renews_by_device_key": true}),
+                ),
             ),
             ("set_consent_scopes", ok(json!({"saved": true}))),
         ]);
@@ -458,6 +482,31 @@ mod tests {
             json!({"scopes": ["debugging_evaluation", "model_training"]})
         );
         assert!(String::from_utf8(out).unwrap().contains(CODE_DONE));
+    }
+
+    #[test]
+    fn a_link_that_cannot_renew_fails_instead_of_saying_it_renews() {
+        let mut script = Script::new(vec![
+            (
+                "account_device_code_redeem",
+                ok(json!({"enrolled": true, "renews_by_device_key": false})),
+            ),
+            ("set_consent_scopes", ok(json!({"saved": true}))),
+        ]);
+        let mut out = Vec::new();
+        let error = login_with_code_with(
+            &mut |m, p| script.answer(m, p),
+            "tcd1_dA.s",
+            &crate::near_ai_login::Consent {
+                scopes: vec![],
+                chosen: false,
+            },
+            false,
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), CODE_NO_RENEWAL);
+        assert!(!String::from_utf8(out).unwrap().contains(CODE_DONE));
     }
 
     #[test]
@@ -536,9 +585,22 @@ mod tests {
 
     #[test]
     fn the_code_comes_from_the_flag_then_the_environment() {
-        assert_eq!(code_from(Some(" a "), Some("b")).as_deref(), Some("a"));
-        assert_eq!(code_from(None, Some("b")).as_deref(), Some("b"));
-        assert_eq!(code_from(None, Some("  ")), None);
-        assert_eq!(code_from(None, None), None);
+        assert_eq!(
+            code_from(Some(" a "), Some("b"), false).as_deref(),
+            Some("a")
+        );
+        assert_eq!(code_from(None, Some("b"), false).as_deref(), Some("b"));
+        assert_eq!(code_from(None, Some("  "), false), None);
+        assert_eq!(code_from(None, None, false), None);
+    }
+
+    #[test]
+    fn another_route_wins_over_a_code_left_in_the_environment() {
+        assert_eq!(code_from(None, Some("tcd1_spent"), true), None);
+        assert_eq!(
+            code_from(Some("tcd1_flag"), Some("tcd1_spent"), true).as_deref(),
+            Some("tcd1_flag"),
+            "the flag itself conflicts with other routes at parse time"
+        );
     }
 }

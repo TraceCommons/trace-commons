@@ -2554,7 +2554,8 @@ pub enum MintAccountDeviceCodeOutcome {
     Minted {
         code_id: uuid::Uuid,
     },
-    /// The proving key is not an active device of the session's account.
+    /// The proving key is not an active device of the session's account, or
+    /// it joined the account by code (a code-joined device never mints).
     MinterNotADevice,
     TooManyOutstanding,
     /// The proof's nonce was already used.

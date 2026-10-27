@@ -71,6 +71,27 @@ final class AccountDevicesSurfaceTests: XCTestCase {
         XCTAssertEqual(DeviceLinkPhase.idle.after(DeviceCodeStatus(state: "expired"), for: "c1"), .idle)
     }
 
+    func testTheLinkPhaseEndsAtTheCodesExpiry() {
+        let code = DeviceCode(codeId: "c1", code: "tcd1_dA.s", expiresAt: "2026-10-27T00:10:00Z")
+        let waiting = DeviceLinkPhase.waiting(code)
+        let expiry = code.expiryDate!
+        XCTAssertEqual(waiting.checked(at: expiry.addingTimeInterval(-1), for: "c1"), waiting)
+        XCTAssertEqual(waiting.checked(at: expiry, for: "c1"), .expired)
+        XCTAssertEqual(waiting.checked(at: expiry, for: "c2"), waiting)
+        let fractional = DeviceCode(codeId: "c1", code: "x", expiresAt: "2026-10-27T00:10:00.250Z")
+        XCTAssertNotNil(fractional.expiryDate)
+        let unreadable = DeviceLinkPhase.waiting(DeviceCode(codeId: "c1", code: "x", expiresAt: "soon"))
+        XCTAssertEqual(unreadable.checked(at: .distantFuture, for: "c1"), unreadable)
+    }
+
+    func testTheLinkPhaseStopsAfterARunOfMissedAnswers() {
+        let waiting = DeviceLinkPhase.waiting(DeviceCode(codeId: "c1", code: "x", expiresAt: "soon"))
+        let cap = DeviceLinkPhase.maxMissedAnswers
+        XCTAssertEqual(waiting.afterMissed(cap - 1, for: "c1"), waiting)
+        XCTAssertEqual(waiting.afterMissed(cap, for: "c1"), .refused(.failed))
+        XCTAssertEqual(waiting.afterMissed(cap, for: "c2"), waiting)
+    }
+
     func testRefusalsRoute() {
         XCTAssertEqual(AccountDevicesRefusal.from(code: "account-session-required"), .sessionEnded)
         XCTAssertEqual(AccountDevicesRefusal.from(code: "device_code_too_many"), .tooMany)

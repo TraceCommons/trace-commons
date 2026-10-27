@@ -96,6 +96,12 @@ pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 
+/// The marker a device that joined its account by one-time code keeps
+/// (`daemon::device_codes`): such a device renews its session with its device
+/// key. It belongs to that enrollment, so it goes with it. Its body is not
+/// read.
+pub const JOINED_BY_CODE_FILE: &str = "joined-by-device-code";
+
 /// The plain files that belong to one enrollment, apart from the credential
 /// references `commons_credentials` owns (device key, account session,
 /// staged device key). `unenroll` removes exactly these, with the stored
@@ -106,7 +112,7 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 9] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 10] = [
     CONFIG_FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
@@ -116,6 +122,7 @@ pub(crate) const ENROLLMENT_FILES: [&str; 9] = [
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
     LEGACY_INVITE_REFUSAL_FILE,
+    JOINED_BY_CODE_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -2278,6 +2285,7 @@ mod tests {
             DAEMON_INFERENCE_CONNECTION_FILE,
             DAEMON_PAYOUT_LINK_FILE,
             DAEMON_PAYOUT_ORG_NAMES_FILE,
+            JOINED_BY_CODE_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
@@ -2289,6 +2297,23 @@ mod tests {
                 "{name} survived logout"
             );
         }
+    }
+
+    #[test]
+    fn unenroll_removes_the_joined_by_code_marker() {
+        // A marker that outlived its enrollment would make a later NEAR AI
+        // enrollment renew by device key, which the commons refuses.
+        let (_d, store) = store();
+        store
+            .write_daemon_file(JOINED_BY_CODE_FILE, b"1\n")
+            .unwrap();
+        store.remove_enrollment_files().unwrap();
+        assert!(
+            store
+                .read_daemon_file(JOINED_BY_CODE_FILE)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -83,13 +83,23 @@ final class AccountDevicesModel: ObservableObject {
 
     private func follow(_ code: DeviceCode, client: DaemonClient) async {
         let codeId = code.codeId
+        var missed = 0
         while link.code?.codeId == codeId {
             try? await Task.sleep(for: Self.pollEvery)
             if Task.isCancelled { return }
-            // A missed answer is not the end: the code may still be used.
+            // Past its expiry the code is spent whatever the daemon says.
+            link = link.checked(at: Date(), for: codeId)
+            guard link.code?.codeId == codeId else { break }
+            // A missed answer is not the end, the code may still be used,
+            // but a run of them is: the shell stops asking.
             guard case .success(let status) = await DaemonWork.run({
                 Result { try client.accountDevices.status(codeId: codeId) }
-            }) else { continue }
+            }) else {
+                missed += 1
+                link = link.afterMissed(missed, for: codeId)
+                continue
+            }
+            missed = 0
             link = link.after(status, for: codeId)
         }
         if case .linked = link { await refresh() }
