@@ -1020,7 +1020,7 @@ private struct MonitorMapPane: View {
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
                 revealed: revealedFolders, space: space)
-                .addingDevices(devicesOnMap)
+                .addingDevices(devicesOnMap, offersLink: devices.devices != nil && devices.surface != nil)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
@@ -1028,7 +1028,14 @@ private struct MonitorMapPane: View {
                 focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
                 onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
                 transferRun: transfers.run, transferCards: showsTransferCards ? transfers.cards : [],
-                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
+                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle,
+                onAddDevice: {
+                    // Settings' Devices section, which starts linking a
+                    // server on the request (owner, 2026-10-27).
+                    AccountDeviceLinkRequest.shared.ask()
+                    OpenMonitor.request(.settings(.connection))
+                },
+                addDeviceLabel: devices.surface?.copy.linkAccessibilityName ?? "")
         case .privateAI:
             if let privateAILabel {
                 PrivateAIFlowMap(
