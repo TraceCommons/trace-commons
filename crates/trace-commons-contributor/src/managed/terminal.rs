@@ -565,13 +565,6 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
     }
 }
 
-/// A floor for the helper's soft open-file limit. Terminal.app starts shells
-/// at launchd's 256, which Claude Code outgrows at startup ("low max file
-/// descriptors"). It is a floor, not a setting: a limit already at or above
-/// it, or unlimited, is left alone, and only the soft limit moves, so the
-/// shell can still raise it again.
-const OPEN_FILES_FLOOR: u32 = 10240;
-
 pub fn shell_command(
     helper: &Path,
     config: &Path,
@@ -588,14 +581,8 @@ pub fn shell_command(
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let helper = helper.to_str().ok_or(ManagedError::InvalidRequest)?;
     let config = config.to_str().ok_or(ManagedError::InvalidRequest)?;
-    // One simple command, whatever runs it: Terminal.app types it into the
-    // user's shell, Ghostty runs it as `bash -c "exec -l <command>"`, and
-    // iTerm2's default profile splits it and execs it with no shell. A
-    // `ulimit ...;` prefix would be lost under the last two, so the raise
-    // lives inside `/bin/sh -c`, which then execs the helper (`$0`).
-    // A refusal (a lower hard limit) leaves the limit as it was.
     Ok(format!(
-        "/bin/sh -c '[ \"$(ulimit -Sn)\" = unlimited ] || [ \"$(ulimit -Sn)\" -ge {OPEN_FILES_FLOOR} ] || ulimit -Sn {OPEN_FILES_FLOOR} 2>/dev/null; exec \"$0\" \"$@\"' {} --config-dir {} redeem-launch --session-id {} --ticket {}",
+        "{} --config-dir {} redeem-launch --session-id {} --ticket {}",
         quote(helper),
         quote(config),
         session,
