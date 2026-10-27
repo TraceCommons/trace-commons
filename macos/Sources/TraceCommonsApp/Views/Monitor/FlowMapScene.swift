@@ -546,14 +546,13 @@ struct FlowMapScene: Equatable {
     static let deviceClearance: CGFloat = 72
 
     /// The other devices, in one column directly below this computer
-    /// (owner, 2026-10-27), each joined to the commons by a quiet line that
-    /// bows out to the right of this computer rather than through it. They
-    /// contribute to the same account, but this Mac cannot say what or
-    /// when, so no line moves or is dashed for them. Past `devicesShown`
-    /// the rest are counted as "+N" under the column. A scene with no
-    /// commons (the Private AI map) is returned as it is.
+    /// (owner, 2026-10-27), with no line to the commons (owner, the same
+    /// day): the map's lines stay this computer's, whose sending it can
+    /// see. Past `devicesShown` the rest are counted as "+N" under the
+    /// column. A scene with no commons (the Private AI map) is returned as
+    /// it is.
     func addingDevices(_ devices: [OtherDevice]) -> FlowMapScene {
-        guard !devices.isEmpty, let library = nodes.first(where: { $0.id == "library" }),
+        guard !devices.isEmpty, nodes.contains(where: { $0.id == "library" }),
               let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
         var scene = self
         let band = Self.band(space)
@@ -566,18 +565,8 @@ struct FlowMapScene: Equatable {
         let room = max(band.upperBound - top, 1)
         let step = min(58, max(40, room / max(CGFloat(weights.count), 1)))
         let radius: CGFloat = 12
-        // The bend clears this computer's deck, and each line a little
-        // further out than the one above it, so they do not lie on top of
-        // each other.
-        let bendBase = hub.at.x + Self.padHalfWidth + 28
         for (index, device) in shown.enumerated() {
             let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
-            let bend = bendBase + 14 * CGFloat(index)
-            let start = CGPoint(x: point.x + Self.padHalfWidth * 0.5, y: point.y)
-            scene.arcs.append(Arc(
-                from: start, control1: CGPoint(x: bend, y: point.y),
-                control2: CGPoint(x: bend, y: library.at.y + 40), to: library.at,
-                style: .quiet))
             scene.nodes.append(Node(
                 id: "device:\(device.id)", kind: .device, at: point, radius: radius,
                 label: device.name, detail: device.detail))

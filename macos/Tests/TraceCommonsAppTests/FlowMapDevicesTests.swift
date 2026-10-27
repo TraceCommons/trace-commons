@@ -37,15 +37,10 @@ final class FlowMapDevicesTests: XCTestCase {
             XCTAssertLessThanOrEqual(node.at.y, FlowMapScene.band(scene.space).upperBound)
             above = node.at.y
         }
-        // One quiet line from each device to the commons: nothing says what
-        // another device sends, so nothing moves or is dashed.
-        let added = scene.arcs.dropFirst(base.arcs.count)
-        XCTAssertEqual(added.count, 2)
-        XCTAssertTrue(added.allSatisfy { $0.style == .quiet })
-        XCTAssertTrue(added.allSatisfy { $0.to == library.at })
-        // Bowed out to the right of this computer, so no line runs through
-        // it on the way up.
-        XCTAssertTrue(added.allSatisfy { min($0.control1.x, $0.control2.x) > hub.at.x + FlowMapScene.padHalfWidth })
+        // No line joins another device to the commons (owner, 2026-10-27):
+        // the devices are drawn, and the map's lines stay this computer's.
+        XCTAssertEqual(scene.arcs, base.arcs)
+        XCTAssertGreaterThan(devices[0].at.y, library.at.y)
         XCTAssertEqual(scene.flows, base.flows, "another device never starts the map moving")
         XCTAssertEqual(scene.nodes.filter { $0.kind != .device }, base.nodes, "this computer's nodes are untouched")
     }
