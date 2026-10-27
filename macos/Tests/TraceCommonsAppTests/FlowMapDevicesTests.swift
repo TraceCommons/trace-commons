@@ -28,11 +28,14 @@ final class FlowMapDevicesTests: XCTestCase {
         XCTAssertEqual(devices.map(\.detail), ["Last seen 1 minutes ago", "Last seen 2 minutes ago"])
         let hub = try XCTUnwrap(scene.nodes.first { $0.id == "hub" })
         let library = try XCTUnwrap(scene.nodes.first { $0.id == "library" })
+        // Directly below this computer (owner, 2026-10-27), in one column,
+        // clear of its name, and inside the band.
+        var above = hub.at.y + FlowMapScene.deviceClearance - 1
         for node in devices {
-            XCTAssertGreaterThan(node.at.x, hub.at.x, "beside this computer, to its right")
-            XCTAssertGreaterThan(node.at.y, library.at.y, "under the commons")
-            XCTAssertLessThanOrEqual(node.at.x + node.radius, scene.space.width, "inside the map")
+            XCTAssertEqual(node.at.x, hub.at.x, "directly below this computer")
+            XCTAssertGreaterThan(node.at.y, above, "each below the one before, clear of this computer's name")
             XCTAssertLessThanOrEqual(node.at.y, FlowMapScene.band(scene.space).upperBound)
+            above = node.at.y
         }
         // One quiet line from each device to the commons: nothing says what
         // another device sends, so nothing moves or is dashed.
@@ -40,6 +43,9 @@ final class FlowMapDevicesTests: XCTestCase {
         XCTAssertEqual(added.count, 2)
         XCTAssertTrue(added.allSatisfy { $0.style == .quiet })
         XCTAssertTrue(added.allSatisfy { $0.to == library.at })
+        // Bowed out to the right of this computer, so no line runs through
+        // it on the way up.
+        XCTAssertTrue(added.allSatisfy { min($0.control1.x, $0.control2.x) > hub.at.x + FlowMapScene.padHalfWidth })
         XCTAssertEqual(scene.flows, base.flows, "another device never starts the map moving")
         XCTAssertEqual(scene.nodes.filter { $0.kind != .device }, base.nodes, "this computer's nodes are untouched")
     }

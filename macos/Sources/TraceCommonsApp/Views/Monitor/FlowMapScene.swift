@@ -541,35 +541,50 @@ struct FlowMapScene: Equatable {
         }
     }
 
-    /// The other devices, in a column right of this computer and under the
-    /// commons, each joined to the commons by a quiet line: they contribute
-    /// to the same account, but this Mac cannot say what or when, so no
-    /// line moves or is dashed for them. Past `devicesShown` the rest are
-    /// counted as "+N". A scene with no commons (the Private AI map) is
-    /// returned as it is.
+    /// How far below this computer's point the first other device may sit:
+    /// past its deck and its name.
+    static let deviceClearance: CGFloat = 72
+
+    /// The other devices, in one column directly below this computer
+    /// (owner, 2026-10-27), each joined to the commons by a quiet line that
+    /// bows out to the right of this computer rather than through it. They
+    /// contribute to the same account, but this Mac cannot say what or
+    /// when, so no line moves or is dashed for them. Past `devicesShown`
+    /// the rest are counted as "+N" under the column. A scene with no
+    /// commons (the Private AI map) is returned as it is.
     func addingDevices(_ devices: [OtherDevice]) -> FlowMapScene {
         guard !devices.isEmpty, let library = nodes.first(where: { $0.id == "library" }),
               let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
         var scene = self
         let band = Self.band(space)
-        let x = min(space.width - 36, hub.at.x + (space.width - hub.at.x) * 0.62)
         let shown = Array(devices.prefix(Self.devicesShown))
         let more = devices.count - shown.count
-        // From level with this computer down the band, as one group.
-        let top = max(hub.at.y - 10, library.at.y + 60)
+        let top = hub.at.y + Self.deviceClearance
         let weights = Array(repeating: CGFloat(1), count: shown.count) + (more > 0 ? [0.6] : [])
-        let slots = Self.stack(weights, in: top ... band.upperBound, maxStep: 64, minStep: 44)
+        // Stacked down from just under this computer, not centred: the
+        // column reads as hanging from it.
+        let room = max(band.upperBound - top, 1)
+        let step = min(58, max(40, room / max(CGFloat(weights.count), 1)))
+        let radius: CGFloat = 12
+        // The bend clears this computer's deck, and each line a little
+        // further out than the one above it, so they do not lie on top of
+        // each other.
+        let bendBase = hub.at.x + Self.padHalfWidth + 28
         for (index, device) in shown.enumerated() {
-            let point = CGPoint(x: x, y: slots[index].y)
-            let radius: CGFloat = 12
-            scene.arcs.append(Self.curve(
-                from: CGPoint(x: point.x, y: point.y - radius), to: library.at, style: .quiet, dim: 1))
+            let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
+            let bend = bendBase + 14 * CGFloat(index)
+            let start = CGPoint(x: point.x + Self.padHalfWidth * 0.5, y: point.y)
+            scene.arcs.append(Arc(
+                from: start, control1: CGPoint(x: bend, y: point.y),
+                control2: CGPoint(x: bend, y: library.at.y + 40), to: library.at,
+                style: .quiet))
             scene.nodes.append(Node(
                 id: "device:\(device.id)", kind: .device, at: point, radius: radius,
                 label: device.name, detail: device.detail))
         }
-        if more > 0, let last = slots.last {
-            scene.overflows.append(Overflow(at: CGPoint(x: x, y: last.y), count: more))
+        if more > 0 {
+            scene.overflows.append(Overflow(
+                at: CGPoint(x: hub.at.x, y: top + step * CGFloat(shown.count) - step * 0.4), count: more))
         }
         return scene
     }
