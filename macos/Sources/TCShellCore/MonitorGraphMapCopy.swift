@@ -216,6 +216,11 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     }
 
     /// The library's card.
+    /// A count of traces in the core's own words: "1 trace", "12 traces".
+    public func tracesCounted(_ count: Int) -> String {
+        Self.counted(count, one: tracesOne, many: traces)
+    }
+
     public func library(contributed: Int?) -> String {
         Self.fill(library, label: Self.counted(contributed, one: tracesOne, many: traces))
     }

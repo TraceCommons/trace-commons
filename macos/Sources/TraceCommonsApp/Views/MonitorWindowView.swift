@@ -1045,7 +1045,8 @@ private struct MonitorMapPane: View {
         guard let surface = devices.surface else { return [] }
         return FlowMapScene.otherDevices(
             devices.devices, name: { surface.name(for: $0) },
-            lastSeen: { surface.lastSeenLine(for: $0, formatted: AccountDevicesView.relative) })
+            lastSeen: { surface.lastSeenLine(for: $0, formatted: AccountDevicesView.relative) },
+            traces: { count in FlowMapScene.words?.tracesCounted(count) ?? String(count) })
     }
 
     /// The Traces map's state (the stack-wide ScreenState rule): core down

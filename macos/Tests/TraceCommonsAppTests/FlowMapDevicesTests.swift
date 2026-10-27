@@ -72,13 +72,57 @@ final class FlowMapDevicesTests: XCTestCase {
             AccountDevice(deviceKeyId: "sha256:new", label: nil, lastSeenAt: nil),
         ]
         let others = FlowMapScene.otherDevices(
-            listed, name: { $0.label ?? "(no name)" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } })
+            listed, name: { $0.label ?? "(no name)" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } },
+            traces: { "\($0) traces" })
         XCTAssertEqual(others, [
             .init(id: "sha256:srv", name: "build-box", detail: "seen t1"),
             .init(id: "sha256:new", name: "(no name)", detail: "—"),
         ])
-        XCTAssertEqual(FlowMapScene.otherDevices(nil, name: { _ in "" }, lastSeen: { _ in nil }), [],
+        XCTAssertEqual(FlowMapScene.otherDevices(nil, name: { _ in "" }, lastSeen: { _ in nil }, traces: { _ in "" }), [],
                        "an unread list draws no devices, never a guess")
+    }
+
+    /// What another device has in the commons lights the commons, as this
+    /// computer's contributions do, but draws no line (owner, 2026-10-27).
+    func test_aDeviceWithTracesInTheCommonsLightsItWithoutALine() throws {
+        let base = traces()
+        let scene = base.addingDevices([
+            .init(id: "a", name: "a", detail: "", contributed: 3),
+            .init(id: "c", name: "c", detail: "", contributed: nil),
+        ])
+        XCTAssertEqual(scene.arcs, base.arcs)
+        guard case .library(let active) = try XCTUnwrap(scene.nodes.first { $0.id == "library" }).kind else {
+            return XCTFail("no library")
+        }
+        XCTAssertTrue(active)
+    }
+
+    func test_theCommonsIsNotLitByDevicesThatSentNothing() throws {
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
+        let base = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
+        let scene = base.addingDevices([
+            .init(id: "c", name: "c", detail: "", contributed: nil),
+            .init(id: "d", name: "d", detail: "", contributed: 0),
+        ])
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+    }
+
+    /// The card says how many of the device's traces stand, in the core's
+    /// own counted words, under its last-seen line; nothing when the server
+    /// did not say.
+    func test_theCardSaysHowManyTracesTheDeviceContributed() {
+        let listed = [
+            AccountDevice(deviceKeyId: "sha256:a", label: "a", lastSeenAt: "t1", contributedTraces: 12),
+            AccountDevice(deviceKeyId: "sha256:b", label: "b", lastSeenAt: "t1"),
+        ]
+        let others = FlowMapScene.otherDevices(
+            listed, name: { $0.label ?? "" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } },
+            traces: { "\($0) traces" })
+        XCTAssertEqual(others.map(\.detail), ["seen t1\n12 traces", "seen t1"])
+        // The core's own counted words, singular included.
+        XCTAssertEqual(FlowMapScene.words?.tracesCounted(1), "1 trace")
+        XCTAssertEqual(FlowMapScene.words?.tracesCounted(12), "12 traces")
+        XCTAssertEqual(others.map(\.contributed), [12, nil])
     }
 
     /// Renders the Traces map with three other devices, in both styles, so
@@ -95,8 +139,10 @@ final class FlowMapDevicesTests: XCTestCase {
         let space = FlowMapScene.space(for: size)
         let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), space: space)
             .addingDevices([
-                .init(id: "a", name: "build-box", detail: "Last seen 5 minutes ago"),
-                .init(id: "b", name: "zaki-air", detail: "Last seen 2 days ago"),
+                .init(id: "a", name: "build-box", detail: "Last seen 5 minutes ago\n12 traces",
+                      contributed: 12),
+                .init(id: "b", name: "zaki-air", detail: "Last seen 2 days ago\n3 traces",
+                      contributed: 3),
                 .init(id: "c", name: "ci-runner-07", detail: "—"),
             ])
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:))
