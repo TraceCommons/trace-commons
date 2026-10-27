@@ -121,8 +121,85 @@ struct FundingRow: View {
     @State private var request: Task<Void, Never>?
     @State private var generation = UUID()
     @State private var visible = false
+    /// The Billing card in Settings, or the NEAR AI balance card's Add funds
+    /// button alone (owner, 2026-10-27). Both make the same bound read and
+    /// open the same verified page.
+    let style: Style
+
+    enum Style: Equatable { case card, addFunds }
+
+    init(copy: PrivateInferenceCopy, style: Style = .card) {
+        self.copy = copy
+        self.style = style
+    }
+
+    /// Whether the balance card shows Add funds: only with a destination
+    /// this read verified, and never in place of a sign-in, which the
+    /// balance card offers itself.
+    nonisolated static func showsAddFunds(destination: FundingDestination?, signInNeeded: Bool) -> Bool {
+        destination != nil && !signInNeeded
+    }
 
     var body: some View {
+        Group {
+            switch style {
+            case .card: card
+            case .addFunds: addFunds
+            }
+        }
+        .onAppear {
+            visible = true
+            load(opening: nil)
+        }
+        .onDisappear {
+            visible = false
+            invalidate()
+        }
+        // Observe individual publications, including a busy true/false pair
+        // within one render pass. Coalescing those would miss a credential write.
+        //
+        // Each also reloads a visible row once it has cleared it, so a sign-in
+        // or a credential write leaves the account read again and not the
+        // unavailable line. The reload waits one turn: `@Published` sends
+        // before it stores, so the busy flag and the session state read here
+        // are still the old ones.
+        .onReceive(model.$credentialBusy.removeDuplicates().dropFirst()) { busy in
+            invalidate()
+            if !busy { reloadAfterPublication() }
+        }
+        // A Sign in that ends leaves the account read again.
+        .onReceive(model.$nearAiSigningIn.removeDuplicates().dropFirst()) { signingIn in
+            if !signingIn { reloadAfterPublication() }
+        }
+        .onReceive(model.$credentialStatus.map(\.sessionState).removeDuplicates().dropFirst()) { _ in
+            invalidate()
+            reloadAfterPublication()
+        }
+    }
+
+    /// The balance card's Add funds: the button alone, while the read holds
+    /// a verified destination and no sign-in is needed.
+    @ViewBuilder
+    private var addFunds: some View {
+        let signIn = model.nearAiSigningIn || NearAiSignInOffer.billingOffers(
+            state: status?.state, failed: model.nearAiSignInFailed)
+        if Self.showsAddFunds(destination: status?.destination, signInNeeded: signIn) {
+            Button {
+                load(opening: status?.destination)
+            } label: {
+                Text(copy.balanceAddFunds).lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.glass))
+            .fixedSize()
+            .disabled(model.credentialBusy || request != nil)
+        } else {
+            // Not nothing: an empty view never appears, and appearing is
+            // what makes the first read.
+            Color.clear.frame(width: 0, height: 0)
+        }
+    }
+
+    private var card: some View {
         // #1146's funding panel, its own card after the balance, under its
         // icon (owner, 2026-10-10): the state in the head with the button
         // on the right, and what the button opens behind the info icon.
@@ -158,34 +235,6 @@ struct FundingRow: View {
                 .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)
                           || (!signIn && request != nil))
             })
-        .onAppear {
-            visible = true
-            load(opening: nil)
-        }
-        .onDisappear {
-            visible = false
-            invalidate()
-        }
-        // Observe individual publications, including a busy true/false pair
-        // within one render pass. Coalescing those would miss a credential write.
-        //
-        // Each also reloads a visible row once it has cleared it, so a sign-in
-        // or a credential write leaves the account read again and not the
-        // unavailable line. The reload waits one turn: `@Published` sends
-        // before it stores, so the busy flag and the session state read here
-        // are still the old ones.
-        .onReceive(model.$credentialBusy.removeDuplicates().dropFirst()) { busy in
-            invalidate()
-            if !busy { reloadAfterPublication() }
-        }
-        // A Sign in that ends leaves the account read again.
-        .onReceive(model.$nearAiSigningIn.removeDuplicates().dropFirst()) { signingIn in
-            if !signingIn { reloadAfterPublication() }
-        }
-        .onReceive(model.$credentialStatus.map(\.sessionState).removeDuplicates().dropFirst()) { _ in
-            invalidate()
-            reloadAfterPublication()
-        }
     }
 
     private func reloadAfterPublication() {

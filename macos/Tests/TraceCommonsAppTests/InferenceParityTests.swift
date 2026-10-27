@@ -246,7 +246,14 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(balance.contains("Text(copy.balanceWhat)"))
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         XCTAssertFalse(account.contains("subtitle: [copy.balanceWhat]"))
+        // Billing's card stays in Settings (#1638); the balance card carries
+        // only its Add funds button (owner, 2026-10-27), after the balance.
         XCTAssertFalse(account.contains("FundingRow(copy: copy)"))
+        let card = try XCTUnwrap(account.range(of: "struct PrivateAIBalanceCard: View {"))
+        let cardSource = String(account[card.lowerBound...])
+        let row = try XCTUnwrap(cardSource.range(of: "BalanceRow(copy: copy)"))
+        let addFunds = try XCTUnwrap(cardSource.range(of: "FundingRow(copy: copy, style: .addFunds)"))
+        XCTAssertLessThan(row.lowerBound, addFunds.lowerBound, "Add funds follows the balance")
         let settings = try Self.text("Views/Settings/PrivateAISection.swift")
         XCTAssertEqual(settings.components(separatedBy: "FundingRow(copy: copy)").count - 1, 1)
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
