@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import TCDesign
 import TCShellCore
 
@@ -525,7 +526,16 @@ struct FlowMapScene: Equatable {
         let id: String
         let name: String
         let detail: String
+        /// How many of its traces stand in the commons, as the server
+        /// counts them (#1676); nil when the server did not say.
+        var contributed: Int? = nil
+        /// When the newest of those arrived.
+        var lastContributedAt: Date? = nil
     }
+
+    /// How recently another device must have sent a trace for its line to
+    /// move: within the hour reads as carrying traces now.
+    static let deviceActiveWindow: TimeInterval = 3600
 
     /// How many other devices the map draws before counting the rest.
     static let devicesShown = 4
@@ -533,12 +543,26 @@ struct FlowMapScene: Equatable {
     /// The Devices section's list without this Mac (the computer the map is
     /// drawn around), named and dated as that section does; a dash for a
     /// device the server has not seen. An unread list is no devices.
+    /// `traces` says a count in the core's words; the card gains it as a
+    /// second line only when the server counted.
     static func otherDevices(
-        _ listed: [AccountDevice]?, name: (AccountDevice) -> String, lastSeen: (AccountDevice) -> String?
+        _ listed: [AccountDevice]?, name: (AccountDevice) -> String, lastSeen: (AccountDevice) -> String?,
+        traces: (Int) -> String
     ) -> [OtherDevice] {
-        (listed ?? []).filter { !$0.thisDevice }.map {
-            OtherDevice(id: $0.deviceKeyId, name: name($0), detail: lastSeen($0) ?? "—")
+        (listed ?? []).filter { !$0.thisDevice }.map { device in
+            let seen = lastSeen(device) ?? "—"
+            let detail = device.contributedTraces.map { seen + "\n" + traces($0) } ?? seen
+            return OtherDevice(
+                id: device.deviceKeyId, name: name(device), detail: detail,
+                contributed: device.contributedTraces,
+                lastContributedAt: device.lastContributedAt.flatMap(Self.parseInstant))
         }
+    }
+
+    private static func parseInstant(_ text: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
 
     /// How far below this computer's point the first other device may sit:
@@ -552,7 +576,7 @@ struct FlowMapScene: Equatable {
     /// when, so no line moves or is dashed for them. Past `devicesShown`
     /// the rest are counted as "+N" under the column. A scene with no
     /// commons (the Private AI map) is returned as it is.
-    func addingDevices(_ devices: [OtherDevice]) -> FlowMapScene {
+    func addingDevices(_ devices: [OtherDevice], now: Date = Date()) -> FlowMapScene {
         guard !devices.isEmpty, let library = nodes.first(where: { $0.id == "library" }),
               let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
         var scene = self
@@ -574,13 +598,28 @@ struct FlowMapScene: Equatable {
             let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
             let bend = bendBase + 14 * CGFloat(index)
             let start = CGPoint(x: point.x + Self.padHalfWidth * 0.5, y: point.y)
+            // Moving while the device carries traces now (it sent one within
+            // `deviceActiveWindow`); quiet otherwise, and when the server
+            // did not say.
+            let active = device.lastContributedAt.map { now.timeIntervalSince($0) <= Self.deviceActiveWindow } ?? false
             scene.arcs.append(Arc(
                 from: start, control1: CGPoint(x: bend, y: point.y),
                 control2: CGPoint(x: bend, y: library.at.y + 40), to: library.at,
-                style: .quiet))
+                style: active ? .flowing : .quiet))
             scene.nodes.append(Node(
                 id: "device:\(device.id)", kind: .device, at: point, radius: radius,
                 label: device.name, detail: device.detail))
+        }
+        // What another device contributed stands in the same commons: the
+        // commons is lit once any device has something there, counted
+        // past the drawn ones too.
+        if devices.contains(where: { ($0.contributed ?? 0) > 0 }),
+           let index = scene.nodes.firstIndex(where: { $0.id == "library" }) {
+            let lit = scene.nodes[index]
+            scene.nodes[index] = Node(
+                id: lit.id, kind: .library(active: true), at: lit.at, radius: lit.radius,
+                label: lit.label, detail: lit.detail, dim: lit.dim, title: lit.title,
+                dashed: lit.dashed, ringed: lit.ringed, sublabel: lit.sublabel, waiting: lit.waiting)
         }
         if more > 0 {
             scene.overflows.append(Overflow(

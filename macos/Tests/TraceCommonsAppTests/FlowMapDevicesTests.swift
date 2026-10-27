@@ -77,13 +77,69 @@ final class FlowMapDevicesTests: XCTestCase {
             AccountDevice(deviceKeyId: "sha256:new", label: nil, lastSeenAt: nil),
         ]
         let others = FlowMapScene.otherDevices(
-            listed, name: { $0.label ?? "(no name)" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } })
+            listed, name: { $0.label ?? "(no name)" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } },
+            traces: { "\($0) traces" })
         XCTAssertEqual(others, [
             .init(id: "sha256:srv", name: "build-box", detail: "seen t1"),
             .init(id: "sha256:new", name: "(no name)", detail: "—"),
         ])
-        XCTAssertEqual(FlowMapScene.otherDevices(nil, name: { _ in "" }, lastSeen: { _ in nil }), [],
+        XCTAssertEqual(FlowMapScene.otherDevices(nil, name: { _ in "" }, lastSeen: { _ in nil }, traces: { _ in "" }), [],
                        "an unread list draws no devices, never a guess")
+    }
+
+    /// A device that sent a trace within the hour carries traces now: its
+    /// line moves, as this computer's does while it sends. One that sent
+    /// earlier, or that the server has not counted, stays quiet; a count
+    /// the server did not send is never drawn as nothing sent.
+    func test_aDeviceThatContributedWithinTheHourMoves() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let base = traces()
+        let scene = base.addingDevices([
+            .init(id: "a", name: "a", detail: "", contributed: 3, lastContributedAt: now.addingTimeInterval(-600)),
+            .init(id: "b", name: "b", detail: "", contributed: 9, lastContributedAt: now.addingTimeInterval(-7200)),
+            .init(id: "c", name: "c", detail: "", contributed: nil, lastContributedAt: nil),
+            .init(id: "d", name: "d", detail: "", contributed: 0, lastContributedAt: nil),
+        ], now: now)
+        let added = Array(scene.arcs.dropFirst(base.arcs.count))
+        XCTAssertEqual(added.map(\.style), [.flowing, .quiet, .quiet, .quiet])
+        XCTAssertTrue(scene.flows)
+        XCTAssertEqual(FlowMapScene.deviceActiveWindow, 3600)
+        // Something a device sent stands in the commons: the commons is lit.
+        guard case .library(let active) = try XCTUnwrap(scene.nodes.first { $0.id == "library" }).kind else {
+            return XCTFail("no library")
+        }
+        XCTAssertTrue(active)
+    }
+
+    func test_theCommonsIsNotLitByDevicesThatSentNothing() throws {
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
+        let base = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
+        let scene = base.addingDevices([
+            .init(id: "c", name: "c", detail: "", contributed: nil, lastContributedAt: nil),
+            .init(id: "d", name: "d", detail: "", contributed: 0, lastContributedAt: nil),
+        ])
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+    }
+
+    /// The card says how many of the device's traces stand, in the core's
+    /// own counted words, under its last-seen line; nothing when the server
+    /// did not say.
+    func test_theCardSaysHowManyTracesTheDeviceContributed() {
+        let listed = [
+            AccountDevice(deviceKeyId: "sha256:a", label: "a", lastSeenAt: "t1",
+                          contributedTraces: 12, lastContributedAt: "2027-01-15T08:00:00Z"),
+            AccountDevice(deviceKeyId: "sha256:b", label: "b", lastSeenAt: "t1"),
+        ]
+        let others = FlowMapScene.otherDevices(
+            listed, name: { $0.label ?? "" }, lastSeen: { $0.lastSeenAt.map { "seen \($0)" } },
+            traces: { "\($0) traces" })
+        XCTAssertEqual(others.map(\.detail), ["seen t1\n12 traces", "seen t1"])
+        // The core's own counted words, singular included.
+        XCTAssertEqual(FlowMapScene.words?.tracesCounted(1), "1 trace")
+        XCTAssertEqual(FlowMapScene.words?.tracesCounted(12), "12 traces")
+        XCTAssertEqual(others.map(\.contributed), [12, nil])
+        XCTAssertEqual(others[0].lastContributedAt, ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
+        XCTAssertNil(others[1].lastContributedAt)
     }
 
     /// Renders the Traces map with three other devices, in both styles, so
@@ -100,8 +156,10 @@ final class FlowMapDevicesTests: XCTestCase {
         let space = FlowMapScene.space(for: size)
         let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), space: space)
             .addingDevices([
-                .init(id: "a", name: "build-box", detail: "Last seen 5 minutes ago"),
-                .init(id: "b", name: "zaki-air", detail: "Last seen 2 days ago"),
+                .init(id: "a", name: "build-box", detail: "Last seen 5 minutes ago\n12 traces",
+                      contributed: 12, lastContributedAt: Date().addingTimeInterval(-300)),
+                .init(id: "b", name: "zaki-air", detail: "Last seen 2 days ago\n3 traces",
+                      contributed: 3, lastContributedAt: Date().addingTimeInterval(-172_800)),
                 .init(id: "c", name: "ci-runner-07", detail: "—"),
             ])
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:))
