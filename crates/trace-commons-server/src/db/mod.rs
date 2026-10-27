@@ -2533,6 +2533,14 @@ pub struct AccountDeviceSummary {
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when the session the caller presented belongs to this device.
     pub this_device: bool,
+    /// How many of the device's traces still stand: submissions under its
+    /// own principal, or an upload principal bound to it (V135), that are
+    /// received, accepted or quarantined and not withdrawn, revoked or
+    /// purged. Counted only while the device's principal is linked to this
+    /// account. Zero is a count, not "unknown".
+    pub contributed_traces: i64,
+    /// When the newest of those was received; `None` with none.
+    pub last_contributed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A code to mint, as [`Database::mint_account_device_code`] takes it. Every

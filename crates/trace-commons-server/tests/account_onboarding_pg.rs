@@ -2477,3 +2477,203 @@ async fn a_revoke_in_flight_holds_back_a_renewal_and_a_redeem_until_it_commits()
     assert_eq!(joined, 0, "no device joined under the revoked laptop");
     task.abort();
 }
+
+/// Inserts a submission by `principal` with `status`, received `received_at`.
+async fn seed_submission(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    principal: &str,
+    status: &str,
+    received_at: chrono::DateTime<Utc>,
+) -> uuid::Uuid {
+    let submission = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+                schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+                redaction_pipeline_version,redaction_hash,received_at)
+             VALUES($1,$2,$3,$4,'v1','v1','test',$5,'low','test',$6,$7)",
+            &[
+                &tenant,
+                &submission,
+                &uuid::Uuid::new_v4(),
+                &principal,
+                &status,
+                &"a".repeat(64),
+                &received_at,
+            ],
+        )
+        .await
+        .unwrap();
+    submission
+}
+
+/// Each device in the list carries how many of its traces still stand in
+/// the commons, and when it last sent one, so the app's map can show the
+/// account's other computers contributing. A device's traces are the
+/// submissions made under its own principal or an upload principal bound to
+/// it (V135); "still stands" is received, accepted or quarantined, and not
+/// withdrawn, revoked or purged -- the server side of History's accepted,
+/// submitted and quarantined rows.
+#[tokio::test]
+async fn each_listed_device_says_what_it_has_contributed() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("devices-contributed").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let tag = format!("{:?}", std::time::SystemTime::now());
+    let laptop_token = session_hash(&format!("contrib-laptop-{tag}"));
+    let laptop = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&fresh_keypair()),
+            native_session(&laptop_token),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the laptop provisions");
+    let server_token = session_hash(&format!("contrib-server-{tag}"));
+    let server = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&fresh_keypair()),
+            native_session(&server_token),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the server provisions");
+    let (tenant, account) = (laptop.tenant_id.clone(), laptop.account_id);
+    let principal_of = |device: String| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    "SELECT principal_ref FROM trace_near_provisioned_devices WHERE device_key_id = $1",
+                    &[&device],
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0)
+        }
+    };
+    let laptop_principal = principal_of(laptop.device_key_id.clone()).await;
+    let server_principal = principal_of(server.device_key_id.clone()).await;
+
+    // Nothing sent yet: zero, said as zero, and no last time.
+    let fresh = db
+        .list_account_devices(&tenant, account, None)
+        .await
+        .unwrap();
+    assert!(fresh.iter().all(|d| d.contributed_traces == 0));
+    assert!(fresh.iter().all(|d| d.last_contributed_at.is_none()));
+
+    let day = |n: i64| Utc::now() - Duration::days(n);
+    // The laptop, under its own principal: two that stand, the newer one
+    // quarantined; a rejected one, a withdrawn one, a revoked one and a
+    // purged one that do not.
+    seed_submission(&admin, &tenant, &laptop_principal, "accepted", day(5)).await;
+    seed_submission(&admin, &tenant, &laptop_principal, "quarantined", day(2)).await;
+    seed_submission(&admin, &tenant, &laptop_principal, "rejected", day(1)).await;
+    let withdrawn = seed_submission(&admin, &tenant, &laptop_principal, "accepted", day(1)).await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET withdrawn_at = now() WHERE submission_id = $1",
+            &[&withdrawn],
+        )
+        .await
+        .unwrap();
+    seed_submission(&admin, &tenant, &laptop_principal, "revoked", day(1)).await;
+    let purged = seed_submission(&admin, &tenant, &laptop_principal, "accepted", day(1)).await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET purged_at = now() WHERE submission_id = $1",
+            &[&purged],
+        )
+        .await
+        .unwrap();
+    // The server, through an upload principal bound to it (V135), received
+    // and not yet given a verdict.
+    let upload = format!(
+        "principal_sha256:{}",
+        hash(&format!("upload-{tag}")).trim_start_matches("sha256:")
+    );
+    admin
+        .execute(
+            "INSERT INTO trace_device_upload_principals(tenant_id,upload_principal_ref,device_principal_ref,device_key_id)
+             VALUES($1,$2,'principal_sha256:' || encode(sha256(convert_to('device:' || $1 || ':' || $3, 'UTF8')), 'hex'),$3)",
+            &[&tenant, &upload, &server.device_key_id],
+        )
+        .await
+        .unwrap();
+    let bound: String = admin
+        .query_one(
+            "SELECT device_principal_ref FROM trace_device_upload_principals WHERE upload_principal_ref = $1",
+            &[&upload],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        bound, server_principal,
+        "an upload principal names the device's own principal"
+    );
+    seed_submission(&admin, &tenant, &upload, "received", day(3)).await;
+    // Under the account but under no device (another principal of it):
+    // counted for no device.
+    let unattached = format!(
+        "principal_sha256:{}",
+        hash(&format!("unattached-{tag}")).trim_start_matches("sha256:")
+    );
+    seed_submission(&admin, &tenant, &unattached, "accepted", day(1)).await;
+
+    let devices = db
+        .list_account_devices(&tenant, account, None)
+        .await
+        .unwrap();
+    let by_id = |id: &str| {
+        devices
+            .iter()
+            .find(|d| d.device_key_id == id)
+            .unwrap()
+            .clone()
+    };
+    let laptop_row = by_id(&laptop.device_key_id);
+    let server_row = by_id(&server.device_key_id);
+    assert_eq!(laptop_row.contributed_traces, 2);
+    assert_eq!(server_row.contributed_traces, 1);
+    let close = |a: Option<chrono::DateTime<Utc>>, b: chrono::DateTime<Utc>| {
+        (a.expect("a last contribution") - b).num_seconds().abs() < 5
+    };
+    assert!(
+        close(laptop_row.last_contributed_at, day(2)),
+        "the newest that stands, not the rejected one"
+    );
+    assert!(close(server_row.last_contributed_at, day(3)));
+
+    // Another account's devices count none of these.
+    let (other_login, other_task) = stub_near_ai_login("devices-contributed-other").await;
+    let other = db
+        .provision_near_ai_login(
+            &other_login,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash(&format!("contrib-other-{tag}"))),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("another account provisions");
+    let theirs = db
+        .list_account_devices(&other.tenant_id, other.account_id, None)
+        .await
+        .unwrap();
+    assert!(theirs.iter().all(|d| d.contributed_traces == 0));
+    task.abort();
+    other_task.abort();
+}
