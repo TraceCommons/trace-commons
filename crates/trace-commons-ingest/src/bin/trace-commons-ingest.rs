@@ -11,6 +11,8 @@
 // crate it was extracted from, so the paths the operator docs cite change
 // only in the crate name.
 
+#[path = "trace_commons_ingest_internal/account_device_codes.rs"]
+mod account_device_codes_routes;
 #[path = "trace_commons_ingest_internal/account_devices.rs"]
 mod account_devices_routes;
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
@@ -8672,6 +8674,8 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         .merge(payout_link_routes::routes())
         // The devices linked to the account: list, rename, revoke.
         .merge(account_devices_routes::routes())
+        // One-time codes that link a headless device: mint and status.
+        .merge(account_device_codes_routes::account_routes())
         .get("/v1/account/traces", account_traces_list_handler)
         .post(
             "/v1/account/source-sessions/status",
@@ -9100,6 +9104,17 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/account/near-ai/provision/finish/v2",
             post(near_provisioning::near_ai_provision_finish_v2_handler),
+        )
+        // A headless device redeems a code minted by a signed-in device, and
+        // a device that joined that way renews its session with its key.
+        // Unauthenticated: the code, or the key's signature, is the credential.
+        .route(
+            trace_commons_protocol::account_device_code::DEVICE_CODE_REDEEM_PATH,
+            post(account_device_codes_routes::redeem_handler),
+        )
+        .route(
+            trace_commons_protocol::account_device_code::DEVICE_SESSION_RENEW_PATH,
+            post(account_device_codes_routes::renew_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL

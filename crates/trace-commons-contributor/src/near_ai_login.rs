@@ -53,6 +53,9 @@ pub(crate) const OPEN_PROMPT: &str = "Open this address in your browser to sign 
 /// address, so the browser on their own computer needs the port forwarded.
 pub(crate) const REMOTE_INTRO: &str =
     "No browser on this machine can reach you, so sign in from your own computer:";
+/// Printed first when no browser here can reach the person: a server is
+/// linked more simply with a code from a signed-in computer.
+pub(crate) const CODE_HINT: &str = "On a server? From a computer that's signed in, run `trace-commons-contributor devices add`, then run `trace-commons-contributor login --code <code>` here.";
 /// Stands in for the host in the printed `ssh` command.
 pub(crate) const REMOTE_HOST_PLACEHOLDER: &str = "<this-machine>";
 /// The invite route, named wherever the NEAR AI route is taken by default.
@@ -100,7 +103,7 @@ impl Consent {
     /// The `set_consent_scopes` list. Default answers send an empty list:
     /// the daemon saves the floor scope for it and records no choice, which
     /// is what an invite enrollment with the default answers records.
-    fn request_scopes(&self) -> Vec<String> {
+    pub(crate) fn request_scopes(&self) -> Vec<String> {
         if self.chosen {
             self.scopes.clone()
         } else {
@@ -195,6 +198,7 @@ pub(crate) fn print_sign_in_address(
 ) -> std::io::Result<()> {
     match (plan.remote, loopback_port(url)) {
         (true, Some(port)) => {
+            writeln!(out, "{CODE_HINT}")?;
             writeln!(out, "{REMOTE_INTRO}")?;
             writeln!(
                 out,
@@ -1081,6 +1085,11 @@ mod tests {
         });
         assert_eq!(opened, 0, "{out}");
         assert!(out.contains(REMOTE_INTRO), "{out}");
+        // The code route is named first: it needs no port forward.
+        assert!(
+            out.find(CODE_HINT).unwrap() < out.find(REMOTE_INTRO).unwrap(),
+            "{out}"
+        );
         assert!(
             out.contains(&format!(
                 "ssh -N -o ExitOnForwardFailure=yes -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
@@ -1107,6 +1116,7 @@ mod tests {
         assert!(out.contains(URL), "{out}");
         assert!(!out.contains(OPENING), "{out}");
         assert!(!out.contains("ssh -N"), "{out}");
+        assert!(!out.contains(CODE_HINT), "{out}");
     }
 
     /// Fail closed: a commons that does not advertise the NEAR AI login path

@@ -153,7 +153,7 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
 /// origin `native_identity` trusts for this store -- the native account's
 /// commons on a daemon that holds no config. A non-string `ingest_url` is
 /// refused rather than read as absent.
-fn enroll_origin(store: &ConfigStore, params: &serde_json::Value) -> Result<String> {
+pub(super) fn enroll_origin(store: &ConfigStore, params: &serde_json::Value) -> Result<String> {
     match params.get("ingest_url") {
         Some(value) => value
             .as_str()
@@ -683,17 +683,7 @@ pub(super) async fn renew_account_session(
     // record, the enrolled tenant is the binding: the commons resolves the
     // NEAR AI login to its account, and an answer for another tenant is
     // refused below.
-    let account_id = match &previous {
-        Some(previous) => Some(
-            previous
-                .get("account_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow!("near_ai_enroll_invalid"))?,
-        ),
-        None => None,
-    };
+    let account_id = previous_account_id(previous.as_ref())?;
     if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
@@ -711,6 +701,40 @@ pub(super) async fn renew_account_session(
         )
     };
     let finished = ceremony(shared, api, commons, &session, login.as_ref(), identity).await?;
+    store_renewed_session(
+        shared, cfg, identity, previous, account_id, finished, expected,
+    )
+    .await
+}
+
+/// The stored record's account id, which a renewal's answer must name.
+fn previous_account_id(previous: Option<&serde_json::Value>) -> Result<Option<String>> {
+    match previous {
+        Some(previous) => Ok(Some(
+            previous
+                .get("account_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("near_ai_enroll_invalid"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Check a renewal's answer against the enrolled tenant, the stored
+/// record's account and this device, then store its session in place of
+/// `expected`'s, keeping the record's other fields. Shared by the NEAR AI
+/// renewal and the device-key renewal of a device that joined by code.
+async fn store_renewed_session(
+    shared: &DaemonShared,
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    account_id: Option<String>,
+    finished: Finished,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<()> {
     validate_finished(&finished, identity)?;
     if finished.tenant_id != cfg.tenant_id
         || account_id
@@ -736,6 +760,145 @@ pub(super) async fn renew_account_session(
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for Finished {
+    fn from(response: trace_commons_protocol::account_device_code::DeviceSignInResponse) -> Self {
+        Self {
+            access_token: response.access_token,
+            token_type: response.token_type,
+            expires_in_secs: response.expires_in_secs,
+            account_id: response.account_id,
+            tenant_id: response.tenant_id,
+            device_key_id: response.device_key_id,
+            anchor_hash: response.anchor_hash,
+        }
+    }
+}
+
+/// The commons facts a device-code sign-in enrolls against: everything
+/// [`prepare`] reads except the NEAR AI login, which a device that joins by
+/// code does not have. Checked the same way, before the code is spent.
+pub(super) struct CodeCommons {
+    pub(super) commons: trace_commons_operator_client::Client,
+    issuer_url: String,
+    audience: String,
+    witness: Option<crate::config::WitnessSettings>,
+    receipt_endpoint: Option<String>,
+}
+
+pub(super) async fn prepare_for_code(ingest_url: &str) -> Result<CodeCommons> {
+    let allowed = signup_allowlist(ingest_url, &[])
+        .map_err(|_| anyhow!("near_ai_enroll_endpoint_refused"))?;
+    let commons =
+        client(ingest_url, &allowed).map_err(|_| anyhow!("near_ai_enroll_endpoint_refused"))?;
+    let capability = super::account_onboarding::login_capability_from(&commons, ingest_url)
+        .await
+        .map_err(|refusal| match refusal {
+            super::account_onboarding::SignupRefusal::AddressRefused => {
+                anyhow!("near_ai_enroll_endpoint_refused")
+            }
+            super::account_onboarding::SignupRefusal::Unreachable => {
+                anyhow!("near_ai_enroll_commons_unreachable")
+            }
+            super::account_onboarding::SignupRefusal::Unsupported => {
+                anyhow!("near_ai_enroll_commons_unsupported")
+            }
+        })?;
+    Ok(CodeCommons {
+        commons,
+        issuer_url: capability.issuer_url,
+        audience: capability.audience,
+        witness: capability.witness,
+        receipt_endpoint: capability.receipt_endpoint,
+    })
+}
+
+/// Publish a device-code sign-in as an enrollment, exactly as a NEAR AI
+/// provisioning is published ([`persist`]).
+pub(super) fn persist_code_sign_in(
+    store: &ConfigStore,
+    ingest_url: &str,
+    commons: CodeCommons,
+    identity: &DeviceIdentity,
+    response: trace_commons_protocol::account_device_code::DeviceSignInResponse,
+    expected: &super::commons_credentials::Snapshot,
+) -> Result<serde_json::Value> {
+    persist(
+        store,
+        Commons {
+            ingest_url,
+            issuer_url: &commons.issuer_url,
+            audience: &commons.audience,
+            witness: commons.witness,
+            receipt_endpoint: commons.receipt_endpoint,
+        },
+        identity,
+        response.into(),
+        Some(expected),
+    )
+}
+
+/// Renew the account session of a device that joined by code: it has no
+/// NEAR AI login, so it signs a fresh nonce with its device key (owner
+/// decision 2026-10-27). The commons answers only for a device that joined
+/// by code and is not revoked; the answer is checked and stored exactly as
+/// [`renew_account_session`]'s is.
+pub(super) async fn renew_account_session_by_device_key(
+    shared: &DaemonShared,
+    commons: &trace_commons_operator_client::Client,
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<()> {
+    use trace_commons_protocol::account_device_code::{
+        DEVICE_SESSION_RENEW_PATH, DeviceSessionRenewRequest, DeviceSignInResponse,
+        device_session_renew_bytes,
+    };
+    let account_id = previous_account_id(previous.as_ref())?;
+    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+        bail!("near_ai_enroll_invalid")
+    }
+    let device: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&identity.public_key_b64)?
+        .try_into()
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
+    let mut nonce = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+        .map_err(|_| anyhow!("near_ai_enroll_unavailable"))?;
+    let issued_at = Utc::now().timestamp();
+    let request = DeviceSessionRenewRequest {
+        tenant_id: cfg.tenant_id.clone(),
+        device_public_key: identity.public_key_b64.clone(),
+        nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+        issued_at,
+        signature: identity.sign_b64(&device_session_renew_bytes(
+            &cfg.tenant_id,
+            &device,
+            &nonce,
+            issued_at,
+        )),
+    };
+    let response: DeviceSignInResponse = commons
+        .call_json(
+            reqwest::Method::POST,
+            DEVICE_SESSION_RENEW_PATH,
+            &[],
+            Some(&request),
+        )
+        .await
+        .map_err(|_| anyhow!("device_session_renewal_refused"))?;
+    store_renewed_session(
+        shared,
+        cfg,
+        identity,
+        previous,
+        account_id,
+        response.into(),
+        expected,
+    )
+    .await
 }
 
 /// Validate the server's answer and publish the enrollment, or publish
@@ -845,6 +1008,12 @@ fn persist_for(
             &fresh
         }
     };
+    // A NEAR AI enrollment renews through its NEAR AI login, never by
+    // device key, so no joined-by-code marker may stand beside it. A code
+    // sign-in writes its marker after this returns.
+    store
+        .remove_daemon_file(super::device_codes::JOINED_BY_CODE_FILE)
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
     super::commons_credentials::replace(
         &store,
         expected,

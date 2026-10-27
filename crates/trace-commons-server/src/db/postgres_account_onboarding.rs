@@ -211,7 +211,7 @@ impl NearAiAnchorMaterial {
 /// No `trace_near_identities` row: that table binds a wallet public key to a
 /// NEAR account name, and this path has neither. A login proves an account,
 /// not a key. Returns the device key id and the principal.
-async fn attach_near_ai_login_device(
+pub(super) async fn attach_near_ai_login_device(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     account: &Uuid,

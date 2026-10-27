@@ -80,6 +80,16 @@
 //! signs in a NEAR AI account whose record is absent -- after a sign-out, a
 //! NEAR AI-only contributor had no other way back short of unenrolling.
 //!
+//! # A device that joined by code
+//!
+//! A server linked with a one-time code from a signed-in laptop
+//! (`account_device_code_redeem`) has no NEAR AI login to present. It keeps
+//! a marker file ([`super::device_codes::JOINED_BY_CODE_FILE`]) and renews
+//! by signing a fresh nonce with its device key instead
+//! ([`super::nearai_onboarding::renew_account_session_by_device_key`]). The
+//! commons answers only while that device is linked: revoking it from
+//! another device ends renewal too. Every other rule here applies.
+//!
 //! # Not renewed
 //!
 //! - **An absent record**, automatically. Sign-out removes it; the person
@@ -285,15 +295,20 @@ pub(crate) async fn account_session_for_read(
 fn may_renew(shared: &DaemonShared) -> bool {
     !key_revoked(&shared.store)
         && near_ai_enrolled(shared)
-        && shared
-            .settings
-            .lock()
-            .map(|settings| settings.near_ai_session.is_some())
-            .unwrap_or(false)
+        && (has_near_ai_login(shared) || super::device_codes::joined_by_code(&shared.store))
         && matches!(
             commons_credentials::load(&shared.store, Kind::Account),
             Ok(Some(raw)) if !recently_failed(shared.store.dir(), &attempt_key(shared, &raw))
         )
+}
+
+/// Whether a NEAR AI login is retained, which the NEAR AI renewal presents.
+fn has_near_ai_login(shared: &DaemonShared) -> bool {
+    shared
+        .settings
+        .lock()
+        .map(|settings| settings.near_ai_session.is_some())
+        .unwrap_or(false)
 }
 
 /// Whether this device is enrolled in a `nearai-` tenant: the accounts
@@ -351,12 +366,8 @@ pub(super) async fn sign_in(
     let Ok(Some(identity)) = DeviceIdentity::load(store) else {
         return Err("near_ai_sign_in_not_enrolled");
     };
-    if shared
-        .settings
-        .lock()
-        .map(|settings| settings.near_ai_session.is_none())
-        .unwrap_or(true)
-    {
+    let by_device_key = !has_near_ai_login(shared) && super::device_codes::joined_by_code(store);
+    if !has_near_ai_login(shared) && !by_device_key {
         // Nothing to present: the shell signs in to NEAR AI first.
         return Err(FAILURE_NEAR_AI_SIGN_IN_REQUIRED);
     }
@@ -380,6 +391,12 @@ pub(super) async fn sign_in(
         }
     };
     let result = match via.commons(&cfg) {
+        Ok(commons) if by_device_key => {
+            super::nearai_onboarding::renew_account_session_by_device_key(
+                shared, &commons, &cfg, &identity, previous, expected,
+            )
+            .await
+        }
         Ok(commons) => {
             super::nearai_onboarding::renew_account_session(
                 shared, via.api, &commons, &cfg, &identity, previous, expected,
@@ -446,7 +463,9 @@ pub(crate) fn classify(error: &anyhow::Error) -> &'static str {
         // than a refusal of the login.
         "near_ai_enroll_token_unavailable" => "near_ai_unavailable",
         "near_ai_enroll_start_failed" => "commons_start_failed",
-        "near_ai_enroll_verification_failed" => "commons_refused",
+        "near_ai_enroll_verification_failed" | "device_session_renewal_refused" => {
+            "commons_refused"
+        }
         super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
         "near_ai_enroll_endpoint_refused" => "commons_address_refused",
         "account-enrollment-mismatch" => "commons_answer_mismatch",
@@ -625,16 +644,8 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     let Ok(Some(identity)) = DeviceIdentity::load(store) else {
         return false;
     };
-    if shared
-        .settings
-        .lock()
-        .map(|settings| settings.near_ai_session.is_none())
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    let renewed = match via.commons(&cfg) {
-        Ok(commons) => {
+    let renewed = match (has_near_ai_login(shared), via.commons(&cfg)) {
+        (true, Ok(commons)) => {
             super::nearai_onboarding::renew_account_session(
                 shared,
                 via.api,
@@ -646,7 +657,21 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
             )
             .await
         }
-        Err(_) => Err(anyhow::anyhow!("near_ai_enroll_endpoint_refused")),
+        // A device that joined by code has no NEAR AI login: it renews by
+        // signing with its device key (owner decision 2026-10-27).
+        (false, Ok(commons)) if super::device_codes::joined_by_code(store) => {
+            super::nearai_onboarding::renew_account_session_by_device_key(
+                shared,
+                &commons,
+                &cfg,
+                &identity,
+                Some(previous),
+                expected,
+            )
+            .await
+        }
+        (false, _) => return false,
+        (true, Err(_)) => Err(anyhow::anyhow!("near_ai_enroll_endpoint_refused")),
     };
     match renewed {
         Ok(()) => {

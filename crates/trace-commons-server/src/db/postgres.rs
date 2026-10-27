@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_binding.rs"]
 mod account_binding;
+#[path = "postgres_account_device_codes.rs"]
+mod account_device_codes;
 #[path = "postgres_account_devices.rs"]
 mod account_devices;
 #[path = "postgres_account_onboarding.rs"]
@@ -307,6 +309,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_holds",
     "trace_payout_audit",
     "trace_payout_reversal_hold_decisions",
+    "trace_account_device_codes",
+    "trace_device_session_renewals",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1920,6 +1924,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         139,
         "account_devices",
         include_str!("../../../../migrations/V139__account_devices.sql"),
+    ),
+    // V140: one-time codes that link a headless device, and the nonces of
+    // accepted device-key session renewals.
+    (
+        140,
+        "account_device_codes",
+        include_str!("../../../../migrations/V140__account_device_codes.sql"),
     ),
 ];
 
@@ -5287,6 +5298,59 @@ impl Database for PgBackend {
         .await
     }
 
+    async fn mint_account_device_code(
+        &self,
+        code: crate::db::NewAccountDeviceCode<'_>,
+    ) -> Result<crate::db::MintAccountDeviceCodeOutcome, DatabaseError> {
+        self.mint_device_code(code).await
+    }
+
+    async fn account_device_code_status(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        code_id: Uuid,
+    ) -> Result<Option<crate::db::AccountDeviceCodeStatus>, DatabaseError> {
+        self.device_code_status(tenant_id, account_id, code_id)
+            .await
+    }
+
+    async fn redeem_account_device_code(
+        &self,
+        tenant_id: &str,
+        code_hash: &str,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
+    ) -> Result<crate::db::DeviceSignInOutcome, DatabaseError> {
+        self.redeem_device_code(
+            tenant_id,
+            code_hash,
+            device_public_key,
+            session,
+            grant_template,
+        )
+        .await
+    }
+
+    async fn renew_device_session(
+        &self,
+        tenant_id: &str,
+        device_public_key: &[u8; 32],
+        nonce_hash: &str,
+        session: crate::db::NewSession<'_>,
+        min_interval: chrono::Duration,
+    ) -> Result<crate::db::DeviceSignInOutcome, DatabaseError> {
+        self.renew_session_by_device_key(
+            tenant_id,
+            device_public_key,
+            nonce_hash,
+            session,
+            min_interval,
+        )
+        .await
+    }
+
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
         self.unbound_passkey_account_count().await
     }
@@ -8564,6 +8628,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
@@ -8611,6 +8676,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
