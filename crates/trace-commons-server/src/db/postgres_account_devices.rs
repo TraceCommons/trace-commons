@@ -159,14 +159,16 @@ impl PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // Native sessions that name no device key (issued before V139, or by
-        // the login-link native sign-in) cannot be told apart from the
-        // revoked device's own, so they end too: a lost laptop that signed in
-        // before V139 is not left live. A NEAR AI device among them renews on
-        // its own with a keyed session; any other signs in again. The
-        // caller's own session is spared, and browser, passkey and NEAR
-        // sessions are not device sessions and are left alone. Only live
-        // rows: past the idle cap `validate_session` already refuses them.
+        // Native sessions that name neither a device key nor a passkey
+        // (issued before V139, or by the login-link native sign-in) cannot be
+        // told apart from the revoked device's own, so they end too: a lost
+        // laptop that signed in before V139 is not left live. A NEAR AI
+        // device among them renews on its own with a keyed session; any
+        // other signs in again. A native passkey session names its passkey
+        // (`auth_credential_id`), and removing that passkey is what ends it,
+        // so it is left alone, as are browser, passkey and NEAR sessions and
+        // the caller's own. Only live rows: past the idle cap
+        // `validate_session` already refuses them.
         let unattributed_sessions_revoked = tx
             .execute(
                 "UPDATE trace_sessions
@@ -174,6 +176,7 @@ impl PgBackend {
                   WHERE tenant_id = trace_current_tenant_id()
                     AND account_id = $1
                     AND device_key_id IS NULL
+                    AND auth_credential_id IS NULL
                     AND client_kind = $2
                     AND revoked_at IS NULL
                     AND expires_at > now()

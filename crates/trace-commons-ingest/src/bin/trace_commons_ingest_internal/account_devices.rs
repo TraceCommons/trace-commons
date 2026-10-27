@@ -15,7 +15,9 @@
 //! NEAR identity list. A NEAR AI account usually holds no strong
 //! authenticator, so a strong-only revoke would leave most accounts unable to
 //! revoke at all. Neither rename nor revoke adds authority: the worst a
-//! stolen session can do here is cut off the owner's other devices. A
+//! stolen session can do here is cut off the owner's other devices and the
+//! account's unattributed native sessions (below), all of which sign in
+//! again. Passkey sessions, browser or native, are never touched. A
 //! revoked key is never revived; its next sign-in is refused by name
 //! (`device_key_revoked`), and the device recovers by signing out, which
 //! drops its key, and signing in again, which makes a new key and joins as a
@@ -25,11 +27,13 @@
 //! the key `FOR SHARE` and the revoke updates it, so the two serialize: the
 //! sign-in either commits its session before the revoke reads the sessions,
 //! or finds the key revoked. (Session validation does not read `device_keys`:
-//! least-privilege session roles hold no grant on it.) Native sessions that name no key
-//! (issued before V139, or by the login-link native sign-in) cannot be
-//! attributed, so a revoke ends those too, except the caller's own: a NEAR AI
-//! device among them renews by itself with a keyed session, and any other
-//! signs in again.
+//! least-privilege session roles hold no grant on it.)
+//!
+//! Native sessions that name neither a key nor a passkey (issued before
+//! V139, or by the login-link native sign-in) cannot be attributed, so a
+//! revoke ends those too, except the caller's own: a NEAR AI device among
+//! them renews by itself with a keyed session, and any other signs in again.
+//! A native passkey session names its passkey and is left alone.
 
 use super::*;
 

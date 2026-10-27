@@ -1796,9 +1796,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// `device_keys.revoked_at` (the upload-claim issuer then refuses the key),
     /// revoke the device principal's active tenant access grants, and revoke
     /// the native sessions minted for the device. The account's native sessions
-    /// that name no device (issued before V139, or by the login-link native
-    /// sign-in) cannot be attributed, so they are revoked too, except the
-    /// caller's own (`caller_session_token_hash`). The device's principal
+    /// that name neither a device nor a passkey (issued before V139, or by the
+    /// login-link native sign-in) cannot be attributed, so they are revoked
+    /// too, except the caller's own (`caller_session_token_hash`). The device's principal
     /// stays linked, so traces it already contributed remain in the account's
     /// history. `actor_ref` is recorded as the grant revoker.
     async fn revoke_account_device(
@@ -2486,8 +2486,9 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
-    /// The account's live native sessions that named no device key (issued
-    /// before V139, or by the login-link native sign-in), revoked with the
+    /// The account's live native sessions that named neither a device key nor
+    /// a passkey (issued before V139, or by the login-link native sign-in),
+    /// revoked with the
     /// device because they cannot be told apart from its own. The caller's
     /// session is never among them.
     pub unattributed_sessions_revoked: u64,

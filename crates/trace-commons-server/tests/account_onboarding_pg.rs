@@ -1853,6 +1853,16 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
     let legacy_session = unkeyed("native", "revoked-again-legacy").await;
     let caller_session = unkeyed("native", "revoked-again-caller").await;
     let browser_session = unkeyed("passkey", "revoked-again-browser").await;
+    // A native session from a passkey sign-in names its passkey.
+    let passkey_native_session = session_hash("revoked-again-passkey-native");
+    admin
+        .execute(
+            "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,auth_credential_id,expires_at)
+             VALUES($1,$2,$3,$4,'native','passkey-credential-1',now() + interval '1 hour')",
+            &[&tenant, &uuid::Uuid::new_v4(), &account, &passkey_native_session],
+        )
+        .await
+        .unwrap();
     // A second grant on the device, already expired: not the revoke's to
     // rewrite or count.
     let principal: String = admin
@@ -1901,6 +1911,11 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
             &browser_session,
             true,
             "a browser session is not a device session",
+        ),
+        (
+            &passkey_native_session,
+            true,
+            "a native passkey session is its passkey's, not a device's",
         ),
     ] {
         assert_eq!(

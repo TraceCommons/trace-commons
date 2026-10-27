@@ -1050,3 +1050,22 @@ async fn enrolling_an_enrolled_device_is_still_refused() {
     assert_eq!(refusal(&response), Some("near_ai_enroll_already_enrolled"));
     assert_eq!(fx.ceremonies(), (0, 0));
 }
+
+#[tokio::test]
+async fn a_revoked_key_runs_no_further_ceremony_until_sign_out() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.shared
+        .store
+        .write_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE, b"1\n")
+        .unwrap();
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), Some(super::FAILURE_DEVICE_KEY_REVOKED));
+    assert_eq!(fx.ceremonies(), (0, 0), "no start, no finish");
+    assert!(!super::may_renew(&fx.shared));
+    assert_eq!(
+        super::last_failure(&fx.shared),
+        Some(super::FAILURE_DEVICE_KEY_REVOKED)
+    );
+}

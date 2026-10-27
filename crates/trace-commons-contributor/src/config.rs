@@ -96,6 +96,12 @@ pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 
+/// Written when the commons refused this device's key as revoked by its
+/// account (`daemon::account_session_renewal::key_revoked`). Stops further
+/// renewals of a key that can never sign in again; it goes with the
+/// enrollment, so signing out and in again (a new key) starts clean.
+pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
+
 /// The plain files that belong to one enrollment, apart from the credential
 /// references `commons_credentials` owns (device key, account session,
 /// staged device key). `unenroll` removes exactly these, with the stored
@@ -106,7 +112,7 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 9] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 10] = [
     CONFIG_FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
@@ -116,6 +122,7 @@ pub(crate) const ENROLLMENT_FILES: [&str; 9] = [
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
     LEGACY_INVITE_REFUSAL_FILE,
+    DEVICE_KEY_REVOKED_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -2278,6 +2285,7 @@ mod tests {
             DAEMON_INFERENCE_CONNECTION_FILE,
             DAEMON_PAYOUT_LINK_FILE,
             DAEMON_PAYOUT_ORG_NAMES_FILE,
+            DEVICE_KEY_REVOKED_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
