@@ -113,7 +113,18 @@ cat >"$stubs/curl" <<'STUB'
 printf '%s\n' "curl $*" >>"$TRACE"
 for arg; do
   case "$arg" in
-    */health) printf '%s' "$FAKE_HEALTH"; exit 0 ;;
+    */health)
+      # FAKE_HEALTH_REFUSALS: refuse that many connections first, as an
+      # ingest still applying migrations does after its restart.
+      if [ -n "${FAKE_HEALTH_REFUSALS:-}" ]; then
+        n="$(cat "$TRACE.refused" 2>/dev/null || echo 0)"
+        if [ "$n" -lt "$FAKE_HEALTH_REFUSALS" ]; then
+          echo $((n + 1)) >"$TRACE.refused"
+          echo "curl: (7) Failed to connect" >&2
+          exit 7
+        fi
+      fi
+      printf '%s' "$FAKE_HEALTH"; exit 0 ;;
   esac
 done
 echo '{}'
@@ -321,6 +332,20 @@ if run_pull "$scratch/pull-staging.trace" "$staging_health" TC_EXPECT_STAGING=1;
 else
   fail "pull-and-install.sh with TC_EXPECT_STAGING=1 refused a staging build"
   cat "$scratch/pull-staging.trace.err" >&2
+fi
+# A first boot that applies migrations is not listening yet when the
+# check starts (2026-10-27: V139 and V140 on staging, refused once, and the
+# deploy rolled a good build back). The check waits for /health to answer.
+rm -f "$scratch/pull-slow.trace.refused"
+if run_pull "$scratch/pull-slow.trace" "$staging_health" TC_EXPECT_STAGING=1 FAKE_HEALTH_REFUSALS=5; then
+  if ! grep -qxF "$rollback" "$scratch/pull-slow.trace"; then
+    pass "pull-and-install.sh with TC_EXPECT_STAGING=1 waits for a slow ingest's /health"
+  else
+    fail "pull-and-install.sh rolled back an ingest that was still starting"
+  fi
+else
+  fail "pull-and-install.sh with TC_EXPECT_STAGING=1 refused an ingest that was still starting"
+  cat "$scratch/pull-slow.trace.err" >&2
 fi
 for health in "$pilot_health" '{"status":"ok"}' ''; do
   if run_pull "$scratch/pull-wrong.trace" "$health" TC_EXPECT_STAGING=1; then
