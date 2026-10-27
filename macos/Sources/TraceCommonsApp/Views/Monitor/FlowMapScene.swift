@@ -1,5 +1,4 @@
 import CoreGraphics
-import Foundation
 import TCDesign
 import TCShellCore
 
@@ -529,13 +528,7 @@ struct FlowMapScene: Equatable {
         /// How many of its traces stand in the commons, as the server
         /// counts them (#1676); nil when the server did not say.
         var contributed: Int? = nil
-        /// When the newest of those arrived.
-        var lastContributedAt: Date? = nil
     }
-
-    /// How recently another device must have sent a trace for its line to
-    /// move: within the hour reads as carrying traces now.
-    static let deviceActiveWindow: TimeInterval = 3600
 
     /// How many other devices the map draws before counting the rest.
     static let devicesShown = 4
@@ -554,15 +547,8 @@ struct FlowMapScene: Equatable {
             let detail = device.contributedTraces.map { seen + "\n" + traces($0) } ?? seen
             return OtherDevice(
                 id: device.deviceKeyId, name: name(device), detail: detail,
-                contributed: device.contributedTraces,
-                lastContributedAt: device.lastContributedAt.flatMap(Self.parseInstant))
+                contributed: device.contributedTraces)
         }
-    }
-
-    private static func parseInstant(_ text: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
 
     /// How far below this computer's point the first other device may sit:
@@ -570,14 +556,13 @@ struct FlowMapScene: Equatable {
     static let deviceClearance: CGFloat = 72
 
     /// The other devices, in one column directly below this computer
-    /// (owner, 2026-10-27), each joined to the commons by a quiet line that
-    /// bows out to the right of this computer rather than through it. They
-    /// contribute to the same account, but this Mac cannot say what or
-    /// when, so no line moves or is dashed for them. Past `devicesShown`
-    /// the rest are counted as "+N" under the column. A scene with no
-    /// commons (the Private AI map) is returned as it is.
-    func addingDevices(_ devices: [OtherDevice], now: Date = Date()) -> FlowMapScene {
-        guard !devices.isEmpty, let library = nodes.first(where: { $0.id == "library" }),
+    /// (owner, 2026-10-27), with no line to the commons (owner, the same
+    /// day): the map's lines stay this computer's, whose sending it can
+    /// see. Past `devicesShown` the rest are counted as "+N" under the
+    /// column. A scene with no commons (the Private AI map) is returned as
+    /// it is.
+    func addingDevices(_ devices: [OtherDevice]) -> FlowMapScene {
+        guard !devices.isEmpty, nodes.contains(where: { $0.id == "library" }),
               let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
         var scene = self
         let band = Self.band(space)
@@ -590,22 +575,8 @@ struct FlowMapScene: Equatable {
         let room = max(band.upperBound - top, 1)
         let step = min(58, max(40, room / max(CGFloat(weights.count), 1)))
         let radius: CGFloat = 12
-        // The bend clears this computer's deck, and each line a little
-        // further out than the one above it, so they do not lie on top of
-        // each other.
-        let bendBase = hub.at.x + Self.padHalfWidth + 28
         for (index, device) in shown.enumerated() {
             let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
-            let bend = bendBase + 14 * CGFloat(index)
-            let start = CGPoint(x: point.x + Self.padHalfWidth * 0.5, y: point.y)
-            // Moving while the device carries traces now (it sent one within
-            // `deviceActiveWindow`); quiet otherwise, and when the server
-            // did not say.
-            let active = device.lastContributedAt.map { now.timeIntervalSince($0) <= Self.deviceActiveWindow } ?? false
-            scene.arcs.append(Arc(
-                from: start, control1: CGPoint(x: bend, y: point.y),
-                control2: CGPoint(x: bend, y: library.at.y + 40), to: library.at,
-                style: active ? .flowing : .quiet))
             scene.nodes.append(Node(
                 id: "device:\(device.id)", kind: .device, at: point, radius: radius,
                 label: device.name, detail: device.detail))

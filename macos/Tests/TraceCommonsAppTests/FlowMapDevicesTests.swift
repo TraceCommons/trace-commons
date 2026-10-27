@@ -37,15 +37,10 @@ final class FlowMapDevicesTests: XCTestCase {
             XCTAssertLessThanOrEqual(node.at.y, FlowMapScene.band(scene.space).upperBound)
             above = node.at.y
         }
-        // One quiet line from each device to the commons: nothing says what
-        // another device sends, so nothing moves or is dashed.
-        let added = scene.arcs.dropFirst(base.arcs.count)
-        XCTAssertEqual(added.count, 2)
-        XCTAssertTrue(added.allSatisfy { $0.style == .quiet })
-        XCTAssertTrue(added.allSatisfy { $0.to == library.at })
-        // Bowed out to the right of this computer, so no line runs through
-        // it on the way up.
-        XCTAssertTrue(added.allSatisfy { min($0.control1.x, $0.control2.x) > hub.at.x + FlowMapScene.padHalfWidth })
+        // No line joins another device to the commons (owner, 2026-10-27):
+        // the devices are drawn, and the map's lines stay this computer's.
+        XCTAssertEqual(scene.arcs, base.arcs)
+        XCTAssertGreaterThan(devices[0].at.y, library.at.y)
         XCTAssertEqual(scene.flows, base.flows, "another device never starts the map moving")
         XCTAssertEqual(scene.nodes.filter { $0.kind != .device }, base.nodes, "this computer's nodes are untouched")
     }
@@ -87,24 +82,15 @@ final class FlowMapDevicesTests: XCTestCase {
                        "an unread list draws no devices, never a guess")
     }
 
-    /// A device that sent a trace within the hour carries traces now: its
-    /// line moves, as this computer's does while it sends. One that sent
-    /// earlier, or that the server has not counted, stays quiet; a count
-    /// the server did not send is never drawn as nothing sent.
-    func test_aDeviceThatContributedWithinTheHourMoves() throws {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
+    /// What another device has in the commons lights the commons, as this
+    /// computer's contributions do, but draws no line (owner, 2026-10-27).
+    func test_aDeviceWithTracesInTheCommonsLightsItWithoutALine() throws {
         let base = traces()
         let scene = base.addingDevices([
-            .init(id: "a", name: "a", detail: "", contributed: 3, lastContributedAt: now.addingTimeInterval(-600)),
-            .init(id: "b", name: "b", detail: "", contributed: 9, lastContributedAt: now.addingTimeInterval(-7200)),
-            .init(id: "c", name: "c", detail: "", contributed: nil, lastContributedAt: nil),
-            .init(id: "d", name: "d", detail: "", contributed: 0, lastContributedAt: nil),
-        ], now: now)
-        let added = Array(scene.arcs.dropFirst(base.arcs.count))
-        XCTAssertEqual(added.map(\.style), [.flowing, .quiet, .quiet, .quiet])
-        XCTAssertTrue(scene.flows)
-        XCTAssertEqual(FlowMapScene.deviceActiveWindow, 3600)
-        // Something a device sent stands in the commons: the commons is lit.
+            .init(id: "a", name: "a", detail: "", contributed: 3),
+            .init(id: "c", name: "c", detail: "", contributed: nil),
+        ])
+        XCTAssertEqual(scene.arcs, base.arcs)
         guard case .library(let active) = try XCTUnwrap(scene.nodes.first { $0.id == "library" }).kind else {
             return XCTFail("no library")
         }
@@ -115,8 +101,8 @@ final class FlowMapDevicesTests: XCTestCase {
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
         let base = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
         let scene = base.addingDevices([
-            .init(id: "c", name: "c", detail: "", contributed: nil, lastContributedAt: nil),
-            .init(id: "d", name: "d", detail: "", contributed: 0, lastContributedAt: nil),
+            .init(id: "c", name: "c", detail: "", contributed: nil),
+            .init(id: "d", name: "d", detail: "", contributed: 0),
         ])
         XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: false))
     }
@@ -126,8 +112,7 @@ final class FlowMapDevicesTests: XCTestCase {
     /// did not say.
     func test_theCardSaysHowManyTracesTheDeviceContributed() {
         let listed = [
-            AccountDevice(deviceKeyId: "sha256:a", label: "a", lastSeenAt: "t1",
-                          contributedTraces: 12, lastContributedAt: "2027-01-15T08:00:00Z"),
+            AccountDevice(deviceKeyId: "sha256:a", label: "a", lastSeenAt: "t1", contributedTraces: 12),
             AccountDevice(deviceKeyId: "sha256:b", label: "b", lastSeenAt: "t1"),
         ]
         let others = FlowMapScene.otherDevices(
@@ -138,8 +123,6 @@ final class FlowMapDevicesTests: XCTestCase {
         XCTAssertEqual(FlowMapScene.words?.tracesCounted(1), "1 trace")
         XCTAssertEqual(FlowMapScene.words?.tracesCounted(12), "12 traces")
         XCTAssertEqual(others.map(\.contributed), [12, nil])
-        XCTAssertEqual(others[0].lastContributedAt, ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
-        XCTAssertNil(others[1].lastContributedAt)
     }
 
     /// Renders the Traces map with three other devices, in both styles, so
@@ -157,9 +140,9 @@ final class FlowMapDevicesTests: XCTestCase {
         let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), space: space)
             .addingDevices([
                 .init(id: "a", name: "build-box", detail: "Last seen 5 minutes ago\n12 traces",
-                      contributed: 12, lastContributedAt: Date().addingTimeInterval(-300)),
+                      contributed: 12),
                 .init(id: "b", name: "zaki-air", detail: "Last seen 2 days ago\n3 traces",
-                      contributed: 3, lastContributedAt: Date().addingTimeInterval(-172_800)),
+                      contributed: 3),
                 .init(id: "c", name: "ci-runner-07", detail: "—"),
             ])
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:))
