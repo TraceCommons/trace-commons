@@ -31,6 +31,15 @@ enum PrivateAIScreenLayout {
         return min(count, 1 + Int((elapsed - 0.9) / 0.24))
     }
 
+    /// A pill's width, in the canvas.
+    static let pillWidth: CGFloat = 88
+    /// The providers' pills, each on its tool's line.
+    static let providerX: CGFloat = 650
+    /// NEAR AI's pill: a column of its own, right of the providers, so a
+    /// tool level with the N (one tool, or the middle of three) never
+    /// draws its provider's pill on NEAR AI's (owner, 2026-10-27).
+    static let destinationX: CGFloat = 770
+
     /// Evenly space connected-tool candidates; one sits in the middle.
     static func rowY(_ index: Int, of count: Int) -> CGFloat {
         guard count > 1 else { return 101 }
@@ -39,9 +48,10 @@ enum PrivateAIScreenLayout {
 }
 
 /// Private AI: the tools that can connect on the left, their providers on
-/// the right, the N between as the hub; turning Private AI on draws the
-/// tools' routes through the N to NEAR AI. Dashed: no tool switches over
-/// until it is connected (`private_ai.offer_lead`).
+/// the right, the N between as the hub, and NEAR AI past the providers.
+/// Dashed: no tool switches over until it is connected
+/// (`private_ai.offer_lead`). The step says what Private AI is and has no
+/// switch (owner, 2026-10-27: it changed little); Settings turns it on.
 struct PrivateAIScreen: View {
     @EnvironmentObject private var model: AppModel
     let copy: FirstRunCopy
@@ -76,31 +86,24 @@ struct PrivateAIScreen: View {
     }
 
     private func diagram(_ tools: [SourceCandidate]) -> some View {
-        let on = runner.state.privateAI && privateAI != nil
-        return GlassAnimationTimeline(minimumInterval: 1.0 / 30, paused: reduceMotion) { date in
+        GlassAnimationTimeline(minimumInterval: 1.0 / 30, paused: reduceMotion) { date in
             let flow = reduceMotion ? 0 : CGFloat((date.timeIntervalSinceReferenceDate / 1.1).truncatingRemainder(dividingBy: 1))
             GeometryReader { geometry in
                 let left = (geometry.size.width - FirstRunStageLayout.canvas.width) / 2
                 let hub = CGPoint(x: left + 440, y: 101)
+                let provider = left + PrivateAIScreenLayout.providerX
+                let destination = left + PrivateAIScreenLayout.destinationX
+                let half = PrivateAIScreenLayout.pillWidth / 2
                 ZStack {
                     ForEach(Array(tools.enumerated()), id: \.element.source) { index, tool in
                         let y = PrivateAIScreenLayout.rowY(index, of: tools.count)
-                        // Straight to the provider, dimmed once Private AI is on.
+                        // Straight to the provider.
                         Path { path in
                             path.move(to: CGPoint(x: left + 254, y: y))
-                            path.addLine(to: CGPoint(x: left + 606, y: y))
+                            path.addLine(to: CGPoint(x: provider - half, y: y))
                         }
                         .stroke(GlassColor.textTertiary, style: StrokeStyle(lineWidth: 1.5, dash: [3, 6], dashPhase: -18 * flow))
-                        .opacity(on ? 0.22 : 0.5)
-                        // Through the N, drawn once Private AI is on.
-                        Path { path in
-                            path.move(to: CGPoint(x: left + 254, y: y))
-                            path.addCurve(
-                                to: CGPoint(x: hub.x - 36, y: hub.y),
-                                control1: CGPoint(x: left + 330, y: y), control2: CGPoint(x: left + 350, y: hub.y))
-                        }
-                        .stroke(GlassTokens.Color.firstRunGlow.color, style: StrokeStyle(lineWidth: 2, dash: [5, 6], dashPhase: -22 * flow))
-                        .opacity(on ? 1 : 0)
+                        .opacity(0.5)
                         FirstRunToolFace(tool: tool.source.glassTool)
                             .firstRunActor(FirstRunStageLayout.tileActor(tool.source))
                             .frame(width: 42, height: 42)
@@ -111,27 +114,19 @@ struct PrivateAIScreen: View {
                             .position(x: left + 230, y: y + 34)
                         if let vendor = tool.answersAt {
                             pill(vendor, lit: false)
-                                .opacity(on ? 0.5 : 1)
-                                .position(x: left + 650, y: y)
+                                .position(x: provider, y: y)
                         }
                     }
-                    Path { path in
-                        path.move(to: CGPoint(x: hub.x + 36, y: hub.y))
-                        path.addLine(to: CGPoint(x: left + 606, y: hub.y))
-                    }
-                    .stroke(GlassTokens.Color.firstRunGlow.color, style: StrokeStyle(lineWidth: 2, dash: [5, 6], dashPhase: -22 * flow))
-                    .opacity(on ? 1 : 0)
-                    FirstRunHub(glow: on ? 1 : 0.4)
+                    FirstRunHub(glow: 0.4)
                         .firstRunActor(FirstRunStageLayout.hubActor)
                         .frame(width: 66, height: 66)
                         .position(hub)
                     if let near = privateAI?.statInferenceAccess {
-                        pill(near, lit: on)
-                            .opacity(on ? 1 : 0.5)
-                            .position(x: left + 650, y: hub.y)
+                        pill(near, lit: false)
+                            .opacity(0.5)
+                            .position(x: destination, y: hub.y)
                     }
                 }
-                .animation(GlassMotion.timed(reduceMotion, duration: 0.5), value: on)
             }
         }
         .frame(height: 221)
@@ -143,12 +138,11 @@ struct PrivateAIScreen: View {
         Text(text)
             .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
             .foregroundStyle(lit ? GlassColor.accentText : GlassColor.textSecondary)
-            .frame(width: 88, height: 24)
+            .frame(width: PrivateAIScreenLayout.pillWidth, height: 24)
             .background(Capsule().fill(lit ? GlassTokens.Color.tintAccent.color : GlassTokens.Color.tintNeutral.color))
     }
 
-    /// Worded by the Private AI copy; the switch stays off and disabled
-    /// until that copy is there, so nobody turns it on unread.
+    /// Worded by the Private AI copy, with Learn more for the rest of it.
     private func card(_ tools: [SourceCandidate]) -> some View {
         GlassAnimationTimeline(minimumInterval: 1.0 / 30, paused: reduceMotion) { date in
             let shown = PrivateAIScreenLayout.counted(
@@ -181,24 +175,9 @@ struct PrivateAIScreen: View {
                         .glassType(GlassTokens.TypeScale.label.weight(.regular))
                         .foregroundStyle(GlassColor.textSecondary)
                 }
-                // The canvas's row (Ron, 2026-10-22): the switch on the
-                // left, named by the destination, and Learn more on the right.
+                // Learn more on the right; the step has no switch (owner,
+                // 2026-10-27), so nothing here turns Private AI on.
                 HStack(spacing: GlassTokens.Space.s5) {
-                    let name = privateAI?.destination ?? copy.privateAi.toggleLoading
-                    Toggle(
-                        name,
-                        isOn: Binding(
-                            get: { runner.state.privateAI && privateAI != nil },
-                            set: { runner.state.privateAI = $0 })
-                    )
-                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
-                    .disabled(privateAI == nil)
-                    // The switch already says its name to assistive tech.
-                    Text(name)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .opacity(privateAI == nil ? GlassTokens.Opacity.disabled : 1)
-                        .accessibilityHidden(true)
                     Spacer(minLength: GlassTokens.Space.s6)
                     if privateAI != nil, !more {
                         Button { more = true } label: {

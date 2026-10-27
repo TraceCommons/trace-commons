@@ -208,12 +208,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(join.contains("busy: starting && runner.isCommitting"))
         XCTAssertFalse(join.contains("bodyEmphasis"))
         let privateAI = try Self.appSource("Views/FirstRun/PrivateAIScreen.swift")
-        // The canvas's switch row (Ron, 2026-10-22): the switch first, named
-        // by the destination, its name beside it.
-        XCTAssertTrue(privateAI.contains("GlassToggleStyle(.watch, showsLabel: false)"))
-        XCTAssertTrue(privateAI.contains("let name = privateAI?.destination ?? copy.privateAi.toggleLoading"))
-        let toggle = try XCTUnwrap(privateAI.range(of: "GlassToggleStyle(.watch, showsLabel: false)"))
-        let label = try XCTUnwrap(privateAI.range(of: "Text(name)"))
-        XCTAssertLessThan(toggle.lowerBound, label.lowerBound)
+        // Ron's switch row (2026-10-22) is gone (owner, 2026-10-27: the
+        // switch changed little); Learn more stays on the row's right.
+        XCTAssertFalse(privateAI.contains("GlassToggleStyle(.watch"))
+        XCTAssertTrue(privateAI.contains("Text(copy.privateAi.learnMore)"))
     }
 }

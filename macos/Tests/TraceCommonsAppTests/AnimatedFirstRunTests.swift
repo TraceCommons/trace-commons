@@ -182,6 +182,29 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual((0..<3).map { PrivateAIScreenLayout.rowY($0, of: 3) }, [21, 101, 181])
     }
 
+    /// A tool level with the N (one tool, or the middle of three) used to
+    /// draw its provider's pill on NEAR AI's: "OpenAI" over "NEAR AI"
+    /// (owner, 2026-10-27). NEAR AI has a column of its own, right of the
+    /// providers, and both stay on the canvas.
+    func test_theNearAIPillNeverSitsOnAProvidersPill() {
+        let gap = PrivateAIScreenLayout.destinationX - PrivateAIScreenLayout.providerX
+        XCTAssertGreaterThanOrEqual(gap, PrivateAIScreenLayout.pillWidth + 8, "the two columns do not touch")
+        XCTAssertLessThanOrEqual(
+            PrivateAIScreenLayout.destinationX + PrivateAIScreenLayout.pillWidth / 2,
+            FirstRunStageLayout.canvas.width, "NEAR AI stays on the canvas")
+    }
+
+    /// The step has no switch (owner, 2026-10-27: it changed little). It
+    /// says what Private AI is, with Learn more; it never turns it on, so
+    /// setup leaves Private AI as it was and Settings turns it on.
+    @MainActor
+    func test_thePrivateAIStepHasNoSwitch() throws {
+        let screen = try MonitorNavigationTests.text("Views/FirstRun/PrivateAIScreen.swift")
+        XCTAssertFalse(screen.contains("Toggle("))
+        XCTAssertFalse(screen.contains("runner.state.privateAI = "))
+        XCTAssertTrue(screen.contains("copy.privateAi.learnMore"))
+    }
+
     // MARK: The stage
 
     /// The scan plays once per first run, and not at all under Reduce Motion.
