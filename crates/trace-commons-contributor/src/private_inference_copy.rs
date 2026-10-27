@@ -91,6 +91,14 @@
 //! subtitle says what actually happens, and [`OFFER_EXPOSURE`] still states
 //! in full what turning this on lets anything else on the machine do. The
 //! name carries the model; the sentences carry the truth.
+//!
+//! # The second exception: the subtitle
+//!
+//! The owner ruled on 2026-10-27 (#1674) that [`SUBTITLE`] may say "Add a
+//! privacy layer to AI models you are already using." It is the one
+//! sentence on this surface that uses the word, it is pinned verbatim by
+//! `the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer`, and it is not a
+//! precedent: any other sentence claiming privacy stays unwriteable.
 
 // PRIVATE-INFERENCE-SURFACE-BEGIN
 //
@@ -5221,6 +5229,35 @@ mod tests {
             copy.balance_what.contains("whole account"),
             "the scope sentence stopped saying the figure is not per-computer: {}",
             copy.balance_what
+        );
+    }
+
+    /// The subtitle is the one sentence that may claim a privacy layer
+    /// (owner, 2026-10-27, #1674). Pinned verbatim so that any change to it,
+    /// or a second sentence borrowing the claim, is a deliberate edit here.
+    /// (The health labels say "privacy scan"; that is a different thing.)
+    #[test]
+    fn the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer() {
+        assert_eq!(
+            SUBTITLE,
+            "Add a privacy layer to AI models you are already using."
+        );
+        let source = include_str!("private_inference_copy.rs");
+        let region = source
+            .split_once("PRIVATE-INFERENCE-SURFACE-BEGIN")
+            .expect("begin marker present")
+            .1
+            .split_once("PRIVATE-INFERENCE-SURFACE-END")
+            .expect("end marker present")
+            .0;
+        let literals_saying_privacy = region
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.to_lowercase().contains("privacy layer"))
+            .count();
+        assert_eq!(
+            literals_saying_privacy, 1,
+            "another line in the surface claims a 'privacy layer'"
         );
     }
 

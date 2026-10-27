@@ -465,7 +465,8 @@ final class InferenceParityTests: XCTestCase {
     /// status row), then the managed cards, then the calls, then balance
     /// and last the card that opens Settings. Billing lives in Settings. The offer and
     /// the NEAR AI sign-in are popover notices over the tab, not cards in
-    /// it (`MonitorNotices`). No subtitle and no Inference access / Runtime
+    /// it (`MonitorNotices`). No subtitle on the main pane (the inspector summary
+    /// draws it, owner 2026-10-27) and no Inference access / Runtime
     /// pair. The "Standard settings" heading, the tools, the switch and
     /// sign-in are the Settings panels', in that order; the managed cards
     /// (no #1146 panel, O3) are never under that heading: it says
@@ -473,7 +474,7 @@ final class InferenceParityTests: XCTestCase {
     /// do not.
     func test_theMainPaneFollowsThePrivateAIPageOrder() throws {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the subtitle is drawn again")
+        XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the main pane draws the subtitle again; it belongs to the inspector summary")
         XCTAssertFalse(account.contains("PrivateAIStatCard("), "the Inference access / Runtime pair is drawn again")
         let order = ["PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
                      "struct InferenceBalanceSection", "PrivateAIBalanceCard(copy: copy)",
@@ -557,15 +558,20 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
-    /// P25, as the owner revised it on 2026-10-12: the summary is the
-    /// Status row alone. The NEAR AI credential row, the Connected tools
-    /// row, the connected / not connected pair and the unreadable ledger's
-    /// lone Calls dash under them are gone.
+    /// P25, as the owner revised it on 2026-10-12 and 2026-10-27: the
+    /// summary is the Status row, then the core's subtitle (the owner put
+    /// the subtitle back on 2026-10-27, here and not on the main pane). The
+    /// NEAR AI credential row, the Connected tools row, the connected / not
+    /// connected pair and the unreadable ledger's lone Calls dash under
+    /// them are gone.
     func test_theInspectorSummaryIsTheStatusRowAlone() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         // The status is the tab's heading row (owner, 2026-10-19): the
         // shared heading over the core's dot and sentence.
-        XCTAssertTrue(views.contains("return GlassTabHeading(copy.inspectorStatus) {"))
+        XCTAssertTrue(views.contains("GlassTabHeading(copy.inspectorStatus) {"))
+        // The core's subtitle sits under the Status row, once (owner, 2026-10-27).
+        XCTAssertEqual(views.components(separatedBy: "Text(copy.subtitle)").count - 1, 1,
+                       "the inspector summary draws the core's subtitle once")
         XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
                        "the summary draws a row besides Status")
