@@ -24,7 +24,7 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(home.contains("openInsights: openInsights"))
         XCTAssertTrue(home.contains("openMissionDrafts: { page = .missionDrafts }"))
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)"))
+        XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,"))
         XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("missionDrafts: missionDrafts"))
