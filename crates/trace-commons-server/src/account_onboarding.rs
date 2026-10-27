@@ -255,7 +255,7 @@ pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) ->
     matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,
     pub account_id: uuid::Uuid,

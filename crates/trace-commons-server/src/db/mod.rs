@@ -1810,6 +1810,63 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Mint a one-time device code for `code.account_id`, after checking
+    /// that `code.minter_device_key_id` is an active device of that account.
+    async fn mint_account_device_code(
+        &self,
+        _code: NewAccountDeviceCode<'_>,
+    ) -> Result<MintAccountDeviceCodeOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "mint_account_device_code not implemented".to_string(),
+        ))
+    }
+
+    /// One of `account_id`'s minted codes, or `None` for an unknown or
+    /// foreign code.
+    async fn account_device_code_status(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _code_id: uuid::Uuid,
+    ) -> Result<Option<AccountDeviceCodeStatus>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_device_code_status not implemented".to_string(),
+        ))
+    }
+
+    /// Spend a device code and link `device_public_key` to the code's
+    /// account in one transaction, as a NEAR AI sign-in links a device: key,
+    /// principal, grant from `grant_template`, provisioned-device row, and
+    /// a native session. The code's label becomes the device's label.
+    async fn redeem_account_device_code(
+        &self,
+        _tenant_id: &str,
+        _code_hash: &str,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
+    ) -> Result<DeviceSignInOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "redeem_account_device_code not implemented".to_string(),
+        ))
+    }
+
+    /// Mint a fresh native session for a device that joined by code and is
+    /// still active, recording `nonce_hash` so the proof cannot be replayed.
+    /// Refuses a device that renewed within `min_interval`.
+    async fn renew_device_session(
+        &self,
+        _tenant_id: &str,
+        _device_public_key: &[u8; 32],
+        _nonce_hash: &str,
+        _session: NewSession<'_>,
+        _min_interval: chrono::Duration,
+    ) -> Result<DeviceSignInOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "renew_device_session not implemented".to_string(),
+        ))
+    }
+
     /// Count `account_id`'s ACTIVE strong authenticators: webauthn credentials plus
     /// NEAR identities, summed in ONE RLS-scoped tx. Lets a caller enforce
     /// "keep at least one strong authenticator" before revoking the last passkey or
@@ -2472,6 +2529,59 @@ pub struct AccountDeviceSummary {
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     /// True when the session the caller presented belongs to this device.
     pub this_device: bool,
+}
+
+/// A code to mint, as [`Database::mint_account_device_code`] takes it. Every
+/// value is a hash, an id or a label; the code's secret never reaches the
+/// database.
+#[derive(Debug, Clone)]
+pub struct NewAccountDeviceCode<'a> {
+    pub tenant_id: &'a str,
+    pub account_id: uuid::Uuid,
+    pub minter_device_key_id: &'a str,
+    pub mint_nonce_hash: &'a str,
+    pub code_hash: &'a str,
+    pub label: Option<&'a str>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Refuse when the account already holds this many unexpired, unredeemed
+    /// codes.
+    pub outstanding_cap: i64,
+}
+
+/// What [`Database::mint_account_device_code`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintAccountDeviceCodeOutcome {
+    Minted {
+        code_id: uuid::Uuid,
+    },
+    /// The proving key is not an active device of the session's account.
+    MinterNotADevice,
+    TooManyOutstanding,
+    /// The proof's nonce was already used.
+    NonceReused,
+}
+
+/// A minted code as its account sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDeviceCodeStatus {
+    pub expired: bool,
+    pub redeemed_device_key_id: Option<String>,
+}
+
+/// What [`Database::redeem_account_device_code`] or
+/// [`Database::renew_device_session`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceSignInOutcome {
+    SignedIn(crate::account_onboarding::ProvisionedNearAccount),
+    /// Redeem: no unexpired, unredeemed code with that hash. Renew: the key
+    /// is not an active device that joined by code.
+    NotFound,
+    /// Redeem: the device key is registered to another tenant or account.
+    DeviceKeyElsewhere,
+    /// Renew: the proof's nonce was already used.
+    NonceReused,
+    /// Renew: the device renewed too recently.
+    TooSoon,
 }
 
 /// Outcome of [`Database::revoke_account_device`]. `removed` is `false` for an

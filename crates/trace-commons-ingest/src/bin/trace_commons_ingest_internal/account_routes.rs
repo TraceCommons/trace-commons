@@ -179,6 +179,10 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
         ("GET", "/v1/account/devices", Refused),
         ("PATCH", "/v1/account/devices/{device_key_id}", Refused),
         ("DELETE", "/v1/account/devices/{device_key_id}", Refused),
+        // Refused: device codes. An unbound account has no NEAR-linked
+        // device to mint from.
+        ("POST", "/v1/account/device-codes", Refused),
+        ("GET", "/v1/account/device-codes/{code_id}", Refused),
         // Refused: merge.
         ("POST", "/v1/account/merge/start", Refused),
         ("POST", "/v1/account/merge/confirm", Refused),

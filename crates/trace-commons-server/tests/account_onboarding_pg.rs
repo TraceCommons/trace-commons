@@ -1773,3 +1773,242 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
     task.abort();
     other_task.abort();
 }
+
+/// A signed-in laptop mints a code, a headless server redeems it and joins
+/// the same account, and only that server can renew its session by key.
+#[tokio::test]
+async fn a_code_minted_on_a_laptop_links_a_server_that_alone_renews_by_key() {
+    use trace_commons_server::db::{
+        DeviceSignInOutcome, MintAccountDeviceCodeOutcome, NewAccountDeviceCode,
+    };
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (login, task) = stub_near_ai_login("device-code").await;
+    let template = signup_template(SIGNUP_TEMPLATE);
+    let laptop = fresh_keypair();
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&laptop),
+            native_session(&session_hash("code-laptop")),
+            &identity(),
+            Some(&template),
+        )
+        .await
+        .expect("the laptop provisions");
+    let (tenant, account) = (first.tenant_id.clone(), first.account_id);
+    let mint = |code_hash: String, nonce: String, minter: String, cap: i64| {
+        let tenant = tenant.clone();
+        let db = &db;
+        async move {
+            db.mint_account_device_code(NewAccountDeviceCode {
+                tenant_id: &tenant,
+                account_id: account,
+                minter_device_key_id: &minter,
+                mint_nonce_hash: &nonce,
+                code_hash: &code_hash,
+                label: Some("zaki-server"),
+                expires_at: Utc::now() + Duration::minutes(10),
+                outstanding_cap: cap,
+            })
+            .await
+            .unwrap()
+        }
+    };
+
+    // Only an active device of the account can mint.
+    let stranger = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &device_bytes(&fresh_keypair()),
+    );
+    assert_eq!(
+        mint(hash("c0"), hash("n0"), stranger, 3).await,
+        MintAccountDeviceCodeOutcome::MinterNotADevice
+    );
+    let code_hash = hash("code-1");
+    let MintAccountDeviceCodeOutcome::Minted { code_id } = mint(
+        code_hash.clone(),
+        hash("n1"),
+        first.device_key_id.clone(),
+        3,
+    )
+    .await
+    else {
+        panic!("the laptop mints");
+    };
+    assert_eq!(
+        mint(hash("code-2"), hash("n1"), first.device_key_id.clone(), 3).await,
+        MintAccountDeviceCodeOutcome::NonceReused,
+        "a mint proof's nonce is accepted once"
+    );
+    assert_eq!(
+        mint(hash("code-3"), hash("n3"), first.device_key_id.clone(), 1).await,
+        MintAccountDeviceCodeOutcome::TooManyOutstanding
+    );
+    let status = db
+        .account_device_code_status(&tenant, account, code_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.expired);
+    assert_eq!(status.redeemed_device_key_id, None);
+
+    // A wrong code finds nothing; the right one links the server.
+    let server = fresh_keypair();
+    let server_session = session_hash("code-server");
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &hash("not-a-code"),
+            &device_bytes(&server),
+            native_session(&server_session),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    let DeviceSignInOutcome::SignedIn(linked) = db
+        .redeem_account_device_code(
+            &tenant,
+            &code_hash,
+            &device_bytes(&server),
+            native_session(&server_session),
+            Some(&template),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("the server redeems");
+    };
+    assert_eq!(linked.account_id, account);
+    assert_eq!(linked.anchor_hash, first.anchor_hash);
+    assert!(
+        db.validate_session(&tenant, &server_session)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        signup_grants(&admin, &tenant, &linked.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)]
+    );
+    let devices = db
+        .list_account_devices(&tenant, account, Some(&server_session))
+        .await
+        .unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[1].device_key_id, linked.device_key_id);
+    assert_eq!(devices[1].label.as_deref(), Some("zaki-server"));
+    assert!(devices[1].this_device);
+    assert_eq!(
+        db.account_device_code_status(&tenant, account, code_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .redeemed_device_key_id,
+        Some(linked.device_key_id.clone())
+    );
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &code_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-again")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound,
+        "a code is spent by its first redeem"
+    );
+
+    // Renewal: the laptop joined by NEAR AI, not by code, and is refused.
+    let renew = |key: [u8; 32], nonce: String, interval: Duration| {
+        let tenant = tenant.clone();
+        let db = &db;
+        async move {
+            let token = session_hash("renewed");
+            let outcome = db
+                .renew_device_session(&tenant, &key, &nonce, native_session(&token), interval)
+                .await
+                .unwrap();
+            (outcome, token)
+        }
+    };
+    assert_eq!(
+        renew(device_bytes(&laptop), hash("r0"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NotFound
+    );
+    let (outcome, token) = renew(device_bytes(&server), hash("r1"), Duration::zero()).await;
+    assert!(matches!(outcome, DeviceSignInOutcome::SignedIn(ref p) if p.account_id == account));
+    assert!(
+        db.validate_session(&tenant, &token)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r1"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NonceReused
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r2"), Duration::minutes(10))
+            .await
+            .0,
+        DeviceSignInOutcome::TooSoon
+    );
+
+    // Revoking the server ends its renewal; revoking the laptop voids the
+    // codes it minted.
+    assert!(
+        db.revoke_account_device(&tenant, account, &linked.device_key_id, "account-actor:me")
+            .await
+            .unwrap()
+            .removed
+    );
+    assert_eq!(
+        renew(device_bytes(&server), hash("r3"), Duration::zero())
+            .await
+            .0,
+        DeviceSignInOutcome::NotFound
+    );
+    let late_hash = hash("code-late");
+    assert!(matches!(
+        mint(
+            late_hash.clone(),
+            hash("n4"),
+            first.device_key_id.clone(),
+            3
+        )
+        .await,
+        MintAccountDeviceCodeOutcome::Minted { .. }
+    ));
+    assert!(
+        db.revoke_account_device(&tenant, account, &first.device_key_id, "account-actor:me")
+            .await
+            .unwrap()
+            .removed
+    );
+    assert_eq!(
+        db.redeem_account_device_code(
+            &tenant,
+            &late_hash,
+            &device_bytes(&fresh_keypair()),
+            native_session(&session_hash("code-late")),
+            Some(&template),
+        )
+        .await
+        .unwrap(),
+        DeviceSignInOutcome::NotFound
+    );
+    task.abort();
+}
