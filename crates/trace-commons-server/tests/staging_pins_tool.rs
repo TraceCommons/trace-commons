@@ -1065,12 +1065,14 @@ fn run(args: &[&str], stdin: &str, dir: &Path) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the tool starts");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // A tool that refuses before reading its input may exit before this
+    // write: a broken pipe is that refusal, not a failure, and what it
+    // printed and how it exited are what the test asserts.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("writing the tool's stdin: {error}"),
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -1517,4 +1519,33 @@ fn sign_embeds_the_allowlist_file() {
     let refused = run(&args("bad.json"), &seed, dir.path());
     assert!(text(&refused.stderr).contains("refused: allowlist_unreadable"));
     assert!(!dir.path().join("bad.json").exists());
+}
+
+/// The helper itself: a tool that refuses before reading stdin can exit
+/// before the test has written it, and the write then fails with a broken
+/// pipe. That is the tool behaving as specified, not a failure, so `run`
+/// returns the tool's output either way. A megabyte of stdin, past any
+/// pipe buffer, makes the race certain instead of occasional.
+#[test]
+fn run_survives_a_tool_that_exits_before_reading_its_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = synthetic_seed_hex();
+    write_sets(dir.path());
+    let args = [
+        "sign",
+        "--allowlist",
+        "allowlist.json",
+        "--sets",
+        "observed.txt",
+        "--sequence",
+        "1",
+        "--ttl-days",
+        "7",
+        "--first",
+    ];
+    assert!(run(&args, &seed, dir.path()).status.success());
+    let flood = "0".repeat(1 << 20);
+    let again = run(&args, &flood, dir.path());
+    assert_eq!(again.status.code(), Some(1));
+    assert!(text(&again.stderr).contains("refused: output_exists"));
 }
