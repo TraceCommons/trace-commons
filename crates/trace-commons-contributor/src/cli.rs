@@ -144,6 +144,17 @@ enum Command {
         /// `ssh -L` command that forwards the sign-in to your own computer.
         #[arg(long, conflicts_with_all = ["grant", "invite"])]
         no_browser: bool,
+        /// One-time code from `devices add` on a signed-in computer. Links
+        /// this machine to that account with no browser: the way to sign in
+        /// a server or headless machine. TRACE_COMMONS_DEVICE_CODE works too.
+        #[arg(long, conflicts_with_all = ["grant", "invite", "key_id", "allowed_hosts", "no_browser"])]
+        code: Option<String>,
+    },
+    /// The devices linked to your account, and linking a server with a
+    /// one-time code
+    Devices {
+        #[command(subcommand)]
+        action: DevicesAction,
     },
     /// List discoverable local sessions
     List {
@@ -381,6 +392,35 @@ enum AccountAction {
     },
     /// Revoke the account session and forget it locally
     Logout,
+}
+
+/// The devices linked to one account.
+#[derive(Subcommand)]
+enum DevicesAction {
+    /// Make a one-time code that links a server or another machine to this
+    /// account, then wait until it is used. Run `login --code <code>` there.
+    Add {
+        /// A name for the new device, shown in `devices list`
+        #[arg(long)]
+        label: Option<String>,
+        /// Print the code and return without waiting for it to be used
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// List the devices linked to this account
+    List,
+    /// Name a device; leave out the name to clear it
+    Rename {
+        device_key_id: String,
+        label: Option<String>,
+    },
+    /// Unlink a device: it is signed out and can no longer renew its sign-in
+    Revoke {
+        device_key_id: String,
+        /// Skip the confirmation
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Consent, after enrollment.
@@ -636,7 +676,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             scopes,
             default_consent,
             no_browser,
+            code,
         } => {
+            let env_code = std::env::var(crate::devices_cli::CODE_ENV).ok();
+            if let Some(code) = crate::devices_cli::code_from(code.as_deref(), env_code.as_deref())
+            {
+                return crate::devices_cli::login_with_code(
+                    &store,
+                    &code,
+                    scopes.as_deref(),
+                    default_consent,
+                    cli.json,
+                );
+            }
             commands::refuse_json_sign_in(
                 cli.json,
                 grant.as_deref(),
@@ -739,6 +791,51 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout { yes } => commands::logout(&store, yes),
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
+        Command::Devices { action } => {
+            let mut call = |method: &str, params: serde_json::Value| {
+                commands::daemon_call(&store, method, params)
+            };
+            let mut stdout = std::io::stdout();
+            match action {
+                DevicesAction::Add { label, no_wait } => crate::devices_cli::add_with(
+                    &mut call,
+                    label.as_deref(),
+                    !no_wait,
+                    cli.json,
+                    &mut |d| std::thread::sleep(d),
+                    &mut stdout,
+                ),
+                DevicesAction::List => {
+                    crate::devices_cli::list_with(&mut call, cli.json, &mut stdout)
+                }
+                DevicesAction::Rename {
+                    device_key_id,
+                    label,
+                } => crate::devices_cli::rename_with(
+                    &mut call,
+                    &device_key_id,
+                    label.as_deref(),
+                    cli.json,
+                    &mut stdout,
+                ),
+                DevicesAction::Revoke { device_key_id, yes } => {
+                    use std::io::IsTerminal;
+                    if !yes && !std::io::stdin().is_terminal() {
+                        anyhow::bail!(
+                            "devices revoke requires confirmation; use --yes in non-interactive mode"
+                        );
+                    }
+                    crate::devices_cli::revoke_with(
+                        &mut call,
+                        &device_key_id,
+                        yes,
+                        cli.json,
+                        &mut std::io::stdin(),
+                        &mut stdout,
+                    )
+                }
+            }
+        }
         Command::Consent { action } => match action {
             ConsentAction::Scopes { scopes } => {
                 commands::consent_scopes(&store, scopes.as_deref(), cli.json)
@@ -956,6 +1053,38 @@ mod tests {
             } => assert_eq!(i, "https://i.example/onboard#C"),
             _ => panic!("login --invite"),
         }
+    }
+
+    #[test]
+    fn login_code_parses_and_refuses_the_other_routes() {
+        match parse(&["login", "--code", "tcd1_dA.s"]).command {
+            Command::Login { code: Some(c), .. } => assert_eq!(c, "tcd1_dA.s"),
+            _ => panic!("login --code"),
+        }
+        for other in [
+            &["--grant", "g"][..],
+            &["--invite", "https://i.example/onboard#C"],
+            &["--no-browser"],
+            &["--key-id"],
+        ] {
+            let args: Vec<&str> = ["trace-commons-contributor", "login", "--code", "c"]
+                .into_iter()
+                .chain(other.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+        assert!(matches!(
+            parse(&["devices", "add", "--label", "box", "--no-wait"]).command,
+            Command::Devices {
+                action: DevicesAction::Add { no_wait: true, .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["devices", "revoke", "sha256:ab", "--yes"]).command,
+            Command::Devices {
+                action: DevicesAction::Revoke { yes: true, .. }
+            }
+        ));
     }
 
     #[test]

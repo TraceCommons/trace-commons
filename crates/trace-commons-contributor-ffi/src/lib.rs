@@ -6068,6 +6068,20 @@ pub extern "C" fn tc_payout_link_copy_json() -> *mut c_char {
     })
 }
 
+/// The Devices section's words (`consent_copy::account_devices_copy`), as
+/// a JSON object of `AccountDevicesCopy`'s fields. Every string is a draft
+/// for owner review; templates carry `{device}`, `{code}` or `{when}`.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_account_devices_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::account_devices_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The Flow 1 grant screens' sentences
 /// (`consent_copy::automatic_contribution_copy`), as a JSON object of
 /// `AutomaticGrantCopy`'s fields, for the contributor configuration in

@@ -438,7 +438,7 @@ fn consent_source(
 ///
 /// Also answers whether the scopes are the person's choice
 /// ([`ConsentSource::is_a_choice`]).
-fn resolve_consent_scopes(
+pub(crate) fn resolve_consent_scopes(
     scopes: Option<&str>,
     default_consent: bool,
 ) -> Result<(Vec<String>, bool)> {
@@ -3997,7 +3997,11 @@ fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
 /// overwrites the files from its own copy on its next pass. See
 /// `daemon::client`'s module doc for the full list of what silently did not
 /// work before this.
-fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> Result<Response> {
+pub(crate) fn daemon_call(
+    store: &ConfigStore,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Response> {
     daemon_call_probed(store, method, params).map(|(resp, _)| resp)
 }
 
