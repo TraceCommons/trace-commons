@@ -2414,10 +2414,12 @@ async fn a_revoke_in_flight_holds_back_a_renewal_and_a_redeem_until_it_commits()
     .await
     .unwrap();
     let renewed_token = session_hash("race-renewed");
+    let server_key = device_bytes(&server);
+    let renew_nonce = hash(&format!("race-renew-{salt}"));
     let renewal = db.renew_device_session(
         &tenant,
-        &device_bytes(&server),
-        &hash(&format!("race-renew-{salt}")),
+        &server_key,
+        &renew_nonce,
         native_session(&renewed_token),
         Duration::zero(),
     );
@@ -2447,11 +2449,13 @@ async fn a_revoke_in_flight_holds_back_a_renewal_and_a_redeem_until_it_commits()
     .await
     .unwrap();
     let joiner = fresh_keypair();
+    let joiner_key = device_bytes(&joiner);
+    let joiner_session = session_hash("race-joiner");
     let redeem = db.redeem_account_device_code(
         &tenant,
         &late_code,
-        &device_bytes(&joiner),
-        native_session(&session_hash("race-joiner")),
+        &joiner_key,
+        native_session(&joiner_session),
         Some(&template),
     );
     tokio::pin!(redeem);
