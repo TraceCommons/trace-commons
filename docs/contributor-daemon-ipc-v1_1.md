@@ -4595,9 +4595,11 @@ marked `truncated` (partial coverage), never as complete. Each file is read
 line by line, never held whole, so no file is skipped for its size, and
 what a read keeps is bounded by the per-session series caps, not the file
 (owner decision D4, settled 2026-10-20 for streaming and the per-poll
-budget). A file
-with one line over 16 MB, or one that cannot be read, is stored as unknown,
-never as zero. A row stored as unknown with no usage counters by a daemon
+budget). A line
+over 16 MB (an inlined image, say) is passed over unread: the rest of the
+session is counted and its row is marked partial (its series `truncated`,
+its facts `capped`). A file that cannot be read is stored as unknown, never
+as zero. A row stored as unknown with no usage counters by a daemon
 that skipped files over 16 MB is read once more after the upgrade, even when
 its file is unchanged.
 
