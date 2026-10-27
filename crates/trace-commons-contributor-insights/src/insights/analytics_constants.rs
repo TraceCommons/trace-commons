@@ -269,8 +269,9 @@ pub const COUNTER_PASS_MAX_BYTES_PER_TICK: u64 = 64 * 1024 * 1024;
 /// and memory does not grow with it: it is bounded by one line and by what
 /// the scans keep, at most the series caps (`MAX_SERIES_TURNS`,
 /// `MAX_SERIES_TOOL_CALLS`) for Claude Code (owner decision D4, settled
-/// 2026-10-20). One line longer than this is not read: its session is
-/// stored as unknown, never as zero.
+/// 2026-10-20). One line longer than this (an inlined image, say) is passed
+/// over unread: the rest of the session is counted and it is marked
+/// partial, never stored as unknown for it.
 pub const COUNTER_PASS_MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Whether a Codex transcript records a contributor declining an edit in a
