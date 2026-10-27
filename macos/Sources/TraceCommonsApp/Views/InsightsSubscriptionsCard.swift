@@ -27,7 +27,7 @@ struct InsightsSubscriptionsCard: View {
                     if model.shown?.truncated == true {
                         Text(text("analytics_subscriptions_truncated")).insightsCaption()
                     }
-                    ForEach((model.shown?.providers ?? []).filter { Self.knownProvider($0.provider) }) { provider in
+                    ForEach(model.supportedProviders) { provider in
                         providerSection(provider)
                     }
                 }
@@ -37,41 +37,20 @@ struct InsightsSubscriptionsCard: View {
         }
     }
 
-    private static func knownProvider(_ provider: String) -> Bool { provider == "codex" || provider == "claude" }
-
     private func providerSection(_ provider: DaemonData.SubscriptionUsageProvider) -> some View {
         let name = text("analytics_subscriptions_provider_" + provider.provider)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                Text(name).insightsHeading()
-                Spacer(minLength: GlassTokens.Space.s2)
-                if model.canChange {
-                    Button(text(provider.enabled ? "analytics_subscriptions_stop" : "analytics_subscriptions_read")) {
-                        Task { await model.setEnabled(provider.provider, on: !provider.enabled) }
-                    }
-                    .buttonStyle(GlassButtonStyle(.secondary))
-                    .disabled(!model.changingProviders.isEmpty)
-                    .accessibilityLabel(InsightsOverviewWords.fill(
-                        text(provider.enabled ? "analytics_subscriptions_stop_accessibility" : "analytics_subscriptions_read_accessibility"),
-                        ["harness": name]))
+            Text(name).insightsHeading()
+            if provider.refreshing, provider.logins.isEmpty {
+                Text(text("analytics_subscriptions_reading")).insightsCaption()
+            }
+            ForEach(provider.logins) { login in
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    loginSection(login, provider: provider.provider, now: context.date)
                 }
             }
-            if provider.enabled {
-                if provider.refreshing, provider.logins.isEmpty {
-                    Text(text("analytics_subscriptions_reading")).insightsCaption()
-                }
-                ForEach(provider.logins) { login in
-                    TimelineView(.periodic(from: .now, by: 30)) { context in
-                        loginSection(login, provider: provider.provider, now: context.date)
-                    }
-                }
-                if !provider.refreshing, provider.logins.isEmpty {
-                    Text(text("analytics_subscriptions_unavailable")).insightsCaption()
-                }
-            } else {
-                Text(InsightsOverviewWords.fill(text("analytics_subscriptions_read_detail"), ["harness": name]))
-                    .insightsCaption()
-                    .fixedSize(horizontal: false, vertical: true)
+            if !provider.refreshing, provider.logins.isEmpty {
+                Text(text("analytics_subscriptions_no_logins")).insightsCaption()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -81,6 +60,9 @@ struct InsightsSubscriptionsCard: View {
         let words = InsightsSubscriptionWords.login(login, provider: provider, now: now, copy: copy)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             Text(words.label).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            if let freshness = words.freshness {
+                Text(freshness).insightsCaption().fixedSize(horizontal: false, vertical: true)
+            }
             if let state = words.state { Text(state).insightsCaption().fixedSize(horizontal: false, vertical: true) }
             if login.state == "observed", words.windows.isEmpty {
                 Text(text("analytics_subscriptions_not_reported")).insightsCaption()
@@ -124,6 +106,7 @@ enum InsightsSubscriptionWords {
     struct Login: Equatable {
         let label: String
         let state: String?
+        let freshness: String?
         let windows: [Window]
         let banked: String
         let checked: String?
@@ -138,31 +121,45 @@ enum InsightsSubscriptionWords {
         let unknown = text("analytics_unavailable")
         let name = text("analytics_subscriptions_provider_" + provider)
         let state: String?
-        if login.stale {
-            state = text("analytics_subscriptions_stale")
-        } else if login.state != "observed" {
-            switch login.reason {
-            case "credentials_missing", "credentials_expired", "sign_in_required", "unsupported_login", "authentication_failed",
-                 "auth_missing", "auth_expired", "auth_changed":
-                state = fill("analytics_subscriptions_sign_in", ["harness": name])
-            case "tools_missing", "native_cli_unavailable":
-                state = fill("analytics_subscriptions_native_tool", ["harness": name])
-            case "keychain_read_pending":
-                state = text("analytics_subscriptions_keychain_pending")
-            case "keychain_unavailable", "keychain_locked", "keychain_permission_required", "keychain_needs_permission":
-                state = fill("analytics_subscriptions_keychain", ["harness": name])
-            default:
-                state = text("analytics_subscriptions_unavailable")
-            }
-        } else { state = nil }
-        var seenWindows = Set<String>()
-        let windows = login.windows.compactMap { window -> Window? in
+        switch login.reason {
+        case "credentials_missing", "credentials_expired", "sign_in_required", "unsupported_login", "authentication_failed",
+             "auth_missing", "auth_expired", "auth_changed":
+            state = fill("analytics_subscriptions_sign_in", ["harness": name])
+        case "tools_missing", "native_cli_unavailable":
+            state = fill("analytics_subscriptions_native_tool", ["harness": name])
+        case "native_tool_running":
+            state = text("analytics_subscriptions_native_tool_running")
+        case "base_url_refused", "invalid_response", "no_logins", "native_storage_unsupported":
+            state = text("analytics_subscriptions_" + (login.reason ?? "unavailable"))
+        case "not_checked", "not_observed":
+            state = text("analytics_subscriptions_not_checked")
+        case "keychain_unavailable", "keychain_locked", "keychain_permission_required", "keychain_needs_permission":
+            state = fill("analytics_subscriptions_keychain", ["harness": name])
+        default:
+            state = login.state != "observed" || login.reason != nil ? text("analytics_subscriptions_unavailable") : nil
+        }
+        // A refused refresh may retain an earlier measurement. Its age and
+        // the current failure both matter; neither replaces the other.
+        let freshness = login.stale
+            ? text(state == nil ? "analytics_subscriptions_stale" : "analytics_subscriptions_cached") : nil
+        let windows = login.windows.enumerated().map { index, window -> Window in
             let label: String
-            switch window.lane {
-            case "session": label = text("analytics_subscriptions_session")
-            case "weekly": label = text("analytics_subscriptions_weekly")
-            case "model": label = window.label.flatMap { $0.isEmpty ? nil : $0 } ?? text("analytics_subscriptions_model")
-            default: return nil
+            if window.lane == "model" {
+                label = window.label.flatMap { $0.isEmpty ? nil : $0 } ?? text("analytics_subscriptions_model")
+            } else if let duration = window.durationMins {
+                if duration == 10_080 { label = text("analytics_subscriptions_weekly") }
+                else {
+                    let unit = duration.isMultiple(of: 1_440) ? "days" : (duration.isMultiple(of: 60) ? "hours" : "minutes")
+                    let count = duration / (unit == "days" ? 1_440 : (unit == "hours" ? 60 : 1))
+                    let key = "analytics_subscriptions_window_" + (count == 1 ? String(unit.dropLast()) : unit)
+                    label = fill(key, ["n": String(count)])
+                }
+            } else {
+                switch window.lane {
+                case "session": label = text("analytics_subscriptions_session")
+                case "weekly": label = text("analytics_subscriptions_weekly")
+                default: label = text("analytics_subscriptions_window_unknown")
+                }
             }
             let expired = window.resetsAt.map { $0 <= now } ?? false
             let measured = login.state == "observed" && !expired
@@ -172,15 +169,16 @@ enum InsightsSubscriptionWords {
             let reset = window.resetsAt.flatMap { date in
                 date > now ? fill("analytics_subscriptions_resets", ["time": timestamp(date)]) : nil
             }
-            let id = window.lane + ":" + (window.label ?? "")
-            guard seenWindows.insert(id).inserted else { return nil }
+            // Providers may report several windows in the same lane. Keep
+            // each slot, including two windows with an unknown duration.
+            let id = "\(index):\(window.lane):\(window.durationMins ?? 0):\(window.label ?? "")"
             let fraction = measured ? window.usedPermille.map { UInt64(1000 - $0) } : nil
             return Window(id: id, label: label, remaining: remaining, remainingPermille: fraction, reset: reset)
         }
         let banked = login.bankedResets.map { fill("analytics_subscriptions_banked_count", ["n": String($0)]) } ?? unknown
         let checked = login.updatedAt.map { fill("analytics_subscriptions_checked", ["time": timestamp($0)]) }
         return Login(label: login.defaultLogin ? text("analytics_subscriptions_default_login") : login.label,
-                     state: state, windows: windows, banked: banked, checked: checked)
+                     state: state, freshness: freshness, windows: windows, banked: banked, checked: checked)
     }
 
     private static func timestamp(_ date: Date) -> String {

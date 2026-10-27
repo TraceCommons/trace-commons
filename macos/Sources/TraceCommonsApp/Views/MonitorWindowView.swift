@@ -267,7 +267,8 @@ struct MonitorWindowView: View {
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
-                    InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)
+                    InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
+                                 subscriptions: model.subscriptionUsageModel)
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).

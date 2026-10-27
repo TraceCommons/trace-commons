@@ -1,8 +1,9 @@
-//! Bounded, read-only native subscription usage probes. Secrets never form IPC
-//! values or errors. Native clients retain ownership of authentication.
+//! Explicit, bounded native subscription usage probes. Secrets never form IPC
+//! values or errors. The native CLI owns authentication and may renew its own
+//! credentials, so probes refuse while another native Codex process is running.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,16 +16,15 @@ use tokio::io::{
 };
 use tokio::process::{Child, Command};
 use tokio::sync::OwnedSemaphorePermit;
-use trace_commons_contributor_platform::external_claude_credentials as external;
 #[cfg(unix)]
 use trace_commons_contributor_platform::native_process_group::ProcessGroupGuard;
 
-use super::{LoginSpec, ProbeFailure, Provider, Reading, Window};
+use super::{
+    Identity, LoginSpec, ProbeFailure, Provider, Reading, Window, native_metadata_revision,
+};
 
 const MAX_BYTES: usize = 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const CLAUDE_CURRENT_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
 
 pub(super) async fn collect(
     login: &LoginSpec,
@@ -33,12 +33,12 @@ pub(super) async fn collect(
 ) -> Result<Reading, ProbeFailure> {
     match login.provider {
         Provider::Codex => collect_codex(login, interactive, lease).await,
-        Provider::Claude => collect_claude(login, interactive, lease).await,
+        Provider::Claude => Err(failure("provider_disabled", None)),
     }
 }
 
-// Native Security queries cannot be canceled and Tokio waits for spawn_blocking
-// jobs at runtime drop. A leased detached thread bounds concurrency without
+// Native filesystem/process queries may block and cannot be canceled. Tokio
+// waits for spawn_blocking jobs at runtime drop. A leased detached thread bounds concurrency without
 // preventing daemon shutdown; a dropped receiver simply drops its late result.
 pub(super) async fn native_read<T: Send + 'static>(
     lease: Arc<OwnedSemaphorePermit>,
@@ -55,7 +55,7 @@ pub(super) async fn native_read<T: Send + 'static>(
     receiver.await.map_err(|_| "unavailable")
 }
 
-fn failure(reason: &'static str, identity: Option<String>) -> ProbeFailure {
+fn failure(reason: &'static str, identity: Option<Identity>) -> ProbeFailure {
     ProbeFailure { reason, identity }
 }
 
@@ -159,7 +159,7 @@ fn codex_store(bytes: Option<&[u8]>) -> Result<CodexStore, &'static str> {
             Some("file") => Ok(CodexStore::File),
             Some("keyring") => Ok(CodexStore::Keyring),
             Some("auto") => Ok(CodexStore::Auto),
-            _ => Err("keychain_needs_permission"),
+            _ => Err("native_storage_unsupported"),
         },
     }
 }
@@ -220,6 +220,11 @@ async fn selected_codex_config(
                 None
             };
             let store = codex_store(bytes.as_deref())?;
+            // No verified credential-free Keychain revision is available. Auto
+            // may select Keychain even if auth.json exists, so refuse it too.
+            if store != CodexStore::File {
+                return Err("native_storage_unsupported");
+            }
             let config: toml::Value = toml::from_str(
                 std::str::from_utf8(bytes.as_deref().unwrap_or(b"")).map_err(|_| "unavailable")?,
             )
@@ -232,9 +237,96 @@ async fn selected_codex_config(
     .map_err(|_| "unavailable")?
 }
 
+// We deliberately do not try to infer CODEX_HOME from another process's
+// environment. Any Codex process may share this home. Unknown process metadata
+// fails closed; neither scanning nor refusal signals another process.
+fn codex_process_may_share_home(
+    name: &str,
+    executable: Option<&Path>,
+    arguments: &[String],
+    native: Option<&Path>,
+) -> bool {
+    if name.trim().is_empty() {
+        return true;
+    }
+    if executable
+        .zip(native)
+        .is_some_and(|(running, selected)| running == selected)
+    {
+        return true;
+    }
+    fn codex_token(token: &str) -> bool {
+        let token = token.to_ascii_lowercase();
+        let name = token.rsplit(['/', '\\']).next().unwrap_or(&token);
+        matches!(name, "codex" | "codex.exe" | "codex.js" | "codex.mjs")
+            || name.starts_with("codex-")
+            || token.contains("/codex.app/")
+            || token.contains("/@openai/codex/")
+    }
+    if codex_token(name)
+        || executable.is_some_and(|path| codex_token(&path.to_string_lossy()))
+        || arguments.iter().any(|argument| codex_token(argument))
+    {
+        return true;
+    }
+    // A wrapper whose argv is hidden could be the native Codex launcher.
+    arguments.is_empty() && matches!(name, "node" | "nodejs" | "sh" | "bash" | "zsh" | "env")
+}
+
+async fn ensure_codex_idle(
+    login: &LoginSpec,
+    lease: &Arc<OwnedSemaphorePermit>,
+) -> Result<(), ProbeFailure> {
+    let native = login
+        .native_executable
+        .clone()
+        .or_else(|| crate::managed::profiles::find_native(crate::managed::ToolId::Codex).ok())
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+    let check = native_read(Arc::clone(lease), move || {
+        let mut system = sysinfo::System::new();
+        if system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_exe(sysinfo::UpdateKind::Always)
+                .with_cmd(sysinfo::UpdateKind::Always),
+        ) == 0
+        {
+            return false;
+        }
+        !system.processes().values().any(|process| {
+            codex_process_may_share_home(
+                &process.name().to_string_lossy(),
+                process.exe(),
+                &process
+                    .cmd()
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                native.as_deref(),
+            )
+        })
+    });
+    match tokio::time::timeout(PROBE_TIMEOUT, check).await {
+        Ok(Ok(true)) => Ok(()),
+        _ => Err(failure("native_tool_running", None)),
+    }
+}
+
 async fn collect_codex(
     login: &LoginSpec,
-    interactive: bool,
+    _interactive: bool,
+    lease: Arc<OwnedSemaphorePermit>,
+) -> Result<Reading, ProbeFailure> {
+    // Refuse before opening config/auth files or invoking a native CLI. A
+    // global single-probe lease serializes our own collectors; external native
+    // clients do not share that lease, so recheck immediately before each step.
+    ensure_codex_idle(login, &lease).await?;
+    collect_codex_when_idle(login, lease).await
+}
+
+async fn collect_codex_when_idle(
+    login: &LoginSpec,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<Reading, ProbeFailure> {
     // Do not let a usage query create a native profile that does not exist.
@@ -244,9 +336,7 @@ async fn collect_codex(
     let (store, base_url) = selected_codex_config(&login.root, &lease)
         .await
         .map_err(|r| failure(r, None))?;
-    if store != CodexStore::File && !interactive {
-        return Err(failure("keychain_needs_permission", None));
-    }
+    ensure_codex_idle(login, &lease).await?;
     let file_identity = if store == CodexStore::File {
         Some(
             codex_guard(&login.root, &lease)
@@ -257,7 +347,13 @@ async fn collect_codex(
     } else {
         None
     };
-    let mut current_identity = file_identity.as_ref().map(|(id, _)| id.clone());
+    let mut current_identity = file_identity
+        .as_ref()
+        .and_then(|(_, account)| account.clone())
+        .map(|account| Identity {
+            account: Some(account),
+            email: None,
+        });
     let executable = login
         .native_executable
         .clone()
@@ -265,16 +361,9 @@ async fn collect_codex(
         .ok_or_else(|| failure("native_cli_unavailable", current_identity.clone()))?;
     let mut command = Command::new(executable);
     command.args(["-s", "read-only", "-a", "never"]);
-    // Keep the same explicitly selected source in interactive/background
-    // probes; a leftover file must never stand in for a configured keyring.
-    command.args([
-        "-c",
-        match store {
-            CodexStore::File => "cli_auth_credentials_store=\"file\"",
-            CodexStore::Keyring => "cli_auth_credentials_store=\"keyring\"",
-            CodexStore::Auto => "cli_auth_credentials_store=\"auto\"",
-        },
-    ]);
+    // Only file-backed native credentials are supported. Neither keyring nor
+    // auto is allowed to reach the native executable, even on explicit Refresh.
+    command.args(["-c", "cli_auth_credentials_store=\"file\""]);
     command.args([
         "-c",
         &format!("chatgpt_base_url={}", toml::Value::String(base_url.clone())),
@@ -309,6 +398,7 @@ async fn collect_codex(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
+    ensure_codex_idle(login, &lease).await?;
     let mut child = command
         .spawn()
         .map_err(|_| failure("unavailable", current_identity.clone()))?;
@@ -346,22 +436,37 @@ async fn collect_codex(
     #[cfg(unix)]
     let _ = group.terminate();
     stop_child(&mut child).await;
-    let after = if store == CodexStore::File {
-        codex_guard(&login.root, &lease)
-            .await
-            .map_err(|r| failure(r, None))?
-    } else {
-        None
-    };
-    if after != file_identity
-        || selected_codex_config(&login.root, &lease)
-            .await
-            .map_err(|r| failure(r, None))?
-            != (store, base_url)
-    {
+    ensure_codex_idle(login, &lease).await?;
+    let revision =
+        codex_completion_revision(&login.root, &lease, &file_identity, &(store, base_url)).await?;
+    result.map(|mut reading| {
+        reading.native_revision = Some(revision);
+        reading
+    })
+}
+
+async fn codex_completion_revision(
+    root: &Path,
+    lease: &Arc<OwnedSemaphorePermit>,
+    expected_identity: &Option<(String, Option<String>)>,
+    expected_config: &(CodexStore, String),
+) -> Result<String, ProbeFailure> {
+    let revision_before = native_metadata_revision(root);
+    // Revalidate the storage selection before opening any credential body.
+    let config = selected_codex_config(root, lease)
+        .await
+        .map_err(|r| failure(r, None))?;
+    if &config != expected_config {
         return Err(failure("auth_changed", None));
     }
-    result
+    let identity = codex_guard(root, lease)
+        .await
+        .map_err(|r| failure(r, None))?;
+    let revision_after = native_metadata_revision(root);
+    if &identity != expected_identity || revision_before != revision_after {
+        return Err(failure("auth_changed", None));
+    }
+    Ok(revision_after)
 }
 
 async fn stop_child(child: &mut Child) {
@@ -377,8 +482,11 @@ async fn rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
     method: &str,
     params: Value,
 ) -> Result<Value, &'static str> {
-    let mut bytes = serde_json::to_vec(&json!({"id":id,"method":method,"params":params}))
-        .map_err(|_| "invalid_response")?;
+    let mut request = json!({"id":id,"method":method});
+    if !params.is_null() {
+        request["params"] = params;
+    }
+    let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid_response")?;
     bytes.push(b'\n');
     input.write_all(&bytes).await.map_err(|_| "unavailable")?;
     loop {
@@ -402,7 +510,20 @@ async fn rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
                 .is_some_and(|s| {
                     s.contains("authentication required") || s.contains("not logged in")
                 });
-            return Err(if auth { "auth_missing" } else { "unavailable" });
+            let code = error.get("code").and_then(Value::as_i64);
+            let expected_unit = error
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.to_ascii_lowercase().contains("expected unit"));
+            return Err(if auth {
+                "auth_missing"
+            } else if method == "account/rateLimits/read"
+                && (code == Some(-32602) || (code == Some(-32600) && expected_unit))
+            {
+                "legacy_rate_limits_params"
+            } else {
+                "unavailable"
+            });
         }
         return message.get("result").cloned().ok_or("invalid_response");
     }
@@ -411,7 +532,7 @@ async fn rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
 async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
     input: &mut W,
     output: &mut R,
-    current_identity: &mut Option<String>,
+    current_identity: &mut Option<Identity>,
     expected_account: Option<&str>,
 ) -> Result<Reading, ProbeFailure> {
     rpc(
@@ -444,7 +565,10 @@ async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
         .get("email")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(|s| fingerprint(s.as_bytes()));
+        .map(|s| Identity {
+            account: None,
+            email: Some(fingerprint(s.as_bytes())),
+        });
     let limits = rpc(
         input,
         output,
@@ -453,8 +577,23 @@ async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
         json!({
         "excludeResetCreditDetails":true,"supportsLunaReserve":false}),
     )
-    .await
-    .map_err(|r| failure(r, current_identity.clone()))?;
+    .await;
+    let limits = match limits {
+        Err("legacy_rate_limits_params") => {
+            rpc(input, output, 5, "account/rateLimits/read", Value::Null).await
+        }
+        result => result,
+    }
+    .map_err(|reason| {
+        failure(
+            if reason == "legacy_rate_limits_params" {
+                "unavailable"
+            } else {
+                reason
+            },
+            current_identity.clone(),
+        )
+    })?;
     let reported_account = limits
         .get("accountId")
         .and_then(Value::as_str)
@@ -466,8 +605,10 @@ async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
     {
         return Err(failure("auth_changed", None));
     }
-    if reported_account.is_some() {
-        *current_identity = reported_account;
+    if let Some(reported_account) = reported_account {
+        current_identity
+            .get_or_insert_with(Identity::default)
+            .account = Some(reported_account);
     }
     let after = rpc(
         input,
@@ -483,13 +624,6 @@ async fn codex_rpc<W: AsyncWrite + Unpin, R: AsyncBufRead + Unpin>(
     }
     let identity = current_identity
         .clone()
-        .or_else(|| {
-            account
-                .get("email")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| fingerprint(s.as_bytes()))
-        })
         .ok_or_else(|| failure("invalid_response", None))?;
     parse_codex(&limits, identity).map_err(|r| failure(r, current_identity.clone()))
 }
@@ -505,7 +639,7 @@ fn chatgpt_account(response: &Value) -> Result<Value, &'static str> {
     Ok(account.clone())
 }
 
-fn parse_codex(value: &Value, identity: String) -> Result<Reading, &'static str> {
+fn parse_codex(value: &Value, identity: Identity) -> Result<Reading, &'static str> {
     let limits = value
         .get("rateLimitsByLimitId")
         .or_else(|| value.get("rate_limits_by_limit_id"))
@@ -513,22 +647,24 @@ fn parse_codex(value: &Value, identity: String) -> Result<Reading, &'static str>
         .or_else(|| value.get("rateLimits"))
         .ok_or("invalid_response")?;
     let mut windows = Vec::new();
-    for (key, fallback_lane) in [("primary", "session"), ("secondary", "weekly")] {
+    for key in ["primary", "secondary"] {
         if let Some(window) = limits.get(key).filter(|v| v.is_object()) {
             // Native Codex may put the only weekly allowance in primary.
-            // Duration is authoritative; slot position is only a fallback.
-            let lane = match window
+            // Duration is authoritative; unknown slots keep their distinct names.
+            let duration_mins = window
                 .get("windowDurationMins")
                 .or_else(|| window.get("window_duration_mins"))
                 .and_then(Value::as_u64)
-            {
+                .filter(|minutes| *minutes > 0 && *minutes <= i64::MAX as u64);
+            let lane = match duration_mins {
                 Some(300) => "session",
                 Some(10080) => "weekly",
-                _ => fallback_lane,
+                _ => key,
             };
             windows.push(Window {
                 lane: lane.into(),
                 label: None,
+                duration_mins,
                 used_permille: percent(
                     window
                         .get("usedPercent")
@@ -547,301 +683,7 @@ fn parse_codex(value: &Value, identity: String) -> Result<Reading, &'static str>
         windows,
         banked_resets,
         identity,
-    })
-}
-
-#[derive(Clone)]
-enum ClaudeSource {
-    File(PathBuf),
-    Keychain {
-        service: String,
-        version: String,
-        file_path: PathBuf,
-    },
-}
-struct ClaudeCredential {
-    token: String,
-    identity: String,
-    source: ClaudeSource,
-}
-
-fn claude_service(config_dir: Option<&str>) -> Result<String, &'static str> {
-    let Some(dir) = config_dir.filter(|s| !s.is_empty()) else {
-        return Ok("Claude Code-credentials".into());
-    };
-    let normalized = external::normalized_profile_directory(dir)?;
-    Ok(format!(
-        "Claude Code-credentials-{}",
-        &fingerprint(normalized.as_bytes())[..8]
-    ))
-}
-
-fn claude_path(login: &LoginSpec) -> Result<PathBuf, &'static str> {
-    let root = match login.secure_storage_dir.as_deref() {
-        Some("") => dirs::home_dir().ok_or("unavailable")?.join(".claude"),
-        Some(value) => PathBuf::from(value),
-        None => login.root.clone(),
-    };
-    Ok(root.join(".credentials.json"))
-}
-
-fn parse_claude_credential(
-    bytes: &[u8],
-    source: ClaudeSource,
-) -> Result<ClaudeCredential, ProbeFailure> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| failure("auth_missing", None))?;
-    let oauth = value
-        .get("claudeAiOauth")
-        .ok_or_else(|| failure("auth_missing", None))?;
-    let token = oauth
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 8192 && !s.chars().any(char::is_control))
-        .ok_or_else(|| failure("auth_missing", None))?;
-    let identity = fingerprint(token.as_bytes());
-    if let Some(expiry) = oauth.get("expiresAt").filter(|v| !v.is_null()) {
-        let expired = expiry
-            .as_i64()
-            .and_then(DateTime::<Utc>::from_timestamp_millis)
-            .is_none_or(|date| date <= Utc::now());
-        if expired {
-            return Err(failure("auth_expired", Some(identity)));
-        }
-    }
-    if let Some(scopes) = oauth.get("scopes").and_then(Value::as_array) {
-        if !scopes.iter().any(|s| s.as_str() == Some("user:profile")) {
-            return Err(failure("auth_missing", Some(identity)));
-        }
-    }
-    Ok(ClaudeCredential {
-        token: token.into(),
-        identity,
-        source,
-    })
-}
-
-fn load_claude(login: &LoginSpec, interactive: bool) -> Result<ClaudeCredential, ProbeFailure> {
-    let path = claude_path(login).map_err(|r| failure(r, None))?;
-    let file_error = match read_file(&path) {
-        Ok(bytes) => match parse_claude_credential(&bytes, ClaudeSource::File(path.clone())) {
-            Ok(credential) => return Ok(credential),
-            Err(error) => Some(error),
-        },
-        Err(reason) => Some(failure(reason, None)),
-    };
-    // CodexBar establishes the secure-file override, but not a per-override
-    // Keychain name. Refuse an uncertain fallback instead of reading a login
-    // that the selected native profile might not own.
-    if login.secure_storage_dir.is_some() {
-        return Err(file_error.unwrap_or_else(|| failure("auth_missing", None)));
-    }
-    let service = claude_service(login.config_dir.as_deref()).map_err(|r| failure(r, None))?;
-    let before = external::version(&service).map_err(|r| failure(r, None))?;
-    let Some(version) = before else {
-        return Err(file_error.unwrap_or_else(|| failure("auth_missing", None)));
-    };
-    let bytes = external::read(&service, interactive)
-        .map_err(|r| failure(r, None))?
-        .ok_or_else(|| failure("auth_missing", None))?;
-    if external::version(&service)
-        .map_err(|r| failure(r, None))?
-        .as_deref()
-        != Some(&version)
-    {
-        return Err(failure("auth_changed", None));
-    }
-    parse_claude_credential(
-        &bytes,
-        ClaudeSource::Keychain {
-            service,
-            version,
-            file_path: path,
-        },
-    )
-}
-
-fn claude_unchanged(credential: &ClaudeCredential) -> bool {
-    match &credential.source {
-        ClaudeSource::File(path) => read_file(path)
-            .ok()
-            .and_then(|bytes| {
-                parse_claude_credential(&bytes, ClaudeSource::File(path.clone())).ok()
-            })
-            .is_some_and(|fresh| fresh.identity == credential.identity),
-        ClaudeSource::Keychain {
-            service,
-            version,
-            file_path,
-        } => {
-            // A newly valid preferred file supersedes the selected legacy item.
-            let preferred_file_now_valid = read_file(file_path)
-                .ok()
-                .and_then(|bytes| {
-                    parse_claude_credential(&bytes, ClaudeSource::File(file_path.clone())).ok()
-                })
-                .is_some();
-            !preferred_file_now_valid
-                && external::version(service).ok().flatten().as_ref() == Some(version)
-        }
-    }
-}
-
-async fn collect_claude(
-    login: &LoginSpec,
-    interactive: bool,
-    lease: Arc<OwnedSemaphorePermit>,
-) -> Result<Reading, ProbeFailure> {
-    let spec = login.clone();
-    let credential_lease = lease.clone();
-    let credential = tokio::time::timeout(
-        PROBE_TIMEOUT,
-        native_read(credential_lease, move || load_claude(&spec, interactive)),
-    )
-    .await
-    .map_err(|_| failure("credential_read_timeout", None))?
-    .map_err(|_| failure("unavailable", None))??;
-    let identity = credential.identity.clone();
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(PROBE_TIMEOUT)
-        .no_proxy()
-        .user_agent(concat!(
-            "TraceCommons/",
-            env!("CARGO_PKG_VERSION"),
-            " subscription-usage"
-        ))
-        .build()
-        .map_err(|_| failure("unavailable", Some(identity.clone())))?;
-    let result = tokio::time::timeout(PROBE_TIMEOUT, async {
-        let mut response = claude_request(&client, &credential.token, true)
-            .send()
-            .await
-            .map_err(request_failure)?;
-        // Older accounts may reject the current inventory query. Retry once
-        // with the established usage endpoint; neither request changes state.
-        if matches!(response.status().as_u16(), 400 | 403) {
-            response = claude_request(&client, &credential.token, false)
-                .send()
-                .await
-                .map_err(request_failure)?;
-        }
-        match response.status().as_u16() {
-            200 => {}
-            401 | 403 => return Err("auth_expired"),
-            _ => return Err("unavailable"),
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_BYTES as u64)
-        {
-            return Err("invalid_response");
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(request_failure)? {
-            if chunk.len() > MAX_BYTES - bytes.len() {
-                return Err("invalid_response");
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid_response")?;
-        parse_claude(&value, identity.clone())
-    })
-    .await
-    .unwrap_or(Err("request_timeout"));
-    let unchanged = tokio::time::timeout(
-        PROBE_TIMEOUT,
-        native_read(lease, move || claude_unchanged(&credential)),
-    )
-    .await
-    .map_err(|_| failure("credential_check_timeout", None))?
-    .map_err(|_| failure("unavailable", None))?;
-    if !unchanged {
-        return Err(failure("auth_changed", None));
-    }
-    result.map_err(|reason| failure(reason, Some(identity)))
-}
-
-fn request_failure(error: reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        "request_timeout"
-    } else {
-        "unavailable"
-    }
-}
-
-fn claude_request(client: &reqwest::Client, token: &str, current: bool) -> reqwest::RequestBuilder {
-    client
-        .get(if current {
-            CLAUDE_CURRENT_USAGE_URL
-        } else {
-            CLAUDE_USAGE_URL
-        })
-        .bearer_auth(token)
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-}
-
-fn parse_claude(value: &Value, identity: String) -> Result<Reading, &'static str> {
-    if !value.is_object() {
-        return Err("invalid_response");
-    }
-    let mut windows = Vec::new();
-    for (key, lane, label) in [
-        ("five_hour", "session", None),
-        ("seven_day", "weekly", None),
-        ("seven_day_opus", "model", Some("Opus")),
-        ("seven_day_sonnet", "model", Some("Sonnet")),
-    ] {
-        if let Some(window) = value.get(key).filter(|v| v.is_object()) {
-            windows.push(Window {
-                lane: lane.into(),
-                label: label.map(str::to_owned),
-                used_permille: percent(window.get("utilization")),
-                resets_at: iso_reset(window.get("resets_at")),
-            });
-        }
-    }
-    if let Some(limits) = value.get("limits").and_then(Value::as_array) {
-        for entry in limits.iter().take(64) {
-            if entry.get("kind").and_then(Value::as_str) != Some("weekly_scoped")
-                || entry.get("group").and_then(Value::as_str) != Some("weekly")
-            {
-                continue;
-            }
-            let Some(label) = entry
-                .pointer("/scope/model/display_name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control))
-            else {
-                continue;
-            };
-            let model_id = entry
-                .pointer("/scope/model/id")
-                .and_then(Value::as_str)
-                .unwrap_or(label);
-            if label.eq_ignore_ascii_case("all models") || model_id.ends_with("all-models") {
-                continue;
-            }
-            if windows
-                .iter()
-                .any(|w| w.lane == "model" && w.label.as_deref() == Some(label))
-            {
-                continue;
-            }
-            windows.push(Window {
-                lane: "model".into(),
-                label: Some(label.into()),
-                used_permille: percent(entry.get("percent")),
-                resets_at: iso_reset(entry.get("resets_at")),
-            });
-        }
-    }
-    Ok(Reading {
-        windows,
-        banked_resets: None,
-        identity,
+        native_revision: None,
     })
 }
 
@@ -857,16 +699,326 @@ fn unix_reset(value: Option<&Value>) -> Option<DateTime<Utc>> {
         .filter(|n| *n > 0)
         .and_then(|n| DateTime::from_timestamp(n, 0))
 }
-fn iso_reset(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_guard_refuses_native_clients_wrappers_and_uninspectable_wrappers() {
+        for (name, executable, args) in [
+            ("codex", None, vec![]),
+            (
+                "Codex",
+                Some("/Applications/Codex.app/Contents/MacOS/Codex"),
+                vec![],
+            ),
+            (
+                "node",
+                None,
+                vec!["/opt/node_modules/@openai/codex/bin/codex.js"],
+            ),
+            ("sh", None, vec!["/tmp/codex", "app-server"]),
+            ("node", None, vec![]),
+            ("", None, vec![]),
+        ] {
+            assert!(codex_process_may_share_home(
+                name,
+                executable.map(Path::new),
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                None
+            ));
+        }
+        assert!(codex_process_may_share_home(
+            "renamed",
+            Some(Path::new("/tmp/native")),
+            &[],
+            Some(Path::new("/tmp/native"))
+        ));
+        assert!(!codex_process_may_share_home(
+            "other",
+            Some(Path::new("/bin/other")),
+            &["other".into()],
+            None
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn running_codex_refuses_before_auth_reads_or_launch() {
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("codex");
+        std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
+        let mut child = OwnedChild(
+            std::process::Command::new(&executable)
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            b"invalid config that must never be read",
+        )
+        .unwrap();
+        let login = super::super::native_login(
+            Provider::Codex,
+            None,
+            Some(dir.path().to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let lease = Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            collect(&login, true, lease).await.unwrap_err().reason,
+            "native_tool_running"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the user's process must survive refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn gated_claude_never_touches_native_credentials_or_processes() {
+        let login = LoginSpec {
+            provider: Provider::Claude,
+            root: "/does/not/exist".into(),
+            id: "gated".into(),
+            label: "gated".into(),
+            default_login: true,
+            native_executable: None,
+            config_dir: None,
+            metadata_revision: None,
+            native_revision: None,
+        };
+        let lease = Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            collect(&login, true, lease).await.unwrap_err().reason,
+            "provider_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn older_unit_params_schema_retries_once_without_params_over_native_protocol() {
+        for error in [
+            json!({"code":-32600,"message":"Invalid request: invalid type: map, expected unit"}),
+            json!({"code":-32602,"message":"Invalid params"}),
+        ] {
+            let (client, server) = tokio::io::duplex(8192);
+            let (reader, mut input) = tokio::io::split(client);
+            let mut output = BufReader::new(reader);
+            let fixture = tokio::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(server);
+                let mut reader = BufReader::new(reader);
+                let account = json!({"account":{"type":"chatgpt","email":"fixture@example.test","planType":"pro"}});
+                for (id, method) in [
+                    (1, "initialize"),
+                    (0, "initialized"),
+                    (2, "account/read"),
+                    (3, "account/rateLimits/read"),
+                    (5, "account/rateLimits/read"),
+                    (4, "account/read"),
+                ] {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], method);
+                    if id == 0 {
+                        continue;
+                    }
+                    assert_eq!(request["id"], id);
+                    let response = match id {
+                        1 => json!({"id":id,"result":{}}),
+                        2 | 4 => json!({"id":id,"result":account}),
+                        3 => {
+                            assert_eq!(request["params"]["excludeResetCreditDetails"], true);
+                            json!({"id":id,"error":error})
+                        }
+                        5 => {
+                            assert!(request.get("params").is_none());
+                            json!({"id":id,"result":{"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":540}}}})
+                        }
+                        _ => unreachable!(),
+                    };
+                    writer
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            });
+            let reading = codex_rpc(&mut input, &mut output, &mut None, None)
+                .await
+                .unwrap();
+            assert_eq!(reading.windows[0].used_permille, Some(120));
+            assert_eq!(reading.windows[0].duration_mins, Some(540));
+            fixture.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn arbitrary_rpc_errors_do_not_retry_legacy_schema() {
+        for error in [
+            json!({"code":-32600,"message":"Invalid request"}),
+            json!({"code":429,"message":"Too many requests"}),
+            json!({"code":401,"message":"authentication required"}),
+        ] {
+            let failure = fixture_rpc(vec![json!({"id":1,"result":{}}), json!({"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.test"}}}), json!({"id":3,"error":error})], &mut None).await.unwrap_err();
+            assert!(matches!(failure.reason, "unavailable" | "auth_missing"));
+        }
+    }
+
+    #[test]
+    fn exact_and_unknown_durations_remain_distinct_without_slot_inference() {
+        for (primary, secondary, expected) in [
+            (json!(540), json!(1440), [Some(540), Some(1440)]),
+            (Value::Null, json!(0), [None, None]),
+            (json!(u64::MAX), json!(-1), [None, None]),
+        ] {
+            let reading = parse_codex(&json!({"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":primary},"secondary":{"usedPercent":43,"windowDurationMins":secondary}}}), "fixture".into()).unwrap();
+            assert_eq!(reading.windows.len(), 2);
+            assert_eq!(
+                (
+                    reading.windows[0].lane.as_str(),
+                    reading.windows[1].lane.as_str()
+                ),
+                ("primary", "secondary")
+            );
+            assert_eq!(
+                [
+                    reading.windows[0].duration_mins,
+                    reading.windows[1].duration_mins
+                ],
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn post_read_witness_accepts_same_account_rotation_and_rejects_account_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        std::fs::write(
+            &auth,
+            br#"{"tokens":{"account_id":"account-a","access_token":"old"}}"#,
+        )
+        .unwrap();
+        let lease = Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap(),
+        );
+        let original = codex_guard(dir.path(), &lease).await.unwrap();
+        let config = selected_codex_config(dir.path(), &lease).await.unwrap();
+        let before = native_metadata_revision(dir.path());
+        std::fs::write(
+            &auth,
+            br#"{"tokens":{"account_id":"account-a","access_token":"rotated-token"}}"#,
+        )
+        .unwrap();
+        let witness = codex_completion_revision(dir.path(), &lease, &original, &config)
+            .await
+            .unwrap();
+        assert_ne!(before, witness);
+        assert_eq!(witness, native_metadata_revision(dir.path()));
+        std::fs::write(
+            &auth,
+            br#"{"tokens":{"account_id":"account-b","access_token":"another-token"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_completion_revision(dir.path(), &lease, &original, &config)
+                .await
+                .unwrap_err()
+                .reason,
+            "auth_changed"
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "cli_auth_credentials_store='keyring'",
+        )
+        .unwrap();
+        std::fs::write(&auth, b"invalid credentials must not be parsed").unwrap();
+        assert_eq!(
+            codex_completion_revision(dir.path(), &lease, &original, &config)
+                .await
+                .unwrap_err()
+                .reason,
+            "native_storage_unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyring_and_auto_are_refused_before_auth_body_reads_or_cli_launch() {
+        for store in ["keyring", "auto"] {
+            for auth in [
+                b"invalid credential body".as_slice(),
+                br#"{"tokens":{"account_id":"fixture","access_token":"fixture"}}"#.as_slice(),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    dir.path().join("config.toml"),
+                    format!("cli_auth_credentials_store='{store}'"),
+                )
+                .unwrap();
+                std::fs::write(dir.path().join("auth.json"), auth).unwrap();
+                let mut login = super::super::native_login(
+                    Provider::Codex,
+                    None,
+                    Some(dir.path().to_string_lossy().into_owned()),
+                )
+                .unwrap();
+                login.native_executable = Some(dir.path().join("must-never-launch"));
+                let lease = Arc::new(
+                    Arc::new(tokio::sync::Semaphore::new(1))
+                        .acquire_owned()
+                        .await
+                        .unwrap(),
+                );
+                // Enter immediately after the separately-tested idle preflight;
+                // neither malformed auth nor an unavailable CLI may win here.
+                let failure = collect_codex_when_idle(&login, lease).await.unwrap_err();
+                assert_eq!(failure.reason, "native_storage_unsupported");
+                assert_eq!(failure.identity, None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_success_keeps_account_and_email_evidence_for_partial_failures() {
+        let mut identity = None;
+        let reading = fixture_rpc(vec![json!({"id":1,"result":{}}),
+            json!({"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.test"}}}),
+            json!({"id":3,"result":{"accountId":"fixture-account","rateLimits":{"primary":{"usedPercent":20}}}}),
+            json!({"id":4,"result":{"account":{"type":"chatgpt","email":"fixture@example.test"}}})], &mut identity).await.unwrap();
+        assert_eq!(
+            reading.identity.account,
+            Some(fingerprint(b"fixture-account"))
+        );
+        assert_eq!(
+            reading.identity.email,
+            Some(fingerprint(b"fixture@example.test"))
+        );
+        let failure = fixture_rpc(vec![json!({"id":1,"result":{}}),
+            json!({"id":2,"result":{"account":{"type":"chatgpt","email":"fixture@example.test"}}}),
+            json!({"id":3,"error":{"code":503,"message":"unavailable"}})], &mut None).await.unwrap_err();
+        assert!(!reading.identity.conflicts_with(&failure.identity.unwrap()));
+    }
 
     #[test]
     fn codex_source_selection_never_substitutes_a_leftover_file_for_keyring() {
@@ -885,7 +1037,7 @@ mod tests {
         );
         assert_eq!(
             codex_store(Some(b"cli_auth_credentials_store = 2\n")).unwrap_err(),
-            "keychain_needs_permission"
+            "native_storage_unsupported"
         );
     }
 
@@ -926,30 +1078,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn claude_usage_request_is_fixed_host_and_read_only_with_legacy_fallback() {
-        let client = reqwest::Client::new();
-        for current in [true, false] {
-            let request = claude_request(&client, "fixture-token", current)
-                .build()
-                .unwrap();
-            assert_eq!(request.method(), reqwest::Method::GET);
-            assert_eq!(
-                request.url().as_str(),
-                if current {
-                    CLAUDE_CURRENT_USAGE_URL
-                } else {
-                    CLAUDE_USAGE_URL
-                }
-            );
-            assert_eq!(request.headers()["anthropic-beta"], "oauth-2025-04-20");
-            assert_eq!(request.headers()["authorization"], "Bearer fixture-token");
-        }
-    }
-
     async fn fixture_rpc(
         lines: Vec<Value>,
-        identity: &mut Option<String>,
+        identity: &mut Option<Identity>,
     ) -> Result<Reading, ProbeFailure> {
         let (client, mut server) = tokio::io::duplex(MAX_BYTES * 2 + 8192);
         let mut transcript = Vec::new();
@@ -958,6 +1089,7 @@ mod tests {
             transcript.push(b'\n');
         }
         server.write_all(&transcript).await.unwrap();
+        server.shutdown().await.unwrap();
         let (reader, mut writer) = tokio::io::split(client);
         let mut reader = BufReader::new(reader.take((MAX_BYTES + 1) as u64));
         codex_rpc(&mut writer, &mut reader, identity, None).await
@@ -965,12 +1097,18 @@ mod tests {
 
     #[tokio::test]
     async fn codex_rate_limit_failure_belongs_to_native_account_not_old_file() {
-        let mut identity = Some(fingerprint(b"old-file-account"));
+        let mut identity = Some(Identity::from(fingerprint(b"old-file-account")));
         let error = fixture_rpc(vec![json!({"id":1,"result":{}}),
             json!({"id":2,"result":{"account":{"type":"chatgpt","email":"new@example.test","planType":"pro"}}}),
             json!({"id":3,"error":{"message":"fixture quota unavailable"}})], &mut identity).await.unwrap_err();
         assert_eq!(error.reason, "unavailable");
-        assert_eq!(error.identity, Some(fingerprint(b"new@example.test")));
+        assert_eq!(
+            error.identity,
+            Some(Identity {
+                account: None,
+                email: Some(fingerprint(b"new@example.test"))
+            })
+        );
     }
 
     #[tokio::test]
@@ -1057,7 +1195,7 @@ mod tests {
                 .iter()
                 .map(|w| w.lane.as_str())
                 .collect::<Vec<_>>(),
-            vec!["session", "weekly"]
+            vec!["primary", "secondary"]
         );
     }
 
@@ -1077,74 +1215,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(0), Some(999)]
         );
-    }
-
-    #[test]
-    fn claude_reads_session_weekly_and_generic_fable_scope_without_fabricating_missing_windows() {
-        let read = parse_claude(&json!({"five_hour":{"utilization":12.5,"resets_at":"2026-10-27T12:00:00Z"},
-            "seven_day":{"utilization":52},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":23,
-                "scope":{"model":{"id":"claude/fable.5:promo","display_name":"Fable"}}}]}),"fixture".into()).unwrap();
-        assert_eq!(
-            read.windows
-                .iter()
-                .map(|w| (w.lane.as_str(), w.label.as_deref(), w.used_permille))
-                .collect::<Vec<_>>(),
-            vec![
-                ("session", None, Some(125)),
-                ("weekly", None, Some(520)),
-                ("model", Some("Fable"), Some(230))
-            ]
-        );
-        assert!(
-            parse_claude(
-                &json!({"five_hour":null,"seven_day":null}),
-                "fixture".into()
-            )
-            .unwrap()
-            .windows
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn claude_invalid_fields_do_not_discard_valid_siblings_or_turn_into_full_allowance() {
-        let read = parse_claude(&json!({"five_hour":{"utilization":false},"seven_day":{"utilization":100},
-            "limits":[false,{"kind":"weekly_scoped","group":"weekly","percent":"20","scope":{"model":{"display_name":"Fable"}}}]}),"fixture".into()).unwrap();
-        assert_eq!(read.windows[0].used_permille, None);
-        assert_eq!(read.windows[1].used_permille, Some(1000));
-        assert_eq!(read.windows[2].used_permille, None);
-        for v in [json!(-1), json!(101), json!("0"), json!(false), Value::Null] {
-            assert_eq!(percent(Some(&v)), None);
-        }
-    }
-
-    #[test]
-    fn claude_native_profiles_keep_exact_service_names_and_never_use_global_fallback() {
-        assert_eq!(claude_service(None).unwrap(), "Claude Code-credentials");
-        assert_ne!(
-            claude_service(Some("/tmp/a")).unwrap(),
-            claude_service(Some("/tmp/a/")).unwrap()
-        );
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            claude_service(Some("/tmp/cafe\u{301}")).unwrap(),
-            claude_service(Some("/tmp/caf\u{e9}")).unwrap()
-        );
-    }
-
-    #[test]
-    fn native_credential_parser_rejects_api_keys_and_scopeless_inference_tokens() {
-        assert_eq!(
-            codex_file_identity(br#"{"OPENAI_API_KEY":"DO_NOT_ECHO"}"#),
-            Err("auth_missing")
-        );
-        let error = parse_claude_credential(
-            br#"{"claudeAiOauth":{"accessToken":"DO_NOT_ECHO","scopes":["user:inference"]}}"#,
-            ClaudeSource::File(PathBuf::from("fixture")),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(error.reason, "auth_missing");
-        assert!(!format!("{error:?}").contains("DO_NOT_ECHO"));
     }
 }

@@ -31,8 +31,8 @@ final class SubscriptionUsageWireTests: XCTestCase {
         let client = LiveDaemonClient(transport: transport)
         let answer = try await client.subscriptionUsage(refresh: false, interactive: true)
         XCTAssertTrue(answer.providers.isEmpty)
-        _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "claude")
-        try await client.setSubscriptionUsage(provider: "claude", on: true)
+        _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "codex")
+        try await client.setSubscriptionUsage(provider: "codex", on: true)
         let calls = transport.recorded()
         XCTAssertEqual(calls.map(\.0), ["subscription_usage", "subscription_usage", "set_settings"])
         let read = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[0].1.utf8)) as? [String: Bool])
@@ -40,16 +40,40 @@ final class SubscriptionUsageWireTests: XCTestCase {
         let scoped = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[1].1.utf8)) as? [String: Any])
         XCTAssertEqual(scoped["refresh"] as? Bool, true)
         XCTAssertEqual(scoped["interactive"] as? Bool, true)
-        XCTAssertEqual(scoped["provider"] as? String, "claude")
+        XCTAssertEqual(scoped["provider"] as? String, "codex")
         let set = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[2].1.utf8)) as? [String: Bool])
-        XCTAssertEqual(set, ["subscription_usage_claude_enabled": true])
-        do {
-            try await client.setSubscriptionUsage(provider: "unrecognized", on: true)
-            XCTFail("unrecognized provider must not become an arbitrary settings key")
-        } catch let error as DaemonDataError {
-            XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
+        XCTAssertEqual(set, ["subscription_usage_codex_enabled": true])
+        for provider in ["claude", "unrecognized"] {
+            do {
+                try await client.setSubscriptionUsage(provider: provider, on: true)
+                XCTFail("unsupported provider must not become a settings key")
+            } catch let error as DaemonDataError {
+                XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
+            }
+            do {
+                _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: provider)
+                XCTFail("unsupported provider must not launch a probe")
+            } catch let error as DaemonDataError {
+                XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
+            }
         }
         XCTAssertEqual(transport.recorded().count, 3)
+    }
+
+    func testDurationIsOptionalPositiveAndPreservesNonstandardWindows() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let old = try decoder.decode(DaemonData.SubscriptionUsageWindow.self, from: Data(#"{"lane":"weekly"}"#.utf8))
+        XCTAssertNil(old.durationMins)
+        for minutes in [540, 1_440] {
+            let json = "{\"lane\":\"secondary\",\"duration_mins\":\(minutes)}"
+            let window = try decoder.decode(DaemonData.SubscriptionUsageWindow.self, from: Data(json.utf8))
+            XCTAssertEqual(window.durationMins, minutes)
+        }
+        for invalid in ["0", "-1", "null", "true", "\"540\"", "18446744073709551615"] {
+            let json = "{\"lane\":\"secondary\",\"duration_mins\":\(invalid)}"
+            let window = try decoder.decode(DaemonData.SubscriptionUsageWindow.self, from: Data(json.utf8))
+            XCTAssertNil(window.durationMins)
+        }
     }
 
     func testInvalidOptionalMeasurementDoesNotDiscardValidNeighbors() throws {

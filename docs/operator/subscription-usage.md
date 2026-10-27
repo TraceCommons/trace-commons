@@ -1,31 +1,25 @@
 # Subscription limits in Insights
 
-Insights → Overview shows **Subscription limits** separately from the selected analytics week. Each reading belongs to a native Codex or Claude login; allowances from different accounts are never added together.
+In Settings → Tools, **Read Codex usage** permits current native subscription limits to be displayed in Insights → Overview. It is off by default. The disclosure beside the switch explains that **Refresh** asks the native Codex app using the saved default and managed subscription sign-ins. Only file-backed Codex sign-ins are supported. Codex may renew its own sign-in. Enabling the switch does not run a probe. Nothing is offered in Insights while it is off.
 
-Choose **Read usage** for the provider you want to inspect. The preference is off by default for each provider. It uses the login already owned by the native coding tool. **Stop reading** disables that provider and clears its held readings.
+After enabling, choose **Refresh** in Insights to read current limits. Opening a screen, starting the daemon, and background ticks do not launch Codex or read credentials. Background work only checks local file metadata and expires held values. Reads are refused while Codex is running; close Codex before choosing Refresh. Process inspection is conservative and may also withhold a probe when it cannot establish that it is safe to start one.
 
-- **Codex:** session/weekly remaining allowance and the provider's banked-reset count. Native `codex app-server` supplies account/rateLimits/read, with its own authentication handling. The reset count is authoritative even when reset details are absent or capped. The app does not redeem a reset.
-- **Claude:** session, weekly, and model-specific weekly limits such as Fable, when the provider reports them. The app reads the selected native credential file or its correctly scoped macOS Keychain item, then asks Anthropic's OAuth usage endpoint. It does not rotate or persist Claude tokens.
+Codex supplies session/weekly allowance and banked-reset inventory through its native `account/rateLimits/read` interface. Modern parameters are retried without parameters only when an older native schema rejects their shape. The app never redeems resets. Window durations are carried as optional minutes; absent durations and percentages remain unknown. Default and explicitly saved native subscription profiles stay separate. API-key accounts are not subscription allowances.
 
-Default native profiles and explicitly saved native subscription profiles are separate rows. Managed profiles never borrow credentials from the default profile. API-key accounts are not subscription allowances.
+Keyring-only and automatic credential stores are refused with `native_storage_unsupported`, before reading credentials or starting Codex. Their account changes cannot be verified from local file metadata. This revision does not query Keychain metadata in the background or prompt for Keychain access. Use Codex itself to check limits for these stores.
 
-A percentage is **remaining** allowance. Reset times use your local time zone. A missing measurement is unknown, not zero or a full allowance. A failed refresh may leave a reading marked stale while its window remains valid. A reset, sign-out, account change or disabled provider makes the corresponding old value unknown rather than transferring it to another account.
+**Claude usage is unavailable in this revision.** Its switch is hidden and enabling it through configuration is refused. The direct Anthropic OAuth collector and its PR-added native credential/ACL helpers have been removed pending the acquisition review. No subscription-usage action reads Claude files, queries its Keychain item, or sends its token. Claude PTY acquisition and browser-cookie sources are outside this implementation.
 
-Codex profiles configured for Keychain or automatic credential storage require an explicit Refresh; background probes use file-backed native credentials to avoid an unexpected authentication dialog. A Claude secure-storage override selects its credential file and does not fall back to another profile’s Keychain item.
+A percentage is remaining allowance. Reset times use the local time zone. A missing measurement is unknown, not zero or full. A transient failed refresh without identity evidence can retain a marked-stale reading for at most one hour and never past a window reset. Confirmed authentication loss, changed native file metadata, removed profiles, disabled reading, and unenrollment invalidate held readings. A successful native renewal can publish a new reading only when its final identity-checked file revision still matches the current login; other file changes invalidate old values rather than transferring them to another account.
 
-Refresh requests are coalesced with a one-minute minimum interval. Enabled providers are checked periodically; the screen can request a refresh. Background Claude Keychain reads inspect item metadata and its access rules before requesting a secret. If the running app is not already trusted, Insights asks you to Refresh to permit access. An explicit user action can permit the normal macOS Keychain prompt for the Claude credential item. A pending native access request is bounded and does not prevent daemon shutdown. If access is denied or credentials are expired, use the provider's native sign-in flow and refresh again.
+Current readings remain separate from the historical week picker and trace analytics. They stay in daemon memory; credentials, provider account IDs, and raw errors never cross IPC or enter contributed traces. Unenroll turns both legacy provider switches off in memory and on disk and invalidates held readings. If persisted revocation fails, local enrollment cleanup still completes and the call returns a retryable failure; unreadable settings are never overwritten.
 
-Usage is read locally and sent only to the subscription's provider for its usage request. The app stores current snapshots in memory; it does not add subscription credentials or account usage to contributed traces or an Insights history database.
-
-The provider switches are also available through the supported configuration API:
+The supported configuration switch is:
 
 ```json
-{
-  "subscription_usage_codex_enabled": true,
-  "subscription_usage_claude_enabled": true
-}
+{"subscription_usage_codex_enabled": true}
 ```
 
-Discover and preview settings with `near-ai config schema` and `near-ai config preview` before applying them. Use the CLI bundled with the app/channel being configured; see [agent configuration](../agent-configuration.md).
+Discover and preview with `near-ai config schema` and `near-ai config preview` before applying. Setting this flag grants permission but does not request a read. The legacy `subscription_usage_claude_enabled` field remains readable for compatibility and its schema accepts only `false` for cleanup. Use the CLI bundled with the app/channel being configured; see [agent configuration](../agent-configuration.md).
 
-Implementation references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [CodexBar Codex acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/codex.md), and [CodexBar Claude acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/claude.md). Browser-cookie acquisition and Claude PTY scraping are outside this implementation.
+Implementation reference: [Codex app-server](https://learn.chatgpt.com/docs/app-server). No subscription history, routing, reset redemption, browser cookies, or Claude credential acquisition is implemented here.

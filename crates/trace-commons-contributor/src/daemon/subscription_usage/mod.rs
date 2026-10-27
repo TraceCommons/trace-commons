@@ -16,11 +16,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, EVENT_STATUS_CHANGED, Request, Response};
 use crate::managed::{AuthState, ConnectionKind, ToolId};
 
-const POLL_SECONDS: i64 = 15 * 60;
+const STALE_SECONDS: i64 = 20 * 60;
 const MANUAL_FLOOR_SECONDS: i64 = 60;
 const CACHE_SECONDS: i64 = 60 * 60;
 const MAX_LOGINS: usize = 128;
-const MAX_PROBES: usize = 4;
+const MAX_PROBES: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,18 +39,61 @@ pub(super) struct LoginSpec {
     pub native_executable: Option<PathBuf>,
     /// The exact native override string; None names the native default login.
     pub config_dir: Option<String>,
-    /// Claude may separately scope its native secure-storage item.
-    pub secure_storage_dir: Option<String>,
     /// Native-account metadata revision, never a provider account identifier.
     pub metadata_revision: Option<String>,
+    /// Credential-free native file revision, separate from the managed binding.
+    pub native_revision: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Window {
     pub lane: String,
     pub label: Option<String>,
+    /// Exact provider duration, when supplied; never inferred from a slot.
+    pub duration_mins: Option<u64>,
     pub used_permille: Option<u16>,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// Comparable account evidence only. Missing evidence is not an account change;
+/// an email fingerprint must never be compared with an account-ID fingerprint.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct Identity {
+    pub account: Option<String>,
+    pub email: Option<String>,
+}
+
+impl Identity {
+    fn conflicts_with(&self, other: &Self) -> bool {
+        self.account
+            .as_ref()
+            .zip(other.account.as_ref())
+            .is_some_and(|(a, b)| a != b)
+            || self
+                .email
+                .as_ref()
+                .zip(other.email.as_ref())
+                .is_some_and(|(a, b)| a != b)
+    }
+}
+
+#[cfg(test)]
+impl From<&str> for Identity {
+    fn from(value: &str) -> Self {
+        Self {
+            account: Some(value.into()),
+            email: None,
+        }
+    }
+}
+#[cfg(test)]
+impl From<String> for Identity {
+    fn from(value: String) -> Self {
+        Self {
+            account: Some(value),
+            email: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -58,13 +101,15 @@ pub(super) struct Reading {
     pub windows: Vec<Window>,
     pub banked_resets: Option<u64>,
     /// Memory-only account fingerprint. Never derive a display label from it.
-    pub identity: String,
+    pub identity: Identity,
+    /// Post-validation file revision witnessed by the native collector.
+    pub native_revision: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ProbeFailure {
     pub reason: &'static str,
-    pub identity: Option<String>,
+    pub identity: Option<Identity>,
 }
 
 type ProbeFuture = Pin<Box<dyn Future<Output = Result<Reading, ProbeFailure>> + Send>>;
@@ -131,6 +176,8 @@ impl Provider {
 
 impl State {
     fn synchronize(&mut self, enabled: [bool; 2], logins: Vec<LoginSpec>) {
+        // Claude is gated until the provider terms review is resolved.
+        let enabled = [enabled[0], false];
         self.enabled = enabled;
         self.truncated = logins
             .iter()
@@ -149,7 +196,6 @@ impl State {
                 entry.login.provider != login.provider
                     || entry.login.root != login.root
                     || entry.login.config_dir != login.config_dir
-                    || entry.login.secure_storage_dir != login.secure_storage_dir
                     || entry.login.metadata_revision != login.metadata_revision
             });
             if replace {
@@ -163,10 +209,18 @@ impl State {
                         last_started: None,
                         measured_at: None,
                         reading: None,
-                        reason: None,
+                        reason: Some("not_checked"),
                     },
                 );
             } else if let Some(entry) = self.entries.get_mut(&login.id) {
+                if entry.login.native_revision != login.native_revision {
+                    // Invalidate displayed data immediately. An already-running
+                    // probe may finish only with a witness of this new revision.
+                    // Keep its generation; consent/binding changes above never do.
+                    entry.reading = None;
+                    entry.measured_at = None;
+                    entry.reason = Some("not_checked");
+                }
                 entry.login = login;
             }
         }
@@ -178,17 +232,16 @@ impl State {
         manual: bool,
         provider: Option<Provider>,
     ) -> Vec<Claim> {
+        if !manual {
+            return Vec::new();
+        }
         self.entries
             .values_mut()
             .filter_map(|entry| {
                 if provider.is_some_and(|provider| entry.login.provider != provider) {
                     return None;
                 }
-                let interval = if manual {
-                    MANUAL_FLOOR_SECONDS
-                } else {
-                    POLL_SECONDS
-                };
+                let interval = MANUAL_FLOOR_SECONDS;
                 if entry.refreshing
                     || entry
                         .last_started
@@ -228,11 +281,27 @@ impl State {
         entry.refreshing = false;
         match answer {
             Ok(mut reading) => {
+                let witnessed_revision = reading
+                    .native_revision
+                    .as_ref()
+                    .or(claim.login.native_revision.as_ref());
+                if witnessed_revision != entry.login.native_revision.as_ref() {
+                    entry.reading = None;
+                    entry.measured_at = None;
+                    entry.reason = Some("auth_changed");
+                    return;
+                }
                 reading.windows.truncate(16);
                 reading.windows.retain(|window| {
-                    matches!(window.lane.as_str(), "session" | "weekly" | "model")
+                    matches!(
+                        window.lane.as_str(),
+                        "session" | "weekly" | "model" | "primary" | "secondary"
+                    )
                 });
                 for window in &mut reading.windows {
+                    window.duration_mins = window
+                        .duration_mins
+                        .filter(|minutes| *minutes > 0 && *minutes <= i64::MAX as u64);
                     window.used_permille = window.used_permille.filter(|used| *used <= 1000);
                     if window
                         .resets_at
@@ -252,21 +321,17 @@ impl State {
                 entry.reason = None;
             }
             Err(failure) => {
-                let same_identity = failure
-                    .identity
-                    .as_ref()
-                    .filter(|identity| !identity.is_empty())
-                    .is_some_and(|identity| {
-                        entry
-                            .reading
-                            .as_ref()
-                            .is_some_and(|old| &old.identity == identity)
-                    });
+                let changed_identity = failure.identity.as_ref().is_some_and(|identity| {
+                    entry
+                        .reading
+                        .as_ref()
+                        .is_some_and(|old| old.identity.conflicts_with(identity))
+                });
                 let authentication = matches!(
                     failure.reason,
                     "auth_missing" | "auth_expired" | "auth_changed"
                 );
-                if authentication || !same_identity {
+                if authentication || changed_identity {
                     entry.reading = None;
                     entry.measured_at = None;
                 }
@@ -275,19 +340,30 @@ impl State {
         }
     }
 
+    fn expire(&mut self, now: DateTime<Utc>) {
+        for entry in self.entries.values_mut() {
+            if entry
+                .measured_at
+                .is_some_and(|at| now >= at + Duration::seconds(CACHE_SECONDS))
+            {
+                entry.reading = None;
+            }
+        }
+    }
+
     fn value(&self, now: DateTime<Utc>) -> Value {
-        let providers: Vec<_> = [Provider::Codex, Provider::Claude].into_iter().map(|provider| {
+        let providers: Vec<_> = [Provider::Codex].into_iter().map(|provider| {
             let mut entries: Vec<_> = self.entries.values().filter(|entry| entry.login.provider == provider).collect();
             entries.sort_by(|a,b| (!a.login.default_login, &a.login.id).cmp(&(!b.login.default_login, &b.login.id)));
             let logins: Vec<_> = entries.into_iter().map(|entry| {
                 let fresh_enough = entry.measured_at.is_some_and(|at| now < at + Duration::seconds(CACHE_SECONDS));
                 let reading = entry.reading.as_ref().filter(|_| fresh_enough);
                 let stale = reading.is_some() && (entry.reason.is_some()
-                    || entry.measured_at.is_some_and(|at| now >= at + Duration::seconds(POLL_SECONDS)));
+                    || entry.measured_at.is_some_and(|at| now >= at + Duration::seconds(STALE_SECONDS)));
                 let windows: Vec<_> = reading.into_iter().flat_map(|reading| &reading.windows).map(|window| {
                     let used = window.used_permille.filter(|_| window.resets_at.is_none_or(|reset| reset > now));
                     json!({"lane":window.lane,"label":window.label,"used_permille":used,
-                        "remaining_text":remaining_text(used),"resets_at":window.resets_at})
+                        "remaining_text":remaining_text(used),"resets_at":window.resets_at,"duration_mins":window.duration_mins})
                 }).collect();
                 json!({"id":entry.login.id,"label":entry.login.label,"default_login":entry.login.default_login,
                     "state":if reading.is_some() {"observed"} else {"unknown"},"reason":entry.reason,
@@ -313,11 +389,10 @@ fn native_login(
     provider: Provider,
     home: Option<PathBuf>,
     config_dir: Option<String>,
-    secure_storage_dir: Option<String>,
 ) -> Option<LoginSpec> {
     let (folder, id, label) = match provider {
         Provider::Codex => (".codex", "codex-default", "Codex"),
-        Provider::Claude => (".claude", "claude-default", "Claude"),
+        Provider::Claude => return None,
     };
     let root = match &config_dir {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -326,58 +401,74 @@ fn native_login(
     };
     Some(LoginSpec {
         provider,
+        metadata_revision: None,
+        native_revision: Some(native_metadata_revision(&root)),
         root,
         id: id.into(),
         label: label.into(),
         default_login: true,
         config_dir,
-        secure_storage_dir,
-        metadata_revision: None,
         native_executable: None,
     })
+}
+
+/// A credential-free invalidation revision. Atomic replacement, same-length
+/// rewrites and signout are all changes. Keychain contents are never queried.
+fn native_metadata_revision(root: &std::path::Path) -> String {
+    fn revision(path: &std::path::Path) -> String {
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    format!(
+                        "{}:{}:{}:{}:{}:{}",
+                        metadata.len(),
+                        metadata.mtime(),
+                        metadata.mtime_nsec(),
+                        metadata.ctime(),
+                        metadata.ctime_nsec(),
+                        metadata.ino()
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    format!(
+                        "{}:{:?}:{:?}",
+                        metadata.len(),
+                        metadata.modified(),
+                        metadata.created()
+                    )
+                }
+            }
+            Err(error) => format!("{:?}", error.kind()),
+        }
+    }
+    format!(
+        "{}|{}",
+        revision(&root.join("auth.json")),
+        revision(&root.join("config.toml"))
+    )
 }
 
 fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
     let enabled = shared
         .settings
         .lock()
-        .map(|s| {
-            [
-                s.subscription_usage_codex_enabled,
-                s.subscription_usage_claude_enabled,
-            ]
-        })
+        .map(|s| [s.subscription_usage_codex_enabled, false])
         .unwrap_or([false, false]);
-    if !enabled.iter().any(|on| *on) {
+    if !enabled[0] {
         return (enabled, Vec::new());
     }
     let mut logins = Vec::new();
-    let executables = [
-        enabled[0]
-            .then(|| crate::managed::profiles::find_native(ToolId::Codex).ok())
-            .flatten(),
-        enabled[1]
-            .then(|| crate::managed::profiles::find_native(ToolId::Claude).ok())
-            .flatten(),
-    ];
-    for (provider, _tool, override_name) in [
-        (Provider::Codex, ToolId::Codex, "CODEX_HOME"),
-        (Provider::Claude, ToolId::Claude, "CLAUDE_CONFIG_DIR"),
-    ] {
-        if enabled[provider.index()] {
-            let secure = (provider == Provider::Claude)
-                .then(|| std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").ok())
-                .flatten();
-            if let Some(mut login) = native_login(
-                provider,
-                dirs::home_dir(),
-                std::env::var(override_name).ok(),
-                secure,
-            ) {
-                login.native_executable = executables[provider.index()].clone();
-                logins.push(login);
-            }
-        }
+    // Executable discovery is deferred to explicit refresh. Background work
+    // only stats native files; it never reads auth/config contents or Keychain.
+    if let Some(login) = native_login(
+        Provider::Codex,
+        dirs::home_dir(),
+        std::env::var("CODEX_HOME").ok(),
+    ) {
+        logins.push(login);
     }
     let accounts = shared
         .managed
@@ -407,16 +498,16 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
         logins.push(LoginSpec {
             provider,
             config_dir: Some(root.to_string_lossy().into_owned()),
-            root,
+            root: root.clone(),
             id: account.id.to_string(),
             label: account.label,
             default_login: false,
-            secure_storage_dir: None,
             metadata_revision: Some(format!(
                 "{:?}:{:?}",
                 account.auth_state, account.verified_at
             )),
-            native_executable: executables[provider.index()].clone(),
+            native_revision: Some(native_metadata_revision(&root)),
+            native_executable: None,
         });
     }
     (enabled, logins)
@@ -430,6 +521,7 @@ fn synchronize(shared: &DaemonShared) {
     };
     if let Ok(mut state) = shared.subscription_usage.state.lock() {
         state.synchronize(enabled, logins);
+        state.expire(Utc::now());
     }
 }
 
@@ -448,19 +540,7 @@ fn schedule(
     let claims = service
         .state
         .lock()
-        .map(|mut state| {
-            if manual && interactive {
-                // The explicit permission-recovery action should not wait a minute
-                // behind the background probe that discovered it needs a prompt.
-                for entry in state.entries.values_mut().filter(|entry| {
-                    entry.reason == Some("keychain_needs_permission")
-                        && provider.is_none_or(|provider| entry.login.provider == provider)
-                }) {
-                    entry.last_started = None;
-                }
-            }
-            state.claims(now, manual, provider)
-        })
+        .map(|mut state| state.claims(now, manual, provider))
         .unwrap_or_default();
     if claims.is_empty() {
         return;
@@ -532,9 +612,9 @@ pub(super) fn settings_changed(shared: &DaemonShared) {
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
 }
 
-/// Cheap when disabled or not due. Provider I/O is detached from the pass.
-pub(super) fn tick(shared: &DaemonShared, now: DateTime<Utc>) {
-    schedule(shared, now, false, false, None);
+/// Background ticks synchronize metadata only; explicit Refresh owns all probes.
+pub(super) fn tick(shared: &DaemonShared, _now: DateTime<Utc>) {
+    synchronize(shared);
 }
 
 pub(super) fn handle(shared: &DaemonShared, req: &Request) -> Response {
@@ -553,7 +633,6 @@ pub(super) fn handle(shared: &DaemonShared, req: &Request) -> Response {
     let provider = match params.get("provider") {
         None => None,
         Some(Value::String(value)) if value == "codex" => Some(Provider::Codex),
-        Some(Value::String(value)) if value == "claude" => Some(Provider::Claude),
         Some(_) => {
             return Response::err(
                 req.id,
@@ -603,24 +682,26 @@ mod tests {
     }
     fn login(id: &str) -> LoginSpec {
         LoginSpec {
-            provider: Provider::Claude,
+            provider: Provider::Codex,
             root: PathBuf::from(format!("/fake/{id}")),
             id: id.into(),
             label: id.into(),
             default_login: id == "default",
             config_dir: None,
-            secure_storage_dir: None,
             metadata_revision: None,
+            native_revision: None,
             native_executable: None,
         }
     }
     fn reading(identity: &str, reset: DateTime<Utc>) -> Reading {
         Reading {
             identity: identity.into(),
+            native_revision: None,
             banked_resets: Some(2),
             windows: vec![Window {
                 lane: "weekly".into(),
                 label: None,
+                duration_mins: Some(10080),
                 used_permille: Some(420),
                 resets_at: Some(reset),
             }],
@@ -628,7 +709,7 @@ mod tests {
     }
     fn prepared() -> (State, Claim) {
         let mut state = State::default();
-        state.synchronize([false, true], vec![login("default")]);
+        state.synchronize([true, false], vec![login("default")]);
         let claim = state.claims(now(), true, None).pop().unwrap();
         (state, claim)
     }
@@ -647,17 +728,17 @@ mod tests {
         state.synchronize([false, false], vec![login("default")]);
         assert!(state.claims(now(), true, None).is_empty());
         assert!(state.entries.is_empty());
-        assert_eq!(state.value(now())["providers"][1]["enabled"], false);
+        assert_eq!(state.value(now())["providers"][0]["enabled"], false);
     }
     #[test]
     fn disabling_or_removing_a_login_invalidates_its_inflight_completion() {
         let (mut state, claim) = prepared();
         state.synchronize([false, false], vec![]);
-        state.synchronize([false, true], vec![login("default")]);
+        state.synchronize([true, false], vec![login("default")]);
         state.complete(&claim, Ok(reading("old", now() + Duration::days(1))), now());
         assert!(state.entries["default"].reading.is_none());
         let next = state.claims(now(), true, None).pop().unwrap();
-        state.synchronize([false, true], vec![]);
+        state.synchronize([true, false], vec![]);
         state.complete(&next, Ok(reading("old", now() + Duration::days(1))), now());
         assert!(state.entries.is_empty());
     }
@@ -667,10 +748,10 @@ mod tests {
         state.complete(&claim, Ok(reading("a", now() + Duration::days(1))), now());
         let mut same = login("default");
         same.label = "renamed".into();
-        state.synchronize([false, true], vec![same.clone()]);
+        state.synchronize([true, false], vec![same.clone()]);
         assert!(state.entries["default"].reading.is_some());
         same.metadata_revision = Some("ready-new-verification".into());
-        state.synchronize([false, true], vec![same]);
+        state.synchronize([true, false], vec![same]);
         assert!(state.entries["default"].reading.is_none());
         state.complete(&claim, Ok(reading("old", now() + Duration::days(1))), now());
         assert!(state.entries["default"].reading.is_none());
@@ -690,15 +771,15 @@ mod tests {
             now() + Duration::minutes(1),
         );
         let value = state.value(now() + Duration::minutes(2));
-        let row = &value["providers"][1]["logins"][0];
+        let row = &value["providers"][0]["logins"][0];
         assert_eq!(row["stale"], true);
         assert_eq!(row["windows"][0]["remaining_text"], "58%");
         assert_eq!(
-            state.value(reset)["providers"][1]["logins"][0]["windows"][0]["used_permille"],
+            state.value(reset)["providers"][0]["logins"][0]["windows"][0]["used_permille"],
             Value::Null
         );
         assert_eq!(
-            state.value(now() + Duration::hours(1))["providers"][1]["logins"][0]["banked_resets"],
+            state.value(now() + Duration::hours(1))["providers"][0]["logins"][0]["banked_resets"],
             Value::Null
         );
         state.complete(
@@ -712,23 +793,142 @@ mod tests {
         assert!(state.entries["default"].reading.is_none());
     }
     #[test]
-    fn unknown_failure_identity_and_auth_loss_clear_prior_percentages() {
-        for error in [
-            ProbeFailure {
-                reason: "timeout",
-                identity: None,
-            },
-            ProbeFailure {
-                reason: "auth_expired",
-                identity: Some("a".into()),
-            },
-        ] {
+    fn unknown_failure_identity_keeps_bounded_stale_data_but_auth_loss_clears_it() {
+        for reason in ["timeout", "native_tool_running", "unavailable"] {
             let (mut state, claim) = prepared();
             state.complete(&claim, Ok(reading("a", now() + Duration::days(1))), now());
-            state.complete(&claim, Err(error), now());
+            state.complete(
+                &claim,
+                Err(ProbeFailure {
+                    reason,
+                    identity: None,
+                }),
+                now(),
+            );
+            assert!(state.entries["default"].reading.is_some());
+            assert_eq!(
+                state.value(now())["providers"][0]["logins"][0]["stale"],
+                true
+            );
+            assert_eq!(
+                state.value(now() + Duration::hours(1))["providers"][0]["logins"][0]["windows"],
+                json!([])
+            );
+            state.complete(
+                &claim,
+                Err(ProbeFailure {
+                    reason: "auth_missing",
+                    identity: None,
+                }),
+                now(),
+            );
             assert!(state.entries["default"].reading.is_none());
         }
     }
+
+    #[test]
+    fn owned_rotation_publishes_only_with_matching_witness_and_unchanged_binding() {
+        let mut original = login("default");
+        original.native_revision = Some("before".into());
+        let mut state = State::default();
+        state.synchronize([true, false], vec![original.clone()]);
+        let claim = state.claims(now(), true, None).pop().unwrap();
+        let mut rotated = original.clone();
+        rotated.native_revision = Some("after".into());
+        state.synchronize([true, false], vec![rotated.clone()]);
+        assert!(state.current(&claim));
+        assert!(state.entries["default"].reading.is_none());
+        let mut answer = reading("same-account", now() + Duration::days(1));
+        answer.native_revision = Some("after".into());
+        state.complete(&claim, Ok(answer.clone()), now());
+        assert!(state.entries["default"].reading.is_some());
+
+        // Later file changes immediately remove the old display; the earlier
+        // witness cannot authorize republishing it for another native revision.
+        rotated.native_revision = Some("new-account".into());
+        state.synchronize([true, false], vec![rotated.clone()]);
+        assert!(state.entries["default"].reading.is_none());
+        state.complete(&claim, Ok(answer.clone()), now());
+        assert!(state.entries["default"].reading.is_none());
+
+        // Neither disabling/re-enabling nor reconnecting may revive an old claim.
+        for changed_binding in [false, true] {
+            let mut state = State::default();
+            state.synchronize([true, false], vec![original.clone()]);
+            let claim = state.claims(now(), true, None).pop().unwrap();
+            let mut current = original.clone();
+            current.native_revision = Some("after".into());
+            if changed_binding {
+                current.metadata_revision = Some("reconnected".into());
+            } else {
+                state.synchronize([false, false], vec![]);
+            }
+            state.synchronize([true, false], vec![current]);
+            state.complete(&claim, Ok(answer.clone()), now());
+            assert!(state.entries["default"].reading.is_none());
+        }
+    }
+
+    #[test]
+    fn changed_native_revision_rejects_an_unwitnessed_completion() {
+        let (mut state, claim) = prepared();
+        let mut changed = login("default");
+        changed.native_revision = Some("changed".into());
+        state.synchronize([true, false], vec![changed]);
+        state.complete(&claim, Ok(reading("old", now() + Duration::days(1))), now());
+        assert!(state.entries["default"].reading.is_none());
+    }
+
+    #[test]
+    fn partial_account_evidence_preserves_stale_values_until_comparable_identity_changes() {
+        let (mut state, claim) = prepared();
+        let mut answer = reading("account-id", now() + Duration::days(1));
+        answer.identity.email = Some("email-a".into());
+        state.complete(&claim, Ok(answer), now());
+        state.complete(
+            &claim,
+            Err(ProbeFailure {
+                reason: "unavailable",
+                identity: Some(Identity {
+                    account: None,
+                    email: Some("email-a".into()),
+                }),
+            }),
+            now(),
+        );
+        assert!(state.entries["default"].reading.is_some());
+        state.complete(
+            &claim,
+            Err(ProbeFailure {
+                reason: "unavailable",
+                identity: Some(Identity {
+                    account: None,
+                    email: Some("email-b".into()),
+                }),
+            }),
+            now(),
+        );
+        assert!(state.entries["default"].reading.is_none());
+    }
+
+    #[test]
+    fn freshness_has_cadence_margin_and_preserves_exact_duration() {
+        let (mut state, claim) = prepared();
+        state.complete(&claim, Ok(reading("a", now() + Duration::days(1))), now());
+        assert_eq!(
+            state.value(now() + Duration::minutes(15))["providers"][0]["logins"][0]["stale"],
+            false
+        );
+        assert_eq!(
+            state.value(now() + Duration::minutes(20))["providers"][0]["logins"][0]["stale"],
+            true
+        );
+        assert_eq!(
+            state.value(now())["providers"][0]["logins"][0]["windows"][0]["duration_mins"],
+            10080
+        );
+    }
+
     #[test]
     fn snapshot_never_serializes_native_roots_or_provider_identity() {
         let (mut state, claim) = prepared();
@@ -759,28 +959,27 @@ mod tests {
         );
         assert_eq!(
             state
-                .claims(now() + Duration::minutes(15), false, None)
+                .claims(now() + Duration::minutes(15), true, None)
                 .len(),
             1
         );
     }
     #[test]
-    fn a_focused_refresh_claims_only_the_selected_provider() {
+    fn claude_is_gated_even_when_legacy_settings_enable_it() {
         let mut state = State::default();
-        let mut codex = login("codex-default");
-        codex.provider = Provider::Codex;
-        state.synchronize([true, true], vec![codex, login("default")]);
-        let claims = state.claims(now(), true, Some(Provider::Codex));
-        assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].login.provider, Provider::Codex);
-        assert!(!state.entries["default"].refreshing);
+        let mut claude = login("claude-default");
+        claude.provider = Provider::Claude;
+        state.synchronize([true, true], vec![login("default"), claude]);
+        assert_eq!(state.entries.len(), 1);
+        assert!(state.claims(now(), true, Some(Provider::Claude)).is_empty());
+        assert_eq!(state.value(now())["providers"].as_array().unwrap().len(), 1);
     }
 
     #[test]
     fn separate_logins_do_not_share_readings_and_cache_size_is_bounded() {
         let mut state = State::default();
         state.synchronize(
-            [false, true],
+            [true, false],
             (0..MAX_LOGINS + 8).map(|i| login(&i.to_string())).collect(),
         );
         assert_eq!(state.entries.len(), MAX_LOGINS);
@@ -811,29 +1010,84 @@ mod integration_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn native_overrides_keep_the_exact_profile_and_secure_storage_scope() {
-        let home = Some(PathBuf::from("/fake/home"));
-        let normal = native_login(Provider::Claude, home.clone(), None, None).unwrap();
-        assert_eq!(normal.root, PathBuf::from("/fake/home/.claude"));
-        assert!(normal.config_dir.is_none());
-        let overridden = native_login(
-            Provider::Claude,
-            home.clone(),
-            Some("/fake/home/.claude/".into()),
-            Some(String::new()),
+    fn native_overrides_keep_the_exact_codex_home() {
+        let login = native_login(Provider::Codex, None, Some("/fake/codex-work".into())).unwrap();
+        assert_eq!(login.root, PathBuf::from("/fake/codex-work"));
+        assert!(login.default_login);
+        assert!(native_login(Provider::Claude, Some(PathBuf::from("/fake")), None).is_none());
+    }
+
+    #[test]
+    fn native_metadata_revision_detects_atomic_switch_config_change_and_signout() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        std::fs::write(&auth, b"account-a").unwrap();
+        let before = native_metadata_revision(dir.path());
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"account-b").unwrap();
+        // Atomic replacement must invalidate even with identical length/mtime.
+        let modified = std::fs::metadata(&auth).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(replacement, &auth).unwrap();
+        let switched = native_metadata_revision(dir.path());
+        assert_ne!(before, switched);
+        std::fs::write(
+            dir.path().join("config.toml"),
+            b"cli_auth_credentials_store='keyring'",
         )
         .unwrap();
-        assert_eq!(overridden.root, PathBuf::from("/fake/home/.claude/"));
-        assert_eq!(
-            overridden.config_dir.as_deref(),
-            Some("/fake/home/.claude/")
+        let configured = native_metadata_revision(dir.path());
+        assert_ne!(switched, configured);
+        std::fs::remove_file(auth).unwrap();
+        assert_ne!(configured, native_metadata_revision(dir.path()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enabled_background_status_and_settings_never_probe_and_claude_is_refused() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let (_dir, shared) = shared(Arc::new(move |_, _, _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { panic!("metadata-only routes must not collect") })
+        }));
+        {
+            let mut settings = shared.settings.lock().unwrap();
+            settings.subscription_usage_codex_enabled = true;
+            settings.subscription_usage_claude_enabled = true;
+        }
+        settings_changed(&shared);
+        for minutes in [0, 15, 60, 120] {
+            tick(&shared, Utc::now() + Duration::minutes(minutes));
+        }
+        let status = handle(
+            &shared,
+            &Request {
+                id: 1,
+                method: "subscription_usage".into(),
+                params: json!({}),
+            },
+        )
+        .result
+        .unwrap();
+        assert_eq!(status["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(status["providers"][0]["enabled"], true);
+        assert_eq!(status["providers"][0]["refreshing"], false);
+        let response = handle(
+            &shared,
+            &Request {
+                id: 2,
+                method: "subscription_usage".into(),
+                params: json!({"provider":"claude","refresh":true,"interactive":true}),
+            },
         );
-        assert_eq!(overridden.secure_storage_dir.as_deref(), Some(""));
-        let codex =
-            native_login(Provider::Codex, None, Some("/fake/codex-work".into()), None).unwrap();
-        assert_eq!(codex.root, PathBuf::from("/fake/codex-work"));
-        assert!(codex.default_login);
-        assert!(native_login(Provider::Claude, None, None, None).is_none());
+        assert!(response.error.is_some());
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     fn shared(collector: Collector) -> (tempfile::TempDir, Arc<DaemonShared>) {
@@ -966,7 +1220,7 @@ mod integration_tests {
                     let mut managed = shared.managed.lock().unwrap();
                     let accounts = &mut managed.as_mut().unwrap().accounts;
                     let account = accounts
-                        .add(ToolId::Claude, ConnectionKind::Subscription, "fixture")
+                        .add(ToolId::Codex, ConnectionKind::Subscription, "fixture")
                         .unwrap();
                     accounts.update_auth(account.id, AuthState::Ready).unwrap();
                 }
@@ -974,8 +1228,8 @@ mod integration_tests {
                     .settings
                     .lock()
                     .unwrap()
-                    .subscription_usage_claude_enabled = true;
-                tick(&shared, Utc::now());
+                    .subscription_usage_codex_enabled = true;
+                schedule(&shared, Utc::now(), true, true, None);
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     while entered.load(Ordering::SeqCst) == 0 {
                         tokio::task::yield_now().await;
@@ -1025,6 +1279,7 @@ mod integration_tests {
                             windows: vec![],
                             banked_resets: None,
                             identity: "fixture".into(),
+                            native_revision: None,
                         })
                     })
                     .await
@@ -1039,7 +1294,7 @@ mod integration_tests {
             let accounts = &mut managed.as_mut().unwrap().accounts;
             let account = accounts
                 .add(
-                    ToolId::Claude,
+                    ToolId::Codex,
                     ConnectionKind::Subscription,
                     &format!("saved-{i}"),
                 )
@@ -1050,8 +1305,8 @@ mod integration_tests {
             .settings
             .lock()
             .unwrap()
-            .subscription_usage_claude_enabled = true;
-        tick(&shared, Utc::now());
+            .subscription_usage_codex_enabled = true;
+        schedule(&shared, Utc::now(), true, true, None);
         let timed_out = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let count = shared
@@ -1077,7 +1332,7 @@ mod integration_tests {
             .settings
             .lock()
             .unwrap()
-            .subscription_usage_claude_enabled = false;
+            .subscription_usage_codex_enabled = false;
         settings_changed(&shared);
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
@@ -1128,6 +1383,7 @@ mod integration_tests {
                     windows: vec![],
                     banked_resets: Some(3),
                     identity: "fixture".into(),
+                    native_revision: None,
                 })
             })
         }));
@@ -1136,7 +1392,7 @@ mod integration_tests {
             let accounts = &mut managed.as_mut().unwrap().accounts;
             let account = accounts
                 .add(
-                    ToolId::Claude,
+                    ToolId::Codex,
                     ConnectionKind::Subscription,
                     &format!("saved-{i}"),
                 )
@@ -1147,8 +1403,8 @@ mod integration_tests {
             .settings
             .lock()
             .unwrap()
-            .subscription_usage_claude_enabled = true;
-        tick(&shared, Utc::now());
+            .subscription_usage_codex_enabled = true;
+        schedule(&shared, Utc::now(), true, true, None);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while calls.load(Ordering::SeqCst) < MAX_PROBES {
                 tokio::task::yield_now().await;
@@ -1163,7 +1419,7 @@ mod integration_tests {
             .settings
             .lock()
             .unwrap()
-            .subscription_usage_claude_enabled = false;
+            .subscription_usage_codex_enabled = false;
         settings_changed(&shared);
         gate.add_permits(MAX_PROBES);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1214,7 +1470,7 @@ mod integration_tests {
             params: json!({"refresh":true,"interactive":true,"provider":"codex"}),
         };
         let value = handle(&shared, &req).result.unwrap();
-        assert_eq!(value["providers"].as_array().unwrap().len(), 2);
+        assert_eq!(value["providers"].as_array().unwrap().len(), 1);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while observed.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
@@ -1249,13 +1505,13 @@ mod integration_tests {
             .as_mut()
             .unwrap()
             .accounts
-            .add(ToolId::Claude, ConnectionKind::Subscription, "saved")
+            .add(ToolId::Codex, ConnectionKind::Subscription, "saved")
             .unwrap();
         shared
             .settings
             .lock()
             .unwrap()
-            .subscription_usage_claude_enabled = true;
+            .subscription_usage_codex_enabled = true;
         let (_, logins) = inputs(&shared);
         assert!(
             !logins
@@ -1277,28 +1533,6 @@ mod integration_tests {
             .find(|login| login.id == account.id.to_string())
             .unwrap();
         assert!(managed.metadata_revision.is_some());
-        assert!(managed.secure_storage_dir.is_none());
         assert!(!shared.store.dir().join("managed-profiles").exists());
-    }
-
-    #[test]
-    fn defaults_are_off_and_invalid_setting_types_are_refused() {
-        let mut settings = super::super::settings::DaemonSettings::default();
-        assert!(
-            !settings.subscription_usage_codex_enabled
-                && !settings.subscription_usage_claude_enabled
-        );
-        let patch = json!({"subscription_usage_codex_enabled":true,"subscription_usage_claude_enabled":true});
-        assert!(super::super::settings::apply_settings_object(&mut settings, &patch).unwrap());
-        assert!(
-            settings.subscription_usage_codex_enabled && settings.subscription_usage_claude_enabled
-        );
-        assert!(
-            super::super::settings::apply_settings_object(
-                &mut settings,
-                &json!({"subscription_usage_codex_enabled":"yes"})
-            )
-            .is_err()
-        );
     }
 }

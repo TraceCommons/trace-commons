@@ -690,7 +690,7 @@ pub struct DaemonSettings {
     /// Explicit permission to read native Codex subscription usage; display only.
     #[serde(default)]
     pub subscription_usage_codex_enabled: bool,
-    /// Explicit permission to read native Claude subscription usage; display only.
+    /// Legacy cleanup flag. Claude acquisition is disabled pending review.
     #[serde(default)]
     pub subscription_usage_claude_enabled: bool,
 
@@ -2185,8 +2185,12 @@ pub fn apply_settings_object(
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             "subscription_usage_claude_enabled" => {
-                settings.subscription_usage_claude_enabled =
-                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                // Keep false available to clear earlier preferences, but never
+                // grant credential access to the gated provider.
+                if value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)? {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.subscription_usage_claude_enabled = false;
             }
             // Insights feed T (owner decision D4, open). Off by default.
             "insights_counter_pass" => {
@@ -5539,5 +5543,24 @@ mod tests {
                  `set_settings` section of docs/contributor-daemon-ipc-v1_1.md"
             );
         }
+    }
+    #[test]
+    fn subscription_usage_claude_cannot_be_enabled_while_gated() {
+        let mut settings = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"subscription_usage_claude_enabled":true})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!settings.subscription_usage_claude_enabled);
+        settings.subscription_usage_claude_enabled = true;
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({"subscription_usage_claude_enabled":false}),
+        )
+        .unwrap();
+        assert!(!settings.subscription_usage_claude_enabled);
     }
 }

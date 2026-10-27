@@ -319,7 +319,7 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
-        guard provider == nil || provider == "codex" || provider == "claude" else {
+        guard provider == nil || provider == "codex" else {
             throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
         }
         var params: [String: Any] = ["refresh": refresh, "interactive": refresh && interactive]
@@ -328,7 +328,7 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func setSubscriptionUsage(provider: String, on: Bool) async throws {
-        guard provider == "codex" || provider == "claude" else {
+        guard provider == "codex" else {
             throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
         }
         _ = try await call("set_settings", params: ["subscription_usage_" + provider + "_enabled": on],

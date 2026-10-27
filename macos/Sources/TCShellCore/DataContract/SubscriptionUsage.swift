@@ -95,21 +95,24 @@ extension DaemonData {
         /// a missing percentage or a count of recent local traces.
         public let remainingText: String?
         public let resetsAt: Date?
+        public let durationMins: Int?
 
         enum CodingKeys: String, CodingKey {
             case lane, label
             case usedPermille = "used_permille"
             case remainingText = "remaining_text"
             case resetsAt = "resets_at"
+            case durationMins = "duration_mins"
         }
 
         public init(lane: String, label: String? = nil, usedPermille: Int? = nil,
-                    remainingText: String? = nil, resetsAt: Date? = nil) {
+                    remainingText: String? = nil, resetsAt: Date? = nil, durationMins: Int? = nil) {
             self.lane = lane
             self.label = label
             self.usedPermille = usedPermille.flatMap { (0...1000).contains($0) ? $0 : nil }
             self.remainingText = remainingText
             self.resetsAt = resetsAt
+            self.durationMins = durationMins.flatMap { $0 > 0 ? $0 : nil }
         }
 
         public init(from decoder: Decoder) throws {
@@ -120,6 +123,8 @@ extension DaemonData {
             usedPermille = used.flatMap { (0...1000).contains($0) ? $0 : nil }
             remainingText = try? container.decodeIfPresent(String.self, forKey: .remainingText)
             resetsAt = try? container.decodeIfPresent(Date.self, forKey: .resetsAt)
+            let duration = try? container.decodeIfPresent(Int.self, forKey: .durationMins)
+            durationMins = duration.flatMap { $0 > 0 ? $0 : nil }
         }
     }
 }

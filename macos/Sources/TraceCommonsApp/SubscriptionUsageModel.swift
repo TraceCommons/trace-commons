@@ -18,26 +18,34 @@ final class SubscriptionUsageModel {
     private var queuedInteractive = false
     private var queuedProvider: String?
     private var observation: UUID?
+    private var observationSleep: Task<Void, Never>?
+    private let activePollInterval: Duration
+    private(set) var codexEnabled: Bool?
     private(set) var shown: DaemonData.SubscriptionUsage?
     private(set) var failureKey: String?
     private(set) var unsupported = false
     private(set) var changingProviders = Set<String>()
 
-    var isVisible: Bool { reader != nil && !unsupported && (shown != nil || failureKey != nil) }
+    var supportedProviders: [DaemonData.SubscriptionUsageProvider] {
+        (shown?.providers ?? []).filter { $0.provider == "codex" && $0.enabled }
+    }
+    var isVisible: Bool { reader != nil && !unsupported && codexEnabled == true }
     var isRefreshing: Bool {
-        reading != nil || shown?.providers.contains(where: { $0.enabled && $0.refreshing }) == true
+        reading != nil || supportedProviders.contains(where: \.refreshing)
     }
     var canChange: Bool { writer != nil }
 
-    init(reader: Reader? = nil, writer: Writer? = nil) {
+    init(reader: Reader? = nil, writer: Writer? = nil, activePollInterval: Duration = .seconds(2)) {
         self.reader = reader
         self.writer = writer
+        self.activePollInterval = activePollInterval
     }
 
     /// The view's task owns polling and cancellation. Only an explicit button
     /// passes interactive:true; opening Overview cannot prompt for Keychain.
     func observe() async {
         let token = UUID()
+        observationSleep?.cancel()
         observation = token
         generation = UUID()
         clearQueuedRefresh()
@@ -45,10 +53,14 @@ final class SubscriptionUsageModel {
             defer { endObservation(token) }
             while !Task.isCancelled, observation == token {
                 await load()
+                guard !Task.isCancelled, observation == token else { return }
                 if unsupported || reader == nil { return }
-                do {
-                    try await Task.sleep(for: .seconds(isRefreshing ? 2 : 60))
-                } catch { return }
+                let delay: Duration = isRefreshing ? activePollInterval : .seconds(60)
+                let sleeper = Task<Void, Never> { _ = try? await Task.sleep(for: delay) }
+                observationSleep = sleeper
+                await sleeper.value
+                guard observation == token else { return }
+                observationSleep = nil
             }
         } onCancel: {
             // A transport may ignore cancellation while waiting on IPC. End
@@ -60,6 +72,8 @@ final class SubscriptionUsageModel {
     private func endObservation(_ token: UUID) {
         guard observation == token else { return }
         observation = nil
+        observationSleep?.cancel()
+        observationSleep = nil
         generation = UUID()
         reading = nil
         readingGeneration = nil
@@ -92,6 +106,7 @@ final class SubscriptionUsageModel {
             if reading == request {
                 reading = nil
                 readingGeneration = nil
+                observationSleep?.cancel()
                 let pending = queuedRefresh
                 let prompt = queuedInteractive
                 let selected = queuedProvider
@@ -113,6 +128,7 @@ final class SubscriptionUsageModel {
                 return
             }
             shown = value
+            codexEnabled = value.providers.first(where: { $0.provider == "codex" })?.enabled
             unsupported = false
             failureKey = nil
         } catch {
@@ -124,23 +140,27 @@ final class SubscriptionUsageModel {
     }
 
     func refresh() {
-        guard !isRefreshing else { return }
+        guard codexEnabled == true, !isRefreshing else { return }
         let token = generation
         Task { [weak self] in
             guard let self, self.generation == token else { return }
-            await self.load(refresh: true, interactive: true)
+            await self.load(refresh: true, interactive: true, provider: "codex")
+            // Resume status polling immediately after an explicit request,
+            // even when the observer was in its minute-long idle wait.
+            self.observationSleep?.cancel()
         }
     }
 
     /// Hide disabled data immediately, and invalidate any read from before the
     /// user's choice. The daemon remains authoritative when the write returns.
     func setEnabled(_ provider: String, on: Bool) async {
-        guard let writer, provider == "codex" || provider == "claude",
+        guard let writer, provider == "codex",
               changingProviders.isEmpty else { return }
         let startedObservation = observation
         generation = UUID()
         clearQueuedRefresh()
         changingProviders.insert(provider)
+        if !on { codexEnabled = false }
         if !on, let shown {
             self.shown = DaemonData.SubscriptionUsage(schemaVersion: shown.schemaVersion, providers: shown.providers.map { row in
                 row.provider == provider
@@ -155,7 +175,10 @@ final class SubscriptionUsageModel {
                   startedObservation == nil || observation == startedObservation else { return }
             changingProviders.remove(provider)
             generation = UUID()
-            await load(refresh: on, interactive: on, provider: provider)
+            // Consent only permits a later explicit Refresh. Reconcile the
+            // saved permission without launching any credential operation.
+            await load()
+            observationSleep?.cancel()
         } catch {
             guard !Task.isCancelled,
                   startedObservation == nil || observation == startedObservation else { return }
@@ -166,7 +189,9 @@ final class SubscriptionUsageModel {
             let token = generation
             if let reader, let actual = try? await reader(false, false, nil), generation == token {
                 shown = actual
+                codexEnabled = actual.providers.first(where: { $0.provider == "codex" })?.enabled
             }
+            observationSleep?.cancel()
         }
     }
 }

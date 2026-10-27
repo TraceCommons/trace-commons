@@ -105,7 +105,46 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_read_detail",
-        "Read limits using the {harness} login saved on this Mac.",
+        "Enable usage reading in Settings; only Refresh asks the native app for usage.",
+    ),
+    ("analytics_subscriptions_setting_codex", "Read Codex usage"),
+    (
+        "analytics_subscriptions_codex_detail",
+        "On Refresh, Trace Commons reads the saved Codex sign-in file for your default and saved managed subscription profiles to ask the Codex app for usage. Codex may renew its own sign-in. There are no background credential reads.",
+    ),
+    (
+        "analytics_subscriptions_not_checked",
+        "Refresh to read current usage.",
+    ),
+    (
+        "analytics_subscriptions_native_tool_running",
+        "Close Codex, then Refresh to read usage.",
+    ),
+    (
+        "analytics_subscriptions_base_url_refused",
+        "This Codex configuration uses an unsupported server address.",
+    ),
+    (
+        "analytics_subscriptions_invalid_response",
+        "Codex returned usage this app cannot read.",
+    ),
+    (
+        "analytics_subscriptions_no_logins",
+        "No saved Codex sign-in was found.",
+    ),
+    ("analytics_subscriptions_window_hours", "{n} hours"),
+    ("analytics_subscriptions_window_hour", "1 hour"),
+    ("analytics_subscriptions_window_minutes", "{n} minutes"),
+    ("analytics_subscriptions_window_minute", "1 minute"),
+    ("analytics_subscriptions_window_days", "{n} days"),
+    ("analytics_subscriptions_window_day", "1 day"),
+    (
+        "analytics_subscriptions_window_unknown",
+        "Duration not reported",
+    ),
+    (
+        "analytics_subscriptions_native_storage_unsupported",
+        "Usage is unavailable for this Codex sign-in storage. Check limits in Codex.",
     ),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),
@@ -132,10 +171,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_keychain",
         "Refresh to allow Keychain access for {harness} usage.",
     ),
-    (
-        "analytics_subscriptions_keychain_pending",
-        "Waiting for Keychain access.",
-    ),
+    ("analytics_subscriptions_cached", "Last reading."),
     ("analytics_subscriptions_reading", "Reading usage…"),
     (
         "analytics_subscriptions_not_reported",
@@ -143,7 +179,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_unavailable",
-        "Usage couldn't be read. Refresh to try again.",
+        "Usage couldn't be read.",
     ),
     (
         "analytics_subscriptions_change_failed",
