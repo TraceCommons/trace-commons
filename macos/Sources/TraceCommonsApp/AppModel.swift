@@ -2839,7 +2839,8 @@ final class AppModel: ObservableObject {
 
     /// What the launch's own request opens (`LaunchRouting.launchOpening`).
     var launchOpening: LaunchRouting.LaunchOpening {
-        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding)
+        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding,
+                                    background: LaunchRouting.isBackgroundLaunch(CommandLine.arguments))
     }
 
     /// Whether the first run has been finished (Start on the Uses screen)

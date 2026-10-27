@@ -17,6 +17,13 @@
 //! (`handle_local`), against the same configuration directory and credential
 //! store. Nothing here re-implements the ceremony or the enrollment.
 //!
+//! On macOS the CLI bundled in the app cannot answer them itself: the NEAR
+//! AI session lives in the app's keychain access group, and only the app is
+//! signed with it. With no daemon running, `login` starts the app in the
+//! background (no window, not brought forward) and waits for its daemon, or
+//! opens the app's first run when this Mac has not been set up, since the
+//! app starts no daemon until first run has the session folders.
+//!
 //! # Secrets
 //!
 //! The refresh token and NEAR AI's short-lived JWT never leave the daemon's
@@ -25,6 +32,7 @@
 //! to fixed sentences and the account id is not shown at all.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -353,7 +361,8 @@ pub(crate) fn sign_in_and_enroll(mut ports: Ports<'_>, consent: &Consent) -> Res
 
 /// [`sign_in_and_enroll`] against this store: over the running daemon's
 /// socket when one answers, otherwise in this process with one daemon state
-/// loaded for the whole flow.
+/// loaded for the whole flow. A process that cannot keep the session
+/// hands the sign-in to the app instead ([`hand_off_to_app`]).
 ///
 /// Which of the two is decided once. A per-call fallback would load the
 /// daemon state (and read the OS credential store) on every poll, and would
@@ -362,7 +371,7 @@ pub(crate) fn run(store: &ConfigStore, consent: &Consent, no_browser: bool) -> R
     use crate::daemon::client;
     use crate::daemon::ipc::{DaemonShared, handle_local};
 
-    let running = client::is_running(store);
+    let running = client::is_running(store) || hand_off_to_app(store)?;
     let mut local: Option<DaemonShared> = None;
     let mut call = |method: &str, params: serde_json::Value| -> Result<Response> {
         if running {
@@ -433,6 +442,176 @@ pub(crate) fn run_for_launch(store: &ConfigStore) -> Result<()> {
         sleep: &mut sleep,
         out: &mut stdout,
     })
+}
+
+/// The argument the app reads as "started for the CLI": it opens no window
+/// at launch, first run included (`LaunchRouting.isBackgroundLaunch`).
+pub(crate) const BACKGROUND_LAUNCH_ARG: &str = "--background-launch";
+/// How often `login` asks whether the launched app's daemon answers.
+const DAEMON_POLL: Duration = Duration::from_millis(500);
+/// How long it waits for that daemon before saying so.
+const DAEMON_WAIT: Duration = Duration::from_secs(30);
+/// No app around this CLI to hand the sign-in to.
+pub(crate) const OPEN_APP: &str = "Open the Near.ai app, then run this command again.";
+
+/// Who answers `login`'s daemon methods.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// The daemon already running for this store.
+    Daemon,
+    /// This process, which can keep the session itself.
+    InProcess,
+    /// The app around this CLI, started in the background.
+    LaunchApp(PathBuf),
+    /// The app around this CLI, opened on its first run: it starts no
+    /// daemon until first run has the session folders.
+    OpenSetup(PathBuf),
+    /// Nobody: the person opens the app.
+    OpenApp,
+}
+
+/// `kept` is whether this process can keep a NEAR AI session
+/// (`store_is_reachable`); `roots_declared` whether the app would start its
+/// daemon; `app` the bundle this CLI runs from.
+fn route(running: bool, kept: bool, roots_declared: bool, app: Option<PathBuf>) -> Route {
+    if running {
+        return Route::Daemon;
+    }
+    if kept {
+        return Route::InProcess;
+    }
+    match app {
+        None => Route::OpenApp,
+        Some(app) if roots_declared => Route::LaunchApp(app),
+        Some(app) => Route::OpenSetup(app),
+    }
+}
+
+/// The `.app` this executable is bundled in (`X.app/Contents/MacOS/near-ai`),
+/// or `None` for a CLI installed anywhere else.
+fn app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    let bundled = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && app.extension()? == "app";
+    bundled.then(|| app.to_path_buf())
+}
+
+/// The app's name as Finder shows it: "Near.ai", "Near.ai Staging".
+fn app_name(app: &Path) -> String {
+    app.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Near.ai".to_string())
+}
+
+/// `open` arguments that start the app without bringing it forward (`-g`)
+/// and, through the app's own argument, without a window. Not `-j`: an app
+/// launched hidden can hold back the windows it opens later.
+fn background_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
+    let mut args = vec!["-g".to_string()];
+    args.extend(setup_launch_args(app, state_dir));
+    args.extend(["--args".to_string(), BACKGROUND_LAUNCH_ARG.to_string()]);
+    args
+}
+
+/// `open` arguments that open the app as a click does, on its first run.
+/// `state_dir` is the store when the override variable chose it: `open`
+/// does not pass the terminal's environment to the app.
+fn setup_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(dir) = state_dir {
+        args.push("--env".to_string());
+        args.push(format!(
+            "{}={}",
+            crate::channel::STATE_DIR_ENV,
+            dir.to_string_lossy()
+        ));
+    }
+    args.push(app.to_string_lossy().into_owned());
+    args
+}
+
+fn launching_line(app: &Path) -> String {
+    format!("Starting {} in the background to sign in.", app_name(app))
+}
+
+fn setup_line(app: &Path) -> String {
+    format!(
+        "Finish setting up in {}, which is now open. Sign-in is part of setup.",
+        app_name(app)
+    )
+}
+
+fn no_daemon_line(app: &Path) -> String {
+    let name = app_name(app);
+    format!("{name} started, but its background service didn't. Open {name} to see why.")
+}
+
+/// Polls `answers` until it is true or [`DAEMON_WAIT`] has passed.
+fn wait_for_daemon(answers: &mut dyn FnMut() -> bool, sleep: &mut dyn FnMut(Duration)) -> bool {
+    let mut waited = Duration::ZERO;
+    loop {
+        if answers() {
+            return true;
+        }
+        if waited >= DAEMON_WAIT {
+            return false;
+        }
+        sleep(DAEMON_POLL);
+        waited += DAEMON_POLL;
+    }
+}
+
+fn open_app(args: &[String]) -> Result<()> {
+    match std::process::Command::new("/usr/bin/open")
+        .args(args)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        _ => bail!(OPEN_APP),
+    }
+}
+
+/// With no daemon running: `Ok(true)` once the app's daemon answers for this
+/// store, `Ok(false)` to sign in in this process as before. Only on macOS,
+/// where the bundled CLI has no keychain entitlement and so could only fail
+/// at `near_ai_credential_start` (`near_ai_credential_storage_unentitled`).
+fn hand_off_to_app(store: &ConfigStore) -> Result<bool> {
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
+    }
+    let kept = crate::daemon::cloud_credential_lifecycle::store_is_reachable(store).is_ok();
+    // Unreadable settings are treated as not set up: opening the app shows
+    // the person what it makes of them.
+    let roots_declared = crate::daemon::settings::DaemonSettings::load(store)
+        .map(|settings| crate::daemon::settings::roots_declared(&settings))
+        .unwrap_or(false);
+    let app = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok()
+        .and_then(|exe| app_bundle(&exe));
+    let state_dir = std::env::var_os(crate::channel::STATE_DIR_ENV).map(|_| store.dir());
+    match route(false, kept, roots_declared, app) {
+        Route::Daemon | Route::InProcess => Ok(false),
+        Route::OpenApp => bail!(OPEN_APP),
+        Route::OpenSetup(app) => {
+            open_app(&setup_launch_args(&app, state_dir))?;
+            bail!(setup_line(&app))
+        }
+        Route::LaunchApp(app) => {
+            println!("{}", launching_line(&app));
+            open_app(&background_launch_args(&app, state_dir))?;
+            let mut answers = || crate::daemon::client::is_running(store);
+            let mut sleep = |d: Duration| std::thread::sleep(d);
+            if wait_for_daemon(&mut answers, &mut sleep) {
+                Ok(true)
+            } else {
+                bail!(no_daemon_line(&app))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1263,5 +1442,179 @@ mod tests {
         let saved = store.load_config().unwrap().unwrap();
         assert!(saved.consent_scopes.contains(&"model_training".to_string()));
         assert_eq!(saved.consent_scopes_chosen, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod app_handoff_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn app() -> PathBuf {
+        PathBuf::from("/Applications/Near.ai Staging.app")
+    }
+
+    #[test]
+    fn a_running_daemon_answers_whatever_else_holds() {
+        assert_eq!(route(true, false, false, Some(app())), Route::Daemon);
+        assert_eq!(route(true, true, true, None), Route::Daemon);
+    }
+
+    #[test]
+    fn an_entitled_process_signs_in_itself_as_before() {
+        assert_eq!(route(false, true, false, Some(app())), Route::InProcess);
+        assert_eq!(route(false, true, true, None), Route::InProcess);
+    }
+
+    #[test]
+    fn an_unentitled_cli_inside_a_set_up_app_starts_it_in_the_background() {
+        assert_eq!(
+            route(false, false, true, Some(app())),
+            Route::LaunchApp(app())
+        );
+    }
+
+    #[test]
+    fn an_unentitled_cli_on_a_mac_not_set_up_opens_the_apps_setup() {
+        // No folders chosen: the app will not start its daemon until first
+        // run has them, so there is nothing to wait for in the background.
+        assert_eq!(
+            route(false, false, false, Some(app())),
+            Route::OpenSetup(app())
+        );
+    }
+
+    #[test]
+    fn an_unentitled_cli_outside_an_app_is_told_to_open_one() {
+        assert_eq!(route(false, false, true, None), Route::OpenApp);
+        assert_eq!(route(false, false, false, None), Route::OpenApp);
+    }
+
+    #[test]
+    fn the_app_is_found_from_the_bundled_cli_only() {
+        assert_eq!(
+            app_bundle(Path::new(
+                "/Applications/Near.ai Staging.app/Contents/MacOS/near-ai"
+            )),
+            Some(app())
+        );
+        assert_eq!(app_bundle(Path::new("/opt/homebrew/bin/near-ai")), None);
+        assert_eq!(
+            app_bundle(Path::new("/tmp/target/debug/trace-commons-contributor")),
+            None
+        );
+        // Contents/MacOS under something that is not an app bundle.
+        assert_eq!(app_bundle(Path::new("/tmp/x/Contents/MacOS/near-ai")), None);
+        assert_eq!(
+            app_bundle(Path::new("/tmp/x.app/Resources/MacOS/near-ai")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_app_is_launched_without_coming_forward_or_opening_a_window() {
+        let args = background_launch_args(&app(), None);
+        assert_eq!(
+            args,
+            vec![
+                "-g".to_string(),
+                "/Applications/Near.ai Staging.app".to_string(),
+                "--args".to_string(),
+                BACKGROUND_LAUNCH_ARG.to_string(),
+            ]
+        );
+        assert!(
+            !args.iter().any(|a| a == "-j"),
+            "hidden apps can hold back later windows"
+        );
+        assert_eq!(
+            BACKGROUND_LAUNCH_ARG, "--background-launch",
+            "the app matches this spelling"
+        );
+    }
+
+    #[test]
+    fn setup_opens_the_app_normally() {
+        assert_eq!(
+            setup_launch_args(&app(), None),
+            vec!["/Applications/Near.ai Staging.app".to_string()]
+        );
+    }
+
+    /// `open` does not pass the terminal's environment on, so a store
+    /// chosen with the override variable is handed to the app explicitly:
+    /// otherwise the app would start its daemon on the default folder and
+    /// `login` would wait on one that never answers.
+    #[test]
+    fn an_overridden_store_goes_to_the_app_with_it() {
+        let dir = Path::new("/tmp/tc state");
+        let pair = format!("{}=/tmp/tc state", crate::channel::STATE_DIR_ENV);
+        assert_eq!(
+            background_launch_args(&app(), Some(dir)),
+            vec![
+                "-g".to_string(),
+                "--env".to_string(),
+                pair.clone(),
+                "/Applications/Near.ai Staging.app".to_string(),
+                "--args".to_string(),
+                BACKGROUND_LAUNCH_ARG.to_string(),
+            ]
+        );
+        assert_eq!(
+            setup_launch_args(&app(), Some(dir)),
+            vec![
+                "--env".to_string(),
+                pair,
+                "/Applications/Near.ai Staging.app".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn waiting_stops_once_the_daemon_answers() {
+        let mut checks = 0;
+        let mut slept = Duration::ZERO;
+        let up = wait_for_daemon(
+            &mut || {
+                checks += 1;
+                checks == 3
+            },
+            &mut |d| slept += d,
+        );
+        assert!(up);
+        assert_eq!(checks, 3);
+        assert_eq!(slept, DAEMON_POLL * 2);
+    }
+
+    #[test]
+    fn waiting_gives_up_after_its_bound() {
+        let mut checks = 0u32;
+        let mut slept = Duration::ZERO;
+        let up = wait_for_daemon(
+            &mut || {
+                checks += 1;
+                false
+            },
+            &mut |d| slept += d,
+        );
+        assert!(!up);
+        assert!(slept >= DAEMON_WAIT, "waited {slept:?}");
+        assert!(slept < DAEMON_WAIT + DAEMON_POLL * 2, "waited {slept:?}");
+    }
+
+    #[test]
+    fn the_messages_name_the_app() {
+        assert_eq!(
+            launching_line(&app()),
+            "Starting Near.ai Staging in the background to sign in."
+        );
+        assert_eq!(
+            setup_line(&app()),
+            "Finish setting up in Near.ai Staging, which is now open. Sign-in is part of setup."
+        );
+        assert_eq!(
+            no_daemon_line(&app()),
+            "Near.ai Staging started, but its background service didn't. Open Near.ai Staging to see why."
+        );
     }
 }
