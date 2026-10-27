@@ -970,6 +970,10 @@ private struct MonitorMapPane: View {
     /// The Traces map's rocket and station, or the laptop and orb
     /// (`TracesMapStyle`, Settings, General); it changes at once.
     @AppStorage(TracesMapStyle.key) private var mapRocket = true
+    /// The account's devices (#1668), for the Traces map's other computers:
+    /// read when the map has a client and again when the account session
+    /// changes, as the Devices section reads them.
+    @StateObject private var devices = AccountDevicesModel()
 
     private var mapStyle: TracesMapStyle { mapRocket ? .launch : .standard }
 
@@ -988,6 +992,13 @@ private struct MonitorMapPane: View {
                 stateLine
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
+        }
+        .task(id: model.payoutLinkDaemonClient.map(ObjectIdentifier.init)) {
+            devices.attach(model.payoutLinkDaemonClient)
+            await devices.refresh()
+        }
+        .onChange(of: model.accountSessionGeneration) {
+            Task { await devices.refresh() }
         }
     }
 
@@ -1009,6 +1020,7 @@ private struct MonitorMapPane: View {
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
                 revealed: revealedFolders, space: space)
+                .addingDevices(devicesOnMap)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
@@ -1025,6 +1037,15 @@ private struct MonitorMapPane: View {
                 Color.clear
             }
         }
+    }
+
+    /// The other devices on the account, named and dated as the Devices
+    /// section shows them; none while its words or its list are unread.
+    private var devicesOnMap: [FlowMapScene.OtherDevice] {
+        guard let surface = devices.surface else { return [] }
+        return FlowMapScene.otherDevices(
+            devices.devices, name: { surface.name(for: $0) },
+            lastSeen: { surface.lastSeenLine(for: $0, formatted: AccountDevicesView.relative) })
     }
 
     /// The Traces map's state (the stack-wide ScreenState rule): core down

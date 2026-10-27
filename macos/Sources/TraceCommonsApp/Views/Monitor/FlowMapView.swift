@@ -347,6 +347,13 @@ struct FlowMapView: View {
         case .harness(let tool, _):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             if let tool { mark(tool, centre: centre, side: 16 * fit.scale, in: &layer) }
+        case .device:
+            // Another device on the account: this computer's laptop, small,
+            // on its own deck (its screen rising above the point, as this
+            // computer's does). Not the launch pad: nothing launches from
+            // here for it.
+            Self.drawLaptop(at: CGPoint(x: centre.x, y: centre.y + 4 * fit.scale),
+                            scale: fit.scale * Self.deviceScale, in: &layer)
         case .destination(let lamp):
             let lit = lamp == .answering || lamp == .running
             layer.fill(disc, with: .color(lit ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
@@ -400,6 +407,9 @@ struct FlowMapView: View {
     /// How far above this computer's point the laptop's screen rises: a
     /// contributed trace sets off upward from there on the standard map.
     nonisolated static let laptopScreenTop: CGFloat = 36
+
+    /// Another device's laptop, against this computer's.
+    nonisolated static let deviceScale: CGFloat = 0.45
 
     /// This computer as a laptop on the standard map (owner, 2026-10-19):
     /// its deck as wide as the pad, so the line out lands on its left edge,
