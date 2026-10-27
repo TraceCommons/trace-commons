@@ -125,6 +125,18 @@ final class AccountDevicesClientTests: XCTestCase {
         XCTAssertEqual(devices[1].lastSeenAt, "2026-10-27T01:00:00Z")
     }
 
+    /// What each device has contributed, as the server counts it: carried
+    /// when sent, and unknown (nil), never zero, from a server too old to
+    /// send it.
+    func testListCarriesEachDevicesContributions() throws {
+        let fake = Fake([
+            #"{"id":1,"result":{"devices":[{"device_key_id":"sha256:aa","public_key":"k","origin":"near_ai","created_at":"2026-10-27T00:00:00Z","this_device":false,"contributed_traces":12,"last_contributed_at":"2026-10-27T02:00:00Z"},{"device_key_id":"sha256:bb","public_key":"k","origin":"near_ai","created_at":"2026-10-27T00:00:00Z","this_device":false,"contributed_traces":0},{"device_key_id":"sha256:cc","public_key":"k","origin":"near_ai","created_at":"2026-10-27T00:00:00Z","this_device":false}]}}"#
+        ])
+        let devices = try AccountDevicesClient(transport: fake).list()
+        XCTAssertEqual(devices.map(\.contributedTraces), [12, 0, nil])
+        XCTAssertEqual(devices.map(\.lastContributedAt), ["2026-10-27T02:00:00Z", nil, nil])
+    }
+
     func testMintStatusAndRevokeSendWhatTheDaemonReads() throws {
         let fake = Fake([
             #"{"id":1,"result":{"code_id":"c1","code":"tcd1_dA.s","expires_at":"2026-10-27T00:10:00Z"}}"#,

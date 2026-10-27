@@ -71,6 +71,13 @@ struct AccountDeviceListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_seen_at: Option<DateTime<Utc>>,
     this_device: bool,
+    /// How many of the device's traces still stand in the commons
+    /// (`AccountDeviceSummary::contributed_traces`). Always present: zero
+    /// is a count.
+    contributed_traces: i64,
+    /// When the newest of those was received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_contributed_at: Option<DateTime<Utc>>,
 }
 
 async fn list_handler(
@@ -96,6 +103,8 @@ async fn list_handler(
             created_at: device.created_at,
             last_seen_at: device.last_seen_at,
             this_device: device.this_device,
+            contributed_traces: device.contributed_traces,
+            last_contributed_at: device.last_contributed_at,
         })
         .collect();
     Ok(Json(serde_json::json!({ "devices": devices })))
@@ -207,6 +216,34 @@ fn device_not_found() -> (StatusCode, Json<ApiError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A device's contribution count is always on the wire, zero included,
+    /// so a client can tell "nothing yet" from a server too old to say;
+    /// its last time is left out when there is none.
+    #[test]
+    fn a_listed_device_always_carries_its_count() {
+        let item = |traces: i64, last: Option<DateTime<Utc>>| AccountDeviceListItem {
+            device_key_id: "sha256:aa".into(),
+            public_key: "k".into(),
+            label: None,
+            origin: "near_ai".into(),
+            created_at: Utc::now(),
+            last_seen_at: None,
+            this_device: false,
+            contributed_traces: traces,
+            last_contributed_at: last,
+        };
+        let none = serde_json::to_value(item(0, None)).unwrap();
+        assert_eq!(none["contributed_traces"], 0);
+        assert!(none.get("last_contributed_at").is_none());
+        let at = Utc::now();
+        let some = serde_json::to_value(item(3, Some(at))).unwrap();
+        assert_eq!(some["contributed_traces"], 3);
+        assert_eq!(
+            some["last_contributed_at"],
+            serde_json::to_value(at).unwrap()
+        );
+    }
 
     #[test]
     fn a_blank_label_clears_and_a_long_or_control_label_is_refused() {
