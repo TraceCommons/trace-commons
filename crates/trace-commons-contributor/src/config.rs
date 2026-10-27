@@ -97,9 +97,10 @@ pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 
 /// Written when the commons refused this device's key as revoked by its
-/// account (`daemon::account_session_renewal::key_revoked`). Stops further
-/// renewals of a key that can never sign in again; it goes with the
-/// enrollment, so signing out and in again (a new key) starts clean.
+/// account (`daemon::account_session_renewal::key_revoked`), naming that
+/// key by digest. Stops further renewals of a key that can never sign in
+/// again. It goes with the enrollment, so unenrolling and enrolling again (a
+/// new key) starts clean; sign-out keeps the key, and so keeps the marker.
 pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 
 /// The plain files that belong to one enrollment, apart from the credential

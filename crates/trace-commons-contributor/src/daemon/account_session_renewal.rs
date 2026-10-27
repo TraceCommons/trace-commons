@@ -66,10 +66,12 @@
 //!
 //! `device_key_revoked` is the other: the account revoked this device's
 //! key (`DELETE /v1/account/devices/{id}`), and the commons never revives
-//! one. The device recovers by signing out, which drops its key, then
-//! signing in, which makes a new key and joins as a new device. The class
-//! is sticky until then ([`key_revoked`]): neither renewal nor Sign in again
-//! runs another ceremony for that key.
+//! one. Sign-out does not recover it: it removes the account session and
+//! keeps the device key. The device recovers by unenrolling (`unenroll`),
+//! which drops the key with the enrollment, then enrolling again, which
+//! makes a new key and joins as a new device. The class is sticky for that
+//! key ([`key_revoked`]): neither renewal nor Sign in again runs another
+//! ceremony for it.
 //!
 //! # Sign in again
 //!
@@ -119,28 +121,45 @@ const RENEWAL_LOG_LINES: usize = 200;
 pub const FAILURE_NEAR_AI_SIGN_IN_REQUIRED: &str = "near_ai_sign_in_required";
 
 /// The class [`classify`] gives the commons refusing this device's key
-/// because its account revoked it. No retry and no NEAR AI sign-in fixes it:
-/// the device signs out, which drops the key, and signs in again with a new
-/// one.
+/// because its account revoked it. No retry, no NEAR AI sign-in and no
+/// sign-out fixes it: the device unenrolls, which drops the key, and enrolls
+/// again with a new one.
 pub const FAILURE_DEVICE_KEY_REVOKED: &str = "device_key_revoked";
 
-/// Whether the commons refused this device's key as revoked. Sticky until
-/// sign-out or unenroll, which remove the marker with the enrollment
-/// ([`crate::config::DEVICE_KEY_REVOKED_FILE`]): every retry would rotate
-/// the NEAR AI refresh token and spend the provisioning rate limit for an
-/// answer that cannot change.
+/// Whether the commons refused the enrolled device key as revoked. The
+/// marker ([`crate::config::DEVICE_KEY_REVOKED_FILE`]) names the refused key
+/// by digest, so it holds for that key only: a renewal of the old key that
+/// answers after an unenroll and a new enrollment leaves the new key alone.
+/// Every retry of the refused key would rotate the NEAR AI refresh token and
+/// spend the provisioning rate limit for an answer that cannot change.
+/// Unenroll removes the marker with the enrollment; sign-out does not.
 pub(crate) fn key_revoked(store: &crate::config::ConfigStore) -> bool {
-    matches!(
-        store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE),
-        Ok(Some(_))
-    )
+    let Ok(Some(marker)) = store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE) else {
+        return false;
+    };
+    let Ok(Some(cfg)) = store.load_config() else {
+        return false;
+    };
+    marker.trim_ascii() == revoked_key_digest(&cfg.device_key_id).as_bytes()
 }
 
-/// Mark the key revoked when `class` says so. Best effort: without the
-/// marker the 10-minute backoff still bounds the retries.
-fn remember_if_revoked(store: &crate::config::ConfigStore, class: &str) {
+/// The marker's content: the refused key, by digest, never its id.
+fn revoked_key_digest(device_key_id: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"trace-commons/device-key-revoked/v1");
+    hash.update(device_key_id.as_bytes());
+    format!("sha256:{}", hex::encode(hash.finalize()))
+}
+
+/// Mark `device_key_id` revoked when `class` says so: the key the refused
+/// ceremony signed with, not whatever is enrolled when it answers. Best
+/// effort: without the marker the 10-minute backoff still bounds the
+/// retries.
+fn remember_if_revoked(store: &crate::config::ConfigStore, class: &str, device_key_id: &str) {
     if class == FAILURE_DEVICE_KEY_REVOKED {
-        let _ = store.write_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE, b"1\n");
+        let mut marker = revoked_key_digest(device_key_id);
+        marker.push('\n');
+        let _ = store.write_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE, marker.as_bytes());
     }
 }
 
@@ -383,7 +402,7 @@ pub(super) async fn sign_in(
             let class = classify(&error);
             record(shared, Trigger::SignIn, Some(class));
             failed(store.dir(), attempt_key(shared, &raw), class);
-            remember_if_revoked(store, class);
+            remember_if_revoked(store, class, &identity.device_key_id);
             Err(match class {
                 FAILURE_NEAR_AI_SIGN_IN_REQUIRED => FAILURE_NEAR_AI_SIGN_IN_REQUIRED,
                 FAILURE_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
@@ -642,7 +661,7 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
             // Keyed after the attempt, so the NEAR AI rotation it made is
             // the login a retry would present.
             failed(store.dir(), attempt_key(shared, &raw), class);
-            remember_if_revoked(store, class);
+            remember_if_revoked(store, class, &identity.device_key_id);
             false
         }
     }
@@ -701,14 +720,27 @@ mod revoked_key_tests {
     use super::*;
 
     #[test]
-    fn a_revoked_key_is_remembered_until_the_enrollment_goes() {
+    fn only_the_revoked_class_is_remembered_and_unenroll_removes_it() {
         let (_dir, store) = crate::config::tests_support::temp_store();
-        assert!(!key_revoked(&store));
-        remember_if_revoked(&store, "commons_refused");
-        assert!(!key_revoked(&store), "only the revoked class sticks");
-        remember_if_revoked(&store, FAILURE_DEVICE_KEY_REVOKED);
-        assert!(key_revoked(&store));
+        remember_if_revoked(&store, "commons_refused", "key-a");
+        assert!(matches!(
+            store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE),
+            Ok(None)
+        ));
+        remember_if_revoked(&store, FAILURE_DEVICE_KEY_REVOKED, "key-a");
+        let marker = store
+            .read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&marker).contains("key-a"),
+            "the marker names the key by digest only"
+        );
+        assert!(!key_revoked(&store), "no enrollment, nothing to hold back");
         store.remove_enrollment_files().unwrap();
-        assert!(!key_revoked(&store), "sign-out clears it");
+        assert!(matches!(
+            store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE),
+            Ok(None)
+        ));
     }
 }
