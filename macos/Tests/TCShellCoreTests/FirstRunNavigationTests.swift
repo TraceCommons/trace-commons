@@ -52,9 +52,13 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     /// Uses goes on once the required use is known, so nobody passes it
-    /// without seeing that use.
+    /// without seeing that use, and once the person picked a Sharing
+    /// choice: neither is preselected (owner, 2026-10-27).
     func test_usesWaitsForTheRequiredUseToBeKnown() {
-        let state = FirstRunState(step: .uses)
+        var state = FirstRunState(step: .uses)
+        XCTAssertFalse(state.sharingChosen)
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"), "no pick yet")
+        state.sharingChosen = true
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil))
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
     }
@@ -207,6 +211,7 @@ final class FirstRunNavigationTests: XCTestCase {
         var state = FirstRunState(step: .join)
         state.account = .enrolled
         state.scopes = ["evaluation"]
+        state.sharingChosen = true
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
         XCTAssertFalse(
             FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil),
@@ -229,10 +234,25 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     func test_joinWaitsForSomethingStartCanFinish() {
-        var state = FirstRunState(step: .join)
+        var state = FirstRunState(step: .join, sharingChosen: true)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
         state.account = .enrolled
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
+    }
+
+    /// Start, on Join, waits for a Sharing choice the person picked, even
+    /// with an enrollment held. Watching only shares nothing and needs none.
+    func test_joinWaitsForASharingChoice() {
+        var state = FirstRunState(step: .join, account: .enrolled)
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
+        state.sharing = .askMe
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"),
+            "the field's starting value is not a pick")
+        state.sharingChosen = true
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
+        let watching = FirstRunState(step: .join, account: .watchOnly)
+        XCTAssertTrue(FirstRunNavigation.canContinue(watching, candidates: [], requiredScope: "research"))
     }
 
     /// Uses comes before sign-in, which is required (owner, 2026-10-12),
@@ -453,6 +473,7 @@ final class FirstRunNavigationTests: XCTestCase {
             state.account = account
             state.enrolledInvite = enrolledInvite
             state.scopes = ["required"]
+            state.sharingChosen = true
             return state
         }
         for account: AccountAnswer in [.none, .watchOnly, .passkeyChosen, .nearAI] {

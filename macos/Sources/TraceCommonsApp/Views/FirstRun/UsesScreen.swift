@@ -24,6 +24,14 @@ enum UsesScreenLayout {
         options.filter { !$0.alwaysOn && $0.grantsDataUse }
     }
 
+    /// The optional data uses as Uses lists them: the one that earns credit
+    /// (`uses.creditScope`) first, the rest in the daemon's order (owner,
+    /// 2026-10-27).
+    static func shownOptionalScopes(_ options: [ConsentScope], uses: FirstRunCopy.Uses) -> [ConsentScope] {
+        let optional = optionalScopes(options)
+        return optional.filter { $0.name == uses.creditScope } + optional.filter { $0.name != uses.creditScope }
+    }
+
     /// Scopes that grant no data use (the public handle), beside them.
     static func handleScopes(_ options: [ConsentScope]) -> [ConsentScope] {
         options.filter { !$0.alwaysOn && !$0.grantsDataUse }
@@ -50,6 +58,52 @@ enum UsesScreenLayout {
         let on = optional.filter { scopes.contains($0.name) }.count
         if !optional.isEmpty, on == optional.count { return .all }
         return on == 0 ? .none : .some
+    }
+
+    /// The two buttons above the optional uses (owner, 2026-10-27), of
+    /// equal weight so neither is the suggested answer. The uses start
+    /// unticked (R7); only the person's press of one, or of a box, changes
+    /// them.
+    enum Bulk: CaseIterable {
+        /// Every optional data use on. The handle grants no data use and
+        /// is not among them (`optionalScopes`).
+        case allowAll
+        /// Every optional data use off; the required use stays.
+        case onlyRequired
+
+        func title(_ uses: FirstRunCopy.Uses) -> String {
+            switch self {
+            case .allowAll: return uses.allowAll
+            case .onlyRequired: return uses.onlyRequired
+            }
+        }
+    }
+
+    /// The state after the person presses `bulk`. Nothing but the optional
+    /// data uses changes.
+    static func pressing(_ bulk: Bulk, _ state: FirstRunState, optional: [ConsentScope]) -> FirstRunState {
+        var pressed = state
+        let names = Set(optional.map(\.name))
+        switch bulk {
+        case .allowAll: pressed.scopes.formUnion(names)
+        case .onlyRequired: pressed.scopes.subtract(names)
+        }
+        return pressed
+    }
+
+    /// The Sharing radios' selection: none until the person picks one
+    /// (owner, 2026-10-27), then their pick.
+    static func sharingSelection(_ state: FirstRunState) -> SharingPath? {
+        state.sharingChosen ? state.sharing : nil
+    }
+
+    /// The person's pick of a Sharing choice.
+    static func choosingSharing(_ state: FirstRunState, _ path: SharingPath?) -> FirstRunState {
+        guard let path else { return state }
+        var chosen = state
+        chosen.sharing = path
+        chosen.sharingChosen = true
+        return chosen
     }
 
     /// Start sharing, on Join: the required use known and an account Start
@@ -153,7 +207,7 @@ enum UsesScreenLayout {
     /// the person signs in, the last step.
     static func sharingOptions(
         for state: FirstRunState, modes: ContributionModeCopy?, grant: AutomaticGrantCopy?, uses: FirstRunCopy.Uses
-    ) -> [GlassRadioOption<SharingPath>] {
+    ) -> [GlassRadioOption<SharingPath?>] {
         FirstRunNavigation.sharingPaths(for: state).compactMap { path in
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
             guard let modeTitle = modes?.label(for: mode) else { return nil }
@@ -634,7 +688,20 @@ struct UsesScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !optional.isEmpty {
-                ForEach(optional) { option in
+                HStack(spacing: GlassTokens.Space.s3) {
+                    // One style and one width for both: neither is the
+                    // suggested answer.
+                    ForEach(UsesScreenLayout.Bulk.allCases, id: \.self) { bulk in
+                        Button {
+                            runner.state = UsesScreenLayout.pressing(bulk, runner.state, optional: optional)
+                        } label: {
+                            Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(GlassButtonStyle(.secondary))
+                    }
+                }
+                .padding(.top, GlassTokens.Space.s3)
+                ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses)) { option in
                     scopeRow(option)
                 }
             }
@@ -653,7 +720,9 @@ struct UsesScreen: View {
             }
             GlassRadioGroup(
                 copy.uses.sharing,
-                selection: Binding(get: { runner.state.sharing }, set: { runner.state.sharing = $0 }),
+                selection: Binding(
+                    get: { UsesScreenLayout.sharingSelection(runner.state) },
+                    set: { runner.state = UsesScreenLayout.choosingSharing(runner.state, $0) }),
                 options: UsesScreenLayout.sharingOptions(
                     for: runner.state, modes: ProjectModeWords.table, grant: grant, uses: copy.uses))
                 .padding(.bottom, GlassTokens.Space.s3)
@@ -677,6 +746,13 @@ struct UsesScreen: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // The use that earns credit says so, in the required use's
+                // inline style, no louder.
+                if option.name == copy.uses.creditScope {
+                    Text(copy.uses.creditRequired)
+                        .glassType(GlassTokens.TypeScale.mono)
+                        .foregroundStyle(GlassTokens.Color.statusOnText.color)
+                }
             }
         }
         .toggleStyle(GlassCheckboxStyle())
@@ -687,9 +763,9 @@ struct UsesScreen: View {
         GlassInfoButton(UsesScreenLayout.moreAbout(title, uses: copy.uses), text: text)
     }
 
-    /// One optional scope's box. The person's toggle is the only thing that
-    /// ticks an optional scope; the required one is always included
-    /// (`includeRequired`).
+    /// One optional scope's box. Each starts unticked; the person's toggle,
+    /// or their press of Allow all, is the only thing that ticks one. The required
+    /// one is always included (`includeRequired`).
     private func scope(_ name: String) -> Binding<Bool> {
         Binding(
             get: { runner.state.scopes.contains(name) },

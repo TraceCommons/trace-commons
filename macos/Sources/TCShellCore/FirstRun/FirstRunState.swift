@@ -109,6 +109,10 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var sharing: SharingPath {
         didSet { grantReady = false }
     }
+    /// The person picked a Sharing choice on Uses. Neither is chosen for
+    /// them (owner, 2026-10-27): until one is, the radios show none and
+    /// Continue and Start stay off. `sharing` is only read once it is set.
+    public var sharingChosen: Bool
     /// The Private AI step's switch.
     public var privateAI: Bool
     /// The witness the disclosure showed, passed to `grant_automatic`.
@@ -157,6 +161,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         pastSelections: [String: Set<String>] = [:],
         scopes: Set<String> = [],
         sharing: SharingPath = .askMe,
+        sharingChosen: Bool = false,
         privateAI: Bool = false,
         witnessSigningAddress: String? = nil,
         grantReady: Bool = false,
@@ -178,6 +183,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.pastSelections = pastSelections
         self.scopes = scopes
         self.sharing = sharing
+        self.sharingChosen = sharingChosen
         self.privateAI = privateAI
         self.witnessSigningAddress = witnessSigningAddress
         self.grantReady = grantReady

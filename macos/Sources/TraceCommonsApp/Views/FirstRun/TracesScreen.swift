@@ -53,6 +53,17 @@ enum TracesScreenLayout {
         return TCCoreCopy.firstRunEstimateLine(requestJSON: json)
     }
 
+    /// Whether Traces notes that the traces won't earn credit: the use that
+    /// earns it (`uses.creditScope`) is not ticked (owner, 2026-10-27).
+    static func showsNoCredit(_ state: FirstRunState, uses: FirstRunCopy.Uses) -> Bool {
+        !state.scopes.contains(uses.creditScope)
+    }
+
+    /// The note's link: back to Uses, every answer kept.
+    static func backToUses(_ state: FirstRunState) -> FirstRunState {
+        FirstRunNavigation.back(to: .uses, from: state)
+    }
+
     /// The count rises after the orbs start, over 1.9s.
     static let countDelay: Double = 0.9
     static let countDuration: Double = 1.9
@@ -109,7 +120,12 @@ struct TracesScreen: View {
         } title: {
             FirstRunTitle(light: copy.traces.titleLight, bold: copy.traces.titleBold)
         } content: {
-            estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
+            VStack(spacing: GlassTokens.Space.s4) {
+                estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
+                if TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses) {
+                    noCredit
+                }
+            }
         }
         .onAppear {
             openedAt = memory.tracesCounted ? .distantPast : Date()
@@ -213,6 +229,22 @@ struct TracesScreen: View {
             }
         }
         .accessibilityHidden(true)
+    }
+
+    /// A neutral note, in the caption's secondary colour, with its link.
+    private var noCredit: some View {
+        VStack(spacing: GlassTokens.Space.s2) {
+            Text(copy.traces.noCredit)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(copy.traces.backToUses) {
+                runner.state = TracesScreenLayout.backToUses(runner.state)
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+        }
+        .frame(maxWidth: 460)
     }
 
     /// The one estimated total, or nothing at all when there is none.

@@ -260,6 +260,13 @@ pub struct TracesCopy {
     /// marked as an estimate). An invite's own range replaces it; a server
     /// dollar range replaces both. The owner's figure.
     pub estimate: EstimateRange,
+    /// Under the estimate while the use that earns credit
+    /// (`uses.credit_scope`) is not ticked, with `back_to_uses`, a link to
+    /// the Uses step. A neutral note, not a warning. Owner, 2026-10-27
+    /// (dictated), pending approval; the one line that names going back,
+    /// since it opens a step the footer's Back would not name.
+    pub no_credit: &'static str,
+    pub back_to_uses: &'static str,
 }
 
 /// A range of points per accepted trace, the one unit the daemon accepts.
@@ -432,6 +439,16 @@ pub struct UsesCopy {
     /// Under Automatic before sign-in: sign-in is the last step, and the
     /// grant needs the enrollment it makes. DRAFT, NEEDS APPROVAL.
     pub automatic_after_sign_in: &'static str,
+    /// Two buttons of equal weight above the optional data uses, which
+    /// start unticked (R7): `allow_all` ticks every optional use, the
+    /// public handle excepted; `only_required` unticks them, leaving the
+    /// required use. Owner, 2026-10-27. DRAFT, NEEDS APPROVAL.
+    pub allow_all: &'static str,
+    pub only_required: &'static str,
+    /// The optional use that earns credit, shown first among them, with
+    /// `credit_required` under its description (owner, 2026-10-27).
+    pub credit_scope: &'static str,
+    pub credit_required: &'static str,
 }
 
 /// The passkey popups P-1, P-2, P-5 and P-7 (`passkey-flow.tsx`). P-3, P-4
@@ -682,6 +699,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             you_review: "You review",
             the_commons: "The commons",
             automatic_after_sign_in: "Starts when setup finishes after sign-in.",
+            allow_all: "Allow all",
+            only_required: "Only required",
+            credit_scope: crate::consent_copy::DATA_USE_CREDIT_SCOPE,
+            credit_required: crate::consent_copy::DATA_USE_CREDIT_REQUIRED,
         },
         traces: TracesCopy {
             title_light: "What your traces ",
@@ -692,6 +713,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             estimate_usd: "An estimated {min}–{max} in NEAR AI credit",
             estimate_usd_one: "An estimated {min} in NEAR AI credit",
             estimate: EstimateRange { min: 3, max: 8 },
+            no_credit: "You didn't allow Train coding models, so your traces won't earn credit. To earn credit, go back to Uses and allow it.",
+            back_to_uses: "Go back to Uses",
         },
         passkey: PasskeyCopy {
             close: "Close",
@@ -961,11 +984,34 @@ mod tests {
     }
 
     /// Back is a button in the footer, never an instruction: no line tells
-    /// the person to go back.
+    /// the person to go back. The one exception is Traces' note when the
+    /// use that earns credit is off, with its link to Uses (owner,
+    /// 2026-10-27).
     #[test]
     fn no_line_says_to_go_back() {
-        let json = serde_json::to_string(&first_run_copy()).unwrap();
-        assert!(!json.contains("Go back"), "{json}");
+        let mut copy = first_run_copy();
+        assert!(copy.traces.no_credit.contains("go back to Uses"));
+        assert_eq!(copy.traces.back_to_uses, "Go back to Uses");
+        copy.traces.no_credit = "";
+        copy.traces.back_to_uses = "";
+        let json = serde_json::to_string(&copy).unwrap();
+        assert!(
+            !json.contains("Go back") && !json.contains("go back"),
+            "{json}"
+        );
+    }
+
+    /// The note names the use that earns credit by its title.
+    #[test]
+    fn the_no_credit_note_names_the_use_that_earns_it() {
+        let copy = first_run_copy();
+        assert_eq!(copy.uses.credit_scope, "model_training");
+        assert!(
+            copy.traces
+                .no_credit
+                .starts_with("You didn't allow Train coding models,")
+        );
+        assert!(copy.traces.no_credit.contains("won't earn credit"));
     }
 
     /// Watching only queues picked past sessions on this Mac and sends
