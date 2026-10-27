@@ -939,7 +939,7 @@ const STATE_DIR_NAME: &str = crate::channel::STATE_DIR_NAME;
 /// So on Windows the preferred directory is LocalAppData, and an enrollment
 /// left behind in the roaming location is migrated on the next run. See
 /// [`adopt_state_dir`].
-fn platform_default_dir() -> Result<PathBuf> {
+pub(crate) fn platform_default_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     {
         let preferred = dirs::config_local_dir()

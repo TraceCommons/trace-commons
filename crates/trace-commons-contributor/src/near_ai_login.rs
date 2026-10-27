@@ -466,14 +466,24 @@ enum Route {
     /// The app around this CLI, opened on its first run: it starts no
     /// daemon until first run has the session folders.
     OpenSetup(PathBuf),
+    /// The app around this CLI is already open and its daemon is not
+    /// answering; launching it again would only re-activate it.
+    AppNotAnswering(PathBuf),
     /// Nobody: the person opens the app.
     OpenApp,
 }
 
 /// `kept` is whether this process can keep a NEAR AI session
 /// (`store_is_reachable`); `roots_declared` whether the app would start its
-/// daemon; `app` the bundle this CLI runs from.
-fn route(running: bool, kept: bool, roots_declared: bool, app: Option<PathBuf>) -> Route {
+/// daemon; `app` the bundle this CLI runs from; `app_open` whether that
+/// app is already running.
+fn route(
+    running: bool,
+    kept: bool,
+    roots_declared: bool,
+    app: Option<PathBuf>,
+    app_open: bool,
+) -> Route {
     if running {
         return Route::Daemon;
     }
@@ -482,8 +492,9 @@ fn route(running: bool, kept: bool, roots_declared: bool, app: Option<PathBuf>) 
     }
     match app {
         None => Route::OpenApp,
-        Some(app) if roots_declared => Route::LaunchApp(app),
-        Some(app) => Route::OpenSetup(app),
+        Some(app) if !roots_declared => Route::OpenSetup(app),
+        Some(app) if app_open => Route::AppNotAnswering(app),
+        Some(app) => Route::LaunchApp(app),
     }
 }
 
@@ -497,6 +508,50 @@ fn app_bundle(exe: &Path) -> Option<PathBuf> {
         && contents.file_name()? == "Contents"
         && app.extension()? == "app";
     bundled.then(|| app.to_path_buf())
+}
+
+/// Whether `ps -axo command=` output lists `exe`, the app's own executable,
+/// as a process: the path alone or followed by its arguments.
+fn app_running_in(ps: &str, exe: &Path) -> bool {
+    let exe = exe.to_string_lossy();
+    ps.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(exe.as_ref())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    })
+}
+
+/// Whether the app at `app` is running, by its `CFBundleExecutable`. A
+/// failure to tell reads as not running: the launch then waits its bound
+/// and says so.
+fn app_is_open(app: &Path) -> bool {
+    let plist = app.join("Contents/Info.plist");
+    let exe = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleExecutable", "raw", "-o", "-"])
+        .arg(&plist)
+        .output();
+    let Ok(exe) = exe else { return false };
+    let name = String::from_utf8_lossy(&exe.stdout).trim().to_string();
+    if !exe.status.success() || name.is_empty() {
+        return false;
+    }
+    let Ok(ps) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "command="])
+        .output()
+    else {
+        return false;
+    };
+    app_running_in(
+        &String::from_utf8_lossy(&ps.stdout),
+        &app.join("Contents/MacOS").join(name),
+    )
+}
+
+/// The store to hand the app, or `None` when it is the platform default,
+/// which the app resolves itself. `--config-dir` and the override variable
+/// both choose a store the app would not, so neither is special-cased.
+fn forwarded_state_dir<'a>(store_dir: &'a Path, default: Option<&Path>) -> Option<&'a Path> {
+    (default != Some(store_dir)).then_some(store_dir)
 }
 
 /// The app's name as Finder shows it: "Near.ai", "Near.ai Staging".
@@ -517,8 +572,9 @@ fn background_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
 }
 
 /// `open` arguments that open the app as a click does, on its first run.
-/// `state_dir` is the store when the override variable chose it: `open`
-/// does not pass the terminal's environment to the app.
+/// `state_dir` is the store when it is not the default
+/// ([`forwarded_state_dir`]): `open` does not pass the terminal's
+/// environment to the app.
 fn setup_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(dir) = state_dir {
@@ -542,6 +598,11 @@ fn setup_line(app: &Path) -> String {
         "Finish setting up in {}, which is now open. Sign-in is part of setup.",
         app_name(app)
     )
+}
+
+fn not_answering_line(app: &Path) -> String {
+    let name = app_name(app);
+    format!("{name} is open, but its background service isn't answering. Open {name} to see why.")
 }
 
 fn no_daemon_line(app: &Path) -> String {
@@ -592,10 +653,13 @@ fn hand_off_to_app(store: &ConfigStore) -> Result<bool> {
         .and_then(|exe| exe.canonicalize())
         .ok()
         .and_then(|exe| app_bundle(&exe));
-    let state_dir = std::env::var_os(crate::channel::STATE_DIR_ENV).map(|_| store.dir());
-    match route(false, kept, roots_declared, app) {
+    let default = crate::config::platform_default_dir().ok();
+    let state_dir = forwarded_state_dir(store.dir(), default.as_deref());
+    let app_open = app.as_deref().is_some_and(app_is_open);
+    match route(false, kept, roots_declared, app, app_open) {
         Route::Daemon | Route::InProcess => Ok(false),
         Route::OpenApp => bail!(OPEN_APP),
+        Route::AppNotAnswering(app) => bail!(not_answering_line(&app)),
         Route::OpenSetup(app) => {
             open_app(&setup_launch_args(&app, state_dir))?;
             bail!(setup_line(&app))
@@ -1456,20 +1520,23 @@ mod app_handoff_tests {
 
     #[test]
     fn a_running_daemon_answers_whatever_else_holds() {
-        assert_eq!(route(true, false, false, Some(app())), Route::Daemon);
-        assert_eq!(route(true, true, true, None), Route::Daemon);
+        assert_eq!(route(true, false, false, Some(app()), false), Route::Daemon);
+        assert_eq!(route(true, true, true, None, false), Route::Daemon);
     }
 
     #[test]
     fn an_entitled_process_signs_in_itself_as_before() {
-        assert_eq!(route(false, true, false, Some(app())), Route::InProcess);
-        assert_eq!(route(false, true, true, None), Route::InProcess);
+        assert_eq!(
+            route(false, true, false, Some(app()), false),
+            Route::InProcess
+        );
+        assert_eq!(route(false, true, true, None, false), Route::InProcess);
     }
 
     #[test]
     fn an_unentitled_cli_inside_a_set_up_app_starts_it_in_the_background() {
         assert_eq!(
-            route(false, false, true, Some(app())),
+            route(false, false, true, Some(app()), false),
             Route::LaunchApp(app())
         );
     }
@@ -1479,15 +1546,67 @@ mod app_handoff_tests {
         // No folders chosen: the app will not start its daemon until first
         // run has them, so there is nothing to wait for in the background.
         assert_eq!(
-            route(false, false, false, Some(app())),
+            route(false, false, false, Some(app()), false),
             Route::OpenSetup(app())
         );
     }
 
     #[test]
     fn an_unentitled_cli_outside_an_app_is_told_to_open_one() {
-        assert_eq!(route(false, false, true, None), Route::OpenApp);
-        assert_eq!(route(false, false, false, None), Route::OpenApp);
+        assert_eq!(route(false, false, true, None, false), Route::OpenApp);
+        assert_eq!(route(false, false, false, None, false), Route::OpenApp);
+    }
+
+    /// Already open with its daemon not answering (refused, or still on
+    /// first run's folders): `open` would only re-activate it, since
+    /// LaunchServices drops `--args` and `--env` for a running instance, so
+    /// nothing is waited for.
+    #[test]
+    fn an_app_already_open_without_its_daemon_is_not_waited_on() {
+        assert_eq!(
+            route(false, false, true, Some(app()), true),
+            Route::AppNotAnswering(app())
+        );
+        // With no folders declared it is on first run: bring it forward.
+        assert_eq!(
+            route(false, false, false, Some(app()), true),
+            Route::OpenSetup(app())
+        );
+        assert_eq!(route(true, false, true, Some(app()), true), Route::Daemon);
+    }
+
+    #[test]
+    fn a_running_app_is_found_by_its_executable_path() {
+        let exe = Path::new("/Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp");
+        let ps = "/sbin/launchd\n\
+                  /Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp --background-launch\n";
+        assert!(app_running_in(ps, exe));
+        assert!(app_running_in(
+            "/Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp\n",
+            exe
+        ));
+        // The bundled CLI itself, the production app, and a longer name
+        // sharing the prefix are not it.
+        assert!(!app_running_in(
+            "/Applications/Near.ai Staging.app/Contents/MacOS/near-ai login\n\
+             /Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp\n\
+             /Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsAppHelper\n",
+            exe
+        ));
+    }
+
+    /// `--config-dir` wins over the override variable in
+    /// `ConfigStore::resolve`, so the store is forwarded whenever it is not
+    /// the default, however it was chosen; the default goes unforwarded, so
+    /// the app resolves it exactly as a click would.
+    #[test]
+    fn a_store_other_than_the_default_is_forwarded_however_it_was_chosen() {
+        let default = Path::new("/Users/x/Library/Application Support/trace-commons-staging");
+        let chosen = Path::new("/Users/x/tc-alt");
+        assert_eq!(forwarded_state_dir(chosen, Some(default)), Some(chosen));
+        assert_eq!(forwarded_state_dir(default, Some(default)), None);
+        // No default to compare with: forward, so the app cannot pick another.
+        assert_eq!(forwarded_state_dir(chosen, None), Some(chosen));
     }
 
     #[test]
@@ -1611,6 +1730,10 @@ mod app_handoff_tests {
         assert_eq!(
             setup_line(&app()),
             "Finish setting up in Near.ai Staging, which is now open. Sign-in is part of setup."
+        );
+        assert_eq!(
+            not_answering_line(&app()),
+            "Near.ai Staging is open, but its background service isn't answering. Open Near.ai Staging to see why."
         );
         assert_eq!(
             no_daemon_line(&app()),

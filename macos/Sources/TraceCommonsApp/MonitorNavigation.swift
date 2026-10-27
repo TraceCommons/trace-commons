@@ -175,7 +175,6 @@ enum LaunchRouting {
         arguments.dropFirst().contains(backgroundLaunchArgument)
     }
 
-    ///
     /// A `background` launch opens nothing at all: the CLI started the app
     /// to answer its sign-in (`near_ai_login::hand_off_to_app`), and a
     /// window, first run's included, would take the person out of the
