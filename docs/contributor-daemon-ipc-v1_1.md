@@ -4076,8 +4076,9 @@ design asks for, plus two honest unknowns:
 
 **Attribution is approximate and must be described as such.** The proxy's
 ledger records a *facade* -- `anthropic`, `openai` -- not a tool id. Claude
-Code speaks Anthropic and Codex speaks OpenAI, so today a call separates them;
-two connected tools of the same family do not separate at all. `family` on a
+Code speaks Anthropic; Codex and OpenCode speak OpenAI. A call cannot be
+attributed to either when both OpenAI-family tools are connected. Two connected
+tools of the same family do not separate at all. `family` on a
 row is what makes attribution possible, and it is `null` for a
 catalog-described tool, whose facade nothing here knows.
 
@@ -4106,7 +4107,11 @@ time, which `plan_connect(id, port, catalog)` does not expose.
 }
 ```
 
-Writes nothing. `outcome` is one of:
+Writes nothing. OpenCode Connect uses async dispatch to qualify the installed major
+and read a bounded model list from the live proxy before preparing its provider
+and default-model edit. Merely listing tools does not launch the native CLI.
+
+`outcome` is one of:
 
 | `outcome` | meaning |
 |---|---|
@@ -4119,6 +4124,11 @@ Writes nothing. `outcome` is one of:
 
 `plan_id` is minted for `changes` and for nothing else, so "there is a plan id"
 and "the outcome is committable" are one question answered once.
+
+OpenCode may also return `unsupported_version` when the installed major cannot
+be qualified, or `models_unavailable` when the live proxy has no usable model
+list. Both are noncommittable and carry no plan id. Native bindings append
+outcome codes 47 and 48; older unknown outcomes remain noncommittable.
 
 **`occupied` is not an outcome.** A plan can carry changes *and* occupied slots
 at once -- the empty slots are filled and the full one is reported in the same

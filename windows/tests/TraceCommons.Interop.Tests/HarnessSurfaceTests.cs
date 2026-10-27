@@ -99,10 +99,19 @@ public class HarnessSurfaceTests
     /// A plan id is minted for a committable plan and for nothing else, so a
     /// shell cannot construct a write out of an outcome that refused one.
     /// </summary>
+    [Theory]
+    [InlineData("unsupported_version", HarnessPlanOutcome.UnsupportedVersion)]
+    [InlineData("models_unavailable", HarnessPlanOutcome.ModelsUnavailable)]
+    public void OpenCodeQualificationRefusalsHaveDistinctOutcomes(string label, HarnessPlanOutcome expected)
+    {
+        Assert.Equal(expected, HarnessSurface.Outcome(label));
+        Assert.False(string.IsNullOrEmpty(HarnessSurface.OutcomeSentence(label)));
+    }
+
     [Fact]
     public void OnlyAChangeCarriesAPlanId()
     {
-        foreach (string outcome in new[] { "noop", "unparseable", "not_installed", "entry_unusable", "no_config_path" })
+        foreach (string outcome in new[] { "noop", "unparseable", "not_installed", "entry_unusable", "no_config_path", "unsupported_version", "models_unavailable" })
         {
             HarnessPlan? plan = HarnessSurface.ParsePlan(
                 $$"""{"id":"claude","action":"connect","outcome":"{{outcome}}","plan_id":null,"path":null,"changes":[],"occupied":[]}""");

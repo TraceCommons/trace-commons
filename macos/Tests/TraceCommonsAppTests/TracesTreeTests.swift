@@ -695,7 +695,11 @@ final class TracesQueueStateTests: XCTestCase {
     /// The health label is said when nothing more specific already says it,
     /// and not twice when the budget does.
     func test_theHealthLabelIsNotSaidTwice() async throws {
-        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        let full = try await status {
+            $0["health"] = ["last_error_label": "queue-full"]
+            $0["queue_at_capacity"] = true
+            $0["queue_capacity_used"] = 500
+        }
         XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
         let capped = try await status {
             $0["health"] = ["last_error_label": "daily-cap-reached"]
@@ -744,7 +748,11 @@ final class TracesQueueStateTests: XCTestCase {
     /// A full queue names the configured limit when the settings were read,
     /// in the core's words, as the main window's banner does.
     func test_aFullQueueNamesItsLimit() async throws {
-        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        let full = try await status {
+            $0["health"] = ["last_error_label": "queue-full"]
+            $0["queue_at_capacity"] = true
+            $0["queue_capacity_used"] = 500
+        }
         let named = TracesStore.safeguards(full, maxQueueEntries: 500).first?.body
         XCTAssertEqual(named, HealthCopy.core(label: "queue-full", maxQueueEntries: 500).detail)
         XCTAssertNotEqual(named, TracesStore.safeguards(full, maxQueueEntries: nil).first?.body)

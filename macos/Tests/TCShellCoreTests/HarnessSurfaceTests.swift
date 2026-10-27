@@ -9,6 +9,12 @@ import XCTest
 /// while the shell had stopped asking the shared table at all. Every one of
 /// them is a spy or a stub returning a value the test chose.
 final class HarnessSurfaceTests: XCTestCase {
+    func testOpenCodeQualificationRefusalsHaveDistinctNoncommittableCodes() {
+        XCTAssertEqual(HarnessPlanOutcome.fromABI(47), .unsupportedVersion)
+        XCTAssertEqual(HarnessPlanOutcome.fromABI(48), .modelsUnavailable)
+        XCTAssertEqual(HarnessPlanOutcome.fromABI(49), .unknown)
+    }
+
     /// The shared complete payload; see `PrivateInferenceCopyFixture`.
     /// A new required property is one edit there, not five here.
     private let payload = PrivateInferenceCopyFixture.complete

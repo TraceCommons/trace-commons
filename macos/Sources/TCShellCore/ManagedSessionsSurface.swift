@@ -157,9 +157,10 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
 public enum ManagedSurface {
     public static func visibleHarnesses(_ rows: [HarnessRow], tools: [ManagedToolAvailability]?) -> [HarnessRow] {
         rows.filter { row in
-            // Saved routing and previous activity remain manageable after uninstall.
-            if row.connected || row.lastCallAt != nil { return true }
-            return tools?.first(where: { $0.tool == row.id })?.installed ?? row.installed
+            // Persistent routing is independent of managed launch availability.
+            // Keep stale-port connections removable even after uninstall or proxy Off.
+            if row.installed || row.connected || row.canDisconnect || row.lastCallAt != nil { return true }
+            return tools?.first(where: { $0.tool == row.id })?.installed == true
         }
     }
 

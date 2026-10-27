@@ -14,8 +14,14 @@ final class ManagedToolAvailabilityTests: XCTestCase {
     func testHarnessSetupUsesExecutableEvidenceAndKeepsConfiguredRows() throws {
         let rows = try JSONDecoder().decode([HarnessRow].self, from: Data(#"[{"id":"claude","name":"Claude Code","installed":true,"connected":false,"connect_command":"","state":"available","can_connect":true,"can_disconnect":false},{"id":"codex","name":"Codex","installed":false,"connected":true,"connect_command":"","state":"connected","can_connect":false,"can_disconnect":true}]"#.utf8))
         let availability = try snapshot(tools(["opencode"]))
-        XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: availability.tools).map(\.id), ["codex"])
+        XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: availability.tools).map(\.id), ["claude", "codex"])
         XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: nil).map(\.id), ["claude", "codex"])
+    }
+    func testPersistentDisconnectSurvivesUninstallAndAnOldProxyPort() throws {
+        let rows = try JSONDecoder().decode([HarnessRow].self, from: Data(#"[{"id":"opencode","name":"OpenCode","installed":false,"connected":false,"connect_command":"","state":"not_connected","can_connect":false,"can_disconnect":true}]"#.utf8))
+        let availability = try snapshot(tools([]))
+        XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: availability.tools).map(\.id), ["opencode"])
+        XCTAssertTrue(rows[0].canDisconnect)
     }
     func testUpdateRecoveryUsesAttemptedToolAndInstalledFallback() throws {
         let value = try snapshot(tools(["claude", "codex", "opencode"]))

@@ -111,3 +111,34 @@ RUSTFLAGS='-D warnings' cargo test -p trace-commons-contributor --lib daemon::ha
 pins that declared logins register on an embedded start, stay unconsented and
 unauthenticated, keep cross-account fallback off, and leave `config.toml`
 unchanged.
+
+## Default tool connections in Settings
+
+Use **Settings → Private AI → Default tool connections** to Connect or
+Disconnect Claude Code, Codex and OpenCode. Connect shows the proposed changes;
+files change only after confirmation. These are saved defaults for ordinary
+tool launches, separate from the account chosen for a managed session.
+Project settings and environment overrides can take precedence.
+
+The proxy must be running and have an answering account before a new connection
+can be prepared. The existing Private AI switch stops or starts the listener.
+Turning it off keeps explicit tool connections; Disconnect removes a tool's
+routing settings even while the proxy is off or the tool is uninstalled.
+
+OpenCode versions 1 and 2 use their respective provider schemas. The preview
+selects an actual model advertised by the running proxy. Previous model
+selections are saved in a private adjacent routing record. Disconnect restores
+only values still owned by this connection. Model choices that still name
+this connection return to their previous provider; new agent overrides naming
+it are removed so they inherit the restored default. Choices moved to another
+provider and unrelated edits are kept. Disconnect does not replace the whole
+configuration with an old backup. A malformed or
+unsupported configuration is refused, including commented JSONC that cannot
+be edited losslessly. No managed-profile permissions policy is copied into
+global settings. Production and staging use separate routing records, and a
+connection owned by the other app channel must be disconnected before these
+global defaults can be changed.
+
+See the official [OpenCode V1 configuration](https://opencode.ai/docs/config/)
+and [OpenCode V2 configuration](https://opencode.ai/v2/docs/config/) references
+for configuration precedence.
