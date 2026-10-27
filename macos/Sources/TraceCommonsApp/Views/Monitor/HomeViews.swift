@@ -110,6 +110,17 @@ struct TracesHistoryPage: View {
     }
 }
 
+/// Home's hero cards that the person closed with their X (owner,
+/// 2026-10-27: Kimi and Insights were in the person's face). Kept in this
+/// Mac's defaults; nothing leaves the machine.
+enum HomeClosedCards {
+    static let campaignKey = "home.closedCampaignID"
+    static let insightsKey = "home.insightsCardClosed"
+
+    /// A campaign shows unless it is the one closed: a new id shows again.
+    static func showsCampaign(_ id: String, closed: String) -> Bool { id != closed }
+}
+
 private struct HomeOverview: View {
     let store: HomeStore
     let traces: TracesStore
@@ -132,6 +143,12 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
+    /// The campaign closed with its X, by id, for good on this Mac: a new
+    /// campaign shows again (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
+    /// The Insights card closed with its X, for good on this Mac; the
+    /// Insights tab stays where it is (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.insightsKey) private var insightsClosed = false
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -156,11 +173,13 @@ private struct HomeOverview: View {
     /// A native promotion, available from compiled copy before its remote refresh.
     @ViewBuilder
     private var campaign: some View {
-        if let campaign = campaignStore.campaign {
+        if let campaign = campaignStore.campaign,
+           HomeClosedCards.showsCampaign(campaign.id, closed: closedCampaign) {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaign,
                 title: campaign.title, subtitle: campaign.body,
-                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) }
+                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) },
+                closeLabel: MonitorWords.close, onClose: { closedCampaign = campaign.id }
             ) {
                 if let image = campaignStore.image {
                     Image(nsImage: image)
@@ -204,10 +223,11 @@ private struct HomeOverview: View {
                 // Insights as a hero promotion, today's figures in its words
                 // and its graphic (owner, 2026-10-12: an upsell, not a bare
                 // way in).
-                if let insightsHeading {
+                if let insightsHeading, !insightsClosed {
                     GlassHeroCard(
                         gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights,
+                        closeLabel: MonitorWords.close, onClose: { insightsClosed = true }
                     ) {
                         HomeInsightsGraphic(glance: freshGlance)
                     } content: {
