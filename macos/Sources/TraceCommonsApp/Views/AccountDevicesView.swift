@@ -34,6 +34,12 @@ struct AccountDevicesView: View {
         .task(id: app.payoutLinkDaemonClient.map(ObjectIdentifier.init)) {
             model.attach(app.payoutLinkDaemonClient)
             await model.refresh()
+            // The Traces map's + opened Settings here to link a server.
+            if AccountDeviceLinkRequest.shared.take() { await model.linkServer() }
+        }
+        // Asked again while the section is already on screen.
+        .onReceive(AccountDeviceLinkRequest.shared.$pending.removeDuplicates().filter { $0 }) { _ in
+            Task { if AccountDeviceLinkRequest.shared.take() { await model.linkServer() } }
         }
         .onChange(of: app.accountSessionGeneration) {
             Task { await model.refresh() }

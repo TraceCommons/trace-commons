@@ -3,6 +3,23 @@ import SwiftUI
 import TCBridge
 import TCShellCore
 
+/// A request, from the Traces map's +, to start linking a server the next
+/// time the Devices section is on screen (owner, 2026-10-27). One request
+/// starts one link: taking it clears it.
+@MainActor
+final class AccountDeviceLinkRequest: ObservableObject {
+    static let shared = AccountDeviceLinkRequest()
+    @Published private(set) var pending = false
+
+    func ask() { pending = true }
+
+    /// Whether linking was asked for, clearing the request.
+    func take() -> Bool {
+        defer { pending = false }
+        return pending
+    }
+}
+
 /// The Devices section's state: the devices linked to the account, the
 /// one-time code for linking a server while it is on screen, and the one
 /// refusal line. All sentences come from the core's copy; the daemon does
