@@ -24,6 +24,9 @@ struct FlowMapScene: Equatable {
             /// The Private AI destination tools connect to, drawn from the
             /// core's Private AI state.
             case destination(Lamp)
+            /// Another device linked to the same account (#1668, #1669),
+            /// beside this computer on the Traces map.
+            case device
         }
 
         /// The Private AI destination's state, from `tool_destinations
@@ -511,6 +514,64 @@ struct FlowMapScene: Equatable {
             path: folder.path, rule: folder.mode.map(ProjectCopy.modeChoiceLabel),
             waiting: folder.sessions.count, contributed: contributed)
             ?? pair(MonitorWords.waiting, folder.sessions.count)
+    }
+
+    // MARK: Other devices
+
+    /// Another device linked to this account, as the Devices section lists
+    /// it: its name there and its last-seen line. Nothing here says what it
+    /// watches or sends; those stay on that device.
+    struct OtherDevice: Equatable {
+        let id: String
+        let name: String
+        let detail: String
+    }
+
+    /// How many other devices the map draws before counting the rest.
+    static let devicesShown = 4
+
+    /// The Devices section's list without this Mac (the computer the map is
+    /// drawn around), named and dated as that section does; a dash for a
+    /// device the server has not seen. An unread list is no devices.
+    static func otherDevices(
+        _ listed: [AccountDevice]?, name: (AccountDevice) -> String, lastSeen: (AccountDevice) -> String?
+    ) -> [OtherDevice] {
+        (listed ?? []).filter { !$0.thisDevice }.map {
+            OtherDevice(id: $0.deviceKeyId, name: name($0), detail: lastSeen($0) ?? "—")
+        }
+    }
+
+    /// The other devices, in a column right of this computer and under the
+    /// commons, each joined to the commons by a quiet line: they contribute
+    /// to the same account, but this Mac cannot say what or when, so no
+    /// line moves or is dashed for them. Past `devicesShown` the rest are
+    /// counted as "+N". A scene with no commons (the Private AI map) is
+    /// returned as it is.
+    func addingDevices(_ devices: [OtherDevice]) -> FlowMapScene {
+        guard !devices.isEmpty, let library = nodes.first(where: { $0.id == "library" }),
+              let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
+        var scene = self
+        let band = Self.band(space)
+        let x = min(space.width - 36, hub.at.x + (space.width - hub.at.x) * 0.62)
+        let shown = Array(devices.prefix(Self.devicesShown))
+        let more = devices.count - shown.count
+        // From level with this computer down the band, as one group.
+        let top = max(hub.at.y - 10, library.at.y + 60)
+        let weights = Array(repeating: CGFloat(1), count: shown.count) + (more > 0 ? [0.6] : [])
+        let slots = Self.stack(weights, in: top ... band.upperBound, maxStep: 64, minStep: 44)
+        for (index, device) in shown.enumerated() {
+            let point = CGPoint(x: x, y: slots[index].y)
+            let radius: CGFloat = 12
+            scene.arcs.append(Self.curve(
+                from: CGPoint(x: point.x, y: point.y - radius), to: library.at, style: .quiet, dim: 1))
+            scene.nodes.append(Node(
+                id: "device:\(device.id)", kind: .device, at: point, radius: radius,
+                label: device.name, detail: device.detail))
+        }
+        if more > 0, let last = slots.last {
+            scene.overflows.append(Overflow(at: CGPoint(x: x, y: last.y), count: more))
+        }
+        return scene
     }
 
     // MARK: Private AI
