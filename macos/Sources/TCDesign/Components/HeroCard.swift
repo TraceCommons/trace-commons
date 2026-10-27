@@ -10,12 +10,16 @@ import SwiftUI
 /// The whole card is one button (the pill draws the action, it is not a
 /// second control), so VoiceOver reads it once: the title, the line and
 /// the action. The graphic is decoration and hidden from assistive tech.
+/// Given `onClose`, a small X in the top trailing corner closes the card
+/// (owner, 2026-10-27): a control of its own, over the card's button.
 public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let gradient: GlassGradient
     private let title: String
     private let subtitle: String?
     private let actionTitle: String?
     private let action: () -> Void
+    private let closeLabel: String?
+    private let onClose: (() -> Void)?
     private let graphic: Graphic
     private let content: Content
     @State private var hovering = false
@@ -24,6 +28,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     public init(
         gradient: GlassGradient, title: String, subtitle: String? = nil,
         actionTitle: String? = nil, action: @escaping () -> Void,
+        closeLabel: String? = nil, onClose: (() -> Void)? = nil,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -31,6 +36,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.subtitle = subtitle
         self.actionTitle = actionTitle
         self.action = action
+        self.closeLabel = closeLabel
+        self.onClose = onClose
         self.graphic = graphic()
         self.content = content()
     }
@@ -84,6 +91,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+        .overlay(alignment: .topTrailing) {
+            if let onClose {
+                GlassHeroClose(label: closeLabel ?? "", action: onClose)
+            }
+        }
     }
 
     private var words: some View {
@@ -113,6 +125,33 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
             }
         }
         .padding(GlassTokens.Space.cardPaddingHorizontal)
+    }
+}
+
+/// A hero card's X: small, in heroInk on the card's own ground so it reads
+/// in both appearances, brighter under the pointer, with a control-sized
+/// target (the Traces cards' X, on a hero's ground).
+struct GlassHeroClose: View {
+    let label: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    /// The glyph's side, and its inset from the card's top and trailing edges.
+    static var glyph: CGFloat { 12 }
+    static var inset: CGFloat { GlassTokens.Space.s4 }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .glassGlyph(Self.glyph, weight: .semibold)
+                .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(hovering ? 1 : 0.75))
+                .padding(Self.inset)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 

@@ -1,25 +1,31 @@
 # Subscription limits in Insights
 
-In Settings → Tools, **Read Codex usage** permits current native subscription limits to be displayed in Insights → Overview. It is off by default. The disclosure beside the switch explains that **Refresh** asks the native Codex app using the saved default and managed subscription sign-ins. Only file-backed Codex sign-ins are supported. Codex may renew its own sign-in. Enabling the switch does not run a probe. Nothing is offered in Insights while it is off.
+Insights → Overview shows saved native subscription profiles and captured quota windows separately from historical trace analytics.
 
-After enabling, choose **Refresh** in Insights to read current limits. Opening a screen, starting the daemon, and background ticks do not launch Codex or read credentials. Background work only checks local file metadata and expires held values. Reads are refused while Codex is running; close Codex before choosing Refresh. Process inspection is conservative and may also withhold a probe when it cannot establish that it is safe to start one.
+## Claude
 
-Codex supplies session/weekly allowance and banked-reset inventory through its native `account/rateLimits/read` interface. Modern parameters are retried without parameters only when an older native schema rejects their shape. The app never redeems resets. Window durations are carried as optional minutes; absent durations and percentages remain unknown. Default and explicitly saved native subscription profiles stay separate. API-key accounts are not subscription allowances.
+Claude usage is available by default for detected native profiles; no opt-in switch is required. Choose **Refresh** beside the specific login to read its saved Claude Code sign-in and ask Anthropic for usage. The explanation beside the action describes Keychain access. macOS may ask for `Claude Code-credentials`; **Always Allow** grants continuing access to that item, but this app still reads it only on an explicit selected-login Refresh.
 
-Keyring-only and automatic credential stores are refused with `native_storage_unsupported`, before reading credentials or starting Codex. Their account changes cannot be verified from local file metadata. This revision does not query Keychain metadata in the background or prompt for Keychain access. Use Codex itself to check limits for these stores.
+Claude measurements are labeled **Captured on Refresh**. Refresh again after changing Claude accounts. Background work does not query Keychain, so the app does not claim continuous account tracking. Local credential/config file metadata invalidates known changes, and reset times invalidate old allowances. A missing measurement remains unknown.
 
-**Claude usage is unavailable in this revision.** Its switch is hidden and enabling it through configuration is refused. The direct Anthropic OAuth collector and its PR-added native credential/ACL helpers have been removed pending the acquisition review. No subscription-usage action reads Claude files, queries its Keychain item, or sends its token. Claude PTY acquisition and browser-cookie sources are outside this implementation.
+The reader uses the exact profile's native credential file or Keychain service. `CLAUDE_SECURESTORAGE_CONFIG_DIR` selects the native secure-storage root when present, otherwise `CLAUDE_CONFIG_DIR` applies. Custom profiles never fall back to the global item. Managed launches remove inherited secure-storage overrides to preserve profile isolation. Native credentials remain owned by Claude Code.
 
-A percentage is remaining allowance. Reset times use the local time zone. A missing measurement is unknown, not zero or full. A transient failed refresh without identity evidence can retain a marked-stale reading for at most one hour and never past a window reset. Confirmed authentication loss, changed native file metadata, removed profiles, disabled reading, and unenrollment invalidate held readings. A successful native renewal can publish a new reading only when its final identity-checked file revision still matches the current login; other file changes invalidate old values rather than transferring them to another account.
+Fixed OAuth usage and profile requests supply session, weekly and model-specific limits, including Fable when reported. The app uses stable profile/account/organization evidence. Expired usage tokens lead to **Open Claude Code, then Refresh**; a missing or inference-only token does not imply the user has signed out. Native CLI probing, token renewal and browser-cookie acquisition are outside this reader.
 
-Current readings remain separate from the historical week picker and trace analytics. They stay in daemon memory; credentials, provider account IDs, and raw errors never cross IPC or enter contributed traces. Unenroll turns both legacy provider switches off in memory and on disk and invalidates held readings. If persisted revocation fails, local enrollment cleanup still completes and the call returns a retryable failure; unreadable settings are never overwritten.
+## Codex
 
-The supported configuration switch is:
+In Settings → Tools, **Read Codex usage** permits current native subscription limits. It is off by default. Enabling saves permission only; choose **Refresh** in Insights to acquire a reading. The app reads file-backed default/saved managed profiles through the native Codex app, which may renew its own sign-in.
 
-```json
-{"subscription_usage_codex_enabled": true}
-```
+Detected Codex processes or ambiguous relevant process metadata refuse a probe. Close Codex before Refresh. Keyring and automatic stores return `native_storage_unsupported` before credential access or native launch. Their account changes cannot safely be verified through file metadata alone; check limits in Codex for those stores.
 
-Discover and preview with `near-ai config schema` and `near-ai config preview` before applying. Setting this flag grants permission but does not request a read. The legacy `subscription_usage_claude_enabled` field remains readable for compatibility and its schema accepts only `false` for cleanup. Use the CLI bundled with the app/channel being configured; see [agent configuration](../agent-configuration.md).
+The native `account/rateLimits/read` interface supplies session/weekly allowance and banked resets. Modern parameters retry without parameters only for recognized older-schema rejection. Resets are not redeemed.
 
-Implementation reference: [Codex app-server](https://learn.chatgpt.com/docs/app-server). No subscription history, routing, reset redemption, browser cookies, or Claude credential acquisition is implemented here.
+## Capture and lifecycle
+
+Startup, opening views, status reads and background ticks never acquire credentials or launch provider clients. They only synchronize non-secret file metadata and expire held readings. Requests are scoped and serialized; Keychain approval can wait longer than a network request, with a bounded caller wait. An OS request that outlives its caller retains its concurrency lease, and late secret results are wiped without issuing a provider request after cancellation.
+
+Account/binding removal or changes and unenroll invalidate cached/pending readings. Unenroll preserves the existing retryable persistence-failure behavior and cancels acquisitions; a later explicit Claude Refresh is still available without a Commons enrollment. Transient failures may retain a clearly marked old reading for at most one hour, never beyond a quota reset. Unknown figures are never zero or full allowances. Credentials, raw provider account identifiers and raw errors stay out of IPC, logs, contributed traces and persistent subscription history.
+
+The Codex permission can be configured with `subscription_usage_codex_enabled`. The legacy `subscription_usage_claude_enabled` setting is cleanup-only and no longer controls Claude availability. Use `near-ai config schema` and `near-ai config preview` for current configuration metadata, with the CLI bundled with the app/channel being configured.
+
+References: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [CodexBar Claude acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/claude.md), [owner decision](../superpowers/specs/2026-10-27-claude-subscription-activation-design.md).

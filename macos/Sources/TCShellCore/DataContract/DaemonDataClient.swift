@@ -268,7 +268,9 @@ public protocol DaemonDataClient: Sendable {
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
     func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage
-    /// Opt in to or stop native subscription usage reads for one provider.
+    /// Refresh one locally discovered login when a selector is given.
+    func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?, login: String?) async throws -> DaemonData.SubscriptionUsage
+    /// Opt in to or stop native subscription usage reads for Codex.
     func setSubscriptionUsage(provider: String, on: Bool) async throws
 
     /// `insights_session_label`: set or clear the person's own task and
@@ -362,6 +364,14 @@ extension DaemonDataClient {
     /// Older/sample clients do not acquire native credentials implicitly.
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
         throw DaemonDataError.notAvailableYet(method: "subscription_usage")
+    }
+
+    /// Legacy clients must never widen a request for one Claude login.
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?, login: String?) async throws -> DaemonData.SubscriptionUsage {
+        guard login == nil, provider != "claude" || !refresh else {
+            throw DaemonDataError.notAvailableYet(method: "subscription_usage")
+        }
+        return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider)
     }
 
     public func setSubscriptionUsage(provider: String, on: Bool) async throws {

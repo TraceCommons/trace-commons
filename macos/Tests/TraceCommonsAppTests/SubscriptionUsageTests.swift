@@ -29,7 +29,7 @@ final class SubscriptionUsageTests: XCTestCase {
         let absent = SubscriptionUsageModel()
         await absent.load(refresh: true, interactive: true)
         XCTAssertFalse(absent.isVisible)
-        let old = SubscriptionUsageModel(reader: { _, _, _ in
+        let old = SubscriptionUsageModel(reader: { _, _, _, _ in
             throw DaemonDataError.daemon(code: "unknown_method", message: "unknown-method")
         })
         await old.load()
@@ -41,7 +41,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testRefreshesCoalesceAndOnlyExplicitRefreshIsInteractive() async {
         let gate = UsageReaderGate()
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         })
         let first = Task { await model.load() }
@@ -66,7 +66,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testStoppingHidesUsageAndDiscardsLateRead() async {
         let gate = UsageReaderGate(initial: Self.snapshot())
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         }, writer: { _, _ in })
         await model.load()
@@ -89,7 +89,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testPermissionOnlySavesAndReadsMetadataWithoutRequestingSecrets() async {
         let log = UsageRequestLog()
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, _ in
             await log.append("read:\(refresh):\(interactive):\(provider ?? "all")")
             return Self.snapshot()
         }, writer: { provider, on in await log.append("set:\(provider):\(on)") })
@@ -99,23 +99,119 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertTrue(model.isVisible)
     }
 
+    private static func claudeSnapshot(codexEnabled: Bool = false, refreshing: Bool = false) -> DaemonData.SubscriptionUsage {
+        .init(providers: [
+            .init(provider: "codex", enabled: codexEnabled),
+            .init(provider: "claude", enabled: true, refreshing: refreshing, logins: [
+                .init(id: "claude-default", label: "Default", defaultLogin: true, state: "unknown",
+                      reason: "not_checked", refreshing: refreshing),
+                .init(id: "claude-work", label: "Work", state: "unknown", reason: "not_checked", refreshing: false)])])
+    }
+
     @MainActor
-    func testClaudePermissionIsGatedEvenForOldSnapshots() async {
+    func testClaudeIsAvailableWithoutOptInAndCodexOffDoesNotHideIt() async {
         let log = UsageRequestLog()
-        let model = SubscriptionUsageModel(reader: { _, _, _ in
-            .init(providers: [.init(provider: "codex", enabled: false), .init(provider: "claude", enabled: true)])
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            await log.append("read:\(refresh):\(interactive):\(provider ?? "all"):\(login ?? "all")")
+            return Self.claudeSnapshot()
         }, writer: { provider, on in await log.append("set:\(provider):\(on)") })
+        await model.load()
+        XCTAssertTrue(model.isVisible)
+        XCTAssertEqual(model.codexEnabled, false)
+        XCTAssertEqual(model.supportedProviders.map(\.provider), ["claude"])
+        XCTAssertEqual(model.supportedProviders.first?.logins.map(\.id), ["claude-default", "claude-work"])
+        await model.setEnabled("claude", on: true)
+        let lines = await log.lines()
+        XCTAssertEqual(lines, ["read:false:false:all:all"])
+        XCTAssertFalse(model.canRefresh(provider: "claude", login: nil))
+        XCTAssertFalse(model.canRefresh(provider: "claude", login: "not-discovered"))
+        XCTAssertTrue(model.canRefresh(provider: "claude", login: "claude-work"))
+        await model.setEnabled("codex", on: false)
+        XCTAssertTrue(model.isVisible)
+        XCTAssertEqual(model.supportedProviders.map(\.provider), ["claude"])
+    }
+
+    @MainActor
+    func testNoClaudeProfilesDoesNotOfferInstallationOrExposeAnEmptyProvider() async {
+        let model = SubscriptionUsageModel(reader: { _, _, _, _ in
+            .init(providers: [.init(provider: "codex", enabled: false), .init(provider: "claude", enabled: true)])
+        })
         await model.load()
         XCTAssertFalse(model.isVisible)
         XCTAssertTrue(model.supportedProviders.isEmpty)
-        await model.setEnabled("claude", on: true)
-        let lines = await log.lines()
-        XCTAssertTrue(lines.isEmpty)
+    }
+
+    @MainActor
+    func testExplicitClaudeRefreshTargetsOnlySelectedLoginAndDefaultRefreshRemainsCodex() async {
+        let gate = UsageReaderGate(initial: Self.claudeSnapshot(codexEnabled: true))
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            try await gate.read(refresh: refresh, interactive: interactive, provider: provider, login: login)
+        })
+        await model.load()
+        model.refresh(provider: "claude", login: "claude-work")
+        await waitForCalls(gate, 2)
+        let selected = await gate.scope(1)
+        XCTAssertEqual(selected, ["claude", "claude-work"])
+        XCTAssertTrue(model.isRefreshing(provider: "claude", login: "claude-work"))
+        XCTAssertFalse(model.isRefreshing(provider: "claude", login: "claude-default"))
+        XCTAssertFalse(model.isRefreshing(provider: "codex", login: nil))
+        await gate.resolve(1, value: Self.claudeSnapshot(codexEnabled: true))
+        for _ in 0..<100 where model.isRefreshing { await Task.yield() }
+        model.refresh()
+        await waitForCalls(gate, 3)
+        let defaultScope = await gate.scope(2)
+        XCTAssertEqual(defaultScope, ["codex", nil])
+        await gate.resolve(2, value: Self.claudeSnapshot(codexEnabled: true))
+    }
+
+    @MainActor
+    func testQueuedLoginRefreshNeverWidensIntoOtherLoginReads() async {
+        let gate = UsageReaderGate()
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            try await gate.read(refresh: refresh, interactive: interactive, provider: provider, login: login)
+        })
+        let first = Task { await model.load() }
+        await waitForCalls(gate, 1)
+        await model.load(refresh: true, interactive: true, provider: "claude", login: "claude-default")
+        await model.load(refresh: true, interactive: false, provider: "claude", login: "claude-work")
+        await gate.resolve(0, value: Self.claudeSnapshot())
+        await first.value
+        await waitForCalls(gate, 2)
+        let scope = await gate.scope(1)
+        XCTAssertEqual(scope, ["claude", "claude-work"])
+        let flags = await gate.flags(1)
+        XCTAssertEqual(flags, [true, false])
+        await gate.resolve(1, value: Self.claudeSnapshot())
+    }
+
+    @MainActor
+    func testClaudePendingKeychainReadWakesObserverAndKeepsOnlySelectedSpinner() async {
+        let gate = UsageReaderGate(initial: Self.claudeSnapshot())
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            try await gate.read(refresh: refresh, interactive: interactive, provider: provider, login: login)
+        }, activePollInterval: .milliseconds(1))
+        let observing = Task { await model.observe() }
+        await waitForCalls(gate, 1)
+        for _ in 0..<100 { await Task.yield() }
+        model.refresh(provider: "claude", login: "claude-default")
+        await waitForCalls(gate, 2)
+        await gate.resolve(1, value: Self.claudeSnapshot(refreshing: true))
+        await waitForCalls(gate, 3)
+        XCTAssertTrue(model.isRefreshing(provider: "claude", login: "claude-default"))
+        XCTAssertFalse(model.isRefreshing(provider: "claude", login: "claude-work"))
+        XCTAssertFalse(model.canRefresh(provider: "claude", login: "claude-work"))
+        let metadataFlags = await gate.flags(2)
+        let metadataScope = await gate.scope(2)
+        XCTAssertEqual(metadataFlags, [false, false])
+        XCTAssertEqual(metadataScope, [nil, nil])
+        observing.cancel()
+        await gate.resolve(2, value: Self.claudeSnapshot())
+        await observing.value
     }
 
     @MainActor
     func testAllOffHasNoInsightsOfferButRetainsSettingsPermissionValue() async {
-        let model = SubscriptionUsageModel(reader: { _, _, _ in Self.snapshot(enabled: false) }, writer: { _, _ in })
+        let model = SubscriptionUsageModel(reader: { _, _, _, _ in Self.snapshot(enabled: false) }, writer: { _, _ in })
         await model.load()
         XCTAssertEqual(model.codexEnabled, false)
         XCTAssertTrue(model.canChange)
@@ -129,7 +225,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testExplicitRefreshWakesIdleObserverAndPollsUntilProbeCompletes() async {
         let gate = UsageReaderGate(initial: Self.snapshot())
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         }, activePollInterval: .milliseconds(1))
         let observing = Task { await model.observe() }
@@ -155,7 +251,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testSettingsPermissionChangeWakesSharedObserverWithoutAProbe() async {
         let gate = UsageReaderGate(initial: Self.snapshot())
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         }, writer: { _, _ in })
         let observing = Task { await model.observe() }
@@ -181,7 +277,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testLeavingOverviewDiscardsAReadThatIgnoresCancellation() async {
         let gate = UsageReaderGate()
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         })
         let observing = Task { await model.observe() }
@@ -196,7 +292,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testLeavingOverviewDropsQueuedInteractiveRefresh() async {
         let gate = UsageReaderGate()
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await gate.read(refresh: refresh, interactive: interactive)
         })
         let observing = Task { await model.observe() }
@@ -218,7 +314,7 @@ final class SubscriptionUsageTests: XCTestCase {
     func testPermissionFinishingAfterNavigationDoesNotPublishOrStartAProbe() async {
         let reader = UsageReaderGate()
         let writer = UsageWriterGate()
-        let model = SubscriptionUsageModel(reader: { refresh, interactive, _ in
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, _, _ in
             try await reader.read(refresh: refresh, interactive: interactive)
         }, writer: { _, _ in await writer.write() })
         let observing = Task { await model.observe() }
@@ -243,7 +339,7 @@ final class SubscriptionUsageTests: XCTestCase {
     @MainActor
     func testFailedReadDropsUnmarkedEarlierMeasurements() async {
         let values = UsageFailureReader(value: Self.snapshot())
-        let model = SubscriptionUsageModel(reader: { _, _, _ in try await values.read() })
+        let model = SubscriptionUsageModel(reader: { _, _, _, _ in try await values.read() })
         await model.load()
         XCTAssertNotNil(model.shown)
         await model.load()
@@ -267,16 +363,63 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertNotNil(words.windows[1].reset)
     }
 
+    func testClaudeCaptureContextIsNotAnErrorOrRetryAndResetExpiryStillApplies() throws {
+        let login = DaemonData.SubscriptionUsageLogin(id: "claude-default", label: "Claude", state: "observed",
+            reason: "captured_on_refresh", updatedAt: Self.now, stale: true, windows: [
+                .init(lane: "weekly", usedPermille: 300, remainingText: "70%", resetsAt: Self.now.addingTimeInterval(60)),
+                .init(lane: "session", usedPermille: 100, remainingText: "90%", resetsAt: Self.now)])
+        let words = InsightsSubscriptionWords.login(login, provider: "claude", now: Self.now, copy: try uiCopy())
+        XCTAssertNil(words.state)
+        XCTAssertNil(words.freshness)
+        XCTAssertEqual(words.windows.map(\.remaining), ["70% remaining", "—"])
+        XCTAssertNotNil(words.checked)
+    }
+
+    func testClaudeRecoveryPreservesNativeSessionAndExplainsScopeAndKeychainFailures() throws {
+        let copy = try uiCopy()
+        for (reason, key) in [
+            ("auth_expired", "claude_expired"), ("credentials_expired", "claude_expired"),
+            ("auth_missing", "claude_auth_missing"), ("scope_missing", "claude_scope"),
+            ("keychain_needs_permission", "claude_keychain_denied"),
+            ("credential_read_timeout", "claude_keychain_pending"), ("auth_changed", "claude_auth_changed"),
+            ("request_timeout", "request_timeout"), ("rate_limited", "rate_limited")
+        ] {
+            let login = DaemonData.SubscriptionUsageLogin(id: "claude-default", label: "Claude", state: "unknown", reason: reason)
+            let words = InsightsSubscriptionWords.login(login, provider: "claude", now: Self.now, copy: copy)
+            XCTAssertEqual(words.state, copy["analytics_subscriptions_" + key])
+            XCTAssertFalse(words.state?.isEmpty ?? true)
+        }
+        let expired = try XCTUnwrap(copy["analytics_subscriptions_claude_expired"])
+        XCTAssertTrue(expired.contains("Open Claude Code"))
+        XCTAssertTrue(expired.contains("Refresh"))
+        XCTAssertFalse(expired.lowercased().contains("sign in"))
+    }
+
     func testPermanentFailuresExplainTheCauseAndNativeBusyHasSpecificRecovery() throws {
         let copy = try uiCopy()
         for reason in ["base_url_refused", "invalid_response", "no_logins", "native_tool_running", "native_storage_unsupported"] {
             let login = DaemonData.SubscriptionUsageLogin(id: "codex-default", label: "Codex", defaultLogin: true,
                 state: "unknown", reason: reason)
             let words = InsightsSubscriptionWords.login(login, provider: "codex", now: Self.now, copy: copy)
-            XCTAssertEqual(words.state, copy["analytics_subscriptions_" + reason])
+            XCTAssertEqual(words.state, InsightsOverviewWords.fill(copy["analytics_subscriptions_" + reason] ?? "", ["harness": "Codex"]))
             XCTAssertFalse(words.state?.isEmpty ?? true)
             if reason != "native_tool_running" { XCTAssertFalse(words.state?.contains("Refresh") ?? true) }
             XCTAssertEqual(words.banked, "—")
+        }
+    }
+
+    func testGenericFailureCopyNamesTheSelectedProvider() throws {
+        let copy = try uiCopy()
+        for provider in ["claude", "codex"] {
+            let name = try XCTUnwrap(copy["analytics_subscriptions_provider_" + provider])
+            for reason in ["invalid_response", "no_logins"] {
+                let login = DaemonData.SubscriptionUsageLogin(id: provider + "-default", label: name,
+                    state: "unknown", reason: reason)
+                let words = InsightsSubscriptionWords.login(login, provider: provider, now: Self.now, copy: copy)
+                XCTAssertEqual(words.state, InsightsOverviewWords.fill(copy["analytics_subscriptions_" + reason] ?? "", ["harness": name]))
+                XCTAssertTrue(words.state?.contains(name) ?? false)
+                XCTAssertFalse(words.state?.contains("{harness}") ?? true)
+            }
         }
     }
 
@@ -287,7 +430,7 @@ final class SubscriptionUsageTests: XCTestCase {
                 stale: true, windows: [.init(lane: "weekly", usedPermille: 300, remainingText: "70%")])
             let words = InsightsSubscriptionWords.login(login, provider: "codex", now: Self.now, copy: copy)
             XCTAssertEqual(words.freshness, "Last reading.")
-            XCTAssertEqual(words.state, copy["analytics_subscriptions_" + reason])
+            XCTAssertEqual(words.state, InsightsOverviewWords.fill(copy["analytics_subscriptions_" + reason] ?? "", ["harness": "Codex"]))
             XCTAssertEqual(words.windows.first?.remaining, "70% remaining")
         }
     }
@@ -311,7 +454,7 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertEqual(words.windows[3].remaining, "50% remaining")
     }
 
-    func testPermissionDisclosureIsInSettingsAndOverviewOnlyReadsEnabledProviders() throws {
+    func testCodexConsentStaysInSettingsAndClaudeDisclosurePrecedesScopedOverviewActions() throws {
         let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
         let overview = try SettingsParityTests.text("Views/InsightsSubscriptionsCard.swift")
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
@@ -320,9 +463,13 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertLessThan(disclosure.lowerBound, permission.lowerBound)
         XCTAssertTrue(content.contains("SubscriptionUsageSettingsSection()"))
         XCTAssertTrue(overview.contains("ForEach(model.supportedProviders)"))
-        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_no_logins\"))"))
+        XCTAssertTrue(overview.contains("InsightsOverviewWords.fill(text(\"analytics_subscriptions_no_logins\"), [\"harness\": name])"))
         XCTAssertFalse(overview.contains("setEnabled"))
-        XCTAssertFalse(overview.contains("analytics_subscriptions_read_detail"))
+        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
+        XCTAssertTrue(overview.contains("model.refresh(provider: provider, login: login)"))
+        XCTAssertTrue(overview.contains("analytics_subscriptions_refresh_login_accessibility"))
+        XCTAssertFalse(overview.contains("model.refresh()"))
+        XCTAssertFalse(settings.contains("setting_claude"))
         XCTAssertFalse(settings.contains("model.refresh()"))
         XCTAssertFalse(settings.contains(".observe()"))
         XCTAssertTrue(settings.contains("app.subscriptionUsageModel"))
@@ -347,6 +494,13 @@ final class SubscriptionUsageTests: XCTestCase {
             throw XCTSkip("Opt-in native render")
         }
         let snapshot = DaemonData.SubscriptionUsage(providers: [
+            .init(provider: "claude", enabled: true, logins: [
+                .init(id: "claude-default", label: "Claude", defaultLogin: true,
+                      state: "observed", updatedAt: Date(), windows: [
+                        .init(lane: "session", usedPermille: 300, remainingText: "70%", durationMins: 300),
+                        .init(lane: "weekly", usedPermille: 450, remainingText: "55%", durationMins: 10_080),
+                        .init(lane: "model", label: "Fable", usedPermille: nil)]),
+                .init(id: "claude-work", label: "Work", state: "unknown", reason: "not_checked")]),
             .init(provider: "codex", enabled: true, logins: [.init(id: "codex-default", label: "Codex", defaultLogin: true,
                 state: "observed", updatedAt: Date(), windows: [
                     .init(lane: "primary", usedPermille: 300, remainingText: "70%",
@@ -354,7 +508,7 @@ final class SubscriptionUsageTests: XCTestCase {
                     .init(lane: "secondary", usedPermille: 450, remainingText: "55%",
                           resetsAt: Date().addingTimeInterval(86_400), durationMins: 1_440),
                     .init(lane: "secondary", usedPermille: nil)], bankedResets: nil)])])
-        let model = SubscriptionUsageModel(reader: { _, _, _ in snapshot }, writer: { _, _ in })
+        let model = SubscriptionUsageModel(reader: { _, _, _, _ in snapshot }, writer: { _, _ in })
         await model.load()
         let sharedCopy = try uiCopy()
         XCTAssertFalse(sharedCopy["analytics_subscriptions_title"]?.isEmpty ?? true)
@@ -389,18 +543,19 @@ final class SubscriptionUsageTests: XCTestCase {
 }
 
 private actor UsageReaderGate {
-    private var requests: [(Bool, Bool)] = []
+    private var requests: [(Bool, Bool, String?, String?)] = []
     private var continuations: [Int: CheckedContinuation<DaemonData.SubscriptionUsage, Error>] = [:]
     private var initial: DaemonData.SubscriptionUsage?
     init(initial: DaemonData.SubscriptionUsage? = nil) { self.initial = initial }
-    func read(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {
+    func read(refresh: Bool, interactive: Bool, provider: String? = nil, login: String? = nil) async throws -> DaemonData.SubscriptionUsage {
         let index = requests.count
-        requests.append((refresh, interactive))
+        requests.append((refresh, interactive, provider, login))
         if let initial { self.initial = nil; return initial }
         return try await withCheckedThrowingContinuation { continuations[index] = $0 }
     }
     func count() -> Int { requests.count }
     func flags(_ index: Int) -> [Bool] { [requests[index].0, requests[index].1] }
+    func scope(_ index: Int) -> [String?] { [requests[index].2, requests[index].3] }
     func waitForCalls(_ count: Int) async -> Bool {
         for _ in 0..<10_000 {
             if requests.count >= count { return true }

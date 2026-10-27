@@ -26,6 +26,9 @@ use uuid::Uuid;
 
 pub struct ManagedService {
     pub accounts: AccountStore,
+    #[cfg(test)]
+    pub(super) inspect_profile_override:
+        Option<fn(&AccountView) -> Result<AuthState, ManagedError>>,
     pub sessions: SessionRegistry,
     profiles: NativeProfiles,
     config_dir: std::path::PathBuf,
@@ -62,6 +65,8 @@ impl ManagedService {
     pub fn open(store: &ConfigStore) -> Result<Self, ManagedError> {
         Ok(Self {
             accounts: AccountStore::open(store)?,
+            #[cfg(test)]
+            inspect_profile_override: None,
             sessions: SessionRegistry::open(store)?,
             profiles: NativeProfiles::new(store),
             config_dir: store.dir().to_path_buf(),
@@ -80,6 +85,14 @@ impl ManagedService {
         let probe = self.installed_terminals;
         self.installed_cache
             .get(std::time::Instant::now(), launching, probe)
+    }
+
+    fn inspect_profile(&self, account: &AccountView) -> Result<AuthState, ManagedError> {
+        #[cfg(test)]
+        if let Some(inspect) = self.inspect_profile_override {
+            return inspect(account);
+        }
+        self.profiles.inspect(account, &find_native(account.tool)?)
     }
 
     /// The account a launch request names: the NEAR AI sign-in's entry
@@ -398,9 +411,7 @@ impl ManagedService {
                 let p: AccountParams = parse(request)?;
                 let account = self.account(p.account_id)?;
                 let state = match account.connection {
-                    ConnectionKind::Subscription => self
-                        .profiles
-                        .inspect(&account, &find_native(account.tool)?)?,
+                    ConnectionKind::Subscription => self.inspect_profile(&account)?,
                     _ => {
                         self.secrets.get(p.account_id)?;
                         AuthState::Ready
@@ -600,8 +611,18 @@ fn with_service<T>(
         Err(_) => return Err(Refusal::Unavailable("managed-storage-unavailable")),
     };
     let before = service.sessions.revision();
+    let before_accounts = service.accounts.list();
     let result = f(service);
     let after = service.sessions.revision();
+    let accounts_changed = service.accounts.list() != before_accounts;
+    // Usage synchronization reads this registry too. Release the mutex first,
+    // and synchronize even after an error: an account write may have committed
+    // before persisting the session revision failed. Pending native permission
+    // results must not authorize HTTP for a removed or rebound account.
+    drop(held);
+    if before != after || accounts_changed {
+        super::subscription_usage::settings_changed(shared);
+    }
     if before != after {
         shared.publish("managed_changed", json!({"revision":after}));
     }

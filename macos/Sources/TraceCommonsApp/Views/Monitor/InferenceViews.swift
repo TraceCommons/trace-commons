@@ -375,8 +375,9 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
-/// One row: the listener's state in the core's sentence (never the
-/// switch: what was asked for is not what happened). The credential and
+/// The Status row, then the core's subtitle (owner, 2026-10-27; the main
+/// pane still has none). The row is the listener's state in the core's
+/// sentence (never the switch: what was asked for is not what happened). The credential and
 /// Connected tools rows and the connected / not connected pair are gone
 /// (owner, 2026-10-12): sign-in and the tools are in Settings. The balance
 /// card is the main pane's, further down.
@@ -415,12 +416,19 @@ struct PrivateAIInspectorView: View {
         // otherwise, always beside the core's sentence.
         // The state right after the title (owner, 2026-10-20), not at the
         // row's far end.
-        return GlassTabHeading(copy.inspectorStatus) {
-            GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-                .multilineTextAlignment(.leading)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            GlassTabHeading(copy.inspectorStatus) {
+                GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            // What the destination is for, in the core's words.
+            Text(copy.subtitle)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
