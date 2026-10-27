@@ -309,20 +309,7 @@ pub(super) async fn handle_revoke(shared: &DaemonShared, req: &Request) -> Respo
     };
     match call.status {
         Some(status) if status.is_success() => {
-            // Sessions from before the commons recorded which device made
-            // them cannot be ended by a device revoke; the count is relayed
-            // so a shell can offer to sign out everywhere.
-            let unattributed = call
-                .body
-                .as_ref()
-                .and_then(|body| body.get("unattributed_sessions"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            finish(
-                req,
-                json!({ "revoked": true, "unattributed_sessions": unattributed }),
-                call.persisted,
-            )
+            finish(req, json!({ "revoked": true }), call.persisted)
         }
         status => unavailable(req, status_label(status, "account_device_not_found")),
     }

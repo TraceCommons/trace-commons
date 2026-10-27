@@ -888,7 +888,7 @@ async fn finish(
     if result.account_id != options.account_id {
         bail!("near_signup_account_changed")
     }
-    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|_|anyhow!("near_signup_verification_failed"))
+    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed"))
 }
 
 fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {

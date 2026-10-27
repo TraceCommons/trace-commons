@@ -180,6 +180,7 @@ fn label(error: &anyhow::Error) -> &'static str {
         "near_ai_enroll_commons_unsupported" => "near_ai_enroll_commons_unsupported",
         "near_ai_enroll_invalid" => "near_ai_enroll_invalid",
         "near_ai_enroll_verification_failed" => "near_ai_enroll_verification_failed",
+        ENROLL_DEVICE_KEY_REVOKED => ENROLL_DEVICE_KEY_REVOKED,
         _ => "near_ai_enroll_unavailable",
     }
 }
@@ -499,7 +500,29 @@ async fn ceremony(
             })),
         )
         .await
-        .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))
+        .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+}
+
+/// The commons's label when the device's key was revoked by its account
+/// (`DELETE /v1/account/devices/{id}`).
+pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
+
+/// This module's label for [`DEVICE_KEY_REVOKED_WIRE`]: the key will never
+/// sign in again, and the device recovers by signing out, which drops the
+/// key, then signing in, which makes a new one.
+pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
+
+/// A finish refusal as this module's label: the revoked-key refusal by
+/// name, anything else as `fallback`. Never the remote body.
+pub(super) fn finish_refusal(
+    error: &trace_commons_operator_client::Error,
+    fallback: &'static str,
+) -> anyhow::Error {
+    if error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE) {
+        anyhow!(ENROLL_DEVICE_KEY_REVOKED)
+    } else {
+        anyhow!(fallback)
+    }
 }
 
 /// Which sign-in a retained session belongs to: the inference key that
@@ -1390,6 +1413,27 @@ mod tests {
         ] {
             assert_eq!(label(&anyhow!(raw.to_string())), expected, "{raw}");
         }
+    }
+
+    #[test]
+    fn a_revoked_key_refusal_is_named_and_reaches_the_renewal_class() {
+        let refused = |label: &str| trace_commons_operator_client::Error::ServerLabel {
+            url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+            status: reqwest::StatusCode::CONFLICT,
+            label: label.into(),
+            body: format!("{{\"error\":\"{label}\"}}"),
+        };
+        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback");
+        assert_eq!(revoked.to_string(), ENROLL_DEVICE_KEY_REVOKED);
+        assert_eq!(label(&revoked), ENROLL_DEVICE_KEY_REVOKED);
+        assert_eq!(
+            super::super::account_session_renewal::classify(&revoked),
+            super::super::account_session_renewal::FAILURE_DEVICE_KEY_REVOKED
+        );
+        assert_eq!(
+            finish_refusal(&refused("anything_else"), "fallback").to_string(),
+            "fallback"
+        );
     }
 }
 
