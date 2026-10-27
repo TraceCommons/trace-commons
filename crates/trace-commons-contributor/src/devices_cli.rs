@@ -74,7 +74,7 @@ fn refusal_line(label: &str) -> String {
             "This machine joined by code, so it can't make codes. Make one on a computer signed in with NEAR AI.".into()
         }
         "device_code_minter_not_a_device" => {
-            "This device can't make codes for the account. Sign in again on it first.".into()
+            "This device can't make codes for the account. Make one on a computer that joined with a NEAR AI login, not with a code.".into()
         }
         "account_device_not_found" => "No device with that id is linked to this account.".into(),
         "account_device_revoke_this_device" => {
@@ -287,6 +287,17 @@ pub(crate) fn login_with_code(
         json,
         &mut std::io::stdout(),
     )
+}
+
+/// A `login` refusal, saying where the code came from when it was read
+/// from [`CODE_ENV`] rather than given: a spent code left exported would
+/// otherwise fail every later login with no hint why.
+pub(crate) fn naming_the_variable(error: anyhow::Error, from_env: bool) -> anyhow::Error {
+    if from_env {
+        anyhow!("{error} (The code came from {CODE_ENV}; unset it to sign in another way.)")
+    } else {
+        error
+    }
 }
 
 /// The code for `login --code`: the flag, or else [`CODE_ENV`] when no
@@ -592,6 +603,17 @@ mod tests {
         assert_eq!(code_from(None, Some("b"), false).as_deref(), Some("b"));
         assert_eq!(code_from(None, Some("  "), false), None);
         assert_eq!(code_from(None, None, false), None);
+    }
+
+    #[test]
+    fn a_refused_code_from_the_environment_names_the_variable() {
+        let named = naming_the_variable(anyhow!("That code was refused."), true).to_string();
+        assert!(named.starts_with("That code was refused."), "{named}");
+        assert!(named.contains(CODE_ENV), "{named}");
+        assert_eq!(
+            naming_the_variable(anyhow!("That code was refused."), false).to_string(),
+            "That code was refused."
+        );
     }
 
     #[test]

@@ -686,7 +686,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 || invite.is_some()
                 || no_browser
                 || allowed_hosts.is_some()
-                || std::env::var_os("TRACE_COMMONS_INVITE").is_some();
+                || std::env::var("TRACE_COMMONS_INVITE")
+                    .is_ok_and(|invite| !invite.trim().is_empty());
+            let from_env = code.is_none();
             if let Some(code) =
                 crate::devices_cli::code_from(code.as_deref(), env_code.as_deref(), other_route)
             {
@@ -696,7 +698,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     scopes.as_deref(),
                     default_consent,
                     cli.json,
-                );
+                )
+                .map_err(|error| crate::devices_cli::naming_the_variable(error, from_env));
             }
             commands::refuse_json_sign_in(
                 cli.json,

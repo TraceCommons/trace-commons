@@ -175,7 +175,10 @@ impl PgBackend {
         let label: Option<String> = code.get(3);
         // The new device joins under the minting device's anchor, and only
         // while that device is still active on an open account: revoking the
-        // laptop voids the codes it minted.
+        // laptop voids the codes it minted. FOR SHARE: a revoke of the
+        // minter holds its key row until it commits, so this read waits and
+        // then sees it revoked, rather than linking a device under a laptop
+        // revoked mid-redeem.
         let Some(anchor) = tx
             .query_opt(
                 "SELECT n.anchor_hash FROM trace_near_provisioned_devices n
@@ -187,7 +190,8 @@ impl PgBackend {
                     AND n.account_id = $1
                     AND n.device_key_id = $2
                     AND d.revoked_at IS NULL
-                    AND a.closed_at IS NULL",
+                    AND a.closed_at IS NULL
+                    FOR SHARE OF d",
                 &[&account, &minter],
             )
             .await?
