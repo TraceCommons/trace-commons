@@ -1761,6 +1761,55 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// List the ACTIVE devices linked to `account_id` through NEAR sign-in
+    /// (`trace_near_provisioned_devices` joined to unrevoked `device_keys`),
+    /// oldest first. `session_token_hash` is the hash of the session the caller
+    /// presented, used only to flag `this_device`. Tenant- and account-scoped
+    /// under forced RLS, so another account's devices are never returned.
+    async fn list_account_devices(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session_token_hash: Option<&str>,
+    ) -> Result<Vec<AccountDeviceSummary>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "list_account_devices not implemented".to_string(),
+        ))
+    }
+
+    /// Rename one of `account_id`'s ACTIVE devices. `None` clears the label.
+    /// Returns whether a row was affected (`false` for an unknown, revoked or
+    /// other-account device).
+    async fn rename_account_device(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _device_key_id: &str,
+        _label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "rename_account_device not implemented".to_string(),
+        ))
+    }
+
+    /// Revoke one of `account_id`'s ACTIVE devices in one transaction: set
+    /// `device_keys.revoked_at` (the upload-claim issuer then refuses the key),
+    /// revoke the device principal's active tenant access grants, and revoke
+    /// the native sessions minted for the device. The device's principal stays
+    /// linked, so traces it already contributed remain in the account's
+    /// history. `actor_ref` is recorded as the grant revoker.
+    async fn revoke_account_device(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<RevokeAccountDeviceResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_device not implemented".to_string(),
+        ))
+    }
+
     /// Count `account_id`'s ACTIVE strong authenticators: webauthn credentials plus
     /// NEAR identities, summed in ONE RLS-scoped tx. Lets a caller enforce
     /// "keep at least one strong authenticator" before revoking the last passkey or
@@ -2405,6 +2454,34 @@ pub enum PayoutResolution {
 pub struct RevokeNearResult {
     pub removed: bool,
     pub remaining_strong: i64,
+}
+
+/// One device linked to an account through NEAR sign-in, as
+/// [`Database::list_account_devices`] reports it. `device_key_id` and
+/// `public_key` are public identifiers, not secrets. `last_seen_at` is the
+/// newest `last_seen_at` of the device's native sessions, or `None` when no
+/// session names the device (one minted before sessions carried it).
+#[derive(Debug, Clone)]
+pub struct AccountDeviceSummary {
+    pub device_key_id: String,
+    pub public_key: String,
+    pub label: Option<String>,
+    /// `near` (wallet sign-in) or `near_ai` (NEAR AI sign-in).
+    pub onboarding_origin: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// True when the session the caller presented belongs to this device.
+    pub this_device: bool,
+}
+
+/// Outcome of [`Database::revoke_account_device`]. `removed` is `false` for an
+/// unknown, already-revoked or other-account device; the counts say what the
+/// revoke ended, for a hash-free audit row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RevokeAccountDeviceResult {
+    pub removed: bool,
+    pub sessions_revoked: u64,
+    pub grants_revoked: u64,
 }
 
 /// Outcome of [`Database::stage_merge_proposal`]: device B's login-link was

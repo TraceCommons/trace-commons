@@ -224,7 +224,7 @@ async fn attach_near_ai_login_device(
         .await?;
     }
     tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,account,&device,&anchor_hash]).await?;
-    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at]).await?;
+    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id) VALUES($1,$2,$3,$4,'native',$5,$6)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at,&device]).await?;
     Ok((device, principal))
 }
 
@@ -524,7 +524,7 @@ impl PgBackend {
         claim_provisioned_device_key(&tx, &tenant, &device, &public_key, "near").await?;
         link_provisioned_principal(&tx, &tenant, &account, &principal).await?;
         tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
-        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
+        tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id) VALUES($1,$2,$3,$4,'native',$5,$6)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at,&device]).await?;
         tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_account_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near","admission":"not_granted"})]).await?;
         tx.commit().await?;
         Ok(Some(ProvisionedNearAccount {
