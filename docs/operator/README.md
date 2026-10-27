@@ -56,6 +56,7 @@ the link.
 | Automatically settling eligible contributor credits | [`./automatic-credit-settlement.md`](./automatic-credit-settlement.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
+| Reading supported Codex subscription limits in Insights | [`./subscription-usage.md`](./subscription-usage.md) |
 | Publishing executable mission packages | [`./mission-packages.md`](./mission-packages.md) |
 | Publishing participant reward offers or provisioning account access | [`./participant-rewards.md`](./participant-rewards.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |

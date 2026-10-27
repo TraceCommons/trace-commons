@@ -598,7 +598,18 @@ fn absent(path: &Path) -> bool {
     matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn commit_lock(directory: &Path) -> std::io::Result<std::fs::File> {
+struct CommitLock(std::fs::File);
+
+impl Drop for CommitLock {
+    fn drop(&mut self) {
+        // Closing only this handle leaves the lock held while a concurrently
+        // spawned child still has an inherited descriptor before exec. End
+        // ownership at the transaction boundary, even if that handle is open.
+        let _ = self.0.unlock();
+    }
+}
+
+fn commit_lock(directory: &Path) -> std::io::Result<CommitLock> {
     std::fs::create_dir_all(directory)?;
     let path = directory.join(".opencode-routing.lock");
     private_create(&path, b"")?;
@@ -635,7 +646,7 @@ fn commit_lock(directory: &Path) -> std::io::Result<std::fs::File> {
     }
     file.try_lock()
         .map_err(|_| std::io::Error::other("routing configuration is busy"))?;
-    Ok(file)
+    Ok(CommitLock(file))
 }
 
 fn private_create(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
@@ -1095,6 +1106,24 @@ mod tests {
             std::fs::read_to_string(other_receipt).unwrap(),
             "another channel's private receipt"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_transaction_releases_its_lock_while_an_inherited_handle_remains_open() {
+        let fixture = Fixture::new(&json!({"model":"personal/original"}));
+        let store = PlanStore::default();
+        let preview = connect(&store, &context(1));
+        let held = commit_lock(&fixture.config_dir).unwrap();
+        // A duplicate shares the lock's open file description, just as a
+        // concurrently forked child does before close-on-exec takes effect.
+        let inherited = held.0.try_clone().unwrap();
+        drop(held);
+        commit(&store, preview.plan_id.unwrap())
+            .expect("the finished transaction must release the lock before the child closes it");
+        assert!(connected(&fixture.config(), Some(4321)));
+        assert!(fixture.receipt().is_file());
+        drop(inherited);
     }
 
     #[test]

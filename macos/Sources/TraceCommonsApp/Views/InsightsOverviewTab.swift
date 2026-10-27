@@ -30,6 +30,8 @@ struct InsightsOverviewTab: View {
     /// The daemon's model answers (feed T), for the Models card; `nil`
     /// hides it.
     var models: DaemonData.InsightsModelAnswers?
+    /// Current subscription limits are independent of the selected week.
+    var subscriptions: SubscriptionUsageModel?
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -55,6 +57,7 @@ struct InsightsOverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+                if let subscriptions { InsightsSubscriptionsCard(model: subscriptions, copy: copy) }
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
                     header(overview)

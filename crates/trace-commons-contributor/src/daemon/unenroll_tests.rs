@@ -126,9 +126,13 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
     s.store
         .write_daemon_file(REMEMBERED_PASSKEYS_FILE, b"{\"passkeys\":[]}")
         .unwrap();
-    s.store
-        .write_daemon_file(DAEMON_SETTINGS_FILE, b"{}")
-        .unwrap();
+    // A real preferences document: unenroll must now persist permission
+    // revocation, so an unreadable placeholder is a separate failure case.
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.suggestions_enabled = false;
+        settings.save(&s.store).unwrap();
+    }
     let waiting = seed(&s, QueueState::Pending);
     s.queue.lock().unwrap().save(&s.store).unwrap();
 
@@ -138,6 +142,11 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
     // Mac are not an account's.
     assert!(s.store.daemon_path(REMEMBERED_PASSKEYS_FILE).exists());
     assert!(s.store.daemon_path(DAEMON_SETTINGS_FILE).exists());
+    assert!(
+        !crate::daemon::settings::DaemonSettings::load(&s.store)
+            .unwrap()
+            .suggestions_enabled
+    );
     assert_eq!(
         s.queue.lock().unwrap().get(waiting).unwrap().state,
         QueueState::Pending
@@ -764,4 +773,85 @@ async fn unenroll_turns_the_insights_counter_pass_off() {
     let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
     assert!(!persisted.insights_counter_pass);
     assert!(!rows_file(&s).exists());
+}
+
+#[tokio::test]
+async fn unenroll_turns_off_subscription_usage_in_memory_and_on_disk() {
+    for enrolled in [false, true] {
+        let s = shared();
+        if enrolled {
+            enroll_fixture(&s);
+        }
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.subscription_usage_codex_enabled = true;
+            settings.subscription_usage_claude_enabled = true;
+            settings.save(&s.store).unwrap();
+        }
+        assert!(call(&s).await.error.is_none());
+        let settings = s.settings.lock().unwrap();
+        assert!(!settings.subscription_usage_codex_enabled);
+        assert!(!settings.subscription_usage_claude_enabled);
+        drop(settings);
+        let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+        assert!(!persisted.subscription_usage_codex_enabled);
+        assert!(!persisted.subscription_usage_claude_enabled);
+        let snapshot =
+            crate::daemon::subscription_usage::handle(&s, &req("subscription_usage", json!({})))
+                .result
+                .unwrap();
+        for provider in snapshot["providers"].as_array().unwrap() {
+            assert_eq!(provider["enabled"], false);
+            assert_eq!(provider["logins"], json!([]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unenroll_reports_unpersisted_subscription_revocation_and_can_retry() {
+    let s = shared();
+    enroll_fixture(&s);
+    let approved = seed_previewed_approval(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.subscription_usage_codex_enabled = true;
+        settings.subscription_usage_claude_enabled = true;
+        settings.save(&s.store).unwrap();
+    }
+    let saved = s
+        .store
+        .read_daemon_file(DAEMON_SETTINGS_FILE)
+        .unwrap()
+        .unwrap();
+    s.store
+        .write_daemon_file(DAEMON_SETTINGS_FILE, b"{")
+        .unwrap();
+    let response = call(&s).await;
+    assert!(
+        response.error.is_some(),
+        "unenroll must not claim persisted revocation"
+    );
+    assert!(s.store.load_config().unwrap().is_none());
+    assert!(!s.settings.lock().unwrap().subscription_usage_codex_enabled);
+    assert!(!s.settings.lock().unwrap().subscription_usage_claude_enabled);
+    assert_eq!(
+        s.queue.lock().unwrap().get(approved).unwrap().state,
+        QueueState::Pending
+    );
+    assert_eq!(
+        s.store
+            .read_daemon_file(DAEMON_SETTINGS_FILE)
+            .unwrap()
+            .unwrap(),
+        b"{"
+    );
+    // Repair the unreadable settings; a second unenroll must finish even
+    // though the enrollment itself has already been removed.
+    s.store
+        .write_daemon_file(DAEMON_SETTINGS_FILE, &saved)
+        .unwrap();
+    assert!(call(&s).await.error.is_none());
+    let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+    assert!(!persisted.subscription_usage_codex_enabled);
+    assert!(!persisted.subscription_usage_claude_enabled);
 }
