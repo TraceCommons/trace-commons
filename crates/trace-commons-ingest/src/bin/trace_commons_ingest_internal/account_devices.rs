@@ -12,9 +12,21 @@
 //!   tenant access grants and its native sessions, in one transaction.
 //!
 //! All three take the signed-in account session, weak or strong, like the
-//! NEAR identity list. Neither rename nor revoke adds authority: the worst a
-//! stolen session can do here is cut off the owner's other devices, which
-//! sign in again. An unknown, revoked or foreign device is a uniform 404.
+//! NEAR identity list. A NEAR AI account usually holds no strong
+//! authenticator, so a strong-only revoke would leave most accounts unable to
+//! revoke at all. Neither rename nor revoke adds authority: the worst a
+//! stolen session can do here is cut off the owner's other devices. A
+//! revoked key is never revived; its next sign-in is refused by name
+//! (`device_key_revoked`), and the device recovers by signing out, which
+//! drops its key, and signing in again, which makes a new key and joins as a
+//! new device. An unknown, revoked or foreign device is a uniform 404.
+//!
+//! A revoke ends the sessions that name the device's key, and session
+//! validation refuses any session whose key is revoked, so a sign-in racing
+//! the revoke cannot leave one alive. Sessions issued before V139 name no
+//! key and cannot be attributed; the response counts them
+//! (`unattributed_sessions`) so the client can offer
+//! `POST /v1/account/sessions/revoke-all` instead of a plain success.
 //! `device_key_id` and the public key are public identifiers; audit rows
 //! carry neither, nor the label.
 
@@ -164,11 +176,16 @@ async fn revoke_handler(
         serde_json::json!({
             "sessions_revoked": result.sessions_revoked,
             "grants_revoked": result.grants_revoked,
+            "unattributed_sessions": result.unattributed_sessions,
         }),
     )
     .await
     .map_err(internal_error)?;
-    Ok(Json(serde_json::json!({ "revoked": true })))
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "sessions_revoked": result.sessions_revoked,
+        "unattributed_sessions": result.unattributed_sessions,
+    })))
 }
 
 /// A malformed id cannot name any device, so it gets the same 404 as an

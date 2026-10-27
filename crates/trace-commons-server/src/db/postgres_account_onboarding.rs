@@ -8,6 +8,8 @@ use crate::account_onboarding::{
 // The device key is already registered under a different tenant. Public, in
 // `account_onboarding`, because bind shows this refusal to its caller.
 use crate::account_onboarding::DEVICE_KEY_REGISTERED_ELSEWHERE;
+// The device key was revoked by its account. Public for the same reason.
+use crate::account_onboarding::DEVICE_KEY_REVOKED;
 use crate::db::NewSession;
 use crate::near_account_identity::{NearAccountIdentity, random_near_tenant_id};
 use crate::near_ai_signup_policy::NearAiSignupPolicyTemplate;
@@ -59,19 +61,26 @@ async fn claim_provisioned_device_key(
     }
     let Some(row) = tx
         .query_opt(
-            "SELECT public_key, onboarding_origin, revoked_at IS NULL FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2",
+            // FOR SHARE: a revoke holds this row's lock until it commits, so
+            // the read waits and sees the revocation instead of racing it and
+            // leaving a live session on a revoked device.
+            "SELECT public_key, onboarding_origin, revoked_at IS NULL FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 FOR SHARE",
             &[&tenant, &device],
         )
         .await?
     else {
         return Err(named_refusal(DEVICE_KEY_REGISTERED_ELSEWHERE));
     };
-    // Same tenant, but revoked or recorded differently: never revive or
-    // rewrite it from here.
-    let same = row.get::<_, String>(0) == public_key
-        && row.get::<_, String>(1) == origin
-        && row.get::<_, bool>(2);
-    if same { Ok(()) } else { Err(refused()) }
+    // Same tenant, but recorded differently: never rewrite it from here.
+    if row.get::<_, String>(0) != public_key || row.get::<_, String>(1) != origin {
+        return Err(refused());
+    }
+    // The account revoked this key. Never revived; refused by name so the
+    // device knows to make a new key, which signs in as a new device.
+    if !row.get::<_, bool>(2) {
+        return Err(named_refusal(DEVICE_KEY_REVOKED));
+    }
+    Ok(())
 }
 
 /// Bind the proved wallet key to `account`, or accept the identical live
