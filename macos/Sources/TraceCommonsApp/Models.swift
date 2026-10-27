@@ -253,6 +253,9 @@ struct DaemonStatus: Decodable, Equatable {
     let schemaVersion: String
     let loggedIn: Bool
     let tenantID: String?
+    /// CLI setup completion for this daemon's current enrollment. An older
+    /// daemon omits it; the existing tenant-keyed GUI marker still applies.
+    let setupComplete: Bool?
     var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
@@ -292,6 +295,7 @@ struct DaemonStatus: Decodable, Equatable {
         case schemaVersion = "schema_version"
         case loggedIn = "logged_in"
         case tenantID = "tenant_id"
+        case setupComplete = "setup_complete"
         case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
@@ -312,6 +316,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion: String,
         loggedIn: Bool,
         tenantID: String?,
+        setupComplete: Bool? = nil,
         accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
@@ -330,6 +335,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
         self.tenantID = tenantID
+        self.setupComplete = setupComplete
         self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
@@ -351,6 +357,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
         loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
         tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
+        setupComplete = try c.decodeIfPresent(Bool.self, forKey: .setupComplete)
         accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false

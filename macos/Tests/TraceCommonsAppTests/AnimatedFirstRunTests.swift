@@ -158,19 +158,20 @@ final class AnimatedFirstRunTests: XCTestCase {
 
     // MARK: Private AI
 
-    /// The diagram shows the found tools Private AI can route today (Claude
-    /// Code and Codex), with the vendors they answer at; the line counts the
+    /// The diagram includes all three persistent connection tools, with
+    /// known default vendors only; the line counts the
     /// tools found here.
     func test_privateAIShowsTheToolsItCanRoute() throws {
         let copy = try words()
         let discovered = [
             Self.candidate(.codex, exists: true), Self.candidate(.claudeCode, exists: true),
             Self.candidate(.cline, exists: true), Self.candidate(.geminiCli, exists: false),
+            Self.candidate(.opencode, exists: true),
         ]
         let tools = PrivateAIScreenLayout.connectable(discovered)
-        XCTAssertEqual(tools.map(\.source), [.claudeCode, .codex])
-        XCTAssertEqual(tools.map(\.answersAt), ["Anthropic", "OpenAI"])
-        XCTAssertEqual(PrivateAIScreenLayout.found(discovered), 3)
+        XCTAssertEqual(tools.map(\.source), [.claudeCode, .codex, .opencode])
+        XCTAssertEqual(tools.map(\.answersAt), ["Anthropic", "OpenAI", nil])
+        XCTAssertEqual(PrivateAIScreenLayout.found(discovered), 4)
         XCTAssertEqual(PrivateAIScreenLayout.ofTotal(3, copy: copy.privateAi), "of 3 tools can connect")
         XCTAssertEqual(PrivateAIScreenLayout.ofTotal(1, copy: copy.privateAi), "of 1 tool can connect")
         XCTAssertEqual(PrivateAIScreenLayout.counted(2, after: 0.5, reduceMotion: false), 0)
@@ -178,6 +179,7 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual(PrivateAIScreenLayout.counted(2, after: 5, reduceMotion: false), 2)
         XCTAssertEqual(PrivateAIScreenLayout.counted(2, after: 0, reduceMotion: true), 2)
         XCTAssertEqual(PrivateAIScreenLayout.rowY(0, of: 1), 101, "one tool sits level with the N")
+        XCTAssertEqual((0..<3).map { PrivateAIScreenLayout.rowY($0, of: 3) }, [21, 101, 181])
     }
 
     // MARK: The stage

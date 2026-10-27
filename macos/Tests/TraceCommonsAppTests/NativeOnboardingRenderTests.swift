@@ -123,10 +123,10 @@ private final class ConsentPresentationDaemon: DaemonCalling {
     func call(_ method: String, params paramsJSON: String) -> String {
         guard method == "consent_options" else { return #"{"id":1,"result":{}}"# }
         let scopes: [[String: Any]] = [
-            ["name": "debugging_evaluation", "title": "Debugging and evaluation", "description": "Researchers read traces to find where coding agents fail, and score agents against each other.", "always_on": true, "grants_data_use": true],
-            ["name": "benchmark_only", "title": "Create benchmarks", "description": "Parts of your traces may become benchmark problems that agents are scored against.", "always_on": false, "grants_data_use": true],
-            ["name": "ranking_training", "title": "Train evaluators", "description": "Used to train models that rank or grade what an agent produced. Not models that write code.", "always_on": false, "grants_data_use": true],
-            ["name": "model_training", "title": "Train coding models", "description": "Your traces become training data for models that write code, potentially including commercial ones.", "always_on": false, "grants_data_use": true],
+            ["name": "debugging_evaluation", "title": "Debugging and evaluation", "description": "Researchers can read your traces to study errors and compare coding agents.", "always_on": true, "grants_data_use": true],
+            ["name": "benchmark_only", "title": "Create benchmarks", "description": "Turn parts of your traces into tests for coding agents.", "always_on": false, "grants_data_use": true],
+            ["name": "ranking_training", "title": "Train evaluators", "description": "Train models that rank or grade coding-agent answers.", "always_on": false, "grants_data_use": true],
+            ["name": "model_training", "title": "Train coding models", "description": "Train models that write code, including commercial models.", "always_on": false, "grants_data_use": true],
             ["name": "public_attribution", "title": "List my handle publicly as a contributor", "description": "Does not change data uses.", "always_on": false, "grants_data_use": false],
         ]
         let data = try! JSONSerialization.data(withJSONObject: ["id": 1, "result": ["scopes": scopes]])

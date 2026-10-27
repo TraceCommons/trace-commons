@@ -1,12 +1,15 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": false,
+  "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": null,
   "consent_scopes": [],
   "consent_hold": null,
   "paused": false,
   "queue_depth": 0,
+  "queue_capacity_used": 0,
+  "queue_at_capacity": false,
   "decisions_owed": 0,
   "unpurposed_traces": 0,
   "nudge": {

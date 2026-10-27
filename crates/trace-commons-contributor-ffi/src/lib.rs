@@ -2912,6 +2912,8 @@ pub const TC_HARNESS_PLAN_UNPARSEABLE: i32 = 43;
 pub const TC_HARNESS_PLAN_NOT_INSTALLED: i32 = 44;
 pub const TC_HARNESS_PLAN_ENTRY_UNUSABLE: i32 = 45;
 pub const TC_HARNESS_PLAN_NO_CONFIG_PATH: i32 = 46;
+pub const TC_HARNESS_PLAN_UNSUPPORTED_VERSION: i32 = 47;
+pub const TC_HARNESS_PLAN_MODELS_UNAVAILABLE: i32 = 48;
 
 /// One `harness_list` row's `state`, as a code.
 ///
@@ -2986,6 +2988,8 @@ pub unsafe extern "C" fn tc_harness_plan_outcome_code(outcome: *const c_char) ->
             Some(PlanOutcome::NotInstalled) => TC_HARNESS_PLAN_NOT_INSTALLED,
             Some(PlanOutcome::EntryUnusable) => TC_HARNESS_PLAN_ENTRY_UNUSABLE,
             Some(PlanOutcome::NoConfigPath) => TC_HARNESS_PLAN_NO_CONFIG_PATH,
+            Some(PlanOutcome::UnsupportedVersion) => TC_HARNESS_PLAN_UNSUPPORTED_VERSION,
+            Some(PlanOutcome::ModelsUnavailable) => TC_HARNESS_PLAN_MODELS_UNAVAILABLE,
             None => TC_HARNESS_PLAN_UNKNOWN,
         })
     })

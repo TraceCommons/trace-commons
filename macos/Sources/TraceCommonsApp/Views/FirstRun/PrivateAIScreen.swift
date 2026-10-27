@@ -5,9 +5,9 @@ import TCShellCore
 
 /// What the Private AI step shows, apart from the view so it can be tested.
 enum PrivateAIScreenLayout {
-    /// The tools Private AI can route today: Claude Code and Codex
-    /// (`RoutingSurface`). The diagram shows those found on this Mac.
-    static let routable: [SourceKind] = [.claudeCode, .codex]
+    /// The tools with persistent connections in Settings. The diagram
+    /// shows those found on this Mac; configuration stays in Settings.
+    static let routable: [SourceKind] = [.claudeCode, .codex, .opencode]
 
     /// The found tools Private AI can connect, in ring order.
     static func connectable(_ discovered: [SourceCandidate]?) -> [SourceCandidate] {
@@ -31,10 +31,10 @@ enum PrivateAIScreenLayout {
         return min(count, 1 + Int((elapsed - 0.9) / 0.24))
     }
 
-    /// A tool's row in the diagram, from the top: the first on top, the
-    /// second at the bottom, one alone in the middle.
+    /// Evenly space connected-tool candidates; one sits in the middle.
     static func rowY(_ index: Int, of count: Int) -> CGFloat {
-        count == 1 ? 101 : (index == 0 ? 21 : 181)
+        guard count > 1 else { return 101 }
+        return 21 + 160 * CGFloat(index) / CGFloat(count - 1)
     }
 }
 

@@ -2839,7 +2839,8 @@ final class AppModel: ObservableObject {
 
     /// What the launch's own request opens (`LaunchRouting.launchOpening`).
     var launchOpening: LaunchRouting.LaunchOpening {
-        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding)
+        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding,
+                                    background: LaunchRouting.isBackgroundLaunch(CommandLine.arguments))
     }
 
     /// Whether the first run has been finished (Start on the Uses screen)
@@ -2886,13 +2887,18 @@ final class AppModel: ObservableObject {
     }
 
     var isOnboardingComplete: Bool {
-        guard let tenantID = status.tenantID else { return false }
-        return UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
+        guard let tenantID = status.tenantID, !tenantID.isEmpty else { return false }
+        // A daemon-backed CLI completion is additional proof for the current
+        // enrollment, not a preference to copy into a tenant's legacy marker.
+        // Keep GUI completions and older-daemon behavior intact.
+        return status.setupComplete == true
+            || UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
     }
 
-    /// `isOnboardingComplete` is computed from `UserDefaults`, not from a
-    /// `@Published` property, so writing the key changes nothing SwiftUI is
-    /// watching. Without the explicit `objectWillChange`, pressing Done
+    /// The GUI's legacy completion marker is computed from `UserDefaults`,
+    /// so writing that key changes nothing SwiftUI is watching. Shared CLI
+    /// completion arrives through the published status instead.
+    /// Without the explicit `objectWillChange`, pressing Done
     /// updated the marker and left the contributor sitting on the Done
     /// screen until some *unrelated* published value happened to change --
     /// and `publishIfChanged` exists precisely to stop that from happening,
@@ -2920,6 +2926,7 @@ final class AppModel: ObservableObject {
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
+    func setHarnessesForTesting(_ harnesses: HarnessList) { publishIfChanged(\.harnesses, harnesses) }
     func setArmingOfferForTesting(_ offer: ArmingOffer?) { publishIfChanged(\.armingOffer, offer) }
     func setConfigDirectoryForTesting(_ path: String) { configDirectory = path }
     func clearWatchOnlyMarkerForTesting() {

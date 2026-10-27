@@ -129,6 +129,8 @@
     "tools_title": "Coding tools",
     "tools_empty": "Install a coding tool to get started.",
     "install": "Install",
+    "install_in_terminal": "Open {terminal} and run the official installer for {tool}.",
+    "update_in_terminal": "Open {terminal} and update {tool}.",
     "tool_unavailable": "{tool} wasn't found on this computer.",
     "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
     "update": "Update",

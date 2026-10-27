@@ -166,8 +166,23 @@ enum LaunchRouting {
     /// install that may have finished it long ago.
     enum LaunchOpening: Equatable { case wait, nothing, firstRun, monitor }
 
-    static func launchOpening(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool) -> LaunchOpening {
-        switch startup {
+    /// The argument `near-ai login` launches the app with
+    /// (`BACKGROUND_LAUNCH_ARG` in near_ai_login.rs).
+    static let backgroundLaunchArgument = "--background-launch"
+
+    /// Whether this launch is the CLI's background one.
+    static func isBackgroundLaunch(_ arguments: [String]) -> Bool {
+        arguments.dropFirst().contains(backgroundLaunchArgument)
+    }
+
+    /// A `background` launch opens nothing at all: the CLI started the app
+    /// to answer its sign-in (`near_ai_login::hand_off_to_app`), and a
+    /// window, first run's included, would take the person out of the
+    /// terminal they are working in.
+    static func launchOpening(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool,
+                              background: Bool = false) -> LaunchOpening {
+        if background { return .nothing }
+        return switch startup {
         case .starting: .wait
         case .refused: .monitor
         case .needsRoots: .firstRun

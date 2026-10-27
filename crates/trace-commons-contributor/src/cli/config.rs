@@ -19,7 +19,7 @@ const MAX_PATCH_BYTES: u64 = 1024 * 1024;
 
 #[derive(Args)]
 #[command(
-    after_help = "Trace estimates: near-ai --json daemon pending\nFolder rules: near-ai --json daemon projects\nChange a folder: near-ai daemon project PATH --mode ignore|notify|auto\nAutomatic mode includes existing traces unless --from-now is supplied."
+    after_help = "Trace estimates: near-ai --json daemon pending\nFolder rules: near-ai --json daemon projects\nChange a folder: near-ai daemon project PATH --mode ignore|notify|auto\nSetup readiness: near-ai --json config setup\nFinish setup: near-ai --json config complete --scopes debugging_evaluation,model_training\nAutomatic mode includes existing traces unless --from-now is supplied."
 )]
 pub(super) struct ConfigArgs {
     #[command(subcommand)]
@@ -28,6 +28,14 @@ pub(super) struct ConfigArgs {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Inspect setup readiness and available data-use choices from the running app
+    Setup,
+    /// Finish configured setup so the app skips first-run onboarding
+    Complete {
+        /// Explicit data-use choice made by you or your agent; omitted preserves the saved choice
+        #[arg(long)]
+        scopes: Option<String>,
+    },
     /// Discover writable settings, types, ranges, and effects from the running app
     Schema,
     /// Inspect the running app's redacted settings (includes read-only fields)
@@ -48,19 +56,47 @@ enum ConfigCommand {
 
 pub(super) fn run(store: &ConfigStore, args: &ConfigArgs) -> Result<()> {
     let value = execute(store, &args.command)?;
-    // All four commands describe structured data, so their human rendering is
+    // Configuration commands describe structured data, so their human rendering is
     // readable JSON too. The global error renderer owns --json failures.
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
 fn execute(store: &ConfigStore, command: &ConfigCommand) -> Result<Value> {
+    if let ConfigCommand::Complete { scopes } = command {
+        let scopes = scopes
+            .as_ref()
+            .map(|csv| {
+                let names = csv
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .collect::<Vec<_>>();
+                crate::consent::validate_scopes(&names)
+                    .map_err(|_| anyhow::anyhow!("scopes-invalid"))
+            })
+            .transpose()?;
+        let setup = call(store, "get_setup_status", serde_json::json!({}))?;
+        let scope = setup["scope"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("setup-sign-in-required"))?;
+        let mut params = serde_json::json!({"expected_scope":scope});
+        if let Some(scopes) = scopes {
+            params["scopes"] = serde_json::json!(scopes);
+        }
+        return call(store, "complete_setup", params);
+    }
     let (method, params) = match command {
+        ConfigCommand::Setup => ("get_setup_status", serde_json::json!({})),
+        ConfigCommand::Complete { .. } => unreachable!("handled above"),
         ConfigCommand::Schema => ("get_config_schema", serde_json::json!({})),
         ConfigCommand::Show => ("get_settings", serde_json::json!({})),
         ConfigCommand::Preview { file } => ("preview_settings", read_patch(file)?),
         ConfigCommand::Apply { file } => ("set_settings", read_patch(file)?),
     };
+    call(store, method, params)
+}
+
+fn call(store: &ConfigStore, method: &str, params: Value) -> Result<Value> {
     // In particular, do not call commands::daemon_call: its offline fallback
     // creates private state and can write it while the app is unreachable.
     let response = client::try_call(store, method, &params)
@@ -210,6 +246,46 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cli_can_choose_scopes_finish_setup_and_read_it_back() {
+        let (dir, shared) = crate::daemon::setup_completion::tests::enrolled(false);
+        shared.settings.lock().unwrap().save(&shared.store).unwrap();
+        let store = shared.store.clone();
+        drop(shared);
+        let embedded = crate::daemon::start_embedded(store).await.unwrap();
+        let inspect = ConfigStore::resolve_existing(Some(dir.path().into())).unwrap();
+        assert_eq!(
+            execute(&inspect, &ConfigCommand::Setup).unwrap()["blocked_reason"],
+            "setup-scopes-required"
+        );
+        assert!(execute(&inspect, &ConfigCommand::Complete { scopes: None }).is_err());
+        let result = execute(
+            &inspect,
+            &ConfigCommand::Complete {
+                scopes: Some("model_training,benchmark_only".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["scopes_saved"], true);
+        assert_eq!(
+            execute(&inspect, &ConfigCommand::Setup).unwrap()["complete"],
+            true
+        );
+        assert!(
+            execute(
+                &inspect,
+                &ConfigCommand::Complete {
+                    scopes: Some("SECRET-unknown".into())
+                }
+            )
+            .unwrap_err()
+            .to_string()
+                == "scopes-invalid"
+        );
+        embedded.close();
+    }
+
     #[test]
     fn no_daemon_never_falls_back_to_saved_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -219,6 +295,8 @@ mod tests {
         for command in [
             ConfigCommand::Schema,
             ConfigCommand::Show,
+            ConfigCommand::Setup,
+            ConfigCommand::Complete { scopes: None },
             ConfigCommand::Preview { file: file.clone() },
             ConfigCommand::Apply { file },
         ] {
@@ -275,7 +353,7 @@ mod tests {
     fn config_subcommands_accept_global_options_and_require_patch_files() {
         use super::super::{Cli, Command};
         use clap::Parser;
-        for action in ["schema", "show"] {
+        for action in ["schema", "show", "setup", "complete"] {
             let cli = Cli::try_parse_from([
                 "near-ai",
                 "config",
@@ -288,6 +366,26 @@ mod tests {
             assert!(cli.json);
             assert!(matches!(cli.command, Command::Config(_)));
         }
+        let cli = Cli::try_parse_from([
+            "near-ai",
+            "--json",
+            "config",
+            "complete",
+            "--scopes",
+            "model_training",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Config(_)));
+        assert!(
+            response_value(ipc::Response::err(
+                1,
+                ipc::ERR_UNKNOWN_METHOD,
+                "unknown_method"
+            ))
+            .unwrap_err()
+            .to_string()
+            .starts_with("config-daemon-unsupported")
+        );
         for action in ["preview", "apply"] {
             assert!(Cli::try_parse_from(["near-ai", "config", action]).is_err());
             let cli = Cli::try_parse_from([

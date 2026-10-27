@@ -99,16 +99,19 @@ final class MonitorNoticeDismissals {
     }
 
     /// Missing, failed and masked observations cannot establish recovery.
-    /// Queue depth counts Pending only; the cap also includes Approved, so
-    /// only an explicitly healthy read clears the queue-full incident.
+    /// Queue depth and the general health slot cannot establish recovery.
+    /// Keep a queue dismissal through capacity churn until the admission
+    /// backlog empties; missing fields from older daemons remain unknown.
     static func conditions(status: DaemonData.Status?, loaded: Bool) -> [Kind: Condition] {
         var result = Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0, Condition.unknown) })
         guard loaded, let status else { return result }
         let label = status.health?.lastErrorLabel
-        if label == Kind.queueFull.rawValue {
+        if status.queueAtCapacity == true {
             result[.queueFull] = .active(.init(kind: .queueFull))
-        } else if status.health != nil, label == nil {
+        } else if status.queueAtCapacity == false, status.queueCapacityUsed == 0 {
             result[.queueFull] = .clear
+        } else if status.queueAtCapacity == nil, label == Kind.queueFull.rawValue {
+            result[.queueFull] = .active(.init(kind: .queueFull))
         }
         if let blocked = status.dailyBudget?.blocked {
             result[.dailyCap] = blocked ? .active(.init(kind: .dailyCap, window: status.dailyBudget?.resetsAt)) : .clear

@@ -1,6 +1,7 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": true,
+  "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": "tenant-sample",
   "consent_scopes": [
@@ -9,6 +10,8 @@
   "consent_hold": null,
   "paused": false,
   "queue_depth": 3,
+  "queue_capacity_used": 3,
+  "queue_at_capacity": false,
   "dev_dry_run": false,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,

@@ -443,6 +443,9 @@ extension DaemonData {
         public let schemaVersion: String?
         public let loggedIn: Bool?
         public let tenantId: String?
+        /// Explicit CLI setup completion for the current enrollment. Absent
+        /// on older daemons, which retain shell-local completion behavior.
+        public let setupComplete: Bool?
         /// Opaque account binding; present whenever the daemon can derive a
         /// scope from its store, signed in or not. Not proof of sign-in: read
         /// `loggedIn` for that.
@@ -454,6 +457,10 @@ extension DaemonData {
         /// never shown as text.
         public let consentHold: String?
         public let paused: Bool?
+        /// Authoritative admission capacity, including eligible Approved entries.
+        /// Missing on older daemons; unknown must never establish recovery.
+        public let queueAtCapacity: Bool?
+        public let queueCapacityUsed: Int?
         /// Every `Pending` entry. NOT the badge: never draw a count from it.
         public let queueDepth: Int?
         /// the badge's exact count. `nil` is unknown (an older daemon, or
@@ -510,10 +517,13 @@ extension DaemonData {
             case schemaVersion = "schema_version"
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
+            case setupComplete = "setup_complete"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
             case paused
+            case queueAtCapacity = "queue_at_capacity"
+            case queueCapacityUsed = "queue_capacity_used"
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
             case unpurposedTraces = "unpurposed_traces"
