@@ -1065,12 +1065,14 @@ fn run(args: &[&str], stdin: &str, dir: &Path) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the tool starts");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // A refusal that comes before the key is read (an existing output, an
+    // unreadable allowlist) can exit before this write and close the pipe.
+    // That is the tool's answer, not an error: its exit status and output
+    // are what the caller asserts.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        result => result.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
