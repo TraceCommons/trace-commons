@@ -515,8 +515,8 @@ fn enroll(store: &ConfigStore) {
 /// The home directory every recording sees, in place of the real one.
 ///
 /// The harness, IronWire and source probes all resolve the home through the
-/// environment (`dirs::home_dir`, `$HOME`, `$IRONWIRE_HOME`), not through
-/// the store, so a temp store alone records the machine it runs on: its
+/// environment (`dirs::home_dir`, `$HOME`, `$XDG_CONFIG_HOME`, `$IRONWIRE_HOME`),
+/// not through the store, so a temp store alone records the machine it runs on: its
 /// username in `config_path`, and whichever tools it has installed and
 /// credentialed. This points all of them at one fake home, seeded with an
 /// installed Claude Code, Codex and OpenCode and no IronWire, before any daemon
@@ -560,6 +560,8 @@ fn sample_home() -> &'static SampleHome {
         // binary reads the environment (see the doc above).
         unsafe {
             std::env::set_var("HOME", &fake);
+            // OpenCode honors XDG_CONFIG_HOME before HOME; isolate inherited values too.
+            std::env::set_var("XDG_CONFIG_HOME", fake.join(".config"));
             std::env::set_var("IRONWIRE_HOME", fake.join(".ironwire"));
         }
         SampleHome { fake, real }
