@@ -64,6 +64,11 @@
 //! and no retry can fix it; the app offers Sign in again, which signs in to
 //! NEAR AI first.
 //!
+//! `device_key_revoked` is the other: the account revoked this device's
+//! key (`DELETE /v1/account/devices/{id}`), and the commons never revives
+//! one. The device recovers by signing out, which drops its key, then
+//! signing in, which makes a new key and joins as a new device.
+//!
 //! # Sign in again
 //!
 //! [`sign_in`] is the same ceremony run because the person asked
@@ -110,6 +115,12 @@ const RENEWAL_LOG_LINES: usize = 200;
 
 /// The class [`classify`] gives a refusal of the stored NEAR AI login.
 pub const FAILURE_NEAR_AI_SIGN_IN_REQUIRED: &str = "near_ai_sign_in_required";
+
+/// The class [`classify`] gives the commons refusing this device's key
+/// because its account revoked it. No retry and no NEAR AI sign-in fixes it:
+/// the device signs out, which drops the key, and signs in again with a new
+/// one.
+pub const FAILURE_DEVICE_KEY_REVOKED: &str = "device_key_revoked";
 
 /// Per state directory: one renewal at a time, so the reads that arrive
 /// together renew once.
@@ -344,6 +355,7 @@ pub(super) async fn sign_in(
             failed(store.dir(), attempt_key(shared, &raw), class);
             Err(match class {
                 FAILURE_NEAR_AI_SIGN_IN_REQUIRED => FAILURE_NEAR_AI_SIGN_IN_REQUIRED,
+                FAILURE_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
                 _ => "near_ai_sign_in_unavailable",
             })
         }
@@ -385,6 +397,7 @@ pub(crate) fn classify(error: &anyhow::Error) -> &'static str {
         "near_ai_enroll_token_unavailable" => "near_ai_unavailable",
         "near_ai_enroll_start_failed" => "commons_start_failed",
         "near_ai_enroll_verification_failed" => "commons_refused",
+        super::nearai_onboarding::ENROLL_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
         "near_ai_enroll_endpoint_refused" => "commons_address_refused",
         "account-enrollment-mismatch" => "commons_answer_mismatch",
         // The device proof (a ceremony window this clock refuses) or the

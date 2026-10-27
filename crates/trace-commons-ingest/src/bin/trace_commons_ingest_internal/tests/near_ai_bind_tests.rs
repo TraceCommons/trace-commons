@@ -3597,3 +3597,101 @@ mod open_sign_up {
         );
     }
 }
+
+// --- #1668 review: a revoked device key is refused by name -------------------
+
+/// The wire label every sign-in finish answers with when the device's key
+/// was revoked by its account.
+const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
+
+/// A device whose key its account revoked signs in again through NEAR AI
+/// provisioning: refused by name with 409, not the uniform deny, so the
+/// client can tell the person to sign out and sign in with a new key. A new
+/// key from the same login still signs in.
+#[tokio::test]
+async fn pg_a_revoked_device_key_is_refused_by_name_at_provisioning() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let device = Device::new();
+    let first = provision(&h, &device).await;
+    let tenant = first["tenant_id"].as_str().expect("tenant").to_string();
+    let revoked = admin
+        .execute(
+            "UPDATE device_keys SET revoked_at = now() WHERE device_key_id = $1",
+            &[&first["device_key_id"].as_str().expect("device key id")],
+        )
+        .await
+        .expect("revoke the key");
+    assert_eq!(revoked, 1);
+
+    let started = start(&h.state, PROVISION_START, None, &device).await;
+    let signature = device.sign(&started.signing_bytes);
+    let reply = finish(
+        &h.state,
+        PROVISION_FINISH,
+        None,
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.json());
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({ "error": DEVICE_KEY_REVOKED_WIRE }),
+        "the refusal is named, and names nothing but itself"
+    );
+
+    let again = provision(&h, &Device::new()).await;
+    assert_eq!(
+        again["tenant_id"],
+        tenant.as_str(),
+        "a new key joins the same account"
+    );
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&tenant]).await;
+}
+
+/// The same refusal on the bind finish: the passkey account's own tenant
+/// holds this device key, revoked.
+#[tokio::test]
+async fn pg_a_revoked_device_key_is_refused_by_name_at_bind() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let p = unbound_account(&h.backend).await;
+    let device = Device::new();
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &device.public_bytes(),
+    );
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin,revoked_at)
+             VALUES($1,$2,$3,NULL,'near_ai',now())",
+            &[&device_key_id, &p.tenant, &device.public_b64()],
+        )
+        .await
+        .expect("a revoked key in P's tenant");
+
+    let reply = bind(&h, &p, &device).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.json());
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({ "error": DEVICE_KEY_REVOKED_WIRE })
+    );
+    assert_eq!(
+        binding_row(&admin, &p.tenant, p.account_id).await,
+        ("unbound".to_string(), false)
+    );
+    assert_eq!(
+        audit_metadata(&admin, &p.tenant, "account_binding_failed").await,
+        vec![serde_json::json!({ "stage": DEVICE_KEY_REVOKED_WIRE })]
+    );
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&p.tenant]).await;
+}

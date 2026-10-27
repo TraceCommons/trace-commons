@@ -1795,8 +1795,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// Revoke one of `account_id`'s ACTIVE devices in one transaction: set
     /// `device_keys.revoked_at` (the upload-claim issuer then refuses the key),
     /// revoke the device principal's active tenant access grants, and revoke
-    /// the native sessions minted for the device. The device's principal stays
-    /// linked, so traces it already contributed remain in the account's
+    /// the native sessions minted for the device. The account's native sessions
+    /// that name no device (issued before V139, or by the login-link native
+    /// sign-in) cannot be attributed, so they are revoked too, except the
+    /// caller's own (`caller_session_token_hash`). The device's principal
+    /// stays linked, so traces it already contributed remain in the account's
     /// history. `actor_ref` is recorded as the grant revoker.
     async fn revoke_account_device(
         &self,
@@ -1804,6 +1807,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _account_id: uuid::Uuid,
         _device_key_id: &str,
         _actor_ref: &str,
+        _caller_session_token_hash: Option<&str>,
     ) -> Result<RevokeAccountDeviceResult, DatabaseError> {
         Err(DatabaseError::Pool(
             "revoke_account_device not implemented".to_string(),
@@ -2482,10 +2486,11 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
-    /// The account's live sessions that name no device key (issued before
-    /// V139, or by a sign-in with no device), which a device revoke cannot
-    /// attribute and so leaves alone.
-    pub unattributed_sessions: u64,
+    /// The account's live native sessions that named no device key (issued
+    /// before V139, or by the login-link native sign-in), revoked with the
+    /// device because they cannot be told apart from its own. The caller's
+    /// session is never among them.
+    pub unattributed_sessions_revoked: u64,
 }
 
 /// Outcome of [`Database::stage_merge_proposal`]: device B's login-link was

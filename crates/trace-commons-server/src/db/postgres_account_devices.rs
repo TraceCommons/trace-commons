@@ -100,6 +100,7 @@ impl PgBackend {
         account_id: Uuid,
         device_key_id: &str,
         actor_ref: &str,
+        caller_session_token_hash: Option<&str>,
     ) -> Result<crate::db::RevokeAccountDeviceResult, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
@@ -158,29 +159,42 @@ impl PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // Sessions issued before V139, or by a sign-in that names no device
-        // key, carry no `device_key_id`, so the update above cannot tell
-        // whether one belongs to the revoked device. Counted so the caller
-        // can offer to sign out everywhere instead of a plain success.
-        let unattributed_sessions: i64 = tx
-            .query_one(
-                "SELECT count(*) FROM trace_sessions
+        // Native sessions that name no device key (issued before V139, or by
+        // the login-link native sign-in) cannot be told apart from the
+        // revoked device's own, so they end too: a lost laptop that signed in
+        // before V139 is not left live. A NEAR AI device among them renews on
+        // its own with a keyed session; any other signs in again. The
+        // caller's own session is spared, and browser, passkey and NEAR
+        // sessions are not device sessions and are left alone. Only live
+        // rows: past the idle cap `validate_session` already refuses them.
+        let unattributed_sessions_revoked = tx
+            .execute(
+                "UPDATE trace_sessions
+                    SET revoked_at = now()
                   WHERE tenant_id = trace_current_tenant_id()
                     AND account_id = $1
                     AND device_key_id IS NULL
+                    AND client_kind = $2
                     AND revoked_at IS NULL
-                    AND expires_at > now()",
-                &[&account_id],
+                    AND expires_at > now()
+                    AND last_seen_at > now() - INTERVAL '3 days'
+                    AND ($3::text IS NULL
+                         OR (token_hash <> $3
+                             AND prev_token_hash IS DISTINCT FROM $3))",
+                &[
+                    &account_id,
+                    &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
+                    &caller_session_token_hash,
+                ],
             )
             .await
-            .map_err(DatabaseError::Postgres)?
-            .get(0);
+            .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(crate::db::RevokeAccountDeviceResult {
             removed: true,
             sessions_revoked,
             grants_revoked,
-            unattributed_sessions: u64::try_from(unattributed_sessions).unwrap_or(0),
+            unattributed_sessions_revoked,
         })
     }
 }

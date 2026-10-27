@@ -21,14 +21,15 @@
 //! drops its key, and signing in again, which makes a new key and joins as a
 //! new device. An unknown, revoked or foreign device is a uniform 404.
 //!
-//! A revoke ends the sessions that name the device's key, and session
-//! validation refuses any session whose key is revoked, so a sign-in racing
-//! the revoke cannot leave one alive. Sessions issued before V139 name no
-//! key and cannot be attributed; the response counts them
-//! (`unattributed_sessions`) so the client can offer
-//! `POST /v1/account/sessions/revoke-all` instead of a plain success.
-//! `device_key_id` and the public key are public identifiers; audit rows
-//! carry neither, nor the label.
+//! A revoke ends the sessions that name the device's key. A sign-in reads
+//! the key `FOR SHARE` and the revoke updates it, so the two serialize: the
+//! sign-in either commits its session before the revoke reads the sessions,
+//! or finds the key revoked. (Session validation does not read `device_keys`:
+//! least-privilege session roles hold no grant on it.) Native sessions that name no key
+//! (issued before V139, or by the login-link native sign-in) cannot be
+//! attributed, so a revoke ends those too, except the caller's own: a NEAR AI
+//! device among them renews by itself with a keyed session, and any other
+//! signs in again.
 
 use super::*;
 
@@ -162,6 +163,7 @@ async fn revoke_handler(
             ctx.account_id.as_uuid(),
             &device_key_id,
             &ctx.actor_ref,
+            ctx.session_token_hash.as_deref(),
         )
         .await
         .map_err(internal_error)?;
@@ -176,15 +178,15 @@ async fn revoke_handler(
         serde_json::json!({
             "sessions_revoked": result.sessions_revoked,
             "grants_revoked": result.grants_revoked,
-            "unattributed_sessions": result.unattributed_sessions,
+            "unattributed_sessions_revoked": result.unattributed_sessions_revoked,
         }),
     )
     .await
     .map_err(internal_error)?;
     Ok(Json(serde_json::json!({
         "revoked": true,
-        "sessions_revoked": result.sessions_revoked,
-        "unattributed_sessions": result.unattributed_sessions,
+        "sessions_revoked": result.sessions_revoked
+            + result.unattributed_sessions_revoked,
     })))
 }
 

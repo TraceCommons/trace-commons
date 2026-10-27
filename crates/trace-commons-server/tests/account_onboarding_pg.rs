@@ -1696,7 +1696,8 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
                 tenant_id,
                 other.account_id,
                 &second.device_key_id,
-                "account-actor:other"
+                "account-actor:other",
+                None
             )
             .await
             .unwrap(),
@@ -1708,7 +1709,13 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
     // Revoke the second laptop: its key, grant and session end; the first
     // laptop is untouched.
     let result = db
-        .revoke_account_device(&tenant, account, &second.device_key_id, "account-actor:me")
+        .revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1717,7 +1724,7 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
             removed: true,
             sessions_revoked: 1,
             grants_revoked: 1,
-            unattributed_sessions: 0,
+            unattributed_sessions_revoked: 0,
         }
     );
     let remaining: Vec<String> = db
@@ -1759,10 +1766,16 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
         "the other laptop stays signed in"
     );
     assert!(
-        !db.revoke_account_device(&tenant, account, &second.device_key_id, "account-actor:me")
-            .await
-            .unwrap()
-            .removed,
+        !db.revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            None
+        )
+        .await
+        .unwrap()
+        .removed,
         "revoking twice finds nothing the second time"
     );
     assert!(
@@ -1777,9 +1790,9 @@ async fn a_second_laptop_joins_the_account_and_each_device_can_be_listed_renamed
 
 /// A revoked device's key is refused by name when it signs in again, a new
 /// key on the same machine joins as a new device, and nothing the revoke
-/// could not see keeps the old key signed in: a session issued before V139
-/// is counted, a session that names the revoked key does not validate, and
-/// an expired grant is left as it was.
+/// could not see keeps the old key signed in: an unkeyed native session
+/// from before V139 ends with it, the caller's own and browser sessions do
+/// not, and an expired grant is left as it was.
 #[tokio::test]
 async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key() {
     let _serial = serial().lock().await;
@@ -1818,16 +1831,28 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
         .expect("the second device provisions");
     let (tenant, account) = (first.tenant_id.clone(), first.account_id);
 
-    // A session from before V139 names no device key.
-    let legacy_session = session_hash("revoked-again-legacy");
-    admin
-        .execute(
-            "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at)
-             VALUES($1,$2,$3,$4,'native',now() + interval '1 hour')",
-            &[&tenant, &uuid::Uuid::new_v4(), &account, &legacy_session],
-        )
-        .await
-        .unwrap();
+    // Sessions that name no device key: a native one from before V139 (the
+    // lost device's, as far as anyone can tell), the caller's own native one,
+    // and a browser passkey one.
+    let unkeyed = |kind: &'static str, label: &'static str| {
+        let admin = &admin;
+        let tenant = tenant.clone();
+        async move {
+            let token = session_hash(label);
+            admin
+                .execute(
+                    "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at)
+                     VALUES($1,$2,$3,$4,$5,now() + interval '1 hour')",
+                    &[&tenant, &uuid::Uuid::new_v4(), &account, &token, &kind],
+                )
+                .await
+                .unwrap();
+            token
+        }
+    };
+    let legacy_session = unkeyed("native", "revoked-again-legacy").await;
+    let caller_session = unkeyed("native", "revoked-again-caller").await;
+    let browser_session = unkeyed("passkey", "revoked-again-browser").await;
     // A second grant on the device, already expired: not the revoke's to
     // rewrite or count.
     let principal: String = admin
@@ -1849,7 +1874,13 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
         .unwrap();
 
     let result = db
-        .revoke_account_device(&tenant, account, &second.device_key_id, "account-actor:me")
+        .revoke_account_device(
+            &tenant,
+            account,
+            &second.device_key_id,
+            "account-actor:me",
+            Some(&caller_session),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1858,10 +1889,26 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
             removed: true,
             sessions_revoked: 1,
             grants_revoked: 1,
-            unattributed_sessions: 1,
+            unattributed_sessions_revoked: 1,
         },
-        "the pre-V139 session is counted, not revoked, and the expired grant is not counted"
+        "the unkeyed native session ends with the device; the caller's own and \
+         the browser session do not, and the expired grant is not counted"
     );
+    for (token, live, what) in [
+        (&legacy_session, false, "the pre-V139 native session ends"),
+        (&caller_session, true, "the caller's own session is spared"),
+        (
+            &browser_session,
+            true,
+            "a browser session is not a device session",
+        ),
+    ] {
+        assert_eq!(
+            db.validate_session(&tenant, token).await.unwrap().is_some(),
+            live,
+            "{what}"
+        );
+    }
     let (status, revoked_at_set, updated_recently): (String, bool, bool) = {
         let row = admin
             .query_one(
@@ -1893,24 +1940,6 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
         "the revoked grant's updated_at moves"
     );
 
-    // A session naming the revoked key that the revoke did not end (a
-    // sign-in that raced it) does not validate.
-    let raced_session = session_hash("revoked-again-raced");
-    admin
-        .execute(
-            "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id)
-             VALUES($1,$2,$3,$4,'native',now() + interval '1 hour',$5)",
-            &[&tenant, &uuid::Uuid::new_v4(), &account, &raced_session, &second.device_key_id],
-        )
-        .await
-        .unwrap();
-    assert!(
-        db.validate_session(&tenant, &raced_session)
-            .await
-            .unwrap()
-            .is_none(),
-        "a session on a revoked key never validates"
-    );
     assert!(
         db.validate_session(&tenant, &laptop_session)
             .await
