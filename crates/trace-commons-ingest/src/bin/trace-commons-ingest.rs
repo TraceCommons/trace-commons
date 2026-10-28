@@ -66137,10 +66137,17 @@ fn submission_status_from_record(
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
         // The receipt already resolved estimate-vs-gate figure; the two
-        // surfaces must never disagree about the same record.
-        credit_points_pending: receipt
-            .credit_points_pending
-            .unwrap_or(record.credit_points_pending),
+        // surfaces must never disagree about the same record. Once the
+        // outcome is final nothing is pending: daemons before #1703 add
+        // pending and final together, so sending both counts a decided
+        // trace twice on their Home.
+        credit_points_pending: if outcome.credit_points_final.is_some() {
+            0.0
+        } else {
+            receipt
+                .credit_points_pending
+                .unwrap_or(record.credit_points_pending)
+        },
         credit_points_final: outcome.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,
@@ -66183,13 +66190,18 @@ struct TraceCreditOutcome {
 ///
 /// In order:
 /// 1. A figure the row already carries wins, unchanged.
-/// 2. Any `NoveltyUtility` event: the final figure is their signed sum,
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): the row's
+///    figure as it stands (none unless review stored one), never its gate
+///    award, which the account summary and the ledger figure leave out and
+///    settlement never pays (owner, 2026-10-28: the trace, the summary and
+///    the payout agree).
+/// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
 ///    never below 0, with no reason.
-/// 3. A held or non-crediting status: still pending.
-/// 4. A decision with a withheld label, or one that failed a floor: 0 and
+/// 4. A held or non-crediting status: still pending.
+/// 5. A decision with a withheld label, or one that failed a floor: 0 and
 ///    the reason. A passing decision with neither is its award still being
 ///    written: pending.
-/// 5. No decision: pending.
+/// 6. No decision: pending.
 fn trace_credit_outcome(
     record: &TraceCommonsSubmissionRecord,
     decision: Option<&StorageTraceGateCreditDecisionRow>,
@@ -66201,6 +66213,9 @@ fn trace_credit_outcome(
         absorbs_scoring_awards: false,
     };
     if record.credit_points_final.is_some() {
+        return pending;
+    }
+    if record.is_terminal() {
         return pending;
     }
     let awards = events
