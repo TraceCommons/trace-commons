@@ -743,9 +743,7 @@ enum NearAiSignIn {
     static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
         Task {
             guard let url = await model.startNearAiCredential() else { return }
-            let accepted = await withCheckedContinuation { continuation in
-                openURL(url) { continuation.resume(returning: $0) }
-            }
+            let accepted = await openURL.opened(url)
             if !accepted { model.cancelNearAiCredential() }
             then?()
         }
