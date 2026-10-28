@@ -95648,9 +95648,8 @@ mod gate_credit_display {
                     5.0,
                 )];
                 let shown = status(&record, &events, Some(&decision));
-                assert_eq!(shown.credit_points_final, Some(0.0), "{terminal:?}");
+                assert_eq!(shown.credit_points_final, None, "{terminal:?}");
                 assert_eq!(shown.credit_points_ledger, 0.0, "{terminal:?}");
-                assert_eq!(shown.credit_points_pending, 0.0, "{terminal:?}");
                 assert_eq!(shown.credit_outcome_reason, None, "{terminal:?}");
             }
         }

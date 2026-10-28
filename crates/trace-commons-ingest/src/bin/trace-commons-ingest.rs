@@ -66190,10 +66190,11 @@ struct TraceCreditOutcome {
 ///
 /// In order:
 /// 1. A figure the row already carries wins, unchanged.
-/// 2. A terminal trace (withdrawn, revoked, purged, expired): 0 and no
-///    reason, its `NoveltyUtility` events left out as the account summary
-///    leaves them out and settlement never pays them (owner, 2026-10-28:
-///    the trace, the summary and the payout agree).
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): the row's
+///    figure as it stands (none unless review stored one), never its gate
+///    award, which the account summary and the ledger figure leave out and
+///    settlement never pays (owner, 2026-10-28: the trace, the summary and
+///    the payout agree).
 /// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
 ///    never below 0, with no reason.
 /// 4. A held or non-crediting status: still pending.
@@ -66215,11 +66216,7 @@ fn trace_credit_outcome(
         return pending;
     }
     if record.is_terminal() {
-        return TraceCreditOutcome {
-            credit_points_final: Some(0.0),
-            reason: None,
-            absorbs_scoring_awards: true,
-        };
+        return pending;
     }
     let awards = events
         .iter()
