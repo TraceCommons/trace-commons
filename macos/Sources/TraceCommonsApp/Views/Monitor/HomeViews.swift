@@ -1206,7 +1206,11 @@ private struct HistoryListRow: View {
                 }
             }
             explanations
-            if let figure = HomeFormat.credit(row), let words {
+            if let words, let reason = HomeFormat.noCreditReason(row, copy: model.publicRunCopy) {
+                Text(words.noCredit(reason))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            } else if let figure = HomeFormat.credit(row), let words {
                 Text(words.credit(figure))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
@@ -2006,6 +2010,16 @@ enum HomeFormat {
     /// summary, not per row.
     static func credit(_ row: DaemonData.HistoryRow) -> String? {
         row.creditPointsFinal.map(points)
+    }
+
+    /// Why a decided row earned no credit, in the core's words: only for a
+    /// final figure of 0 the server gave a reason for. A pending row, a
+    /// credited one, or no core copy reads nothing, and the row falls back
+    /// to its figure.
+    static func noCreditReason(_ row: DaemonData.HistoryRow, copy: PublicRunCopy?) -> String? {
+        guard let copy, row.creditPointsFinal == 0,
+              let reason = row.creditOutcomeReason, !reason.isEmpty else { return nil }
+        return copy.creditOutcomeLabel(for: reason)
     }
 
     /// A row's status tag, from the core's one status table. A missing or

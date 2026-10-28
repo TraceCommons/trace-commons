@@ -355,6 +355,7 @@ fn sample_history_records() -> Vec<HistoryRecord> {
         consent_scopes: vec!["debugging_evaluation".into()],
         credit_points_pending: pending,
         credit_points_final: final_,
+        credit_outcome_reason: None,
         explanations: Vec::new(),
         last_refreshed_at: Some(now - chrono::Duration::hours(1)),
         withdrawn_at: withdrawn.then(|| now - chrono::Duration::days(age_days - 1)),
