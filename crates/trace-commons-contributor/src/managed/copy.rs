@@ -10,8 +10,8 @@
 //!   while the snapshot's `tools` row for `opencode` says it is installed.
 //! - `guide_title`, `guide_body`, `guide_step_earn`, `guide_step_start` and
 //!   `guide_step_use` -- the Private AI tab's step-by-step card, first on
-//!   the tab and closed with its X (product owner, 2026-10-28). DRAFT,
-//!   NEEDS APPROVAL of the exact words.
+//!   the tab and closed with its X. Approved by the product owner
+//!   2026-10-28, with `sign_in_title` and `title` "My Private AI sessions".
 //! - `sign_in_title` "Run Private AI in Claude Code, Codex or OpenCode" --
 //!   the launch card's title on the Private AI tab (product owner,
 //!   2026-10-28: make it clear that a tool is how Private AI runs).
