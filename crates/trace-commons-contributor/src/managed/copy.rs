@@ -8,6 +8,13 @@
 //! - `start_codex` "Start Codex"
 //! - `start_opencode` "Start OpenCode" -- Approved 2026-10-16. Shown only
 //!   while the snapshot's `tools` row for `opencode` says it is installed.
+//! - `guide_title`, `guide_body`, `guide_step_earn`, `guide_step_start` and
+//!   `guide_step_use` -- the Private AI tab's step-by-step card, first on
+//!   the tab and closed with its X (product owner, 2026-10-28). DRAFT,
+//!   NEEDS APPROVAL of the exact words.
+//! - `sign_in_title` "Run Private AI in Claude Code, Codex or OpenCode" --
+//!   the launch card's title on the Private AI tab (product owner,
+//!   2026-10-28: make it clear that a tool is how Private AI runs).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
 //!   folder you choose." Shells fill `{destination}` from
 //!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
@@ -71,7 +78,7 @@
 //!   `managed-model-unavailable`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
-            "title": "Managed sessions",
+            "title": "My Private AI sessions",
             "collection_account_busy": "Finish the existing session for this account before starting one with trace collection.",
             "collect_managed_trace": "Collect trace for review",
             "managed_collection_scope": "Saves this session’s trace locally after it ends. Your existing review and contribution settings still apply.",
@@ -183,6 +190,12 @@ pub fn copy() -> serde_json::Value {
             "start_codex": "Start Codex",
             "start_opencode": "Start OpenCode",
             "open_tool": "Open {tool}",
+            "guide_title": "How Private AI works",
+            "guide_body": "Use the NEAR AI credit you earn from your traces to run the AI models you already use through Private AI.",
+            "guide_step_earn": "Contribute traces to earn NEAR AI credit.",
+            "guide_step_start": "Start Claude Code, Codex or OpenCode below.",
+            "guide_step_use": "Work as usual. Its AI calls go through Private AI and are paid with your NEAR AI credit.",
+            "sign_in_title": "Run Private AI in Claude Code, Codex or OpenCode",
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
@@ -234,6 +247,10 @@ mod tests {
         assert_eq!(copy["start_claude"], "Start Claude Code");
         assert_eq!(copy["start_codex"], "Start Codex");
         assert_eq!(copy["start_opencode"], "Start OpenCode");
+        assert_eq!(
+            copy["sign_in_title"],
+            "Run Private AI in Claude Code, Codex or OpenCode"
+        );
         assert_eq!(
             copy["sign_in_scope"],
             "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
