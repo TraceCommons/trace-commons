@@ -87,7 +87,8 @@ final class HomeViewTests: XCTestCase {
         // credit is decided, else the pending figure under the same D6 gate.
         XCTAssertTrue(home.contains(
             "let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal, "
-                + "pending: freshRollup?.creditPending, credit: freshCredit)"))
+                + "pending: freshRollup?.creditPending, accepted: freshRollup?.allTime?.accepted, "
+                + "credit: freshCredit)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, "
                 + "detail: signIn ?? creditTile.detail, "
@@ -160,21 +161,29 @@ final class HomeViewTests: XCTestCase {
         let known = try DaemonDataDecoding.decoder().decode(
             DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
 
-        let undecided = HomeFormat.creditTile(final: 0, pending: 50.35, credit: known)
+        let undecided = HomeFormat.creditTile(final: 0, pending: 50.35, accepted: 3, credit: known)
         XCTAssertEqual(undecided.value, HomeFormat.points(50.35))
         XCTAssertEqual(undecided.detail, MonitorWords.pending)
-        XCTAssertEqual(HomeFormat.creditTile(final: nil, pending: 50.35, credit: nil).value, "—")
+        XCTAssertEqual(HomeFormat.creditTile(final: nil, pending: 50.35, accepted: nil, credit: nil).value, "—")
 
-        let decided = HomeFormat.creditTile(final: 48, pending: 2.35, credit: known)
+        let decided = HomeFormat.creditTile(final: 48, pending: 2.35, accepted: 3, credit: known)
         XCTAssertEqual(decided.value, HomeFormat.points(48))
         XCTAssertEqual(decided.detail, HomeFormat.creditPendingAccessory(2.35, condition: HomeFormat.pendingCondition(known)))
         XCTAssertNotEqual(decided.detail, MonitorWords.pending)
 
-        let settled = HomeFormat.creditTile(final: 48, pending: 0, credit: known)
+        let settled = HomeFormat.creditTile(final: 48, pending: 0, accepted: 3, credit: known)
         XCTAssertEqual(settled.value, HomeFormat.points(48))
         XCTAssertEqual(settled.detail, MonitorWords.final)
+        // Every accepted trace decided with no award (#1703: 0 final, 0
+        // pending) reads Final 0, never Pending.
+        let nothingEarned = HomeFormat.creditTile(final: 0, pending: 0, accepted: 22, credit: known)
+        XCTAssertEqual(nothingEarned.value, HomeFormat.points(0))
+        XCTAssertEqual(nothingEarned.detail, MonitorWords.final)
+        // With nothing accepted yet it is still the pending figure.
+        XCTAssertEqual(HomeFormat.creditTile(final: 0, pending: 0, accepted: 0, credit: known).detail,
+                       MonitorWords.pending)
         // Without the commons' statement, pending is not shown as a figure.
-        XCTAssertEqual(HomeFormat.creditTile(final: 48, pending: 2.35, credit: nil).detail, MonitorWords.final)
+        XCTAssertEqual(HomeFormat.creditTile(final: 48, pending: 2.35, accepted: 3, credit: nil).detail, MonitorWords.final)
     }
 
     private func creditSummary(reason: String?, pointsState: String = "unknown") throws -> DaemonData.CommonsCreditSummary {

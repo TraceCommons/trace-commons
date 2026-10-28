@@ -696,7 +696,8 @@ final class HistoryParityTests: XCTestCase {
         let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
-            "HomeStatTile(label: HomeFormat.creditPendingWord, value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))",
+            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, credit: credit)",
+            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail)",
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))",
             "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))",
         ] {

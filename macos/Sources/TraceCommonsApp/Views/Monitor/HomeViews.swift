@@ -1384,8 +1384,13 @@ private struct HistoryStats: View {
         let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))
+                // The same figures as Home's Credit tile (#1708), so the two
+                // never disagree once credit is decided.
+                let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending,
+                                                       accepted: rollup?.allTime?.accepted,
+                                                       credit: credit)
+                HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
+                             detail: creditTile.detail)
                 HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
                 HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
             }
@@ -1660,7 +1665,9 @@ struct HomeAccountTiles: View {
                 // (#1703), with what is still pending under it; until then
                 // its pending figure, marked Pending, under D6.
                 let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal,
-                                                       pending: freshRollup?.creditPending, credit: freshCredit)
+                                                       pending: freshRollup?.creditPending,
+                                                       accepted: freshRollup?.allTime?.accepted,
+                                                       credit: freshCredit)
                 HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
                              detail: signIn ?? creditTile.detail,
                              systemImage: HomeStatIcons.credit, action: openPrivateAI)
@@ -1906,9 +1913,13 @@ enum HomeFormat {
     /// Home's Credit tile: History's Final figure once any credit is
     /// decided, with the pending accessory (or Final) under it; before
     /// that, the pending figure under D6, marked Pending.
-    static func creditTile(final: Double?, pending: Double?,
+    /// `accepted` is the rollup's accepted count: with traces accepted and
+    /// nothing pending, every one is decided, so the tile reads Final even
+    /// at 0 (traces scored with no award, #1703), never Pending.
+    static func creditTile(final: Double?, pending: Double?, accepted: Int?,
                            credit: DaemonData.CommonsCreditSummary?) -> (value: String, detail: String) {
-        guard let final, final > 0 else {
+        let allDecided = (accepted ?? 0) > 0 && (pending ?? 0) == 0 && final != nil
+        guard let final, final > 0 || allDecided else {
             return (pendingFigure(pending, credit: credit), MonitorWords.pending)
         }
         return (points(final),
