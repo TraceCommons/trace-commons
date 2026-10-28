@@ -138,9 +138,10 @@ final class DesignRulings20261022Tests: XCTestCase {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("drillButton(\"sessions\")"), "the Sessions figure drills again")
         XCTAssertFalse(overview.contains("if model.drills(\"sessions\") { GlassChevron() }"))
-        XCTAssertTrue(overview.contains("header(overview)\n                    sessionsBreakdown\n"))
+        XCTAssertTrue(overview.contains("header(overview)\n                    sessionsBreakdown(overview)\n"))
         XCTAssertFalse(overview.contains("model.counterInputs"))
-        let breakdown = try Self.section("    private var sessionsBreakdown: some View {", in: overview)
+        let breakdown = try Self.section("    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {",
+                                         in: overview)
         XCTAssertTrue(breakdown.contains("if !sessions.rows.isEmpty {"))
         XCTAssertTrue(breakdown.contains("let inputs = model.sessionsInputs, !inputs.sessions.isEmpty"))
     }
