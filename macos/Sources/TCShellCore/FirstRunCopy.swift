@@ -207,10 +207,23 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let theCommons: String
         /// Under Automatic before sign-in.
         public let automaticAfterSignIn: String
+        /// The two equal buttons above the optional uses.
+        public let allowAll: String
+        public let onlyRequired: String
+        /// The collapsed section holding the required use; `{title}` is its
+        /// title.
+        public let alwaysOn: String
+        /// The optional use that earns credit, shown first, with
+        /// `creditRequired` under it.
+        public let creditScope: String
+        public let creditRequired: String
     }
 
     /// Traces: what the watched tools' traces could earn.
     public struct Traces: Decodable, Equatable, Sendable {
+        /// While the use that earns credit is off, and the link to Uses.
+        public let noCredit: String
+        public let backToUses: String
         public let titleLight: String
         public let titleBold: String
         public let onThisMac: String
