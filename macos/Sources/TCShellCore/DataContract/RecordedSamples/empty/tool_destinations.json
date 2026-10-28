@@ -97,7 +97,7 @@
   ],
   "managed_sessions": [],
   "managed_copy": {
-    "title": "My Private AI sessions",
+    "title": "Managed sessions",
     "collection_account_busy": "Finish the existing session for this account before starting one with trace collection.",
     "collect_managed_trace": "Collect trace for review",
     "managed_collection_scope": "Saves this session’s trace locally after it ends. Your existing review and contribution settings still apply.",

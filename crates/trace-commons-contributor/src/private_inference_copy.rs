@@ -95,8 +95,7 @@
 //! # The second exception: the subtitle
 //!
 //! The owner ruled on 2026-10-27 (#1674) that [`SUBTITLE`] may say "Add a
-//! privacy layer to AI models you are already using." On 2026-10-28 the
-//! product owner added "It uses your NEAR AI credit." after it. It is the one
+//! privacy layer to AI models you are already using." It is the one
 //! sentence on this surface that uses the word, it is pinned verbatim by
 //! `the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer`, and it is not a
 //! precedent: any other sentence claiming privacy stays unwriteable.
@@ -116,13 +115,7 @@
 pub const DESTINATION: &str = "Private AI";
 
 /// The one line under the destination's title saying what it is for.
-pub const SUBTITLE: &str =
-    "Add a privacy layer to AI models you are already using. It uses your NEAR AI credit.";
-
-/// The subtitle's second sentence, the one place this surface may say
-/// "credit" (product owner, 2026-10-28): Private AI is paid for with the
-/// NEAR AI credit that contributed traces earn. Pinned with [`SUBTITLE`].
-pub const SUBTITLE_CREDIT: &str = "It uses your NEAR AI credit.";
+pub const SUBTITLE: &str = "Add a privacy layer to AI models you are already using.";
 
 /// The offer’s heading names the intended provider. The body explains that
 /// existing provider connections are not changed by enabling the service.
@@ -5247,9 +5240,8 @@ mod tests {
     fn the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer() {
         assert_eq!(
             SUBTITLE,
-            "Add a privacy layer to AI models you are already using. It uses your NEAR AI credit."
+            "Add a privacy layer to AI models you are already using."
         );
-        assert!(SUBTITLE.ends_with(SUBTITLE_CREDIT));
         let source = include_str!("private_inference_copy.rs");
         let region = source
             .split_once("PRIVATE-INFERENCE-SURFACE-BEGIN")
@@ -5458,8 +5450,7 @@ mod tests {
                 let text = text
                     .replace(DESTINATION, "")
                     .replace("Route AI requests through NEAR AI", "")
-                    .replace(OFFER_LEARN_MORE, "")
-                    .replace(SUBTITLE_CREDIT, "");
+                    .replace(OFFER_LEARN_MORE, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"
