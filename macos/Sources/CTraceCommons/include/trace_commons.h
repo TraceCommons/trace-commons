@@ -2658,6 +2658,12 @@ char*       tc_payout_link_copy_json(void);
  */
 char*       tc_account_devices_copy_json(void);
 
+/* The words for adding Train coding models to traces already sent
+ * (consent_copy::sent_traces_training_copy), every one a draft for owner
+ * review. Count templates carry {count}. NULL only on a caught panic.
+ */
+char*       tc_sent_traces_training_copy_json(void);
+
 /* The Flow 1 grant screens' sentences for the configuration in config_dir
  * (consent_copy::automatic_contribution_copy). The core chooses the
  * disclosure: exactly one of patterns_only and model_scrubbed is present.

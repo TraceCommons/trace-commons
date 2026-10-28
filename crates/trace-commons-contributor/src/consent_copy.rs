@@ -2677,6 +2677,116 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Adding Train coding models to traces already sent (owner decisions
+// 2026-10-28). A trace sent without it earned no scoring award; the person
+// may add the use afterwards, to all of those traces or to one.
+//
+// Every string here is DRAFT, NEEDS APPROVAL: none is approved until the
+// owner signs it off. Templates carry `{count}`, the number of traces,
+// which a shell fills ([`render_count`]). The sheet's two buttons carry
+// equal weight and neither is preselected.
+
+/// DRAFT, NEEDS APPROVAL. The sheet's title.
+pub const SENT_TRACES_TRAINING_TITLE: &str = "Sent without model training";
+/// DRAFT, NEEDS APPROVAL. The sheet's body, for one trace.
+pub const SENT_TRACES_TRAINING_BODY_ONE: &str =
+    "1 trace was sent without Train coding models, so it earned no credit.";
+/// DRAFT, NEEDS APPROVAL. The sheet's body, for `{count}` traces.
+pub const SENT_TRACES_TRAINING_BODY_OTHER: &str =
+    "{count} traces were sent without Train coding models, so they earned no credit.";
+/// DRAFT, NEEDS APPROVAL. Beside the buttons: what allowing changes, and
+/// from when.
+pub const SENT_TRACES_TRAINING_SCOPE: &str =
+    "Allowing adds that one use to them from today and changes nothing else.";
+/// DRAFT, NEEDS APPROVAL. Adds the use to every trace the body counts.
+pub const SENT_TRACES_TRAINING_ALLOW_BUTTON: &str = "Allow";
+/// DRAFT, NEEDS APPROVAL. The allow button's accessibility name.
+pub const SENT_TRACES_TRAINING_ALLOW_ACCESSIBILITY_NAME: &str =
+    "Allow Train coding models for {count} sent traces";
+/// DRAFT, NEEDS APPROVAL. Closes the sheet and changes nothing.
+pub const SENT_TRACES_TRAINING_NOT_NOW_BUTTON: &str = "Not now";
+/// DRAFT, NEEDS APPROVAL. The not-now button's accessibility name.
+pub const SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME: &str = "Keep sent traces as they are";
+/// DRAFT, NEEDS APPROVAL. The quiet line on the Insights card while such
+/// traces exist, for one trace.
+pub const SENT_TRACES_TRAINING_LINE_ONE: &str = "1 sent trace doesn't allow Train coding models.";
+/// DRAFT, NEEDS APPROVAL. The same line for `{count}` traces.
+pub const SENT_TRACES_TRAINING_LINE_OTHER: &str =
+    "{count} sent traces don't allow Train coding models.";
+/// DRAFT, NEEDS APPROVAL. Beside the line: opens the sheet.
+pub const SENT_TRACES_TRAINING_REVIEW_BUTTON: &str = "Review";
+/// DRAFT, NEEDS APPROVAL. The review button's accessibility name.
+pub const SENT_TRACES_TRAINING_REVIEW_ACCESSIBILITY_NAME: &str =
+    "Review sent traces without Train coding models";
+/// DRAFT, NEEDS APPROVAL. In the trace inspector, for one such trace.
+pub const SENT_TRACES_TRAINING_TRACE_LINE: &str =
+    "This trace was sent without Train coding models.";
+/// DRAFT, NEEDS APPROVAL. In the trace inspector: adds the use to this
+/// trace only.
+pub const SENT_TRACES_TRAINING_TRACE_BUTTON: &str = "Allow";
+/// DRAFT, NEEDS APPROVAL. The inspector button's accessibility name.
+pub const SENT_TRACES_TRAINING_TRACE_ACCESSIBILITY_NAME: &str =
+    "Allow Train coding models for this trace";
+/// DRAFT, NEEDS APPROVAL. A trace given the use whose credit has not
+/// landed yet.
+pub const SENT_TRACES_TRAINING_PENDING: &str = "Credit pending";
+/// DRAFT, NEEDS APPROVAL. The grant did not go through.
+pub const SENT_TRACES_TRAINING_FAILED: &str = "That didn't work, and nothing changed.";
+
+/// Every string for adding Train coding models to sent traces, in one
+/// payload, for the shells (`tc_sent_traces_training_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SentTracesTrainingCopy {
+    pub title: &'static str,
+    pub body_one: &'static str,
+    pub body_other: &'static str,
+    pub scope: &'static str,
+    pub allow_button: &'static str,
+    pub allow_accessibility_name: &'static str,
+    pub not_now_button: &'static str,
+    pub not_now_accessibility_name: &'static str,
+    pub line_one: &'static str,
+    pub line_other: &'static str,
+    pub review_button: &'static str,
+    pub review_accessibility_name: &'static str,
+    pub trace_line: &'static str,
+    pub trace_button: &'static str,
+    pub trace_accessibility_name: &'static str,
+    pub pending: &'static str,
+    pub failed: &'static str,
+}
+
+/// The words for adding Train coding models to sent traces.
+#[must_use]
+pub fn sent_traces_training_copy() -> SentTracesTrainingCopy {
+    SentTracesTrainingCopy {
+        title: SENT_TRACES_TRAINING_TITLE,
+        body_one: SENT_TRACES_TRAINING_BODY_ONE,
+        body_other: SENT_TRACES_TRAINING_BODY_OTHER,
+        scope: SENT_TRACES_TRAINING_SCOPE,
+        allow_button: SENT_TRACES_TRAINING_ALLOW_BUTTON,
+        allow_accessibility_name: SENT_TRACES_TRAINING_ALLOW_ACCESSIBILITY_NAME,
+        not_now_button: SENT_TRACES_TRAINING_NOT_NOW_BUTTON,
+        not_now_accessibility_name: SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME,
+        line_one: SENT_TRACES_TRAINING_LINE_ONE,
+        line_other: SENT_TRACES_TRAINING_LINE_OTHER,
+        review_button: SENT_TRACES_TRAINING_REVIEW_BUTTON,
+        review_accessibility_name: SENT_TRACES_TRAINING_REVIEW_ACCESSIBILITY_NAME,
+        trace_line: SENT_TRACES_TRAINING_TRACE_LINE,
+        trace_button: SENT_TRACES_TRAINING_TRACE_BUTTON,
+        trace_accessibility_name: SENT_TRACES_TRAINING_TRACE_ACCESSIBILITY_NAME,
+        pending: SENT_TRACES_TRAINING_PENDING,
+        failed: SENT_TRACES_TRAINING_FAILED,
+    }
+}
+
+/// `template` with `{count}` filled in.
+#[must_use]
+pub fn render_count(template: &str, count: u64) -> String {
+    template.replace("{count}", &count.to_string())
+}
+
 /// `template` with `{org_name}` filled in.
 #[must_use]
 pub fn render_org_name(template: &str, org_name: &str) -> String {
@@ -2707,6 +2817,55 @@ mod tests {
 
     /// The command the Devices card shows is the one the CLI parses, and
     /// every template carries its placeholder.
+    /// Short, plain and draft-marked: one sentence each, no "go back", the
+    /// two sheet choices the same length class, and every count template
+    /// carries its placeholder.
+    #[test]
+    fn the_sent_traces_training_copy_is_short_and_counted() {
+        let copy = sent_traces_training_copy();
+        for template in [
+            copy.body_other,
+            copy.line_other,
+            copy.allow_accessibility_name,
+        ] {
+            assert!(template.contains("{count}"), "{template}");
+        }
+        for one in [copy.body_one, copy.line_one] {
+            assert!(!one.contains("{count}") && one.starts_with("1 "), "{one}");
+        }
+        let value = serde_json::to_value(copy).unwrap();
+        for text in value.as_object().unwrap().values() {
+            let text = text.as_str().unwrap();
+            assert!(!text.trim().is_empty());
+            assert!(!text.to_lowercase().contains("go back"), "{text}");
+            assert!(text.matches(". ").count() == 0, "one sentence: {text}");
+        }
+        assert!(copy.allow_button.split_whitespace().count() <= 2);
+        assert!(copy.not_now_button.split_whitespace().count() <= 2);
+        assert!(copy.trace_button.split_whitespace().count() <= 2);
+        assert_eq!(
+            render_count(copy.body_other, 22),
+            "22 traces were sent without Train coding models, so they earned no credit."
+        );
+        // Every constant in the block is marked a draft in its doc comment.
+        let source = include_str!("consent_copy.rs");
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut declared = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if !line.starts_with("pub const SENT_TRACES_TRAINING_") {
+                continue;
+            }
+            declared += 1;
+            let doc = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with("///"))
+                .any(|line| line.contains("DRAFT, NEEDS APPROVAL"));
+            assert!(doc, "not marked a draft: {line}");
+        }
+        assert_eq!(declared, 17);
+    }
+
     #[test]
     fn the_devices_copy_names_the_real_command() {
         let copy = account_devices_copy();
