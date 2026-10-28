@@ -7285,6 +7285,8 @@ async fn score_shadow_credit_decision(
         chunk_count: int("chunk_count").map(|v| v as i32),
         total_chunk_count: int("total_chunk_count").map(|v| v as i32),
         chunks_capped: evidence["chunks_capped"].as_bool(),
+        perplexity_passed: None,
+        novelty_passed: None,
     }
 }
 
