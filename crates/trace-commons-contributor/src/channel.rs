@@ -98,6 +98,7 @@ mod values {
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons.near-ai.credentials";
     pub const KEYCHAIN_ACCOUNT_SERVICE: &str = "trace-commons.account.credentials";
     pub const KEYCHAIN_INSIGHTS_SERVICE: &str = "trace-commons.insights.digest-key";
+    pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str = "trace-commons.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
     pub const PASSKEY_RP_ID: &str = "tracecommons.ai";
@@ -133,6 +134,8 @@ mod values {
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons-staging.near-ai.credentials";
     pub const KEYCHAIN_ACCOUNT_SERVICE: &str = "trace-commons-staging.account.credentials";
     pub const KEYCHAIN_INSIGHTS_SERVICE: &str = "trace-commons-staging.insights.digest-key";
+    pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str =
+        "trace-commons-staging.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = concat!("https://ingest.", staging_host!());
     pub const PASSKEY_RP_ID: &str = staging_host!();
@@ -193,6 +196,7 @@ pub const KEYCHAIN: KeychainIdentity = KeychainIdentity {
     cloud_service: values::KEYCHAIN_CLOUD_SERVICE,
     account_service: values::KEYCHAIN_ACCOUNT_SERVICE,
     insights_digest_key_service: values::KEYCHAIN_INSIGHTS_SERVICE,
+    claude_usage_service: values::KEYCHAIN_CLAUDE_USAGE_SERVICE,
 };
 
 /// The native app's account API: the one origin trusted before any config

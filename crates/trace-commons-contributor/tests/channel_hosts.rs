@@ -916,6 +916,7 @@ fn the_production_identity_values_never_change() {
             cloud_service: "trace-commons.near-ai.credentials",
             account_service: "trace-commons.account.credentials",
             insights_digest_key_service: "trace-commons.insights.digest-key",
+            claude_usage_service: "trace-commons.claude-usage.token-cache",
         }
     );
     assert_eq!(

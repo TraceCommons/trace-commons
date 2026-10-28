@@ -2,6 +2,7 @@
 //! stay in memory and never cross IPC; the display reads a bounded snapshot.
 
 mod claude;
+mod claude_token_cache;
 mod codex_oauth;
 pub(super) mod providers;
 
@@ -159,6 +160,9 @@ pub(crate) struct UsageService {
     collector: Collector,
     changed: tokio::sync::Notify,
     timeout: std::time::Duration,
+    /// The app's own copy of Claude usage access tokens; see
+    /// `claude_token_cache`. Cleared on unenroll and when Claude is off.
+    token_cache: Arc<claude_token_cache::TokenCache>,
 }
 
 fn global_probe_permits() -> Arc<Semaphore> {
@@ -168,14 +172,20 @@ fn global_probe_permits() -> Arc<Semaphore> {
 
 impl Default for UsageService {
     fn default() -> Self {
+        let token_cache = Arc::new(claude_token_cache::TokenCache::for_build());
+        let deps = claude::Deps::for_build(Arc::clone(&token_cache));
         Self {
             state: Mutex::new(State::default()),
             permits: global_probe_permits(),
             changed: tokio::sync::Notify::new(),
-            collector: Arc::new(|login, interactive, lease| {
-                Box::pin(async move { providers::collect(&login, interactive, lease).await })
+            collector: Arc::new(move |login, interactive, lease| {
+                let deps = deps.clone();
+                Box::pin(
+                    async move { providers::collect_with(&login, interactive, lease, &deps).await },
+                )
             }),
             timeout: std::time::Duration::from_secs(240),
+            token_cache,
         }
     }
 }
@@ -680,20 +690,45 @@ fn schedule(
 }
 
 /// Called after a committed setting change; no provider I/O from this path.
+/// Turning Claude off deletes the cached Claude usage token, on its own
+/// thread because the OS store call may block.
 pub(super) fn settings_changed(shared: &DaemonShared) {
     synchronize(shared);
+    let claude_on = shared
+        .settings
+        .lock()
+        .map(|s| s.subscription_usage_claude_on)
+        .unwrap_or(false);
+    if !claude_on {
+        clear_token_cache(&shared.subscription_usage);
+    }
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
 }
 
 /// Unenroll discards every cached reading and invalidates all in-flight generations.
 /// Available native Claude profiles may reappear later, with no retained reading.
+/// The cached Claude usage token goes too.
 pub(super) fn forget_readings(shared: &DaemonShared) {
     if let Ok(mut state) = shared.subscription_usage.state.lock() {
         state.entries.clear();
         state.next_generation = state.next_generation.wrapping_add(1);
     }
+    clear_token_cache(&shared.subscription_usage);
     shared.subscription_usage.changed.notify_waiters();
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
+}
+
+fn clear_token_cache(service: &UsageService) {
+    let cache = Arc::clone(&service.token_cache);
+    // The epoch moves now, so a Refresh still in flight cannot write its
+    // token back after this; the store delete itself runs off this thread.
+    cache.begin_clear();
+    let spawned = std::thread::Builder::new()
+        .name("tc-claude-usage-cache-clear".into())
+        .spawn(move || cache.clear());
+    if spawned.is_err() {
+        tracing::warn!("claude usage token cache clear could not start");
+    }
 }
 
 /// Background ticks synchronize metadata only; explicit Refresh owns all probes.
@@ -1339,11 +1374,64 @@ mod integration_tests {
             collector,
             changed: tokio::sync::Notify::new(),
             timeout,
+            token_cache: Arc::new(claude_token_cache::TokenCache::for_build()),
         });
         Arc::get_mut(&mut shared).unwrap().dev_dry_run = dev_dry_run;
         shared.adopt_runtime();
         shared.adopt_self();
         (dir, shared)
+    }
+
+    fn cached(shared: &DaemonShared) -> bool {
+        shared
+            .subscription_usage
+            .token_cache
+            .lookup("login", "binding", Utc::now())
+            .is_some()
+    }
+    fn wait_until_uncached(shared: &DaemonShared) -> bool {
+        for _ in 0..200 {
+            if !cached(shared) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+    fn remember(shared: &DaemonShared) {
+        let cache = &shared.subscription_usage.token_cache;
+        cache.remember(
+            cache.epoch(),
+            "login",
+            "binding",
+            (Utc::now() + Duration::hours(1)).timestamp_millis(),
+            b"fixture-token",
+        );
+        assert!(cached(shared));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unenroll_and_turning_claude_off_delete_the_cached_claude_token() {
+        let (_dir, shared) = shared(Arc::new(|_, _, _| {
+            Box::pin(async {
+                Err(ProbeFailure {
+                    reason: "unavailable",
+                    identity: None,
+                })
+            })
+        }));
+        remember(&shared);
+        // Another setting changing while Claude stays on keeps it.
+        settings_changed(&shared);
+        assert!(cached(&shared));
+
+        forget_readings(&shared);
+        assert!(wait_until_uncached(&shared));
+
+        remember(&shared);
+        shared.settings.lock().unwrap().subscription_usage_claude_on = false;
+        settings_changed(&shared);
+        assert!(wait_until_uncached(&shared));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

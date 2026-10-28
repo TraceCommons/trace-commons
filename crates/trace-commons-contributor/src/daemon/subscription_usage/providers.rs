@@ -30,17 +30,27 @@ const MAX_BYTES: usize = 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(test)]
 pub(super) async fn collect(
     login: &LoginSpec,
     interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<Reading, ProbeFailure> {
+    let deps = super::claude::Deps::for_build(Arc::new(
+        super::claude_token_cache::TokenCache::for_build(),
+    ));
+    collect_with(login, interactive, lease, &deps).await
+}
+
+pub(super) async fn collect_with(
+    login: &LoginSpec,
+    interactive: bool,
+    lease: Arc<OwnedSemaphorePermit>,
+    claude: &super::claude::Deps,
+) -> Result<Reading, ProbeFailure> {
     match login.provider {
         Provider::Codex => collect_codex(login, interactive, lease).await,
-        Provider::Claude => {
-            super::claude::collect(login, interactive, lease, &super::claude::Deps::for_build())
-                .await
-        }
+        Provider::Claude => super::claude::collect(login, interactive, lease, claude).await,
     }
 }
 
