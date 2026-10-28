@@ -237,7 +237,8 @@ final class UsesScreenTests: XCTestCase {
     }
 
     /// Private AI is its own step (Ron, 2026-10-21), worded by the Private AI
-    /// copy; its switch stays disabled until the copy is there.
+    /// copy. It has no switch any more (owner, 2026-10-27), so nothing on it
+    /// can be turned on before the copy is there.
     func test_privateAIIsItsOwnStep() throws {
         XCTAssertFalse(try Self.source().contains("privateAICard"), "no Private AI card on Uses any more")
         let url = URL(fileURLWithPath: #filePath)
@@ -245,7 +246,7 @@ final class UsesScreenTests: XCTestCase {
             .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/PrivateAIScreen.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("model.privateInferenceCopy"))
-        XCTAssertTrue(source.contains(".disabled(privateAI == nil)"))
+        XCTAssertFalse(source.contains("Toggle("), "no switch on the step")
         XCTAssertTrue(source.contains("copy.privateAi.offerLead"))
     }
 

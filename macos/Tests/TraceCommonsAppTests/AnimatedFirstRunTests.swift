@@ -182,6 +182,33 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual((0..<3).map { PrivateAIScreenLayout.rowY($0, of: 3) }, [21, 101, 181])
     }
 
+    /// With no switch the diagram is what Private AI does (owner,
+    /// 2026-10-27): every tool's route runs into the N and one line runs
+    /// on to NEAR AI. No provider pills: a provider's pill on the N's row
+    /// sat on NEAR AI's, OpenCode has none, and NEAR AI floated unjoined.
+    @MainActor
+    func test_everyToolRoutesThroughTheNToNearAI() throws {
+        let screen = try MonitorNavigationTests.text("Views/FirstRun/PrivateAIScreen.swift")
+        XCTAssertFalse(screen.contains("tool.answersAt"), "no provider pills")
+        XCTAssertTrue(screen.contains("to: CGPoint(x: hub.x - 36, y: hub.y)"), "each tool into the N")
+        XCTAssertTrue(screen.contains("path.addLine(to: CGPoint(x: destination - half, y: hub.y))"),
+                      "the N on to NEAR AI's pill")
+        XCTAssertLessThanOrEqual(
+            PrivateAIScreenLayout.destinationX + PrivateAIScreenLayout.pillWidth / 2,
+            FirstRunStageLayout.canvas.width, "NEAR AI stays on the canvas")
+    }
+
+    /// The step has no switch (owner, 2026-10-27: it changed little). It
+    /// says what Private AI is, with Learn more; it never turns it on, so
+    /// setup leaves Private AI as it was and Settings turns it on.
+    @MainActor
+    func test_thePrivateAIStepHasNoSwitch() throws {
+        let screen = try MonitorNavigationTests.text("Views/FirstRun/PrivateAIScreen.swift")
+        XCTAssertFalse(screen.contains("Toggle("))
+        XCTAssertFalse(screen.contains("runner.state.privateAI = "))
+        XCTAssertTrue(screen.contains("copy.privateAi.learnMore"))
+    }
+
     // MARK: The stage
 
     /// The scan plays once per first run, and not at all under Reduce Motion.
