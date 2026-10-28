@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(
             tags,
             [
-                ("debugging_evaluation", "required to share"),
+                ("debugging_evaluation", "always on"),
                 ("benchmark_only", "data use"),
                 ("ranking_training", "data use"),
                 ("model_training", "data use"),

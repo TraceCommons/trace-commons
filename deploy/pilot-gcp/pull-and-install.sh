@@ -112,9 +112,11 @@ install_one() {
     local health="" _
     # Asked until it answers, for up to a minute: a first boot that applies
     # migrations is not listening yet (2026-10-27, V139 and V140 on staging,
-    # rolled a good build back on one refused connection).
+    # rolled a good build back on one refused connection). Each ask is
+    # bounded too, so an ingest that accepts the connection and never
+    # answers cannot hang the install.
     for _ in $(seq 1 30); do
-      health="$(curl -sfS http://127.0.0.1:3907/health || true)"
+      health="$(curl -sfS --connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health || true)"
       [ -n "$health" ] && break
       sleep 2
     done
