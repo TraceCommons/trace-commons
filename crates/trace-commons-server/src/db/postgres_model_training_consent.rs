@@ -20,6 +20,16 @@ use trace_commons_protocol::model_training_consent::ModelTrainingConsentOutcome;
 /// The stored value of the one scope, and the one use, this path adds.
 const MODEL_TRAINING: &str = "model_training";
 
+/// The withheld reason a grant re-runs: the award refused for lack of the
+/// use (ingest's `policy_mismatch`).
+const POLICY_MISMATCH: &str = "policy_mismatch";
+
+/// The reason the award emitter records when its checks fail outright
+/// (ingest's `CREDIT_CHECK_ERROR_LABEL`). A re-run that failed that way left
+/// this on the row; matching it lets a repeat grant try again, and every
+/// check reapplies.
+const CREDIT_CHECK_ERROR: &str = "credit_check_error";
+
 /// A trace (aliased `s`) that may take the use: `accepted`, and not revoked,
 /// purged, expired or withdrawn -- by `withdrawn_at`, a `trace_withdrawals`
 /// row, or a withdrawn source session.
@@ -213,10 +223,11 @@ impl PgBackend {
         };
         let withheld_for_the_use = row.get::<_, bool>("perplexity_passed")
             && row.get::<_, bool>("novelty_passed")
-            && row
-                .get::<_, Option<String>>("credit_withheld_reason")
-                .as_deref()
-                == Some("policy_mismatch")
+            && matches!(
+                row.get::<_, Option<String>>("credit_withheld_reason")
+                    .as_deref(),
+                Some(POLICY_MISMATCH | CREDIT_CHECK_ERROR)
+            )
             && row.get::<_, String>("source") == "legacy_gate";
         if !withheld_for_the_use {
             return Ok(None);

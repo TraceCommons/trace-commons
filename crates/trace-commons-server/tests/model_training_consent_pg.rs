@@ -418,7 +418,7 @@ async fn withheld_award_lookup_finds_only_a_latest_legacy_policy_mismatch() {
     let tenant = format!("mtc-{}", Uuid::new_v4());
     let now = Utc::now();
     let mut ids = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         ids.push(
             admin
                 .upsert_trace_submission(submission(&tenant, "owned", TraceCorpusStatus::Accepted))
@@ -467,6 +467,12 @@ async fn withheld_award_lookup_finds_only_a_latest_legacy_policy_mismatch() {
         .await
         .unwrap();
     // 4: never scored.
+    // 5: an earlier re-run whose credit checks failed outright: retried.
+    let check_error = gate_decision(ids[5], true, Some("credit_check_error"), now);
+    admin
+        .insert_trace_gate_decision(&tenant, check_error.clone())
+        .await
+        .unwrap();
 
     let found = runtime
         .withheld_policy_mismatch_gate_award(&tenant, ids[0])
@@ -478,7 +484,15 @@ async fn withheld_award_lookup_finds_only_a_latest_legacy_policy_mismatch() {
     assert_eq!(found.gate_policy_version, withheld.gate_policy_version);
     assert_eq!(found.vector_entry_id, withheld.vector_entry_id);
     assert!(!found.chunks_capped);
-    for id in &ids[1..] {
+    assert_eq!(
+        runtime
+            .withheld_policy_mismatch_gate_award(&tenant, ids[5])
+            .await
+            .unwrap()
+            .map(|award| award.decision_id),
+        Some(check_error.decision_id)
+    );
+    for id in &ids[1..5] {
         assert!(
             runtime
                 .withheld_policy_mismatch_gate_award(&tenant, *id)

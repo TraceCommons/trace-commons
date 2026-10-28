@@ -132,20 +132,40 @@ pub(crate) async fn grant_handler(
                 award_withheld_reason: None,
             },
             ModelTrainingConsentOutcome::Granted | ModelTrainingConsentOutcome::AlreadyGranted => {
-                // The file record is what the award reads when database
-                // reads are off. A repeat grant mirrors it too, so a write
-                // that failed after the database committed is repaired by
-                // asking again.
-                mirror_grant_to_file_record(state.as_ref(), &tenant.tenant_id, row.submission_id)
-                    .map_err(internal_error)?;
-                if row.outcome == ModelTrainingConsentOutcome::Granted {
-                    append_grant_audit(state.as_ref(), &tenant, row.submission_id)
-                        .await
-                        .map_err(internal_error)?;
+                // The database grant has committed for every row, so each
+                // follow-up runs on its own and a failure on one trace never
+                // skips the next one's audit. The audit row comes first. A
+                // trace whose follow-up failed is answered `pending` and
+                // logged hash-only; asking again repairs the file record
+                // and re-runs the award.
+                let mut follow_up_failed = false;
+                if row.outcome == ModelTrainingConsentOutcome::Granted
+                    && let Err(error) =
+                        append_grant_audit(state.as_ref(), &tenant, row.submission_id).await
+                {
+                    log_follow_up_failure("audit", &tenant.tenant_id, row.submission_id, &error);
+                    follow_up_failed = true;
                 }
-                let (award, award_withheld_reason) =
-                    rerun_withheld_award(state.as_ref(), &tenant.tenant_id, row.submission_id)
-                        .await;
+                // The file record is what the award reads when database
+                // reads are off. A repeat grant mirrors it too.
+                if let Err(error) = mirror_grant_to_file_record(
+                    state.as_ref(),
+                    &tenant.tenant_id,
+                    row.submission_id,
+                ) {
+                    log_follow_up_failure(
+                        "file_record",
+                        &tenant.tenant_id,
+                        row.submission_id,
+                        &error,
+                    );
+                    follow_up_failed = true;
+                }
+                let (award, award_withheld_reason) = if follow_up_failed {
+                    (ModelTrainingAwardState::Pending, None)
+                } else {
+                    rerun_withheld_award(state.as_ref(), &tenant.tenant_id, row.submission_id).await
+                };
                 ModelTrainingConsentGrantItem {
                     submission_id: row.submission_id,
                     outcome: row.outcome,
@@ -166,6 +186,21 @@ pub(crate) async fn grant_handler(
         results,
         remaining_eligible,
     }))
+}
+
+fn log_follow_up_failure(
+    step: &'static str,
+    tenant_id: &str,
+    submission_id: Uuid,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        step,
+        error_hash = %safe_runtime_error_hash(error),
+        submission_hash = %sha256_prefixed(&submission_id.to_string()),
+        tenant_hash = %sha256_prefixed(tenant_id),
+        "Trace Commons model training grant recorded; a follow-up step failed"
+    );
 }
 
 fn consent_database(state: &AppState) -> ApiResult<&Arc<dyn Database>> {

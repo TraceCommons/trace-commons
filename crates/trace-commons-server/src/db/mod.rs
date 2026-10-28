@@ -1846,7 +1846,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
 
     /// The submission's latest gate decision when it is a legacy-gate
     /// decision that passed both floors and whose scoring award was withheld
-    /// as `policy_mismatch`: the award a model-training grant re-runs.
+    /// as `policy_mismatch` (or left at `credit_check_error` by a re-run whose
+    /// checks failed): the award a model-training grant re-runs.
     /// `None` otherwise (never scored, a floor failed, withheld for another
     /// reason, credited, or a pipeline Settle row).
     async fn withheld_policy_mismatch_gate_award(
