@@ -67,8 +67,9 @@ final class DesignRulings20261020Tests: XCTestCase {
                        "About $1.50 to $4.50 of inference in traces on this Mac")
     }
 
-    /// Home's groups are titled, in the owner's order and words: Private
-    /// AI, then Traces, then Account.
+    /// Home's groups are titled, in the owner's words. The order is the
+    /// 2026-10-28 ruling: Traces (with its hero) first, then Account, then
+    /// Private AI, below and smaller than Traces.
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -76,12 +77,14 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n            HomeSection(words?.sectionTraces) {"))
-        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let traces = try XCTUnwrap(home.range(of: "            HomeSection(words?.sectionTraces) {\n                tracesHero\n"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let privateAI = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n            privateAI\n"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
-        XCTAssertLessThan(privateAI.lowerBound, waiting.lowerBound)
+        XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
+        XCTAssertLessThan(account.lowerBound, privateAI.lowerBound)
         XCTAssertLessThan(account.lowerBound, credit.lowerBound)
         XCTAssertEqual(HomeSection<EmptyView>.titleType, GlassTabHeading<EmptyView>.titleType)
     }
@@ -107,9 +110,11 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(body.contains("glassCardWatermark"), "the sign-in card has an icon again")
         XCTAssertFalse(body.contains("Image(systemName:"), "the sign-in card has an icon again")
         XCTAssertFalse(home.contains("HomePrivateAIConnectCard"))
-        XCTAssertTrue(home.contains("HomeStatTile(label: MonitorWords.calls, value: HomeFormat.count(totals.calls),"))
-        XCTAssertTrue(home.contains(
-            "HomeStatTile(label: InferenceWords.proof(.verified), value: HomeFormat.count(totals.verified),"))
+        // Signed in: one slim row, not tiles (owner, 2026-10-28: smaller
+        // than Traces).
+        XCTAssertTrue(home.contains("(MonitorWords.calls, HomeFormat.count(totals.calls)),"))
+        XCTAssertTrue(home.contains("(InferenceWords.proof(.verified), HomeFormat.count(totals.verified)),"))
+        XCTAssertFalse(home.contains("HomeStatTile(label: MonitorWords.calls"), "Private AI is tiles again")
         XCTAssertFalse(home.contains("answerPrivateInferenceOffer"), "Home turns Private AI on in one press")
         // No store, or one not read yet: dashes, never zero.
         let none = HomePrivateAI.totals(nil)
