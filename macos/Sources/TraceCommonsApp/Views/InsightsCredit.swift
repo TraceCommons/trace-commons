@@ -167,7 +167,7 @@ struct InsightsCreditHeader: View {
                 if total.traces == 0 {
                     Text(InsightsOverviewWords.fill(text("analytics_credit_none"), ["n": days])).insightsNote()
                 } else {
-                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s8) {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(text("analytics_credit_spent")).insightsEyebrow()
                             Text(InsightsCreditWords.money(total.usdMicros)).insightsFigure()
