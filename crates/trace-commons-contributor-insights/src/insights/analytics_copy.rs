@@ -96,11 +96,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_claude_detail",
-        "Refresh uses this saved Claude Code sign-in to ask Anthropic for usage. macOS may ask for Claude Code-credentials. Always Allow grants continuing access to that sign-in; this app still reads it only on Refresh.",
+        "Reads your Claude Code sign-in only when you press Refresh. macOS may ask to allow access.",
     ),
     (
-        "analytics_subscriptions_claude_captured",
-        "Captured on Refresh. Refresh again after changing Claude accounts.",
+        "analytics_subscriptions_refresh_hint",
+        "Refresh to see your latest limits.",
     ),
     (
         "analytics_subscriptions_refresh_login_accessibility",
@@ -156,7 +156,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_read_detail",
         "Enable usage reading in Settings; only Refresh asks the native app for usage.",
     ),
-    ("analytics_subscriptions_setting_codex", "Read Codex usage"),
+    // Switch labels follow CodexBar's "Show ... usage" (2026-10-27).
+    ("analytics_subscriptions_setting_codex", "Show Codex usage"),
+    (
+        "analytics_subscriptions_setting_claude",
+        "Show Claude Code usage",
+    ),
     (
         "analytics_subscriptions_codex_detail",
         "Reads your Codex sign-in only when you press Refresh.",

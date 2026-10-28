@@ -498,8 +498,13 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
     let enabled = shared
         .settings
         .lock()
-        .map(|s| [s.subscription_usage_codex_enabled, true])
-        .unwrap_or([false, true]);
+        .map(|s| {
+            [
+                s.subscription_usage_codex_enabled,
+                s.subscription_usage_claude_on,
+            ]
+        })
+        .unwrap_or([false, false]);
     let mut logins = Vec::new();
     // Executable discovery is deferred to explicit refresh. Background work
     // only stats native files; it never reads auth/config contents or Keychain.

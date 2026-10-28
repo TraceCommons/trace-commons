@@ -687,9 +687,15 @@ pub struct DaemonSettings {
     #[serde(default = "default_insights_recap_card_enabled")]
     pub insights_recap_card_enabled: bool,
 
-    /// Explicit permission to read native Codex subscription usage; display only.
-    #[serde(default)]
+    /// Whether Refresh may read native Codex subscription usage; display
+    /// only. On by default since 2026-10-27 (owner): like Claude, nothing is
+    /// read until Refresh. A saved `false` stays off; no migration.
+    #[serde(default = "default_subscription_usage_on")]
     pub subscription_usage_codex_enabled: bool,
+    /// Whether Refresh may read Claude subscription usage. On by default; the
+    /// Settings switch turns it off (owner, 2026-10-27).
+    #[serde(default = "default_subscription_usage_on")]
+    pub subscription_usage_claude_on: bool,
     /// Legacy cleanup flag; Claude usage no longer requires an opt-in.
     #[serde(default)]
     pub subscription_usage_claude_enabled: bool,
@@ -1321,6 +1327,10 @@ fn default_insights_counter_pass() -> bool {
     crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
 }
 
+fn default_subscription_usage_on() -> bool {
+    true
+}
+
 fn default_insights_recap_card_enabled() -> bool {
     crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
 }
@@ -1390,7 +1400,8 @@ impl Default for DaemonSettings {
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
             insights_recap_card_enabled: default_insights_recap_card_enabled(),
-            subscription_usage_codex_enabled: false,
+            subscription_usage_codex_enabled: default_subscription_usage_on(),
+            subscription_usage_claude_on: default_subscription_usage_on(),
             subscription_usage_claude_enabled: false,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
@@ -2179,9 +2190,14 @@ pub fn apply_settings_object(
                 settings.insights_ledger_feed =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
-            // Current provider allowances; each reader is independently opt-in.
+            // Current provider allowances; each reader has its own switch,
+            // on by default, and reads only on Refresh.
             "subscription_usage_codex_enabled" => {
                 settings.subscription_usage_codex_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "subscription_usage_claude_on" => {
+                settings.subscription_usage_claude_on =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             "subscription_usage_claude_enabled" => {
@@ -3612,6 +3628,54 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(s.insights_counter_pass);
+    }
+
+    /// Codex usage reading starts on (owner, 2026-10-27), like Claude: it
+    /// reads credentials only on Refresh. A file that never had the field
+    /// loads it on, a saved `false` stays off, and turning it off sticks.
+    #[test]
+    fn codex_subscription_usage_starts_on_and_a_saved_off_stays_off() {
+        assert!(DaemonSettings::default().subscription_usage_codex_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_codex_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.subscription_usage_codex_enabled);
+        v.as_object_mut().unwrap().insert(
+            "subscription_usage_codex_enabled".into(),
+            serde_json::json!(false),
+        );
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.subscription_usage_codex_enabled);
+    }
+
+    /// Claude has its own switch, on by default, and an older file loads it on.
+    #[test]
+    fn claude_subscription_usage_has_a_switch_that_starts_on() {
+        assert!(DaemonSettings::default().subscription_usage_claude_on);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_claude_on");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.subscription_usage_claude_on);
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.subscription_usage_claude_on);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
     }
 
     /// The weekly summary card starts as its constant says (owner decisions

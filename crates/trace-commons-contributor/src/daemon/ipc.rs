@@ -6665,6 +6665,7 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
             // the top of this function.
             drop(commit);
             if req.params.get("subscription_usage_codex_enabled").is_some()
+                || req.params.get("subscription_usage_claude_on").is_some()
                 || req
                     .params
                     .get("subscription_usage_claude_enabled")
