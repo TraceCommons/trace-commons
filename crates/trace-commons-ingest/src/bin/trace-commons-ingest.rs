@@ -66190,13 +66190,17 @@ struct TraceCreditOutcome {
 ///
 /// In order:
 /// 1. A figure the row already carries wins, unchanged.
-/// 2. Any `NoveltyUtility` event: the final figure is their signed sum,
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): 0 and no
+///    reason, its `NoveltyUtility` events left out as the account summary
+///    leaves them out and settlement never pays them (owner, 2026-10-28:
+///    the trace, the summary and the payout agree).
+/// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
 ///    never below 0, with no reason.
-/// 3. A held or non-crediting status: still pending.
-/// 4. A decision with a withheld label, or one that failed a floor: 0 and
+/// 4. A held or non-crediting status: still pending.
+/// 5. A decision with a withheld label, or one that failed a floor: 0 and
 ///    the reason. A passing decision with neither is its award still being
 ///    written: pending.
-/// 5. No decision: pending.
+/// 6. No decision: pending.
 fn trace_credit_outcome(
     record: &TraceCommonsSubmissionRecord,
     decision: Option<&StorageTraceGateCreditDecisionRow>,
@@ -66209,6 +66213,13 @@ fn trace_credit_outcome(
     };
     if record.credit_points_final.is_some() {
         return pending;
+    }
+    if record.is_terminal() {
+        return TraceCreditOutcome {
+            credit_points_final: Some(0.0),
+            reason: None,
+            absorbs_scoring_awards: true,
+        };
     }
     let awards = events
         .iter()

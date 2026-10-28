@@ -95632,6 +95632,29 @@ mod gate_credit_display {
             assert!(waiting.credit_points_pending > 0.0, "{waiting:?}");
         }
 
+        /// A withdrawn or revoked trace shows no gate award, as the account
+        /// summary leaves it out and settlement never pays it (owner,
+        /// 2026-10-28): the trace, the summary and the payout agree.
+        #[test]
+        fn a_terminal_trace_shows_no_gate_award() {
+            for terminal in [TraceCorpusStatus::Revoked, TraceCorpusStatus::Expired] {
+                let mut record = accepted_record_with_estimate(3.0);
+                record.status = terminal;
+                assert!(record.is_terminal(), "{terminal:?}");
+                let decision = decision_with(&record, None, true, true);
+                let events = [legacy_scoring_award_event(
+                    record.submission_id,
+                    "gate-hash",
+                    5.0,
+                )];
+                let shown = status(&record, &events, Some(&decision));
+                assert_eq!(shown.credit_points_final, Some(0.0), "{terminal:?}");
+                assert_eq!(shown.credit_points_ledger, 0.0, "{terminal:?}");
+                assert_eq!(shown.credit_points_pending, 0.0, "{terminal:?}");
+                assert_eq!(shown.credit_outcome_reason, None, "{terminal:?}");
+            }
+        }
+
         /// Every withheld label the gate path stamps, and the floors it
         /// records with none, folds onto the contributor's closed set.
         #[test]
