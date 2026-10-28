@@ -1651,13 +1651,14 @@ struct HomeAccountTiles: View {
         let signIn = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
-                // The same pending figure as History's Credit tile, marked
-                // Pending (owner, 2026-10-28: Home said 0 while History said
-                // 50.3). Under D6 it is a figure only beside the commons'
-                // statement of what it waits on, a dash otherwise.
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit),
-                             detail: signIn ?? MonitorWords.pending,
+                // History's figures (owner, 2026-10-28: Home said 0 while
+                // History said 50.3): its Final once any credit is decided
+                // (#1703), with what is still pending under it; until then
+                // its pending figure, marked Pending, under D6.
+                let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal,
+                                                       pending: freshRollup?.creditPending, credit: freshCredit)
+                HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
+                             detail: signIn ?? creditTile.detail,
                              systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
@@ -1896,6 +1897,18 @@ enum HomeFormat {
         guard let pending, pending > 0, condition != nil,
               let template = MonitorWords.table?.shell.creditPendingAmount else { return nil }
         return template.replacingOccurrences(of: "{amount}", with: points(pending))
+    }
+
+    /// Home's Credit tile: History's Final figure once any credit is
+    /// decided, with the pending accessory (or Final) under it; before
+    /// that, the pending figure under D6, marked Pending.
+    static func creditTile(final: Double?, pending: Double?,
+                           credit: DaemonData.CommonsCreditSummary?) -> (value: String, detail: String) {
+        guard let final, final > 0 else {
+            return (pendingFigure(pending, credit: credit), MonitorWords.pending)
+        }
+        return (points(final),
+                creditPendingAccessory(pending, condition: pendingCondition(credit)) ?? MonitorWords.final)
     }
 
     /// Home's pending-credit tile and status-card link, in the core's words.
