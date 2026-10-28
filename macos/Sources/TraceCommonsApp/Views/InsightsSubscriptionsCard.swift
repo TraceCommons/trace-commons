@@ -10,11 +10,12 @@ struct InsightsSubscriptionsCard: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        if model.isVisible, !text("analytics_subscriptions_title").isEmpty {
+        // 2026-10-27: no title here (Settings keeps it); a refresh line instead.
+        if model.isVisible, !text("analytics_subscriptions_refresh_hint").isEmpty {
             VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                Text(text("analytics_subscriptions_title")).insightsTitle()
                 Text(text(model.supportedProviders.contains(where: { $0.provider == "claude" })
                           ? "analytics_subscriptions_captured_limits" : "analytics_subscriptions_current")).insightsCaption()
+                Text(text("analytics_subscriptions_refresh_hint")).insightsCaption()
                 VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                     if let failure = model.failureKey {
                         Text(text(failure)).insightsError()
@@ -37,16 +38,13 @@ struct InsightsSubscriptionsCard: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(alignment: .firstTextBaseline) {
                 Text(name).insightsHeading()
+                if provider.provider == "claude" {
+                    InsightsInfo(name, [text("analytics_subscriptions_claude_detail")])
+                }
                 if provider.provider == "codex", provider.logins.isEmpty {
                     Spacer(minLength: GlassTokens.Space.s3)
                     refreshButton(provider: provider.provider, login: nil, label: name)
                 }
-            }
-            if provider.provider == "claude" {
-                Text(text("analytics_subscriptions_claude_captured"))
-                    .insightsCaption().fixedSize(horizontal: false, vertical: true)
-                Text(text("analytics_subscriptions_claude_detail"))
-                    .insightsCaption().fixedSize(horizontal: false, vertical: true)
             }
             if provider.refreshing, provider.logins.isEmpty {
                 Text(text("analytics_subscriptions_reading")).insightsCaption()
