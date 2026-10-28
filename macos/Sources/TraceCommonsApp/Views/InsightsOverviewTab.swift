@@ -35,6 +35,12 @@ struct InsightsOverviewTab: View {
     /// NEAR AI credit used and left, account-wide (product owner,
     /// 2026-10-28); `nil` hides it.
     var credit: AnyView?
+    /// Where NEAR AI credit went (product owner, 2026-10-28): the week's
+    /// `near_ai_credit`; `nil` hides the card and the limits table's
+    /// spend.
+    var nearAiCredit: DaemonData.InsightsNearAiCredit?
+    /// NEAR AI credit left, as the balance card words it; `nil` is the dash.
+    var creditLeft: String?
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -60,12 +66,17 @@ struct InsightsOverviewTab: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
 
+    /// The limits table's NEAR AI row, while either figure exists.
+    private var limitsNearAi: InsightsLimitsRows.NearAi? {
+        nearAiCredit == nil && creditLeft == nil ? nil : .init(credit: nearAiCredit, creditLeft: creditLeft)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let credit { credit }
-                if let subscriptions, subscriptions.isVisible {
-                    InsightsLimitsTable(model: subscriptions, copy: copy)
+                if let subscriptions, subscriptions.isVisible || limitsNearAi != nil {
+                    InsightsLimitsTable(model: subscriptions, nearAi: limitsNearAi, copy: copy)
                 }
                 if let subscriptions { InsightsSubscriptionsCard(model: subscriptions, copy: copy) }
                 if let overview = model.shown {
@@ -76,6 +87,9 @@ struct InsightsOverviewTab: View {
                     // (owner, 2026-10-28).
                     header(overview)
                     if pickedDay != nil { sessionsBreakdown(overview) }
+                    // The week's top tasks by NEAR AI credit; Details has
+                    // the drill-down (product owner, 2026-10-28).
+                    if let nearAiCredit { InsightsCreditCard(credit: nearAiCredit, copy: copy) }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(overview.sources) { source in
                             harnessCard(source, overview: overview)

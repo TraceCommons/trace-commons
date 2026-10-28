@@ -6,16 +6,20 @@ import TCShellCore
 /// per measured login, with what is left of the session and weekly
 /// windows, the next reset and the pace, so accounts compare in one look.
 /// The subscription card under it keeps the detail. Only measured windows
-/// fill a cell; anything else is the core's dash.
+/// fill a cell; anything else is the core's dash. NEAR AI has its own row
+/// (product owner, 2026-10-28): no windows, but what was spent today and
+/// in the last 31 days from this Mac, and the account's credit left.
 struct InsightsLimitsTable: View {
     let model: SubscriptionUsageModel
+    var nearAi: InsightsLimitsRows.NearAi?
     let copy: [String: String]
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            let rows = InsightsLimitsRows.rows(model.supportedProviders, now: context.date, copy: copy)
+            let rows = InsightsLimitsRows.rows(model.supportedProviders, nearAi: nearAi, now: context.date,
+                                               copy: copy)
             if !rows.isEmpty {
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                     Text(text("analytics_limits_title")).insightsHeading()
@@ -34,6 +38,9 @@ struct InsightsLimitsTable: View {
                                 Text(row.weekly).monospacedDigit()
                                 Text(row.reset).monospacedDigit()
                                 Text(row.pace).foregroundStyle(row.paceWarns ? GlassStatus.outside.textColor : GlassColor.textPrimary)
+                                Text(row.spentToday).monospacedDigit()
+                                Text(row.spent31Days).monospacedDigit()
+                                Text(row.creditLeft).monospacedDigit()
                             }
                             .glassType(GlassTokens.TypeScale.label)
                             .accessibilityElement(children: .combine)
@@ -54,7 +61,16 @@ enum InsightsLimitsRows {
     static let headerKeys = [
         "analytics_limits_account", "analytics_limits_session_left", "analytics_limits_weekly_left",
         "analytics_limits_next_reset", "analytics_limits_pace",
+        "analytics_limits_spent_today", "analytics_limits_spent_31_days", "analytics_limits_credit_left",
     ]
+
+    /// NEAR AI's figures: the week's `near_ai_credit` (spent today and in
+    /// the last 31 days, calls from this Mac) and the balance card's
+    /// credit left, account-wide, as that card words it.
+    struct NearAi: Equatable {
+        let credit: DaemonData.InsightsNearAiCredit?
+        let creditLeft: String?
+    }
 
     struct Row: Equatable, Identifiable {
         let id: String
@@ -64,6 +80,9 @@ enum InsightsLimitsRows {
         let reset: String
         let pace: String
         let paceWarns: Bool
+        var spentToday = ""
+        var spent31Days = ""
+        var creditLeft = ""
     }
 
     enum Pace: Equatable {
@@ -71,8 +90,27 @@ enum InsightsLimitsRows {
         case runsOut(Date)
     }
 
-    static func rows(_ providers: [DaemonData.SubscriptionUsageProvider], now: Date,
+    static func rows(_ providers: [DaemonData.SubscriptionUsageProvider], nearAi: NearAi? = nil, now: Date,
                      copy: [String: String]) -> [Row] {
+        func text(_ key: String) -> String { copy[key] ?? "" }
+        let unknown = text("analytics_unavailable")
+        var rows = subscriptionRows(providers, now: now, copy: copy)
+        if let nearAi, nearAi.credit != nil || nearAi.creditLeft != nil {
+            let spent = { (window: DaemonData.InsightsCreditWindow?) in
+                window.map { InsightsCreditWords.amount($0.usdMicros, copy: copy) } ?? unknown
+            }
+            rows.append(Row(id: "near_ai", account: text("analytics_limits_near_ai"), session: unknown,
+                            weekly: unknown, reset: unknown, pace: unknown, paceWarns: false,
+                            spentToday: spent(nearAi.credit?.today), spent31Days: spent(nearAi.credit?.last31Days),
+                            creditLeft: nearAi.creditLeft ?? unknown))
+        }
+        return rows
+    }
+
+    /// One row per measured Codex or Claude login. Their spend columns are
+    /// the dash: a subscription reports no money here.
+    private static func subscriptionRows(_ providers: [DaemonData.SubscriptionUsageProvider], now: Date,
+                                         copy: [String: String]) -> [Row] {
         func text(_ key: String) -> String { copy[key] ?? "" }
         let unknown = text("analytics_unavailable")
         return providers.flatMap { provider -> [Row] in
@@ -99,7 +137,8 @@ enum InsightsLimitsRows {
                 if case .runsOut = paced { warns = true } else { warns = false }
                 return Row(id: provider.provider + ":" + login.id, account: account,
                            session: session.map(left) ?? unknown, weekly: weekly.map(left) ?? unknown,
-                           reset: reset, pace: paceWords, paceWarns: warns)
+                           reset: reset, pace: paceWords, paceWarns: warns,
+                           spentToday: unknown, spent31Days: unknown, creditLeft: unknown)
             }
         }
     }

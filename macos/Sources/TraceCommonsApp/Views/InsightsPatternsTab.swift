@@ -2,6 +2,7 @@ import Charts
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCShellCore
 
 /// Patterns ("Where tokens went") over one feed at a time: the daemon's
 /// counter pass (feed T) when it sent a week, the saved snapshots (feed S)
@@ -20,6 +21,9 @@ struct InsightsPatternsTab: View {
     let copy: [String: String]
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
+    /// The week's NEAR AI credit, for the drill-down that leads Details
+    /// (product owner, 2026-10-28); `nil` hides it.
+    var nearAiCredit: DaemonData.InsightsNearAiCredit?
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
     @State private var goalSource = "claude_code"
     @State private var goalNumber = ""
@@ -32,6 +36,12 @@ struct InsightsPatternsTab: View {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let patterns = model.shown {
                     header(patterns)
+                    // Details leads with where NEAR AI credit went, by task,
+                    // tool or folder (product owner, 2026-10-28). The
+                    // pattern cards stay under it: Overview's "Where tokens
+                    // went" and the lever's "Show the reads" open them here,
+                    // and the goals and re-read files live only here.
+                    if let nearAiCredit { InsightsCreditTable(credit: nearAiCredit, copy: copy) }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(patterns.cards) { card in
                             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {

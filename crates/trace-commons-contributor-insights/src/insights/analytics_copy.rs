@@ -213,6 +213,37 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_limits_pace", "Pace"),
     ("analytics_limits_on_pace", "On pace"),
     ("analytics_limits_runs_out", "Runs out in {time}"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): the limits
+    // table's NEAR AI row and its spend columns. Spent today and the last
+    // 31 days are NEAR AI calls from this Mac (the route tallies); credit
+    // left is the account's balance. Codex and Claude rows show the dash.
+    ("analytics_limits_near_ai", "NEAR AI"),
+    ("analytics_limits_spent_today", "Spent today"),
+    ("analytics_limits_spent_31_days", "Last 31 days"),
+    ("analytics_limits_credit_left", "Credit left"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): where NEAR AI
+    // credit went, on Overview (top tasks) and on Details (by task, tool
+    // or project folder; By tool and By project reuse the breakdown
+    // card's words). Folder names are shown on this Mac only.
+    ("analytics_credit_title", "Where credit went"),
+    (
+        "analytics_credit_scope",
+        "NEAR AI calls from this Mac this week.",
+    ),
+    (
+        "analytics_credit_unknown_note",
+        "Some calls had no charge, so their totals are unknown.",
+    ),
+    ("analytics_credit_empty", "No NEAR AI calls this week."),
+    ("analytics_credit_by_task", "By task"),
+    ("analytics_credit_spent", "Spent"),
+    ("analytics_credit_traces", "Traces"),
+    (
+        "analytics_credit_folders_local",
+        "Folder names stay on this Mac.",
+    ),
+    ("analytics_credit_tool_claude_code", "Claude Code"),
+    ("analytics_credit_tool_codex", "Codex"),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),
     ("analytics_subscriptions_weekly", "Weekly"),

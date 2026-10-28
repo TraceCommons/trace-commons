@@ -276,6 +276,7 @@ struct MonitorWindowView: View {
                                  subscriptions: model.subscriptionUsageModel,
                                  inspector: insightsInspector)
                     .credit(AnyView(InferenceBalanceSection()))
+                    .creditLeft(Self.creditLeft(model))
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -441,6 +442,18 @@ struct MonitorWindowView: View {
             // window has only just opened.
             Task { await traces.requestIdleOnly() }
         }
+    }
+
+    /// The NEAR AI credit left for Insights' limits table, worded as the
+    /// balance card words its figure; `nil` (the dash) while the balance
+    /// card shows a sentence instead.
+    @MainActor
+    static func creditLeft(_ model: AppModel) -> String? {
+        guard let copy = model.privateInferenceCopy,
+              BalanceSurface.showsFigures(model.balanceStatus, calls: model.balanceCalls),
+              case .figure(let amount) = BalanceSurface.remaining(
+                model.balanceStatus, copy: copy, calls: model.balanceCalls) else { return nil }
+        return amount
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a

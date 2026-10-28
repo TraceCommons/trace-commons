@@ -27,12 +27,22 @@ struct InsightsView: View {
     /// The NEAR AI credit card at the top of Overview (product owner,
     /// 2026-10-28): drawn by the caller, which has the app's model.
     private var credit: AnyView?
+    /// NEAR AI credit left, as the balance card words it, for the limits
+    /// table's NEAR AI row; `nil` is the dash.
+    private var creditLeft: String?
     @State private var source = "codex"
 
     /// Puts `view` at the top of Overview, as NEAR AI credit used and left.
     func credit(_ view: AnyView) -> InsightsView {
         var copy = self
         copy.credit = view
+        return copy
+    }
+
+    /// The limits table's NEAR AI credit left, as the balance card shows it.
+    func creditLeft(_ amount: String?) -> InsightsView {
+        var copy = self
+        copy.creditLeft = amount
         return copy
     }
 
@@ -163,9 +173,10 @@ struct InsightsView: View {
     }
 
     /// The tab container. No Spend tab: a tab that cannot be used is
-    /// hidden, not drawn greyed, and Insights shows no money (owner
-    /// decision D5). The models open and close with the container, not with
-    /// a tab.
+    /// hidden, not drawn greyed. Insights may show money (product owner,
+    /// 2026-10-28, over owner decision D5): NEAR AI credit on Overview and
+    /// Details, from the NEAR AI ledger's own charge. The models open and
+    /// close with the container, not with a tab.
     private var tabs: some View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
@@ -188,6 +199,8 @@ struct InsightsView: View {
                     models: model.modelAnswers,
                     subscriptions: subscriptionModel,
                     credit: credit,
+                    nearAiCredit: model.counterWeek?.nearAiCredit,
+                    creditLeft: creditLeft,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -201,7 +214,8 @@ struct InsightsView: View {
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
-                                    selectWeek: selectWeek)
+                                    selectWeek: selectWeek,
+                                    nearAiCredit: model.counterWeek?.nearAiCredit)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),

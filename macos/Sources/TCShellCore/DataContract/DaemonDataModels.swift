@@ -2207,6 +2207,10 @@ extension DaemonData {
         /// Why not, while `routingAvailable` is false: `ledger_feed_off`
         /// (the contributor turned the ledger feed off) or `no_ledger`.
         public let routingUnavailable: String?
+        /// Where NEAR AI credit went (product owner, 2026-10-28): `nil`
+        /// while routing is unavailable and from a daemon that predates it,
+        /// which is no figure, never zero.
+        public let nearAiCredit: InsightsNearAiCredit?
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -2225,6 +2229,82 @@ extension DaemonData {
             case changeVsLastWeek = "change_vs_last_week"
             case routingAvailable = "routing_available"
             case routingUnavailable = "routing_unavailable"
+            case nearAiCredit = "near_ai_credit"
+        }
+    }
+
+    /// `insights_week`'s `near_ai_credit`: the NEAR AI ledger's own charge
+    /// (`basis` `near_ai_ledger`), never a list price. `week` is the week
+    /// on screen; `today` and `last31Days` do not move with it.
+    public struct InsightsNearAiCredit: Codable, Equatable, Sendable {
+        public let basis: String
+        public let week: InsightsCreditWindow
+        public let today: InsightsCreditWindow
+        public let last31Days: InsightsCreditWindow
+
+        public init(basis: String = "near_ai_ledger", week: InsightsCreditWindow,
+                    today: InsightsCreditWindow, last31Days: InsightsCreditWindow) {
+            self.basis = basis; self.week = week; self.today = today; self.last31Days = last31Days
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, week, today
+            case last31Days = "last_31_days"
+        }
+    }
+
+    /// One window's NEAR AI charge: the calls through the NEAR AI route
+    /// that started in it. `usdMicros` is `nil` when any call had no
+    /// charge, never zero; a window with no call is a true 0. Only `week`
+    /// carries the groups.
+    public struct InsightsCreditWindow: Codable, Equatable, Sendable {
+        public let from: String
+        public let to: String
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+        public let byTask: [InsightsCreditGroup]?
+        public let byTool: [InsightsCreditGroup]?
+        public let byFolder: [InsightsCreditGroup]?
+
+        public init(from: String = "", to: String = "", usdMicros: Int64?, sessions: Int, calls: Int,
+                    callsWithoutCharge: Int, byTask: [InsightsCreditGroup]? = nil,
+                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil) {
+            self.from = from; self.to = to; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge
+            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case from, to, sessions, calls
+            case usdMicros = "usd_micros"
+            case callsWithoutCharge = "calls_without_charge"
+            case byTask = "by_task"
+            case byTool = "by_tool"
+            case byFolder = "by_folder"
+        }
+    }
+
+    /// One group of a week's charge. `key` is the inferred task, the tool
+    /// (`claude_code`, `codex`) or the folder's local label; `nil` is the
+    /// unknown group. Largest known charge first, unknown ones after.
+    public struct InsightsCreditGroup: Codable, Equatable, Sendable {
+        public let key: String?
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+
+        public init(key: String?, usdMicros: Int64?, sessions: Int = 1, calls: Int = 1, callsWithoutCharge: Int = 0) {
+            self.key = key; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case key, sessions, calls
+            case usdMicros = "usd_micros"
+            case callsWithoutCharge = "calls_without_charge"
         }
     }
 
