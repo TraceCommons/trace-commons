@@ -182,13 +182,17 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual((0..<3).map { PrivateAIScreenLayout.rowY($0, of: 3) }, [21, 101, 181])
     }
 
-    /// A tool level with the N (one tool, or the middle of three) used to
-    /// draw its provider's pill on NEAR AI's: "OpenAI" over "NEAR AI"
-    /// (owner, 2026-10-27). NEAR AI has a column of its own, right of the
-    /// providers, and both stay on the canvas.
-    func test_theNearAIPillNeverSitsOnAProvidersPill() {
-        let gap = PrivateAIScreenLayout.destinationX - PrivateAIScreenLayout.providerX
-        XCTAssertGreaterThanOrEqual(gap, PrivateAIScreenLayout.pillWidth + 8, "the two columns do not touch")
+    /// With no switch the diagram is what Private AI does (owner,
+    /// 2026-10-27): every tool's route runs into the N and one line runs
+    /// on to NEAR AI. No provider pills: a provider's pill on the N's row
+    /// sat on NEAR AI's, OpenCode has none, and NEAR AI floated unjoined.
+    @MainActor
+    func test_everyToolRoutesThroughTheNToNearAI() throws {
+        let screen = try MonitorNavigationTests.text("Views/FirstRun/PrivateAIScreen.swift")
+        XCTAssertFalse(screen.contains("tool.answersAt"), "no provider pills")
+        XCTAssertTrue(screen.contains("to: CGPoint(x: hub.x - 36, y: hub.y)"), "each tool into the N")
+        XCTAssertTrue(screen.contains("path.addLine(to: CGPoint(x: destination - half, y: hub.y))"),
+                      "the N on to NEAR AI's pill")
         XCTAssertLessThanOrEqual(
             PrivateAIScreenLayout.destinationX + PrivateAIScreenLayout.pillWidth / 2,
             FirstRunStageLayout.canvas.width, "NEAR AI stays on the canvas")

@@ -33,12 +33,8 @@ enum PrivateAIScreenLayout {
 
     /// A pill's width, in the canvas.
     static let pillWidth: CGFloat = 88
-    /// The providers' pills, each on its tool's line.
-    static let providerX: CGFloat = 650
-    /// NEAR AI's pill: a column of its own, right of the providers, so a
-    /// tool level with the N (one tool, or the middle of three) never
-    /// draws its provider's pill on NEAR AI's (owner, 2026-10-27).
-    static let destinationX: CGFloat = 770
+    /// NEAR AI's pill, at the end of the N's line.
+    static let destinationX: CGFloat = 650
 
     /// Evenly space connected-tool candidates; one sits in the middle.
     static func rowY(_ index: Int, of count: Int) -> CGFloat {
@@ -47,11 +43,11 @@ enum PrivateAIScreenLayout {
     }
 }
 
-/// Private AI: the tools that can connect on the left, their providers on
-/// the right, the N between as the hub, and NEAR AI past the providers.
-/// Dashed: no tool switches over until it is connected
-/// (`private_ai.offer_lead`). The step says what Private AI is and has no
-/// switch (owner, 2026-10-27: it changed little); Settings turns it on.
+/// Private AI: the tools that can connect on the left, each one's route
+/// into the N, and the N's line on to NEAR AI -- what Private AI does
+/// (owner, 2026-10-27). Dashed: no tool switches over until it is
+/// connected (`private_ai.offer_lead`). The step has no switch (it changed
+/// little); Settings turns Private AI on.
 struct PrivateAIScreen: View {
     @EnvironmentObject private var model: AppModel
     let copy: FirstRunCopy
@@ -91,19 +87,19 @@ struct PrivateAIScreen: View {
             GeometryReader { geometry in
                 let left = (geometry.size.width - FirstRunStageLayout.canvas.width) / 2
                 let hub = CGPoint(x: left + 440, y: 101)
-                let provider = left + PrivateAIScreenLayout.providerX
                 let destination = left + PrivateAIScreenLayout.destinationX
                 let half = PrivateAIScreenLayout.pillWidth / 2
                 ZStack {
                     ForEach(Array(tools.enumerated()), id: \.element.source) { index, tool in
                         let y = PrivateAIScreenLayout.rowY(index, of: tools.count)
-                        // Straight to the provider.
+                        // Each tool's route into the N.
                         Path { path in
                             path.move(to: CGPoint(x: left + 254, y: y))
-                            path.addLine(to: CGPoint(x: provider - half, y: y))
+                            path.addCurve(
+                                to: CGPoint(x: hub.x - 36, y: hub.y),
+                                control1: CGPoint(x: left + 330, y: y), control2: CGPoint(x: left + 350, y: hub.y))
                         }
-                        .stroke(GlassColor.textTertiary, style: StrokeStyle(lineWidth: 1.5, dash: [3, 6], dashPhase: -18 * flow))
-                        .opacity(0.5)
+                        .stroke(GlassTokens.Color.firstRunGlow.color, style: StrokeStyle(lineWidth: 2, dash: [5, 6], dashPhase: -22 * flow))
                         FirstRunToolFace(tool: tool.source.glassTool)
                             .firstRunActor(FirstRunStageLayout.tileActor(tool.source))
                             .frame(width: 42, height: 42)
@@ -112,18 +108,19 @@ struct PrivateAIScreen: View {
                             .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
                             .foregroundStyle(GlassColor.textSecondary)
                             .position(x: left + 230, y: y + 34)
-                        if let vendor = tool.answersAt {
-                            pill(vendor, lit: false)
-                                .position(x: provider, y: y)
-                        }
                     }
-                    FirstRunHub(glow: 0.4)
+                    // The N on to NEAR AI.
+                    Path { path in
+                        path.move(to: CGPoint(x: hub.x + 36, y: hub.y))
+                        path.addLine(to: CGPoint(x: destination - half, y: hub.y))
+                    }
+                    .stroke(GlassTokens.Color.firstRunGlow.color, style: StrokeStyle(lineWidth: 2, dash: [5, 6], dashPhase: -22 * flow))
+                    FirstRunHub(glow: 1)
                         .firstRunActor(FirstRunStageLayout.hubActor)
                         .frame(width: 66, height: 66)
                         .position(hub)
                     if let near = privateAI?.statInferenceAccess {
-                        pill(near, lit: false)
-                            .opacity(0.5)
+                        pill(near, lit: true)
                             .position(x: destination, y: hub.y)
                     }
                 }
