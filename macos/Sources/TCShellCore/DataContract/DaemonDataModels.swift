@@ -2246,15 +2246,21 @@ extension DaemonData {
         public let basis: String
         public let week: InsightsCreditWindow
         public let today: InsightsCreditWindow
+        /// The last 7 local days, oldest first, today last, each with its
+        /// `date`; `nil` from a daemon that predates it.
+        public let byDay: [InsightsCreditWindow]?
         public let last31Days: InsightsCreditWindow
 
         public init(basis: String = "near_ai_ledger", week: InsightsCreditWindow,
-                    today: InsightsCreditWindow, last31Days: InsightsCreditWindow) {
-            self.basis = basis; self.week = week; self.today = today; self.last31Days = last31Days
+                    today: InsightsCreditWindow, byDay: [InsightsCreditWindow]? = nil,
+                    last31Days: InsightsCreditWindow) {
+            self.basis = basis; self.week = week; self.today = today; self.byDay = byDay
+            self.last31Days = last31Days
         }
 
         public enum CodingKeys: String, CodingKey {
             case basis, week, today
+            case byDay = "by_day"
             case last31Days = "last_31_days"
         }
     }
@@ -2266,6 +2272,8 @@ extension DaemonData {
     public struct InsightsCreditWindow: Codable, Equatable, Sendable {
         public let from: String
         public let to: String
+        /// `YYYY-MM-DD`, on a `byDay` window only.
+        public let date: String?
         public let usdMicros: Int64?
         public let sessions: Int
         public let calls: Int
@@ -2274,16 +2282,16 @@ extension DaemonData {
         public let byTool: [InsightsCreditGroup]?
         public let byFolder: [InsightsCreditGroup]?
 
-        public init(from: String = "", to: String = "", usdMicros: Int64?, sessions: Int, calls: Int,
-                    callsWithoutCharge: Int, byTask: [InsightsCreditGroup]? = nil,
+        public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
+                    calls: Int, callsWithoutCharge: Int, byTask: [InsightsCreditGroup]? = nil,
                     byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil) {
-            self.from = from; self.to = to; self.usdMicros = usdMicros; self.sessions = sessions
+            self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
             self.calls = calls; self.callsWithoutCharge = callsWithoutCharge
             self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder
         }
 
         public enum CodingKeys: String, CodingKey {
-            case from, to, sessions, calls
+            case from, to, date, sessions, calls
             case usdMicros = "usd_micros"
             case callsWithoutCharge = "calls_without_charge"
             case byTask = "by_task"

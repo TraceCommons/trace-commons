@@ -21,9 +21,11 @@ struct InsightsPatternsTab: View {
     let copy: [String: String]
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
-    /// The week's NEAR AI credit, for the drill-down that leads Details
-    /// (product owner, 2026-10-28); `nil` hides it.
-    var nearAiCredit: DaemonData.InsightsNearAiCredit?
+    /// The daemon's week, for the drill-down that leads Details (product
+    /// owner, 2026-10-28); `nil` (no counter pass) hides it.
+    var week: DaemonData.InsightsWeek?
+    /// The drill-down's view; Overview's "By project" sets it.
+    var detailsView: Binding<InsightsCreditWords.Dimension> = .constant(.folder)
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
     @State private var goalSource = "claude_code"
     @State private var goalNumber = ""
@@ -36,12 +38,12 @@ struct InsightsPatternsTab: View {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let patterns = model.shown {
                     header(patterns)
-                    // Details leads with where NEAR AI credit went, by task,
-                    // tool or folder (product owner, 2026-10-28). The
-                    // pattern cards stay under it: Overview's "Where tokens
-                    // went" and the lever's "Show the reads" open them here,
-                    // and the goals and re-read files live only here.
-                    if let nearAiCredit { InsightsCreditTable(credit: nearAiCredit, copy: copy) }
+                    // Details leads with the drill-down, by project, task or
+                    // tool (product owner, 2026-10-28). The pattern cards
+                    // stay under it: Overview's "Where tokens went" and the
+                    // lever's "Show the reads" open them here, and the goals
+                    // and re-read files live only here.
+                    if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(patterns.cards) { card in
                             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {

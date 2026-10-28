@@ -2,16 +2,15 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// Where NEAR AI credit went (product owner, 2026-10-28, CodexBar-style),
-/// from `insights_week`'s `near_ai_credit`: the NEAR AI ledger's own
-/// charge for calls from this Mac, never a list price. Overview shows the
-/// week's top tasks (`InsightsCreditCard`); Details breaks the week down by
-/// task, tool or project folder (`InsightsCreditTable`). Folder names come
-/// from this Mac's own folder list and stay on it (owner decision
-/// 2026-10-28, over D7 for this view). A figure with a call that carried no
-/// charge is the core's dash, never `$0.00`.
+/// Details' drill-down (product owner, 2026-10-28): the week on screen by
+/// project folder, with Claude Code and Codex usage (traces and tokens,
+/// from the counter pass's rows) beside NEAR AI spend (the NEAR AI
+/// ledger's own charge, from `near_ai_credit`, never a list price); and
+/// NEAR AI spend by task or by tool. Folder names come from this Mac's own
+/// folder list and stay on it (owner decision 2026-10-28, over D7 for this
+/// view). An unknown figure is the core's dash, never zero.
 enum InsightsCreditWords {
-    enum Dimension: Hashable { case task, tool, folder }
+    enum Dimension: Hashable { case folder, task, tool }
 
     struct Line: Equatable, Identifiable {
         let id: String
@@ -52,12 +51,6 @@ enum InsightsCreditWords {
         }
     }
 
-    /// The week's tasks by credit, largest first as the daemon orders them.
-    static func topTasks(_ credit: DaemonData.InsightsNearAiCredit, copy: [String: String],
-                         limit: Int = 5) -> [Line] {
-        Array(lines(credit.week.byTask ?? [], dimension: .task, copy: copy).prefix(limit))
-    }
-
     /// Said whenever a call in the window carried no charge.
     static func unknownNote(_ window: DaemonData.InsightsCreditWindow, copy: [String: String]) -> String? {
         window.callsWithoutCharge > 0 ? text("analytics_credit_unknown_note", copy) : nil
@@ -67,76 +60,102 @@ enum InsightsCreditWords {
     static func isEmpty(_ window: DaemonData.InsightsCreditWindow) -> Bool { window.calls == 0 }
 }
 
-/// Overview's "Where credit went": the week's top tasks by NEAR AI credit.
-struct InsightsCreditCard: View {
-    let credit: DaemonData.InsightsNearAiCredit
-    let copy: [String: String]
+/// By project: one row per folder, Claude Code and Codex usage beside
+/// NEAR AI spend. Kept pure for tests.
+enum InsightsProjectRows {
+    struct Usage: Equatable {
+        /// Traces counted this week.
+        let traces: Int
+        /// Their tokens; `nil` when any trace's count is unknown.
+        let tokens: Int64?
+    }
 
-    private func text(_ key: String) -> String { copy[key] ?? "" }
+    struct Row: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let claude: Usage?
+        let codex: Usage?
+        /// The NEAR AI amount, or the dash when there was no call or a call
+        /// had no charge.
+        let nearAi: String
+        /// The known NEAR AI amount, for the order.
+        let nearAiMicros: Int64?
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            InsightsSectionTitle(text("analytics_credit_title"), info: [text("analytics_credit_scope")])
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if InsightsCreditWords.isEmpty(credit.week) {
-                    Text(text("analytics_credit_empty")).insightsNote()
-                } else {
-                    InsightsCreditRows(lines: InsightsCreditWords.topTasks(credit, copy: copy), traces: false)
-                    if let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
-                        Text(note).insightsCaption()
-                    }
-                }
-            }
-            .insightsCardBody()
+    /// Every folder with a trace counted this week or NEAR AI spend this
+    /// week. Largest NEAR AI spend first, then most tokens; the unknown
+    /// folder last.
+    static func rows(_ week: DaemonData.InsightsWeek, copy: [String: String]) -> [Row] {
+        var usage: [String?: (claude: Usage?, codex: Usage?)] = [:]
+        func add(_ current: Usage?, tokens: Int64?) -> Usage {
+            let traces = (current?.traces ?? 0) + 1
+            let known: Int64? = current == nil ? 0 : current?.tokens
+            return Usage(traces: traces, tokens: known.flatMap { sum in tokens.map { sum + $0 } })
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        for session in week.rollup?.sessions ?? [] {
+            var entry = usage[session.folder] ?? (nil, nil)
+            switch session.source {
+            case "claude_code": entry.claude = add(entry.claude, tokens: session.tokens)
+            case "codex": entry.codex = add(entry.codex, tokens: session.tokens)
+            default: continue
+            }
+            usage[session.folder] = entry
+        }
+        let spend = Dictionary((week.nearAiCredit?.week.byFolder ?? []).map { ($0.key, $0) },
+                               uniquingKeysWith: { first, _ in first })
+        let folders = Set(usage.keys).union(spend.keys)
+        let unknown = copy["analytics_unavailable"] ?? ""
+        let rows = folders.map { folder -> Row in
+            let group = spend[folder]
+            return Row(id: folder ?? "\u{0}unknown",
+                       label: InsightsCreditWords.label(folder, dimension: .folder, copy: copy),
+                       claude: usage[folder]?.claude, codex: usage[folder]?.codex,
+                       nearAi: group.map { InsightsCreditWords.amount($0.usdMicros, copy: copy) } ?? unknown,
+                       nearAiMicros: group?.usdMicros)
+        }
+        func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
+        return rows.sorted { a, b in
+            let (aUnknown, bUnknown) = (a.id.hasPrefix("\u{0}"), b.id.hasPrefix("\u{0}"))
+            if aUnknown != bUnknown { return bUnknown }
+            if (a.nearAiMicros ?? -1) != (b.nearAiMicros ?? -1) { return (a.nearAiMicros ?? -1) > (b.nearAiMicros ?? -1) }
+            if tokens(a) != tokens(b) { return tokens(a) > tokens(b) }
+            return a.label < b.label
+        }
+    }
+
+    /// A tool's cell: its tokens, or the dash.
+    static func tokens(_ usage: Usage?, copy: [String: String]) -> String {
+        guard let usage else { return copy["analytics_unavailable"] ?? "" }
+        return InsightsOverviewWords.figure(usage.tokens.map { UInt64(max(0, $0)) }, copy: copy)
+    }
+
+    /// A tool's trace count under its tokens; `nil` without traces.
+    static func traces(_ usage: Usage?, copy: [String: String]) -> String? {
+        usage.map { InsightsOverviewWords.fill(copy["analytics_projects_traces"] ?? "", ["n": String($0.traces)]) }
     }
 }
 
-/// Details' drill-down: the week's NEAR AI credit by task, tool or project
-/// folder, with the traces each came from.
-struct InsightsCreditTable: View {
-    let credit: DaemonData.InsightsNearAiCredit
+/// Details' drill-down: By project (the default, and what each Overview
+/// usage card's "By project" opens), By task and By tool.
+struct InsightsDetailsTable: View {
+    let week: DaemonData.InsightsWeek
     let copy: [String: String]
-    @State private var dimension: InsightsCreditWords.Dimension = .task
+    @Binding var dimension: InsightsCreditWords.Dimension
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
-
-    private var groups: [DaemonData.InsightsCreditGroup] {
-        switch dimension {
-        case .task: credit.week.byTask ?? []
-        case .tool: credit.week.byTool ?? []
-        case .folder: credit.week.byFolder ?? []
-        }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             InsightsSectionTitle(text("analytics_credit_title"), info: [text("analytics_credit_scope")])
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 GlassSegmentedTabs(text("analytics_credit_title"), selection: $dimension, segments: [
+                    GlassSegment(text("analytics_card_by_project"), value: InsightsCreditWords.Dimension.folder),
                     GlassSegment(text("analytics_credit_by_task"), value: InsightsCreditWords.Dimension.task),
                     GlassSegment(text("analytics_card_by_tool"), value: InsightsCreditWords.Dimension.tool),
-                    GlassSegment(text("analytics_card_by_project"), value: InsightsCreditWords.Dimension.folder),
                 ])
-                if InsightsCreditWords.isEmpty(credit.week) {
-                    Text(text("analytics_credit_empty")).insightsNote()
-                } else {
-                    HStack {
-                        Spacer(minLength: GlassTokens.Space.s4)
-                        Text(text("analytics_credit_spent")).insightsCaption()
-                        Text(text("analytics_credit_traces")).insightsCaption()
-                            .frame(minWidth: 48, alignment: .trailing)
-                    }
-                    InsightsCreditRows(lines: InsightsCreditWords.lines(groups, dimension: dimension, copy: copy),
-                                       traces: true)
-                    if let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
-                        Text(note).insightsCaption()
-                    }
-                    if dimension == .folder {
-                        Text(text("analytics_credit_folders_local")).insightsCaption()
-                    }
+                switch dimension {
+                case .folder: projects
+                case .task, .tool: nearAi
                 }
             }
             .insightsCardBody()
@@ -144,28 +163,77 @@ struct InsightsCreditTable: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
     }
-}
 
-/// The rows both views draw: a name, its amount, and on Details its traces.
-private struct InsightsCreditRows: View {
-    let lines: [InsightsCreditWords.Line]
-    let traces: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
-                GlassTableRow(first: index == 0) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(line.label)
-                        Spacer(minLength: GlassTokens.Space.s4)
-                        Text(line.amount).insightsMono()
-                        if traces {
-                            Text(line.traces).insightsMono().frame(minWidth: 48, alignment: .trailing)
-                        }
+    /// One table: a row per folder, Claude Code and Codex tokens with their
+    /// traces, and NEAR AI spend.
+    @ViewBuilder private var projects: some View {
+        let rows = InsightsProjectRows.rows(week, copy: copy)
+        if rows.isEmpty {
+            Text(text("analytics_unavailable")).insightsNote()
+        } else {
+            Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s4, verticalSpacing: GlassTokens.Space.s3) {
+                GridRow {
+                    Text(text("analytics_projects_project")).insightsCaption()
+                    Text(text("analytics_credit_tool_claude_code")).insightsCaption().gridColumnAlignment(.trailing)
+                    Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
+                    Text(text("analytics_usage_near_ai")).insightsCaption().gridColumnAlignment(.trailing)
+                }
+                Divider()
+                ForEach(rows) { row in
+                    GridRow(alignment: .firstTextBaseline) {
+                        Text(row.label).lineLimit(2)
+                        usage(row.claude)
+                        usage(row.codex)
+                        Text(row.nearAi).insightsMono()
                     }
                     .accessibilityElement(children: .combine)
                 }
             }
+            if let credit = week.nearAiCredit, let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
+                Text(note).insightsCaption()
+            }
+            Text(text("analytics_credit_folders_local")).insightsCaption()
+        }
+    }
+
+    private func usage(_ usage: InsightsProjectRows.Usage?) -> some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Text(InsightsProjectRows.tokens(usage, copy: copy)).insightsMono()
+            if let traces = InsightsProjectRows.traces(usage, copy: copy) {
+                Text(traces).insightsCaption()
+            }
+        }
+    }
+
+    /// NEAR AI spend by task or by tool, with the traces it came from.
+    @ViewBuilder private var nearAi: some View {
+        if let credit = week.nearAiCredit, !InsightsCreditWords.isEmpty(credit.week) {
+            let groups = (dimension == .task ? credit.week.byTask : credit.week.byTool) ?? []
+            HStack {
+                Spacer(minLength: GlassTokens.Space.s4)
+                Text(text("analytics_credit_spent")).insightsCaption()
+                Text(text("analytics_credit_traces")).insightsCaption()
+                    .frame(minWidth: 48, alignment: .trailing)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(InsightsCreditWords.lines(groups, dimension: dimension, copy: copy).enumerated()),
+                        id: \.element.id) { index, line in
+                    GlassTableRow(first: index == 0) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(line.label)
+                            Spacer(minLength: GlassTokens.Space.s4)
+                            Text(line.amount).insightsMono()
+                            Text(line.traces).insightsMono().frame(minWidth: 48, alignment: .trailing)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+            if let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
+                Text(note).insightsCaption()
+            }
+        } else {
+            Text(text("analytics_credit_empty")).insightsNote()
         }
     }
 }

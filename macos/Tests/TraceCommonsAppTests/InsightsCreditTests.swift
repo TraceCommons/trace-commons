@@ -3,10 +3,10 @@ import XCTest
 @testable import TCShellCore
 @testable import TraceCommonsApp
 
-/// Where NEAR AI credit went (product owner, 2026-10-28): the Overview
-/// card's top tasks, the Details table's groups, and the limits table's
-/// NEAR AI row, from `insights_week`'s `near_ai_credit`. A call with no
-/// charge is the dash, never `$0.00`.
+/// AI usage this week and its drill-down (product owner, 2026-10-28): the
+/// usage cards that lead Overview, and Details' By project, By task and By
+/// tool views, from `insights_week`. A call with no charge is the dash,
+/// never `$0.00`.
 final class InsightsCreditTests: XCTestCase {
     private typealias Group = DaemonData.InsightsCreditGroup
     private typealias Window = DaemonData.InsightsCreditWindow
@@ -16,102 +16,113 @@ final class InsightsCreditTests: XCTestCase {
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
         "analytics_credit_tool_claude_code": "Claude Code",
         "analytics_credit_unknown_note": "Some calls had no charge, so their totals are unknown.",
-        "analytics_limits_near_ai": "NEAR AI", "analytics_subscriptions_provider_codex": "Codex",
+        "analytics_projects_traces": "{n} traces",
     ]
 
-    private func credit(week: Window, today: Window? = nil, last31: Window? = nil) -> DaemonData.InsightsNearAiCredit {
-        let empty = Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0)
-        return .init(week: week, today: today ?? empty, last31Days: last31 ?? empty)
+    private func empty() -> Window { Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0) }
+
+    private func credit(week: Window, last31: Window? = nil, byDay: [Window]? = nil) -> DaemonData.InsightsNearAiCredit {
+        .init(week: week, today: empty(), byDay: byDay, last31Days: last31 ?? week)
     }
 
-    func testTopTasksNameEachTaskWithItsAmountAndDashForUnknown() {
-        let week = Window(usdMicros: nil, sessions: 3, calls: 4, callsWithoutCharge: 1, byTask: [
+    func testGroupsNameEachKeyWithItsAmountAndDashForUnknown() {
+        let lines = InsightsCreditWords.lines([
             Group(key: "bug_fix", usdMicros: 1_250_000),
             Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1),
             Group(key: nil, usdMicros: 500),
-        ])
-        let lines = InsightsCreditWords.lines(week.byTask ?? [], dimension: .task, copy: copy)
+        ], dimension: .task, copy: copy)
         XCTAssertEqual(lines.map(\.label), ["Bug fix", "Docs", "Unknown"])
         XCTAssertEqual(lines[0].amount, "$1.25")
         XCTAssertEqual(lines[1].amount, "—", "unknown is the dash, never $0.00")
-        XCTAssertEqual(InsightsCreditWords.topTasks(credit(week: week), copy: copy, limit: 2).map(\.label),
-                       ["Bug fix", "Docs"])
-        XCTAssertEqual(InsightsCreditWords.unknownNote(week, copy: copy),
-                       "Some calls had no charge, so their totals are unknown.")
-        XCTAssertNil(InsightsCreditWords.unknownNote(
-            Window(usdMicros: 10, sessions: 1, calls: 1, callsWithoutCharge: 0), copy: copy))
-    }
-
-    func testToolAndFolderGroupsUseTheirOwnWordsAndUnknownLabels() {
         let tools = InsightsCreditWords.lines([Group(key: "codex", usdMicros: 10), Group(key: "claude_code", usdMicros: 5)],
                                               dimension: .tool, copy: copy)
         XCTAssertEqual(tools.map(\.label), ["Codex", "Claude Code"])
-        let folders = InsightsCreditWords.lines([Group(key: "app", usdMicros: 10), Group(key: nil, usdMicros: 5)],
-                                                dimension: .folder, copy: copy)
-        XCTAssertEqual(folders.map(\.label), ["app", "Unknown folder"])
-        XCTAssertEqual(folders[0].traces, "1")
+        XCTAssertEqual(InsightsCreditWords.unknownNote(
+            Window(usdMicros: nil, sessions: 1, calls: 2, callsWithoutCharge: 1), copy: copy),
+            "Some calls had no charge, so their totals are unknown.")
+        XCTAssertNil(InsightsCreditWords.unknownNote(Window(usdMicros: 10, sessions: 1, calls: 1, callsWithoutCharge: 0),
+                                                     copy: copy))
     }
 
-    func testNoCallThisWeekIsEmptyNotAZeroList() {
-        let week = Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0, byTask: [])
-        XCTAssertTrue(InsightsCreditWords.isEmpty(week))
-        XCTAssertTrue(InsightsCreditWords.topTasks(credit(week: week), copy: copy).isEmpty)
+    /// The NEAR AI card shows only while there was NEAR AI spend in the
+    /// last 31 days, and its 7 bars leave an unknown day without a bar.
+    func testTheNearAiCardShowsOnlyWithSpendAndItsUnknownDaysAreDashes() {
+        XCTAssertFalse(InsightsUsageWords.showsNearAi(credit(week: empty())))
+        let days = (0..<7).map { index in
+            Window(date: "2026-10-\(22 + index)", usdMicros: index == 3 ? nil : Int64(index) * 100_000,
+                   sessions: 1, calls: 1, callsWithoutCharge: index == 3 ? 1 : 0)
+        }
+        let shown = credit(week: Window(usdMicros: 5, sessions: 1, calls: 1, callsWithoutCharge: 0), byDay: days)
+        XCTAssertTrue(InsightsUsageWords.showsNearAi(shown))
+        let bars = InsightsUsageWords.days(shown, copy: copy)
+        XCTAssertEqual(bars.count, 7)
+        XCTAssertEqual(bars.map(\.id).first, "2026-10-22")
+        XCTAssertNil(bars[3].dollars, "an unknown day draws no bar")
+        XCTAssertEqual(bars[3].amount, "—")
+        XCTAssertEqual(bars[1].amount, "$0.10")
+        XCTAssertTrue(InsightsUsageWords.days(credit(week: empty()), copy: copy).isEmpty, "an older daemon has no bars")
     }
 
-    /// One row per account: Codex and Claude keep their windows and show
-    /// the dash for spend; NEAR AI has no windows and fills the spend.
-    func testTheLimitsTableHasANearAiRowWithSpendAndCreditLeft() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let codex = DaemonData.SubscriptionUsageProvider(provider: "codex", enabled: true, logins: [
-            .init(id: "a", label: "me", defaultLogin: true, state: "observed", windows: [
-                .init(lane: "weekly", usedPermille: 250, resetsAt: now.addingTimeInterval(84 * 3_600), durationMins: 10_080),
-            ]),
-        ])
-        let near = InsightsLimitsRows.NearAi(
-            credit: credit(week: Window(usdMicros: 1, sessions: 1, calls: 1, callsWithoutCharge: 0),
-                           today: Window(usdMicros: 420_000, sessions: 1, calls: 2, callsWithoutCharge: 0),
-                           last31: Window(usdMicros: nil, sessions: 4, calls: 9, callsWithoutCharge: 1)),
-            creditLeft: "$12.00")
-        let rows = InsightsLimitsRows.rows([codex], nearAi: near, now: now, copy: copy)
-        XCTAssertEqual(rows.map(\.account), ["Codex", "NEAR AI"])
-        XCTAssertEqual(rows[0].spentToday, "—")
-        XCTAssertEqual(rows[0].spent31Days, "—")
-        XCTAssertEqual(rows[0].creditLeft, "—")
-        let nearRow = rows[1]
-        XCTAssertEqual(nearRow.session, "—")
-        XCTAssertEqual(nearRow.weekly, "—")
-        XCTAssertEqual(nearRow.reset, "—")
-        XCTAssertEqual(nearRow.pace, "—")
-        XCTAssertFalse(nearRow.paceWarns)
-        XCTAssertEqual(nearRow.spentToday, "$0.42")
-        XCTAssertEqual(nearRow.spent31Days, "—", "a call with no charge makes it unknown")
-        XCTAssertEqual(nearRow.creditLeft, "$12.00")
+    /// By project: one row per folder, Claude Code and Codex traces and
+    /// tokens beside NEAR AI spend, the unknown folder last.
+    func testByProjectJoinsTokensAndSpendPerFolder() throws {
+        var object = try InsightsSessionRouteTests.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["folder"] = "app"   // Claude Code, 37235 tokens
+        rows[1]["folder"] = NSNull() // Codex, 110 tokens
+        var extra = rows[0]
+        extra["tokens"] = NSNull()  // a second Claude trace with an unknown count
+        rows.append(extra)
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        var credit = try XCTUnwrap(object["near_ai_credit"] as? [String: Any])
+        var week = try XCTUnwrap(credit["week"] as? [String: Any])
+        week["by_folder"] = [
+            ["key": "site", "usd_micros": 900, "sessions": 1, "calls": 1, "calls_without_charge": 0],
+            ["key": NSNull(), "usd_micros": 12_500, "sessions": 1, "calls": 1, "calls_without_charge": 0],
+        ]
+        credit["week"] = week
+        object["near_ai_credit"] = credit
+        let decoded = try InsightsSessionRouteTests.decode(object)
+
+        let table = InsightsProjectRows.rows(decoded, copy: copy)
+        XCTAssertEqual(table.map(\.label), ["site", "app", "Unknown folder"])
+        let app = table[1]
+        XCTAssertEqual(app.claude, .init(traces: 2, tokens: nil), "one unknown count makes the sum unknown")
+        XCTAssertNil(app.codex)
+        XCTAssertEqual(InsightsProjectRows.tokens(app.claude, copy: copy), "—")
+        XCTAssertEqual(InsightsProjectRows.traces(app.claude, copy: copy), "2 traces")
+        XCTAssertEqual(InsightsProjectRows.tokens(app.codex, copy: copy), "—")
+        XCTAssertEqual(app.nearAi, "—", "no NEAR AI spend there")
+        let unknown = table[2]
+        XCTAssertEqual(unknown.codex, .init(traces: 1, tokens: 110))
+        XCTAssertEqual(unknown.nearAi, "$0.0125")
+        XCTAssertEqual(table[0].nearAi, "$0.0009")
     }
 
-    /// Without any NEAR AI figure there is no NEAR AI row, and the table
-    /// keeps its header in step with its cells.
-    func testNoNearAiRowWithoutAFigure() {
-        let rows = InsightsLimitsRows.rows([], nearAi: .init(credit: nil, creditLeft: nil), now: Date(), copy: copy)
-        XCTAssertTrue(rows.isEmpty)
-        XCTAssertEqual(InsightsLimitsRows.headerKeys.count, 8)
-        XCTAssertEqual(Array(InsightsLimitsRows.headerKeys.suffix(3)), [
-            "analytics_limits_spent_today", "analytics_limits_spent_31_days", "analytics_limits_credit_left",
-        ])
-    }
-
-    /// The view wiring: Overview draws the card under the week's header,
-    /// Details leads with the table, and the window hands both the week's
-    /// credit and the balance's figure.
-    func testTheViewsDrawTheCreditWhereTheOwnerAsked() throws {
+    /// The wiring: Overview leads with the usage cards and has no balance,
+    /// limits table or subscription card; "By project" opens Details on By
+    /// project; the window no longer hands Insights the balance.
+    func testOverviewLeadsWithTheUsageCardsAndDetailsWithTheDrillDown() throws {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
-        XCTAssertTrue(overview.contains("InsightsCreditCard(credit: nearAiCredit, copy: copy)"))
-        XCTAssertTrue(overview.contains("InsightsLimitsTable(model: subscriptions, nearAi: limitsNearAi, copy: copy)"))
-        let details = try GlassSurfaceRulesTests.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(details.contains("if let nearAiCredit { InsightsCreditTable(credit: nearAiCredit, copy: copy) }"))
+        XCTAssertTrue(overview.contains("InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, copy: copy,"))
+        for gone in ["InsightsLimitsTable", "InsightsSubscriptionsCard(", "InsightsCreditCard", "var credit: AnyView?"] {
+            XCTAssertFalse(overview.contains(gone), gone)
+        }
         let window = try GlassSurfaceRulesTests.text("Views/InsightsView.swift")
-        XCTAssertTrue(window.contains("nearAiCredit: model.counterWeek?.nearAiCredit"))
+        XCTAssertTrue(window.contains("showProjects: { detailsView = .folder; tab = .patterns }"))
+        XCTAssertTrue(window.contains("week: model.counterWeek, detailsView: $detailsView"))
+        XCTAssertFalse(window.contains("func credit("))
         XCTAssertFalse(window.contains("Insights shows no money"), "owner, 2026-10-28: Insights may show money")
+        let details = try GlassSurfaceRulesTests.text("Views/InsightsPatternsTab.swift")
+        XCTAssertTrue(details.contains("if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }"))
         let monitor = try GlassSurfaceRulesTests.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(monitor.contains(".creditLeft("))
+        XCTAssertFalse(monitor.contains(".credit(AnyView(InferenceBalanceSection()))"))
+        XCTAssertFalse(monitor.contains(".creditLeft("))
+        let cards = try GlassSurfaceRulesTests.text("Views/InsightsUsageCards.swift")
+        XCTAssertTrue(cards.contains("Button(text(\"analytics_usage_by_project\")) { showProjects() }"))
+        XCTAssertEqual(cards.components(separatedBy: "InsightsUsageCard(title:").count - 1, 2,
+                       "the login cards and the NEAR AI card are the one component")
     }
 }

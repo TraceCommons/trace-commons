@@ -89,13 +89,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_sample_data", "Sample data"),
     // Current native subscription limits; separate from historical analytics.
     ("analytics_subscriptions_title", "Subscription limits"),
-    ("analytics_subscriptions_current", "Current account limits"),
     ("analytics_subscriptions_provider_codex", "Codex"),
     ("analytics_subscriptions_provider_claude", "Claude"),
-    (
-        "analytics_subscriptions_captured_limits",
-        "Last captured account limits",
-    ),
     (
         "analytics_subscriptions_claude_detail",
         "Reads your Claude Code sign-in only when you press Refresh. macOS may ask to allow access.",
@@ -202,34 +197,40 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_native_storage_unsupported",
         "Usage is unavailable for this Codex sign-in storage. Check limits in Codex.",
     ),
-    // The limits table over the subscription card (product owner,
-    // 2026-10-28): one row per login, CodexBar-style. Pace reads the
-    // weekly window, else the session window.
-    ("analytics_limits_title", "Limits at a glance"),
-    ("analytics_limits_account", "Account"),
+    // AI usage this week (product owner, 2026-10-28): one card per Claude
+    // or Codex login, with these four rows (approved 2026-10-28). Pace
+    // reads the weekly window, else the session window.
     ("analytics_limits_session_left", "Session left"),
     ("analytics_limits_weekly_left", "Weekly left"),
     ("analytics_limits_next_reset", "Next reset"),
     ("analytics_limits_pace", "Pace"),
     ("analytics_limits_on_pace", "On pace"),
     ("analytics_limits_runs_out", "Runs out in {time}"),
-    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): the limits
-    // table's NEAR AI row and its spend columns. Spent today and the last
-    // 31 days are NEAR AI calls from this Mac (the route tallies); credit
-    // left is the account's balance. Codex and Claude rows show the dash.
-    ("analytics_limits_near_ai", "NEAR AI"),
-    ("analytics_limits_spent_today", "Spent today"),
-    ("analytics_limits_spent_31_days", "Last 31 days"),
-    ("analytics_limits_credit_left", "Credit left"),
-    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): where NEAR AI
-    // credit went, on Overview (top tasks) and on Details (by task, tool
-    // or project folder; By tool and By project reuse the breakdown
-    // card's words). Folder names are shown on this Mac only.
-    ("analytics_credit_title", "Where credit went"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): the usage cards
+    // that lead Overview. The NEAR AI card shows this week, today and the
+    // last 31 days of NEAR AI calls from this Mac, and the last 7 days as
+    // bars. Each card ends with a link to Details' By project view.
+    ("analytics_usage_title", "AI usage this week"),
+    ("analytics_usage_near_ai", "NEAR AI"),
+    ("analytics_usage_last_31_days", "Last 31 days"),
+    ("analytics_usage_last_7_days", "Last 7 days"),
+    (
+        "analytics_credit_scope_near_ai",
+        "Charged for NEAR AI calls from this Mac.",
+    ),
+    ("analytics_usage_by_project", "By project"),
+    ("analytics_usage_by_project_a11y", "{label} by project"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): Details'
+    // drill-down, by project (Claude Code and Codex tokens beside NEAR AI
+    // spend), by task or by tool (NEAR AI spend). By tool and By project
+    // reuse the breakdown card's words. Folder names stay on this Mac.
+    ("analytics_credit_title", "Where usage went"),
     (
         "analytics_credit_scope",
-        "NEAR AI calls from this Mac this week.",
+        "This week, from this Mac. By task and By tool show NEAR AI spend.",
     ),
+    ("analytics_projects_project", "Project"),
+    ("analytics_projects_traces", "{n} traces"),
     (
         "analytics_credit_unknown_note",
         "Some calls had no charge, so their totals are unknown.",
@@ -270,7 +271,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Refresh to allow Keychain access for {harness} usage.",
     ),
     ("analytics_subscriptions_cached", "Last reading."),
-    ("analytics_subscriptions_reading", "Reading usage…"),
     (
         "analytics_subscriptions_not_reported",
         "Limits aren't reported for this account.",
@@ -282,10 +282,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_subscriptions_change_failed",
         "The usage setting couldn't be saved.",
-    ),
-    (
-        "analytics_subscriptions_truncated",
-        "Some saved logins aren't shown.",
     ),
     // 2. Coverage.
     (

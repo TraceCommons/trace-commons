@@ -24,27 +24,10 @@ struct InsightsView: View {
     /// The Monitor window's inspector, which shows the open Sessions trace
     /// (`InsightsInspector`); `nil` opens it under its row instead.
     private let inspector: InsightsInspector?
-    /// The NEAR AI credit card at the top of Overview (product owner,
-    /// 2026-10-28): drawn by the caller, which has the app's model.
-    private var credit: AnyView?
-    /// NEAR AI credit left, as the balance card words it, for the limits
-    /// table's NEAR AI row; `nil` is the dash.
-    private var creditLeft: String?
     @State private var source = "codex"
-
-    /// Puts `view` at the top of Overview, as NEAR AI credit used and left.
-    func credit(_ view: AnyView) -> InsightsView {
-        var copy = self
-        copy.credit = view
-        return copy
-    }
-
-    /// The limits table's NEAR AI credit left, as the balance card shows it.
-    func creditLeft(_ amount: String?) -> InsightsView {
-        var copy = self
-        copy.creditLeft = amount
-        return copy
-    }
+    /// Details' drill-down view; a usage card's "By project" opens it on
+    /// By project (product owner, 2026-10-28).
+    @State private var detailsView: InsightsCreditWords.Dimension = .folder
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -174,8 +157,9 @@ struct InsightsView: View {
 
     /// The tab container. No Spend tab: a tab that cannot be used is
     /// hidden, not drawn greyed. Insights may show money (product owner,
-    /// 2026-10-28, over owner decision D5): NEAR AI credit on Overview and
-    /// Details, from the NEAR AI ledger's own charge. The models open and
+    /// 2026-10-28, over owner decision D5): NEAR AI spend on Overview and
+    /// Details, from the NEAR AI ledger's own charge. The NEAR AI balance
+    /// stays on the Private AI tab. The models open and
     /// close with the container, not with a tab.
     private var tabs: some View {
         // The page is in the main pane, whose insets it shares: no inset of
@@ -198,9 +182,8 @@ struct InsightsView: View {
                     patterns: patternsModel.shown,
                     models: model.modelAnswers,
                     subscriptions: subscriptionModel,
-                    credit: credit,
                     nearAiCredit: model.counterWeek?.nearAiCredit,
-                    creditLeft: creditLeft,
+                    showProjects: { detailsView = .folder; tab = .patterns },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -215,7 +198,7 @@ struct InsightsView: View {
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek,
-                                    nearAiCredit: model.counterWeek?.nearAiCredit)
+                                    week: model.counterWeek, detailsView: $detailsView)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
