@@ -270,7 +270,7 @@ public protocol DaemonDataClient: Sendable {
     func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage
     /// Refresh one locally discovered login when a selector is given.
     func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?, login: String?) async throws -> DaemonData.SubscriptionUsage
-    /// Opt in to or stop native subscription usage reads for Codex.
+    /// Turn native subscription usage reads on or off for `codex` or `claude`.
     func setSubscriptionUsage(provider: String, on: Bool) async throws
 
     /// `insights_session_label`: set or clear the person's own task and

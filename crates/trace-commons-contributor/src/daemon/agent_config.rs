@@ -71,6 +71,10 @@ pub(crate) fn schema() -> Value {
             "subscription_usage_codex_enabled",
             "Permit explicit Refresh to read file-backed native Codex subscription limits, including saved managed profiles. Codex may renew its own sign-in. Keyring and automatic credential storage are unsupported. No background credential reads, trace upload, or routing change.",
         ),
+        (
+            "subscription_usage_claude_on",
+            "Permit explicit Refresh to read Claude subscription limits with the saved Claude Code sign-in. On by default. No background credential reads, trace upload, or routing change.",
+        ),
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
             "insights_counter_pass",
