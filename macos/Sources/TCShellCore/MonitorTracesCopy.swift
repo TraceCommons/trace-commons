@@ -726,6 +726,11 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sectionTraces: String
     public let sectionAccount: String
     public let privateAISignIn: String
+    /// Home's Traces hero: its title, line and way into Traces (owner,
+    /// 2026-10-28).
+    public let tracesHeroTitle: String
+    public let tracesHeroBody: String
+    public let tracesHeroAction: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -777,6 +782,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sectionTraces = "section_traces"
         case sectionAccount = "section_account"
         case privateAISignIn = "private_ai_sign_in"
+        case tracesHeroTitle = "traces_hero_title"
+        case tracesHeroBody = "traces_hero_body"
+        case tracesHeroAction = "traces_hero_action"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

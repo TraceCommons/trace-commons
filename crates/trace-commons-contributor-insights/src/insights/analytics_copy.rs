@@ -65,6 +65,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "o",
     // A watched trace's folder label (`list_projects`' label).
     "folder",
+    // The weekday picked on "Tokens by day".
+    "day",
 ];
 
 /// Key, words. Approved in Ron's 2026-10-11 owner review (D17).
@@ -380,6 +382,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_drill_reason", "Reason"),
     ("analytics_drill_show_all", "Show all {n}"),
     ("analytics_drill_show_fewer", "Show fewer"),
+    // 7b. The breakdown for one day picked on "Tokens by day": Claude Code
+    // sessions by their tokens that day. Codex counts intervals, not days.
+    ("analytics_drill_title_day", "Breakdown · {day}"),
+    ("analytics_drill_day_week", "Show week"),
+    ("analytics_drill_day_none", "No tokens counted on this day."),
+    (
+        "analytics_drill_day_codex",
+        "Codex traces can't be split by day yet.",
+    ),
     // 7a. Where a feed T session's calls went (design part B), from the
     // proxy's own record. Its tokens are the proxy's per-call count, never
     // summed with or reconciled to the transcript's. Only verified proof

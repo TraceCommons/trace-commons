@@ -83,13 +83,12 @@ final class HomeViewTests: XCTestCase {
     /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
-        // Credit is the total with its change since the last day this Mac
-        // saw (owner, 2026-10-12); the pending condition still sits under
-        // the tiles.
+        // Credit is History's pending figure, marked Pending (owner,
+        // 2026-10-28), under the same D6 gate.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
-                + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
-                + "detail: signIn ?? delta?.text, detailInk: signIn == nil ? delta?.ink : nil, "
+                + "value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit), "
+                + "detail: signIn ?? MonitorWords.pending, "
                 + "systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
         // columns, under Waiting and Contributed (owner, 2026-10-19), and
@@ -130,7 +129,7 @@ final class HomeViewTests: XCTestCase {
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash). The condition gates the figure but is not drawn
         // (owner, 2026-10-13).
-        XCTAssertTrue(home.contains("HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup))"))
+        XCTAssertTrue(home.contains("HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit)"))
         XCTAssertTrue(home.contains("SummaryFacts.fresh(store.credit, unless: store.failures[\"commons_credit_summary\"])"))
         XCTAssertTrue(home.contains("SummaryFacts.fresh(store.rollup, unless: store.failures[\"history_rollup\"])"))
         XCTAssertFalse(home.contains("Text(condition)"))
@@ -178,7 +177,7 @@ final class HomeViewTests: XCTestCase {
     func test_creditSignInLineIsThePayoutLinkConstant() throws {
         XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("detail: signIn ?? delta?.text"))
+        XCTAssertTrue(home.contains("detail: signIn ?? MonitorWords.pending"))
         XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }

@@ -263,14 +263,15 @@ struct InsightsView: View {
     }
 
     /// Debug builds: the sample week as the daemon's week (feed T), when
-    /// `TRACE_COMMONS_INSIGHTS_SAMPLE=1`. Sessions shows one sample trace
-    /// until the sample's saved list arrives.
+    /// `TRACE_COMMONS_INSIGHTS_SAMPLE=1`, with its counted sessions behind
+    /// Overview's Sessions breakdown. Sessions shows one sample trace until
+    /// the sample's saved list arrives.
     private func showSampleWeekIfAsked() {
         #if DEBUG
         guard InsightsSampleWeek.enabled,
               let overview = try? InsightsSampleWeek.weekOverview,
               let patterns = try? InsightsSampleWeek.weekPatterns else { return }
-        overviewModel.showCounter(overview)
+        overviewModel.showCounter(overview, sessions: try? InsightsSampleWeek.counterSessions)
         patternsModel.showCounter(patterns)
         comparisonsModel.load(counterWeeks: [], weekStart: InsightsSampleWeek.weekStart, recapCardEnabled: true)
         if model.snapshots.isEmpty { sessionsModel.sync(snapshotIDs: ["sample"]) }
