@@ -24,7 +24,17 @@ struct InsightsView: View {
     /// The Monitor window's inspector, which shows the open Sessions trace
     /// (`InsightsInspector`); `nil` opens it under its row instead.
     private let inspector: InsightsInspector?
+    /// The NEAR AI credit card at the top of Overview (product owner,
+    /// 2026-10-28): drawn by the caller, which has the app's model.
+    private var credit: AnyView?
     @State private var source = "codex"
+
+    /// Puts `view` at the top of Overview, as NEAR AI credit used and left.
+    func credit(_ view: AnyView) -> InsightsView {
+        var copy = self
+        copy.credit = view
+        return copy
+    }
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -177,6 +187,7 @@ struct InsightsView: View {
                     patterns: patternsModel.shown,
                     models: model.modelAnswers,
                     subscriptions: subscriptionModel,
+                    credit: credit,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in

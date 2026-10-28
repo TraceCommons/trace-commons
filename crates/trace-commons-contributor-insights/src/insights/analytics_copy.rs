@@ -73,7 +73,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_unavailable", "—"),
     // 1. Tabs and headings.
     ("analytics_tab_overview", "Overview"),
-    ("analytics_tab_patterns", "Patterns"),
+    ("analytics_tab_patterns", "Details"),
     ("analytics_tab_sessions", "Sessions"),
     ("analytics_tab_analyze", "Analyze"),
     ("analytics_this_week", "This week"),

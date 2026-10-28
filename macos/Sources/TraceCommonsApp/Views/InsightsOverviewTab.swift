@@ -32,6 +32,9 @@ struct InsightsOverviewTab: View {
     var models: DaemonData.InsightsModelAnswers?
     /// Current subscription limits are independent of the selected week.
     var subscriptions: SubscriptionUsageModel?
+    /// NEAR AI credit used and left, account-wide (product owner,
+    /// 2026-10-28); `nil` hides it.
+    var credit: AnyView?
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -57,11 +60,13 @@ struct InsightsOverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+                if let credit { credit }
                 if let subscriptions { InsightsSubscriptionsCard(model: subscriptions, copy: copy) }
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
+                    // The Sessions breakdown is off Overview (product owner,
+                    // 2026-10-28); Sessions has the rows.
                     header(overview)
-                    sessionsBreakdown
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(overview.sources) { source in
                             harnessCard(source, overview: overview)

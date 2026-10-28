@@ -138,7 +138,9 @@ final class DesignRulings20261022Tests: XCTestCase {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("drillButton(\"sessions\")"), "the Sessions figure drills again")
         XCTAssertFalse(overview.contains("if model.drills(\"sessions\") { GlassChevron() }"))
-        XCTAssertTrue(overview.contains("header(overview)\n                    sessionsBreakdown\n"))
+        // Off Overview (product owner, 2026-10-28): the helper stays for
+        // Zaki's Details tab, unused on Overview.
+        XCTAssertFalse(overview.contains("header(overview)\n                    sessionsBreakdown\n"))
         XCTAssertFalse(overview.contains("model.counterInputs"))
         let breakdown = try Self.section("    private var sessionsBreakdown: some View {", in: overview)
         XCTAssertTrue(breakdown.contains("if !sessions.rows.isEmpty {"))
