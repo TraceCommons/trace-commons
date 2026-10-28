@@ -266,6 +266,9 @@ pub(super) enum ScreenState {
     UsageFailed,
     /// A subscription notice with no quota figures.
     NoQuota,
+    /// A dialog this driver does not know: a numbered chooser, or a settings
+    /// error. Never answered.
+    Unexpected,
     /// Anything else: still starting, the prompt, or the panel loading.
     Other,
 }
@@ -309,7 +312,20 @@ pub(super) fn classify(screen: &str) -> ScreenState {
     {
         return ScreenState::Trust(trust_keys(screen));
     }
+    if all.contains("settingserror") || screen.lines().any(numbered_choice) {
+        return ScreenState::Unexpected;
+    }
     ScreenState::Other
+}
+
+/// A selected entry of a numbered chooser: `❯` then a number and a dot.
+/// Not the prompt's own `❯`, which is followed by typed text.
+fn numbered_choice(line: &str) -> bool {
+    line.split('❯').skip(1).any(|after| {
+        let after = after.trim_start();
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && after[digits..].starts_with('.')
+    })
 }
 
 /// The key that moves the `❯` marker toward the "Yes" option, or Enter when
@@ -870,6 +886,7 @@ mod driver {
             let screen = super::render(&output);
             match classify(&screen) {
                 ScreenState::NeedsSignIn => return Err("cli_signed_out"),
+                ScreenState::Unexpected => return Err("cli_unexpected_dialog"),
                 ScreenState::UsageFailed if sent => return Err("cli_failed"),
                 ScreenState::NoQuota if sent => return Err("cli_no_quota"),
                 ScreenState::Trust(keys) => {
@@ -922,6 +939,18 @@ mod driver {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
             path
         }
+        /// `run` against a freshly written script. A parallel test's fork
+        /// can briefly hold the script's write descriptor, which makes exec
+        /// fail with ETXTBSY; that is a fixture race, so retry the spawn.
+        fn run_script(exe: &Path, login: &LoginSpec, work: &Path) -> Result<String, &'static str> {
+            for _ in 0..20 {
+                match run(exe, login, work, "s") {
+                    Err("cli_unavailable") => std::thread::sleep(Duration::from_millis(50)),
+                    other => return other,
+                }
+            }
+            run(exe, login, work, "s")
+        }
         fn login(root: &Path) -> LoginSpec {
             LoginSpec {
                 provider: super::super::super::Provider::Claude,
@@ -952,7 +981,7 @@ mod driver {
                  sleep 30\n",
             );
             let work = tempfile::tempdir().unwrap();
-            let screen = run(&exe, &login(dir.path()), work.path(), "s").unwrap();
+            let screen = run_script(&exe, &login(dir.path()), work.path()).unwrap();
             assert!(screen.contains("23% used"), "{screen}");
         }
 
@@ -971,7 +1000,7 @@ mod driver {
             );
             let work = tempfile::tempdir().unwrap();
             assert_eq!(
-                run(&exe, &login(dir.path()), work.path(), "s").unwrap_err(),
+                run_script(&exe, &login(dir.path()), work.path()).unwrap_err(),
                 "cli_signed_out"
             );
             std::thread::sleep(Duration::from_millis(200));
@@ -1187,6 +1216,16 @@ mod tests {
             ScreenState::NoQuota
         );
         assert_eq!(classify("> "), ScreenState::Other);
+        assert_eq!(classify("❯ /usage"), ScreenState::Other);
+        // An unknown chooser or a settings error is never answered.
+        assert_eq!(
+            classify("Pick a model\n ❯ 1. Default\n   2. Other"),
+            ScreenState::Unexpected
+        );
+        assert_eq!(
+            classify("Settings Error\n Fix with Claude / Exit / Continue"),
+            ScreenState::Unexpected
+        );
     }
 
     #[test]

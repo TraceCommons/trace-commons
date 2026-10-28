@@ -40,6 +40,10 @@ const FD_CLOEXEC: c_int = 1;
 // _IO('t', 97) on Darwin.
 const TIOCSCTTY: c_ulong = 0x2000_7461;
 const EINTR: i32 = 4;
+const SIGTERM: c_int = 15;
+/// How long a terminal session gets to exit on SIGTERM, so a config file it
+/// is writing is not cut off, before the group is killed.
+const GRACE: Duration = Duration::from_millis(1500);
 
 unsafe extern "C" {
     fn openpty(
@@ -53,12 +57,14 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
     fn poll(fds: *mut PollFd, count: c_uint, timeout_ms: c_int) -> c_int;
+    fn killpg(group: c_int, signal: c_int) -> c_int;
 }
 
 /// A child process attached to a PTY. Dropping it kills the child's whole
 /// process group and reaps the child.
 pub struct PtyChild {
-    master: File,
+    /// `None` once terminated: closing it ends any wait on output drain.
+    master: Option<File>,
     child: Child,
     group: ProcessGroupGuard,
 }
@@ -140,7 +146,7 @@ impl PtyChild {
             }
         };
         Ok(Self {
-            master,
+            master: Some(master),
             child,
             group,
         })
@@ -149,8 +155,9 @@ impl PtyChild {
     /// Read what the terminal has, waiting at most `wait`. `Ok(0)` means no
     /// output within `wait`; `Err` means the terminal closed or failed.
     pub fn read_some(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, &'static str> {
+        let master = self.master.as_mut().ok_or("native-pty-closed")?;
         let mut fds = PollFd {
-            fd: self.master.as_raw_fd(),
+            fd: master.as_raw_fd(),
             events: POLLIN,
             revents: 0,
         };
@@ -169,7 +176,7 @@ impl PtyChild {
         if fds.revents & POLLIN == 0 && fds.revents & POLLHUP != 0 {
             return Err("native-pty-closed");
         }
-        match self.master.read(buf) {
+        match master.read(buf) {
             Ok(0) => Err("native-pty-closed"),
             Ok(read) => Ok(read),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(0),
@@ -180,9 +187,10 @@ impl PtyChild {
 
     /// Type `bytes` into the terminal.
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
-        self.master
+        let master = self.master.as_mut().ok_or("native-pty-closed")?;
+        master
             .write_all(bytes)
-            .and_then(|()| self.master.flush())
+            .and_then(|()| master.flush())
             .map_err(|_| "native-pty-write-failed")
     }
 
@@ -191,9 +199,32 @@ impl PtyChild {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Kill the whole process group and reap the direct child.
+    /// Ask the group to exit, give it a short grace period, then kill the
+    /// whole group and reap the direct child.
     pub fn terminate(&mut self) {
+        if self.running() {
+            if let Ok(group) = c_int::try_from(self.child.id()) {
+                // SAFETY: the child is not yet reaped, so its PID still names
+                // the isolated group validated at spawn, never the host's.
+                unsafe {
+                    killpg(group, SIGTERM);
+                }
+                // Keep reading: an exiting process can wait for its terminal
+                // output to drain.
+                let deadline = std::time::Instant::now() + GRACE;
+                let mut sink = [0u8; 4096];
+                while self.running() && std::time::Instant::now() < deadline {
+                    if self
+                        .read_some(&mut sink, Duration::from_millis(20))
+                        .is_err()
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            }
+        }
         let _ = self.group.terminate();
+        self.master = None;
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -242,6 +273,30 @@ mod tests {
         assert!(child.running());
         child.terminate();
         assert!(!child.running());
+    }
+
+    #[test]
+    fn terminate_lets_the_child_finish_on_sigterm_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned-up");
+        let ready = dir.path().join("ready");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "trap \"touch '{}'; exit 0\" TERM; touch '{}'; while :; do sleep 0.05; done",
+                marker.display(),
+                ready.display()
+            ),
+        ]);
+        let mut child = PtyChild::spawn(&mut command, 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "child never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.terminate();
+        assert!(marker.exists());
     }
 
     #[test]
