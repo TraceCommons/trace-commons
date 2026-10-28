@@ -7416,9 +7416,15 @@ fn assert_duplicate_pair_reads_as_mains(
     for (database_reads, first_document, second_document) in documents {
         let mode = if *database_reads { "database" } else { "file" };
         let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+        // Once the trace's credit is final nothing is pending (#1707), so
+        // older daemons that add the two do not count it twice.
+        let expected_first_pending = if first_document["credit_points_final"].is_number() {
+            0.0
+        } else {
+            f64::from(credit_points_from_quality_micros(first_quality))
+        };
         assert!(
-            (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs()
-                < 1e-4,
+            (first_pending - expected_first_pending).abs() < 1e-4,
             "{mode} reads: {first_document}"
         );
         let first_explanation = explanation_lines(first_document);
@@ -7622,9 +7628,16 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         let pending = document["credit_points_pending"]
             .as_f64()
             .expect("a pending figure");
+        // The shadow credit quality is the pending figure until the credit
+        // is final; then nothing is pending (#1707).
+        let expected = if document["credit_points_final"].is_number() {
+            0.0
+        } else {
+            expected_pending
+        };
         assert!(
-            (pending - expected_pending).abs() < 1e-4,
-            "{mode} reads: the shadow credit quality is the pending figure: {document}"
+            (pending - expected).abs() < 1e-4,
+            "{mode} reads: the pending figure follows the credit's state: {document}"
         );
         // The NoveltyUtility award is the trace's final credit, and the
         // ledger figure leaves it out, so `total` is still final + ledger.
