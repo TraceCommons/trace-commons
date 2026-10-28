@@ -169,9 +169,7 @@ struct CredentialSection: View {
                 // The URL is served once, by start. Opening it is this
                 // view's environment; the model has no window.
                 guard let url = await model.startNearAiCredential(provider: provider) else { return }
-                let accepted = await withCheckedContinuation { continuation in
-                    openURL(url) { continuation.resume(returning: $0) }
-                }
+                let accepted = await openURL.opened(url)
                 // A browser that never opened leaves a ceremony nobody can
                 // finish, so it is stopped rather than left to time out.
                 if !accepted { model.cancelNearAiCredential() }
