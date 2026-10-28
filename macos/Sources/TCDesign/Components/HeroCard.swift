@@ -17,7 +17,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let title: String
     private let subtitle: String?
     private let actionTitle: String?
-    private let action: () -> Void
+    /// `nil` draws the card as a plain panel: not a button, no hover.
+    private let action: (() -> Void)?
     private let closeLabel: String?
     private let onClose: (() -> Void)?
     private let graphic: Graphic
@@ -27,7 +28,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 
     public init(
         gradient: GlassGradient, title: String, subtitle: String? = nil,
-        actionTitle: String? = nil, action: @escaping () -> Void,
+        actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
@@ -56,19 +57,39 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
 
     public var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { card }
+                    .buttonStyle(GlassPressStyle())
+                    .onHover { inside in
+                        withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isButton)
+            } else {
+                card.accessibilityElement(children: .combine)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if let onClose {
+                GlassHeroClose(label: closeLabel ?? "", action: onClose)
+            }
+        }
+    }
+
+    private var card: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
-        Button(action: action) {
-            words
-                .padding(.trailing, Self.graphicReserve)
-                .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
-                .background(alignment: .trailing) {
-                    // Behind the words, sized to the card, past its edges.
-                    graphic
-                        .frame(width: Self.graphicReserve + 60)
-                        .frame(maxHeight: .infinity)
-                        .opacity(Self.graphicOpacity)
-                        .accessibilityHidden(true)
-                }
+        return words
+            .padding(.trailing, Self.graphicReserve)
+            .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
+            .background(alignment: .trailing) {
+                // Behind the words, sized to the card, past its edges.
+                graphic
+                    .frame(width: Self.graphicReserve + 60)
+                    .frame(maxHeight: .infinity)
+                    .opacity(Self.graphicOpacity)
+                    .accessibilityHidden(true)
+            }
             .background {
                 ZStack {
                     shape.fill(gradient.linear)
@@ -84,18 +105,6 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
             }
             .clipShape(shape)
             .contentShape(shape)
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { inside in
-            withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .overlay(alignment: .topTrailing) {
-            if let onClose {
-                GlassHeroClose(label: closeLabel ?? "", action: onClose)
-            }
-        }
     }
 
     private var words: some View {
