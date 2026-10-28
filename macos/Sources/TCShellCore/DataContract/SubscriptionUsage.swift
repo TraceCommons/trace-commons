@@ -50,9 +50,13 @@ extension DaemonData {
         public let windows: [SubscriptionUsageWindow]
         public let bankedResets: Int?
         public let refreshing: Bool?
+        /// Where the figures came from: "api", or "cli" for Claude figures read
+        /// off the Claude Code CLI's /usage screen. Nil without a reading, or
+        /// from an older daemon.
+        public let source: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, label, state, reason, stale, windows, refreshing
+            case id, label, state, reason, stale, windows, refreshing, source
             case defaultLogin = "default_login"
             case updatedAt = "updated_at"
             case bankedResets = "banked_resets"
@@ -61,7 +65,7 @@ extension DaemonData {
         public init(id: String, label: String, defaultLogin: Bool = false,
                     state: String, reason: String? = nil, updatedAt: Date? = nil,
                     stale: Bool = false, windows: [SubscriptionUsageWindow] = [],
-                    bankedResets: Int? = nil, refreshing: Bool? = nil) {
+                    bankedResets: Int? = nil, refreshing: Bool? = nil, source: String? = nil) {
             self.id = id
             self.label = label
             self.defaultLogin = defaultLogin
@@ -72,6 +76,7 @@ extension DaemonData {
             self.windows = windows
             self.refreshing = refreshing
             self.bankedResets = bankedResets.flatMap { $0 >= 0 ? $0 : nil }
+            self.source = source
         }
 
         public init(from decoder: Decoder) throws {
@@ -87,6 +92,7 @@ extension DaemonData {
             refreshing = try? container.decodeIfPresent(Bool.self, forKey: .refreshing)
             let count = try? container.decodeIfPresent(Int.self, forKey: .bankedResets)
             bankedResets = count.flatMap { $0 >= 0 ? $0 : nil }
+            source = try? container.decodeIfPresent(String.self, forKey: .source)
         }
     }
 

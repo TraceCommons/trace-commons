@@ -285,6 +285,9 @@ impl TraceSource for ClaudeCodeSource {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             return None;
         }
+        if in_usage_probe_project(&self.root, &path) {
+            return None;
+        }
         if let Some(parent) = parent_session_for_member(&path) {
             // The parent must itself be a real session file under the root.
             // A `subagents/` directory whose `<uuid>.jsonl` is missing is an
@@ -329,6 +332,35 @@ impl TraceSource for ClaudeCodeSource {
     }
 }
 
+/// The working-directory name of the Trace Commons app's own Claude usage
+/// probe. The app runs `claude` there, on a user-pressed Refresh, only to
+/// read the `/usage` screen. That session is not the contributor's work and
+/// must never be discovered, offered or uploaded, so every project directory
+/// Claude Code derives from this cwd is skipped here, in discovery and on the
+/// file-event path alike. The probe also runs with transcripts turned off and
+/// deletes anything it leaves; this is the backstop.
+pub const CLAUDE_USAGE_PROBE_DIR: &str = "tc-claude-usage-probe";
+
+/// Whether `name` is the project directory Claude Code derives from the
+/// probe's cwd. Claude Code turns every character outside `[0-9A-Za-z]` into
+/// `-`, so the probe's absolute path always ends `-tc-claude-usage-probe`.
+/// The probe refuses to run from a path long enough for Claude Code to
+/// truncate that suffix. Metadata only: no file is opened.
+fn is_usage_probe_project(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.strip_suffix(CLAUDE_USAGE_PROBE_DIR)
+            .is_some_and(|head| head.ends_with('-'))
+    })
+}
+
+/// Whether `path` lies in the probe's project directory under `root`.
+fn in_usage_probe_project(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|first| is_usage_probe_project(first.as_os_str()))
+}
+
 /// Whether discovery may open a session file to learn its cwd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Peek {
@@ -358,7 +390,7 @@ impl ClaudeCodeSource {
                     continue;
                 }
             };
-            if !is_dir {
+            if !is_dir || is_usage_probe_project(&project_dir.file_name()) {
                 continue;
             }
             let discovery_project = discovery_project_label(&project_dir.file_name());
@@ -1754,6 +1786,65 @@ mod tests {
                 "no path in the error"
             );
         }
+    }
+
+    #[test]
+    fn the_apps_usage_probe_session_is_never_discovered() {
+        let root = tempfile::tempdir().unwrap();
+        let line = "{\"type\":\"user\",\"cwd\":\"/x\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+        let real = root.path().join("-Users-testuser-code-myproj");
+        let probe = root
+            .path()
+            .join("-private-var-folders-ab-T-tc-claude-usage-probe");
+        for dir in [&real, &probe] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("11111111-1111-1111-1111-111111111111.jsonl"), line).unwrap();
+        }
+        let source = ClaudeCodeSource::new(root.path().into());
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.starts_with(&real));
+        assert!(
+            source
+                .discover_unopened()
+                .unwrap()
+                .iter()
+                .all(|r| r.path.starts_with(&real))
+        );
+
+        // The file-event path refuses it too, as does a subagent under it.
+        let probe_session = probe.join("11111111-1111-1111-1111-111111111111.jsonl");
+        assert_eq!(source.session_for_path(&probe_session), None);
+        assert!(source.session_at(&probe_session).unwrap().is_none());
+        let member = probe
+            .join("11111111-1111-1111-1111-111111111111")
+            .join("subagents");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("agent-a.jsonl"), line).unwrap();
+        assert_eq!(source.session_for_path(&member.join("agent-a.jsonl")), None);
+        assert!(
+            source
+                .session_for_path(&real.join("11111111-1111-1111-1111-111111111111.jsonl"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn only_the_exact_probe_suffix_is_excluded() {
+        use std::ffi::OsStr;
+        assert!(is_usage_probe_project(OsStr::new(
+            "-tmp-tc-claude-usage-probe"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new("tc-claude-usage-probe")));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-tmp-xtc-claude-usage-probe-2"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-tmp-mytc-claude-usage-probex"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-Users-me-code-claude-usage-probe"
+        )));
     }
 
     #[test]

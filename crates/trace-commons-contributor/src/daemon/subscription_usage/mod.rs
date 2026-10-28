@@ -2,6 +2,8 @@
 //! stay in memory and never cross IPC; the display reads a bounded snapshot.
 
 mod claude;
+mod claude_cli;
+mod claude_token_cache;
 mod codex_oauth;
 pub(super) mod providers;
 
@@ -117,6 +119,18 @@ pub(super) struct Reading {
     pub identity: Identity,
     /// Post-validation file revision witnessed by the native collector.
     pub native_revision: Option<String>,
+    /// Where the figures came from; shown as the login's `source`.
+    pub source: ReadingSource,
+}
+
+/// `api`: a provider usage endpoint or native app-server. `cli`: read off
+/// the Claude Code CLI's `/usage` screen, whole percentages and resets only
+/// when stated in the local zone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReadingSource {
+    Api,
+    Cli,
 }
 
 #[derive(Clone, Debug)]
@@ -159,6 +173,9 @@ pub(crate) struct UsageService {
     collector: Collector,
     changed: tokio::sync::Notify,
     timeout: std::time::Duration,
+    /// The app's own copy of Claude usage access tokens; see
+    /// `claude_token_cache`. Cleared on unenroll and when Claude is off.
+    token_cache: Arc<claude_token_cache::TokenCache>,
 }
 
 fn global_probe_permits() -> Arc<Semaphore> {
@@ -168,14 +185,20 @@ fn global_probe_permits() -> Arc<Semaphore> {
 
 impl Default for UsageService {
     fn default() -> Self {
+        let token_cache = Arc::new(claude_token_cache::TokenCache::for_build());
+        let deps = claude::Deps::for_build(Arc::clone(&token_cache));
         Self {
             state: Mutex::new(State::default()),
             permits: global_probe_permits(),
             changed: tokio::sync::Notify::new(),
-            collector: Arc::new(|login, interactive, lease| {
-                Box::pin(async move { providers::collect(&login, interactive, lease).await })
+            collector: Arc::new(move |login, interactive, lease| {
+                let deps = deps.clone();
+                Box::pin(
+                    async move { providers::collect_with(&login, interactive, lease, &deps).await },
+                )
             }),
             timeout: std::time::Duration::from_secs(240),
+            token_cache,
         }
     }
 }
@@ -399,7 +422,8 @@ impl State {
                 json!({"id":entry.login.id,"label":entry.login.label,"default_login":entry.login.default_login,
                     "state":if reading.is_some() {"observed"} else {"unknown"},"reason":entry.reason,
                     "updated_at":entry.measured_at,"stale":stale,"windows":windows,"refreshing":entry.refreshing,
-                    "banked_resets":reading.and_then(|reading| reading.banked_resets)})
+                    "banked_resets":reading.and_then(|reading| reading.banked_resets),
+                    "source":reading.map(|reading| reading.source)})
             }).collect();
             json!({"provider":provider,"enabled":self.enabled[provider.index()],
                 "refreshing":self.entries.values().any(|entry| entry.login.provider == provider && entry.refreshing),"logins":logins})
@@ -490,7 +514,7 @@ fn native_metadata_revision(root: &std::path::Path) -> String {
 fn login_revision(login: &LoginSpec) -> String {
     match login.provider {
         Provider::Codex => native_metadata_revision(&login.root),
-        Provider::Claude => claude::metadata_revision(login),
+        Provider::Claude => claude::published_revision(login),
     }
 }
 
@@ -680,20 +704,45 @@ fn schedule(
 }
 
 /// Called after a committed setting change; no provider I/O from this path.
+/// Turning Claude off deletes the cached Claude usage token, on its own
+/// thread because the OS store call may block.
 pub(super) fn settings_changed(shared: &DaemonShared) {
     synchronize(shared);
+    let claude_on = shared
+        .settings
+        .lock()
+        .map(|s| s.subscription_usage_claude_on)
+        .unwrap_or(false);
+    if !claude_on {
+        clear_token_cache(&shared.subscription_usage);
+    }
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
 }
 
 /// Unenroll discards every cached reading and invalidates all in-flight generations.
 /// Available native Claude profiles may reappear later, with no retained reading.
+/// The cached Claude usage token goes too.
 pub(super) fn forget_readings(shared: &DaemonShared) {
     if let Ok(mut state) = shared.subscription_usage.state.lock() {
         state.entries.clear();
         state.next_generation = state.next_generation.wrapping_add(1);
     }
+    clear_token_cache(&shared.subscription_usage);
     shared.subscription_usage.changed.notify_waiters();
     shared.publish(EVENT_STATUS_CHANGED, json!({}));
+}
+
+fn clear_token_cache(service: &UsageService) {
+    let cache = Arc::clone(&service.token_cache);
+    // The epoch moves now, so a Refresh still in flight cannot write its
+    // token back after this; the store delete itself runs off this thread.
+    cache.begin_clear();
+    let spawned = std::thread::Builder::new()
+        .name("tc-claude-usage-cache-clear".into())
+        .spawn(move || cache.clear());
+    if spawned.is_err() {
+        tracing::warn!("claude usage token cache clear could not start");
+    }
 }
 
 /// Background ticks synchronize metadata only; explicit Refresh owns all probes.
@@ -816,6 +865,7 @@ mod tests {
         Reading {
             identity: identity.into(),
             native_revision: None,
+            source: ReadingSource::Api,
             banked_resets: Some(2),
             windows: vec![Window {
                 lane: "weekly".into(),
@@ -825,6 +875,26 @@ mod tests {
                 resets_at: Some(reset),
             }],
         }
+    }
+    #[test]
+    fn a_reading_names_its_source_and_no_reading_names_none() {
+        let (mut state, claim) = prepared();
+        let logins = |state: &State| state.value(now())["providers"][0]["logins"][0].clone();
+        assert!(logins(&state)["source"].is_null());
+        let mut cli = reading("account", now() + Duration::days(1));
+        cli.source = ReadingSource::Cli;
+        state.complete(&claim, Ok(cli), now());
+        assert_eq!(logins(&state)["source"], "cli");
+        let claim = state
+            .claims(now() + Duration::hours(1), true, None, None)
+            .pop()
+            .unwrap();
+        state.complete(
+            &claim,
+            Ok(reading("account", now() + Duration::days(1))),
+            now() + Duration::hours(1),
+        );
+        assert_eq!(logins(&state)["source"], "api");
     }
     fn prepared() -> (State, Claim) {
         let mut state = State::default();
@@ -1339,11 +1409,64 @@ mod integration_tests {
             collector,
             changed: tokio::sync::Notify::new(),
             timeout,
+            token_cache: Arc::new(claude_token_cache::TokenCache::for_build()),
         });
         Arc::get_mut(&mut shared).unwrap().dev_dry_run = dev_dry_run;
         shared.adopt_runtime();
         shared.adopt_self();
         (dir, shared)
+    }
+
+    fn cached(shared: &DaemonShared) -> bool {
+        shared
+            .subscription_usage
+            .token_cache
+            .lookup("login", "binding", Utc::now())
+            .is_some()
+    }
+    fn wait_until_uncached(shared: &DaemonShared) -> bool {
+        for _ in 0..200 {
+            if !cached(shared) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+    fn remember(shared: &DaemonShared) {
+        let cache = &shared.subscription_usage.token_cache;
+        cache.remember(
+            cache.epoch(),
+            "login",
+            "binding",
+            (Utc::now() + Duration::hours(1)).timestamp_millis(),
+            b"fixture-token",
+        );
+        assert!(cached(shared));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unenroll_and_turning_claude_off_delete_the_cached_claude_token() {
+        let (_dir, shared) = shared(Arc::new(|_, _, _| {
+            Box::pin(async {
+                Err(ProbeFailure {
+                    reason: "unavailable",
+                    identity: None,
+                })
+            })
+        }));
+        remember(&shared);
+        // Another setting changing while Claude stays on keeps it.
+        settings_changed(&shared);
+        assert!(cached(&shared));
+
+        forget_readings(&shared);
+        assert!(wait_until_uncached(&shared));
+
+        remember(&shared);
+        shared.settings.lock().unwrap().subscription_usage_claude_on = false;
+        settings_changed(&shared);
+        assert!(wait_until_uncached(&shared));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1512,6 +1635,7 @@ mod integration_tests {
                             banked_resets: None,
                             identity: "fixture".into(),
                             native_revision: None,
+                            source: ReadingSource::Api,
                         })
                     })
                     .await
@@ -1622,6 +1746,7 @@ mod integration_tests {
                     banked_resets: Some(3),
                     identity: "fixture".into(),
                     native_revision: None,
+                    source: ReadingSource::Api,
                 })
             })
         }));
@@ -1744,6 +1869,7 @@ mod integration_tests {
                     banked_resets: None,
                     identity: "fixture-owner".into(),
                     native_revision: None,
+                    source: ReadingSource::Api,
                 })
             })
         }));
