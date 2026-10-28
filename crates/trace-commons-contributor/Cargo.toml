@@ -38,6 +38,15 @@ test-credential-store = ["trace-commons-contributor-insights/test-credential-sto
 # does. One line, so that script can permit this exact definition.
 near-ai-staging = ["trace-commons-attestation/near-ai-staging"]
 
+# Subscription usage (PR #1608 design, first slice): the `subscription_usage`
+# IPC method, its `subscription_usage` setting, and the Codex app-server
+# probe behind them (`src/subscription_usage/`). Off by default: without it
+# the method is `unknown_method` and the setting is refused, so a build
+# without it has no such surface at all. The macOS app's dylib turns it on
+# through `trace-commons-contributor-ffi`'s default features. Adds no
+# package: the probe uses `sysinfo`, already a dependency.
+subscription-usage = []
+
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }

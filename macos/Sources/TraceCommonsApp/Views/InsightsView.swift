@@ -12,6 +12,8 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    /// The Subscriptions card on the Overview (`subscription_usage`).
+    @State private var subscriptionsModel: SubscriptionUsageModel
     @State private var tab: InsightsTab
     /// "Turn off" on the weekly summary card: the daemon's setting, its only
     /// switch. `nil` without a daemon.
@@ -36,6 +38,9 @@ struct InsightsView: View {
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
         }
+        var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
+            { @Sendable refresh in try await client.subscriptionUsage(refresh: refresh) }
+        }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
@@ -43,6 +48,7 @@ struct InsightsView: View {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
             watchedReader = nil
+            subscriptionReader = { @Sendable _ in InsightsSampleWeek.subscriptionUsage() }
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -54,6 +60,7 @@ struct InsightsView: View {
                   specificationModel: ComparisonSpecificationsModel(service: service),
                   sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
                                                        watchedDrill: watchedDrill),
+                  subscriptionsModel: SubscriptionUsageModel(reader: subscriptionReader),
                   turnOffRecapCard: turnOff)
     }
 
@@ -67,6 +74,7 @@ struct InsightsView: View {
                     specificationModel: ComparisonSpecificationsModel,
                     overviewModel: InsightsOverviewModel? = nil,
                     sessionsModel: InsightsSessionsModel? = nil,
+                    subscriptionsModel: SubscriptionUsageModel? = nil,
                     initialTab: InsightsTab = .overview,
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
         self.storeSelection = storeSelection
@@ -78,6 +86,7 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _subscriptionsModel = State(initialValue: subscriptionsModel ?? SubscriptionUsageModel(reader: nil))
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
     }
@@ -124,6 +133,7 @@ struct InsightsView: View {
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
                     snapshots: model.snapshots,
+                    subscriptions: subscriptionsModel,
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
                     selectWeek: selectWeek,
@@ -149,6 +159,7 @@ struct InsightsView: View {
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
         .onAppear { showSampleWeekIfAsked() }
+        .onAppear { subscriptionsModel.open() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
         }
@@ -166,6 +177,7 @@ struct InsightsView: View {
         .onDisappear {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
             patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
+            subscriptionsModel.close()
         }
     }
 

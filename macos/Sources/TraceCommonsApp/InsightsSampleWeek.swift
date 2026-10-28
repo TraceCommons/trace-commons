@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import TCBridge
+import TCShellCore
 
 /// Debug builds only: `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from a
 /// fixed sample week, so a design review can see every chart and section in
@@ -210,6 +211,28 @@ enum InsightsSampleWeek {
                  "context_from": 155_000, "context": 60_000],
             ],
         ]
+    }
+
+    /// The Subscriptions card's sample (`subscription_usage`): ChatGPT Plus,
+    /// the 5-hour window 42% used and resetting in about three hours, the
+    /// weekly one 13% used and resetting in about four days, and one reset
+    /// credit, read a few minutes before `now`. Times are relative to `now`
+    /// so the card never shows a reset already past.
+    static func subscriptionUsage(now: Date = Date()) -> DaemonData.SubscriptionUsage {
+        func stamp(_ offset: TimeInterval) -> String {
+            ISO8601DateFormatter().string(from: now.addingTimeInterval(offset))
+        }
+        let login = DaemonData.SubscriptionLogin(
+            provider: "codex", state: "observed", reason: nil, refreshing: false, source: "cli",
+            updatedAt: stamp(-4 * 60), stale: false, plan: "plus", limitReached: false,
+            windows: [
+                .init(lane: "session", label: nil, durationMins: 300, usedPermille: 420,
+                      resetsAt: stamp(3 * 3_600 + 10 * 60)),
+                .init(lane: "weekly", label: nil, durationMins: 10_080, usedPermille: 130,
+                      resetsAt: stamp(4 * 86_400 + 2 * 3_600)),
+            ],
+            credits: nil, resetCredits: 1)
+        return DaemonData.SubscriptionUsage(enabled: true, logins: [login])
     }
 }
 #endif

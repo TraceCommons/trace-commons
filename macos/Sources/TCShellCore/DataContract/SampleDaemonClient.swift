@@ -499,6 +499,15 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_glance")
     }
 
+    public func subscriptionUsage(refresh: Bool) async throws -> DaemonData.SubscriptionUsage {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no subscription is recorded (it needs the Codex app), so
+        // no card is drawn, as against a daemon built without the feature.
+        // The Insights design sample (`TRACE_COMMONS_INSIGHTS_SAMPLE=1`)
+        // draws its own.
+        throw DaemonDataError.notAvailableYet(method: "subscription_usage")
+    }
+
     // MARK: Network methods (C3, #1187): hand-written samples
 
     public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {

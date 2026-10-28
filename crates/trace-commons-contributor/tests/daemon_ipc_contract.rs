@@ -514,8 +514,13 @@ async fn hello_advertises_exactly_the_documented_method_set() {
         .map(|m| m.as_str().unwrap().to_string())
         .collect();
     methods.sort();
-    let mut expected: Vec<String> = METHODS.iter().map(|m| m.to_string()).collect();
+    // `METHODS`, plus a feature-gated method when its feature is built in.
+    let mut expected: Vec<String> = trace_commons_contributor::daemon::ipc::advertised_methods()
+        .iter()
+        .map(|m| m.to_string())
+        .collect();
     expected.sort();
+    assert!(METHODS.iter().all(|m| expected.contains(&m.to_string())));
     assert_eq!(methods, expected);
 }
 

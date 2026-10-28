@@ -318,6 +318,13 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }
 
+    public func subscriptionUsage(refresh: Bool) async throws -> DaemonData.SubscriptionUsage {
+        // `refresh` is sent only when asked: a plain read is the request
+        // with no parameters.
+        try await call("subscription_usage", params: refresh ? ["refresh": true] : [:],
+                       as: DaemonData.SubscriptionUsage.self)
+    }
+
     // MARK: Network methods (C3, #1187)
 
     public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {

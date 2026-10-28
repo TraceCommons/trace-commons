@@ -181,6 +181,12 @@ pub(crate) fn schema() -> Value {
         "type":"string","enum":["automatic","manual"],"examples":["manual"],
         "description":"Privacy-review mode. Switching to manual returns unsent unattended approvals to waiting. Does not bypass upload consent."
     }));
+    #[cfg(feature = "subscription-usage")]
+    properties.insert("subscription_usage".into(), json!({
+        "type":"object","properties":{"codex":{"type":"boolean"}},"additionalProperties":false,
+        "examples":[{"codex":false}],
+        "description":"Partial subscription-usage switches. codex lets the daemon ask the contributor's own Codex for their plan and usage when they choose Refresh; off clears the held reading. Nothing polls."
+    }));
     properties.insert(
         "insights_context_threshold".into(),
         json!({
@@ -333,6 +339,9 @@ mod tests {
                 line.starts_with('"')
                     .then(|| line.split('"').nth(1).unwrap())
             })
+            // Compiled in only with its feature; the source scan sees it
+            // either way.
+            .filter(|key| cfg!(feature = "subscription-usage") || *key != "subscription_usage")
             .collect();
         assert_eq!(keys, props.keys().map(String::as_str).collect());
         for (key, property) in props {

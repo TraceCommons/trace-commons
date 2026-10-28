@@ -114,6 +114,8 @@ pub mod skill_loop;
 pub mod source;
 pub mod source_copy;
 pub mod submit;
+#[cfg(feature = "subscription-usage")]
+pub mod subscription_usage;
 pub mod token_bundle;
 pub mod token_capture_client;
 pub mod token_review_lease;

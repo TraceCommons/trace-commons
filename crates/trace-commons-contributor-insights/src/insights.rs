@@ -33,6 +33,7 @@ pub mod service;
 pub mod session_drill;
 pub mod session_identity;
 pub mod session_sparkline;
+pub mod subscription_usage_copy;
 pub mod summary;
 pub mod task_attribution;
 pub mod time_evidence;

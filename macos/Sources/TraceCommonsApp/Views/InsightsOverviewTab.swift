@@ -22,6 +22,8 @@ struct InsightsOverviewTab: View {
     /// Saved snapshots, so a drill-down row reads as its session's label.
     /// No default: a caller that forgets them would show every row as the dash.
     let snapshots: [LocalInsight]
+    /// The Subscriptions card, drawn only while its switch is on.
+    var subscriptions: SubscriptionUsageModel?
     /// "Watched-folder counting is unavailable right now", shown with feed S
     /// when feed T is switched on but could not be read.
     var notice: String?
@@ -78,6 +80,11 @@ struct InsightsOverviewTab: View {
                     }
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
+                }
+                // Not a figure of the week: drawn whatever week, or none,
+                // is showing.
+                if let subscriptions, subscriptions.shown {
+                    SubscriptionUsageCard(model: subscriptions, copy: copy)
                 }
                 if model.busy { GlassSpinner() }
             }

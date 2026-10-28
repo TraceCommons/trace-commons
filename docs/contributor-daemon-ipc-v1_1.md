@@ -608,6 +608,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
+| `subscription_usage` | `refresh` (optional boolean) | `enabled`, and while enabled `logins[]` | additive; **only in a build with the contributor's `subscription-usage` cargo feature** (otherwise `unknown_method`); read-only, synchronous, not dry-run local; `refresh: true` schedules one Codex probe and answers at once; gated on the `subscription_usage` setting (off by default); see "`subscription_usage`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
@@ -670,7 +671,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings`, `subscription_usage` (feature builds only) | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -4537,6 +4538,119 @@ endpoint, backend name, retry count or price ever appears here: the ledger's
 priced cost never reaches Insights (owner decision D5, open). The method
 carries no sentence; a shell draws the core's copy for these labels.
 
+### `subscription_usage`
+
+Additive, and **only in a build with the contributor's `subscription-usage`
+cargo feature** (PR #1608 design, first slice; the macOS app's dylib turns
+it on). A build without it answers `unknown_method`, does not list it in
+`hello`, and refuses the setting; a shell that gets `unknown_method` shows
+no Subscriptions card.
+
+The contributor's ChatGPT plan and how much of each Codex limit they have
+used, read from their own Codex through `codex app-server`. Synchronous
+and read-only: it answers from the snapshot the daemon holds. Nothing
+polls. Not on the developer dry-run allowlist, because a refresh launches
+Codex, which asks OpenAI.
+
+Params: `refresh`, optional boolean (anything else is `bad_params` /
+`refresh-invalid`). `true` schedules one probe and returns the current
+snapshot at once, with `refreshing: true` while it runs. A probe is not
+scheduled while one is running, or within 60 seconds of the last one that
+launched Codex; either way the answer is the held snapshot. When the probe
+finishes the daemon publishes `status_changed` (`{}`, no new event) and
+the shell re-reads `subscription_usage`; a shell that does not subscribe
+re-polls.
+
+The probe launches exactly `<absolute path to codex> -s read-only -a never
+app-server`, the path from the daemon's own executable discovery (never a
+bare `codex`), with the environment cleared to `HOME`, a fixed `PATH`,
+`LANG` and `TMPDIR`, a daemon-owned empty working directory and stderr
+discarded. It sends `initialize`, `initialized`, `account/read` (empty
+params: `refreshToken` is never sent) and `account/rateLimits/read`, then
+closes stdin, waits 2 s, SIGTERM, 2 s, SIGKILL, and reaps. Budgets: 10 s
+for `initialize`, 5 s per request, 20 s in all; a stdout line over 1 MiB
+ends it. If a process named `codex` is already running (the CLI or the
+Codex app), nothing is launched and the reason is `codex_running`; that
+does not start the 60-second floor. The daemon never reads Codex's
+`auth.json`, never sees a token and never touches the Keychain.
+
+With the `subscription_usage.codex` setting off (the default) the answer
+is exactly the following, and nothing is read or launched:
+
+```json
+{ "enabled": false }
+```
+
+Otherwise:
+
+```json
+{
+  "enabled": true,
+  "logins": [
+    {
+      "provider": "codex",
+      "state": "observed",
+      "reason": null,
+      "refreshing": false,
+      "source": "cli",
+      "updated_at": "2026-10-26T12:00:00+00:00",
+      "stale": false,
+      "plan": "business",
+      "limit_reached": false,
+      "windows": [
+        { "lane": "weekly", "label": null, "duration_mins": 10080, "used_permille": 0, "resets_at": "2026-11-02T11:00:53+00:00" }
+      ],
+      "credits": { "has_credits": false, "unlimited": false, "balance": null },
+      "reset_credits": 2
+    }
+  ]
+}
+```
+
+- `logins[]` holds one entry in this slice: the default Codex sign-in.
+- `state` is `observed` or `unknown`. `reason` is `null` or one of `off`,
+  `never_refreshed` (switch on, no Refresh yet), `codex_not_found`,
+  `codex_running`, `signed_out`, `not_subscription` (Codex is signed in
+  with an API key), `timeout`, `unreadable`, `blocked` (macOS refused the
+  launch) or `failed`. No reason carries upstream text.
+- A reading is `observed` when Codex answered the usage read, whatever
+  `account/read` said (codex-cli 0.153.4 answers `account: null` for a
+  working ChatGPT sign-in). `account/read` only names the reason when the
+  usage read is refused.
+- A failed refresh keeps the previous reading: still `observed`, with
+  `stale: true` and the failure's `reason`. With no previous reading the
+  entry is `unknown` with the reason, `source`, `updated_at`, `plan`,
+  `limit_reached`, `credits` and `reset_credits` `null` and `windows` empty.
+- `refreshing` is true while a probe runs. `source` is `cli` for a reading.
+  `updated_at` is when the reading was taken, not now.
+- `plan` is `free`, `plus`, `pro`, `team`, `business`, `enterprise`, `edu`
+  or `unknown`; never free text. Codex's variants of a family read as the
+  family (`self_serve_business_*` is `business`, `enterprise_*`
+  `enterprise`, `edu_*` `edu`); any other value, `go`, `prolite` and
+  `ent26` included, is `unknown`.
+- `windows[]`: `lane` is `session`, `weekly` or `model`. Codex's main
+  limit gives up to two windows: 300 minutes is `session` and 10080 is
+  `weekly` wherever Codex reports them (a weekly-only plan reports its
+  weekly window as primary); any other length is `session` as primary and
+  `weekly` as secondary. Every other limit in `rateLimitsByLimitId` gives
+  `model` windows, with `label` its `limitName` when that is 1 to 40 of
+  `A-Z a-z 0-9 space . _ -`, else `null`. `used_permille` is an integer
+  0..=1000. **A window Codex did not report, or reported with a
+  percentage outside 0..=100, is absent, never 0.** `resets_at` is `null`
+  when Codex gave none, or one in the past or more than 31 days ahead. A
+  window whose `resets_at` has passed since the reading stays in the
+  answer with its old figure; a shell shows it as "Usage unknown", never
+  that figure, whether or not the reading is `stale`.
+- `limit_reached` is Codex's `rateLimitReachedType` (`null` there is
+  `false`, any type `true`), else the negation of `ordinaryUsageAllowed`,
+  else `null`. Never inferred from percentages.
+- `credits` is `null` when Codex sent none; `balance` is a non-negative
+  decimal string or `null`. `reset_credits` is Codex's count of available
+  rate-limit resets, or `null`; no credit's id, title or description is read.
+- Nothing on the wire is an email, an account id, a path, a token or
+  upstream text. The words for every label are in the Insights copy
+  (`tc_insights_copy_json`, keys `subscription_usage_*`).
+
 ### `insights_week`
 
 Additive. One local ISO week of token counters from the daemon's counter
@@ -5036,7 +5150,9 @@ Takes a JSON object whose top-level keys must come from
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` --
+`insights_recap_card_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings`,
+`subscription_usage` (only in a build with the `subscription-usage`
+feature) --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -6084,6 +6200,21 @@ shell can tell "unset" from an older daemon (key absent). It is the
 contributor's own limit for the context tip in `insights_glance`, which is
 itself held by owner decision D2 (open); setting it lights nothing while that
 decision is open.
+
+#### `subscription_usage`
+
+Additive, and only in a build with the contributor's `subscription-usage`
+cargo feature: without it the key is `settings-unknown-field` and
+`get_settings` omits it (a saved value stays in the settings file).
+`get_settings` reports `{"codex": false}` until the contributor turns it on.
+`set_settings` takes a partial object, `{"codex": true|false}`: a key
+other than `codex` is `settings-unknown-subscription-usage-key`, a value
+that is not a boolean `settings-invalid-value`, and nothing is applied
+unless the whole object is good. `codex` defaults to `false`, and a
+settings file without the key loads it off. Turning it on reads and
+launches nothing: the first probe is the contributor's first Refresh.
+Turning it off clears the held reading at once, and a probe still running
+lands nowhere. A setting about this Mac, so `unenroll` keeps it.
 
 #### `insights_counter_pass`
 

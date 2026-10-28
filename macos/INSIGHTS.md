@@ -130,9 +130,20 @@ answers `key_unavailable` and it cannot save an analysis, and every tab is
 empty. For a design review, a Debug build launched with
 `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
 fixed watched-folder week with goals, the lever, the weekly summary and one
-trace for Sessions. Only the analytics answers are sampled; a goal, lever or
-summary write is answered and kept nowhere. A release build never reads the
-variable.
+trace for Sessions, plus a sample Subscriptions card (ChatGPT Plus, the 5-hour
+window 42% used, Weekly 13% used, one reset credit) with Settings' "Codex
+usage" switch drawn on. Only the analytics answers are sampled; a goal, lever,
+summary or switch write is answered and kept nowhere. A release build never
+reads the variable.
+
+The Subscriptions card on the Overview reads `subscription_usage` (PR #1608,
+first slice: Codex only) and is drawn only while Settings' "Codex usage" is on.
+Opening the Overview reads the daemon's held snapshot; only Refresh asks the
+daemon to probe the Codex app, after which the card re-reads for up to 35
+seconds until no login says `refreshing`. Nothing polls in the background. A
+daemon built without the `subscription-usage` feature answers
+`unknown_method` and leaves `subscription_usage` out of `get_settings`, so
+neither the card nor the switch is drawn.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening

@@ -9,6 +9,16 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# The macOS app runs its daemon in this dylib, so this is where the app turns
+# on the contributor's `subscription-usage` (PR #1608, first slice: Codex
+# usage on Refresh, behind a settings switch that is off by default). A
+# default feature rather than a channel file entry, so both channels'
+# `make-app-bundle.sh` builds carry it with no script change;
+# `--no-default-features` builds a dylib without the surface.
+default = ["subscription-usage"]
+subscription-usage = ["trace-commons-contributor/subscription-usage"]
+
 [dependencies]
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 # For `secret_leak_pattern_names`, so `tc_scrub_detector_names` reports what

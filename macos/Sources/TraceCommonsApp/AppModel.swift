@@ -2748,6 +2748,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A "Codex usage" write is in flight; the switch takes no other.
+    @Published private(set) var subscriptionUsageBusy = false
+    /// The core's request-failed words for a "Codex usage" write the daemon
+    /// refused or did not confirm; cleared by the next confirmed write.
+    @Published private(set) var subscriptionUsageRefusal: String?
+
+    /// Turns "Codex usage" on or off (`subscription_usage.codex`), sending
+    /// only that key, with the same rules as `setInsightsSwitch`: nothing
+    /// optimistic, and only an echo of what was asked confirms it. Turning
+    /// it off clears the daemon's held reading.
+    func setSubscriptionUsageCodex(_ on: Bool) async {
+        guard !subscriptionUsageBusy else { return }
+        guard let client else {
+            subscriptionUsageRefusal = MonitorWords.table?.requestFailed
+            return
+        }
+        subscriptionUsageBusy = true
+        defer { subscriptionUsageBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["subscription_usage": ["codex": on]]) }
+        }.value
+        switch result {
+        case .success(let settings) where settings.subscriptionUsage?.codex == on:
+            daemonSettings = settings
+            subscriptionUsageRefusal = nil
+        case .success(let settings):
+            if settings.subscriptionUsage?.codex != nil { daemonSettings = settings }
+            subscriptionUsageRefusal = MonitorWords.table?.requestFailed
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            subscriptionUsageRefusal = MonitorWords.table?.requestFailed
+        }
+    }
+
     @Published private(set) var tokenContributionBusy = false
     @Published private(set) var tokenContributionSaveFailed = false
 

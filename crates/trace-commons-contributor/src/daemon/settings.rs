@@ -687,6 +687,17 @@ pub struct DaemonSettings {
     #[serde(default = "default_insights_recap_card_enabled")]
     pub insights_recap_card_enabled: bool,
 
+    /// Subscription usage switches (PR #1608, first slice): whether the
+    /// daemon may ask the contributor's own Codex for their plan and usage
+    /// when they choose Refresh. Off by default, and a settings file without
+    /// the key loads it off. Settable only in a build with the
+    /// `subscription-usage` feature; a build without it keeps a saved value
+    /// on load and save but refuses the key and leaves it out of
+    /// `get_settings`. Turning it off clears the held reading. A setting
+    /// about this Mac, so `unenroll` keeps it.
+    #[serde(default)]
+    pub subscription_usage: SubscriptionUsageSettings,
+
     /// Nudge: whether the app may show in-app suggestions -- the cards on
     /// Traces and History and the menu-bar panel row (`status.nudge`).
     /// Defaults to [`DEFAULT_SUGGESTIONS_ENABLED`]; a settings file written
@@ -795,6 +806,21 @@ pub struct DaemonSettings {
     /// See `legacy_claude_root`.
     #[serde(default, rename = "codex_root", skip_serializing)]
     pub legacy_codex_root: Option<PathBuf>,
+}
+
+/// The `subscription_usage` switches. One provider in this slice.
+///
+/// `other` keeps every key this build does not know (a later provider's
+/// switch, written by a newer build), so an older daemon loading and saving
+/// the file does not drop it. A write naming one is refused.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionUsageSettings {
+    /// Codex usage, through `codex app-server`.
+    #[serde(default)]
+    pub codex: bool,
+    /// Keys this build does not know, kept verbatim.
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
 }
 
 /// The per-kind notification switches (`notify` in the settings file).
@@ -1383,6 +1409,7 @@ impl Default for DaemonSettings {
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
             insights_recap_card_enabled: default_insights_recap_card_enabled(),
+            subscription_usage: SubscriptionUsageSettings::default(),
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
@@ -1825,6 +1852,11 @@ pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
 /// A `notify` object named a kind this build does not know. A fixed label:
 /// the caller's key never enters it.
 pub const ERR_SETTINGS_UNKNOWN_NOTIFY_KIND: &str = "settings-unknown-notify-kind";
+/// A `subscription_usage` object named a provider this build does not
+/// switch. A fixed label: the caller's key never enters it.
+#[cfg(feature = "subscription-usage")]
+pub const ERR_SETTINGS_UNKNOWN_SUBSCRIPTION_USAGE_KEY: &str =
+    "settings-unknown-subscription-usage-key";
 
 /// The `daemon-settings.json` key carrying one adapter's declaration.
 ///
@@ -2195,6 +2227,13 @@ pub fn apply_settings_object(
                     )? as u32),
                 };
             }
+            // Subscription usage (PR #1608, first slice). Only in a build
+            // with the `subscription-usage` feature; without it the key is
+            // unknown like any other. See `apply_subscription_usage_object`.
+            #[cfg(feature = "subscription-usage")]
+            "subscription_usage" => {
+                apply_subscription_usage_object(settings, value)?;
+            }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
         // SET-SETTINGS-KEYS-END
@@ -2237,6 +2276,28 @@ fn apply_notify_object(
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// A partial `subscription_usage` object: `{"codex": bool}`. Any other key
+/// is refused (`ERR_SETTINGS_UNKNOWN_SUBSCRIPTION_USAGE_KEY`) and a value
+/// that is not a boolean is `ERR_SETTINGS_INVALID_VALUE`; nothing is
+/// applied unless the whole object is good. Outside the `SET-SETTINGS-KEYS`
+/// region for the reason `apply_notify_object` is.
+#[cfg(feature = "subscription-usage")]
+fn apply_subscription_usage_object(
+    settings: &mut DaemonSettings,
+    value: &serde_json::Value,
+) -> std::result::Result<(), &'static str> {
+    let obj = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    let mut codex = settings.subscription_usage.codex;
+    for (key, on) in obj {
+        match key.as_str() {
+            "codex" => codex = on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?,
+            _ => return Err(ERR_SETTINGS_UNKNOWN_SUBSCRIPTION_USAGE_KEY),
+        }
+    }
+    settings.subscription_usage.codex = codex;
     Ok(())
 }
 

@@ -52,6 +52,11 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // installed choices beside it, and writes it with
             // `set_managed_terminal`.
             "managed_terminal",
+            // The "Codex usage" switch, sent by a daemon built with the
+            // `subscription-usage` feature: the app's settings model
+            // (`SubscriptionUsageSettingsView`) owns it, beside Settings'
+            // other Insights switches.
+            "subscription_usage", "subscription_usage.codex",
         ]
         // Staging builds only: where the signed NEAR AI pin set stands, and
         // the last attestation outcome under it (owner decision S16):

@@ -26,6 +26,8 @@ struct GlassSettingsContent: View {
                 // run (R-43); the ledger feed's is in Private AI (Ron's #1287
                 // review).
                 InsightsSettingsCard()
+                // "Codex usage", for the Subscriptions card on the Overview.
+                SubscriptionUsageSettingsCard()
             case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()

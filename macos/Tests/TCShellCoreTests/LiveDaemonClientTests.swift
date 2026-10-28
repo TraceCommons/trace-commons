@@ -73,6 +73,32 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(transport.calls.map(\.params), [#"{"tz":3600}"#])
     }
 
+    /// `subscription_usage`: a plain read sends no parameters, Refresh sends
+    /// `refresh: true` and nothing else, and an older daemon's
+    /// `unknown_method` is "not served", which draws no card.
+    func testSubscriptionUsageSendsRefreshOnlyWhenAsked() async throws {
+        let transport = ScriptedTransport { method, _ in
+            method == "subscription_usage" ? #"{"id":0,"result":{"enabled":false}}"# : nil
+        }
+        let client = LiveDaemonClient(transport: transport)
+        let read = try await client.subscriptionUsage(refresh: false)
+        _ = try await client.subscriptionUsage(refresh: true)
+        XCTAssertFalse(read.enabled)
+        XCTAssertNil(read.logins)
+        XCTAssertEqual(transport.calls.map(\.method), ["subscription_usage", "subscription_usage"])
+        XCTAssertEqual(transport.calls.map(\.params), ["{}", #"{"refresh":true}"#])
+
+        let older = ScriptedTransport { _, _ in
+            #"{"id":0,"error":{"code":"unknown_method","message":"unknown-method"}}"#
+        }
+        do {
+            _ = try await LiveDaemonClient(transport: older).subscriptionUsage(refresh: false)
+            XCTFail("an older daemon answered")
+        } catch {
+            XCTAssertEqual((error as? DaemonDataError)?.isNotServed, true)
+        }
+    }
+
     /// The nudge requests: the Traces filter and order, the card actions,
     /// and the Settings switches and offer markers. Queue order sends no
     /// `order` at all, so the request is byte for byte the one before it.

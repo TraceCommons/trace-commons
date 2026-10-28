@@ -264,6 +264,14 @@ public protocol DaemonDataClient: Sendable {
     /// daemon's `unknown_method` and any failed read all mean no glance,
     /// never a zero and never a failed popover.
     func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance
+    /// `subscription_usage`: the ChatGPT plan and Codex limit windows from
+    /// the daemon's held snapshot (PR #1608 design, 3.3). Answers at once;
+    /// `refresh: true` also asks the daemon to probe the Codex app, whose
+    /// answer arrives with `status_changed` or the next read. `enabled:
+    /// false` while the setting is off; a daemon built without the
+    /// `subscription-usage` feature refuses it as `unknown_method`, which
+    /// draws no card.
+    func subscriptionUsage(refresh: Bool) async throws -> DaemonData.SubscriptionUsage
 
     // MARK: Network methods (C3, #1187)
 

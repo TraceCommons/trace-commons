@@ -750,6 +750,10 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// by default); "Hide" on the card turns it off. Absent from an older
     /// daemon: no switch, never an "off".
     var insightsRecapCardEnabled: Bool? = nil
+    /// The subscription usage switches (`subscription_usage`, PR #1608
+    /// design 3.4; off by default). Absent from a daemon built without the
+    /// `subscription-usage` feature: no switch, never an "off".
+    var subscriptionUsage: SubscriptionUsageSettingsView? = nil
     /// Whether the app shows missions at all (`missions_enabled`, owner
     /// decision 2026-10-16: hidden for now, off by default, flipped only
     /// through `set_settings`). Absent from an older daemon, which reads as
@@ -797,7 +801,16 @@ struct DaemonSettingsView: Decodable, Equatable {
         case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"
+        case subscriptionUsage = "subscription_usage"
     }
+}
+
+/// `subscription_usage` as `get_settings` reports it. Only Codex usage
+/// exists in this slice; a key a later daemon adds is ignored here.
+struct SubscriptionUsageSettingsView: Decodable, Equatable {
+    /// "Codex usage": asks the Codex app for the ChatGPT plan's limits,
+    /// only when the contributor chooses Refresh.
+    let codex: Bool?
 }
 
 /// `private_inference_state` as `get_settings`, `set_settings` and `status`

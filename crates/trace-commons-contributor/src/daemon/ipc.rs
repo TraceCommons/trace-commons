@@ -511,6 +511,31 @@ pub const METHODS: &[&str] = &[
     "unpublish_public_run",
 ];
 
+/// Methods dispatched only when a cargo feature compiles them in, each with
+/// whether it is compiled into this build. Every name is listed whatever the
+/// features, so `every_advertised_method_is_dispatched_and_the_reverse`,
+/// which reads the dispatchers' source, can tell a gated arm from a missing
+/// one. `hello` advertises the compiled ones ([`advertised_methods`]); a
+/// build without the feature answers `unknown_method`.
+pub const FEATURE_METHODS: &[(&str, bool)] =
+    &[("subscription_usage", cfg!(feature = "subscription-usage"))];
+
+/// What `hello` advertises: [`METHODS`] and the compiled
+/// [`FEATURE_METHODS`].
+#[must_use]
+pub fn advertised_methods() -> Vec<&'static str> {
+    METHODS
+        .iter()
+        .copied()
+        .chain(
+            FEATURE_METHODS
+                .iter()
+                .filter(|(_, compiled)| *compiled)
+                .map(|(method, _)| *method),
+        )
+        .collect()
+}
+
 /// K2 (#1173): the methods a developer dry run still answers. An allowlist,
 /// not a denylist: each of these only reads or writes this daemon's own
 /// state store, so a method added later that reaches the network is refused
@@ -1142,6 +1167,11 @@ pub struct DaemonShared {
     /// spend its bound on them again. In memory only: a restart tries them
     /// once more.
     pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
+    /// The held subscription usage reading and its one probe (PR #1608,
+    /// first slice). In memory only; a restart starts at
+    /// `never_refreshed`. A leaf lock inside.
+    #[cfg(feature = "subscription-usage")]
+    pub(crate) subscription_usage: Arc<crate::subscription_usage::SubscriptionUsage>,
 }
 
 /// Counts one preview build on [`DaemonShared`] for as long as it lives.
@@ -1494,6 +1524,25 @@ impl DaemonShared {
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
+        // A finished probe is announced as `status_changed`; the shell
+        // re-reads `subscription_usage` (no new event).
+        #[cfg(feature = "subscription-usage")]
+        let subscription_usage = {
+            let events = events.clone();
+            Arc::new(crate::subscription_usage::SubscriptionUsage::new(
+                Arc::new(
+                    crate::subscription_usage::codex_app_server::CodexAppServer::for_daemon(
+                        store.dir(),
+                    ),
+                ),
+                Box::new(move || {
+                    let _ = events.send(Event {
+                        event: EVENT_STATUS_CHANGED.to_string(),
+                        data: serde_json::json!({}),
+                    });
+                }),
+            ))
+        };
         Ok(Self {
             managed,
             store,
@@ -1564,6 +1613,8 @@ impl DaemonShared {
             settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
+            #[cfg(feature = "subscription-usage")]
+            subscription_usage,
         })
     }
 
@@ -3814,7 +3865,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             serde_json::json!({
                 "schema_version": IPC_SCHEMA,
                 "supported_versions": SUPPORTED_VERSIONS,
-                "methods": METHODS,
+                "methods": advertised_methods(),
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
@@ -3831,6 +3882,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "inference_calls" => super::inference_map::handle_calls(shared, req),
         "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
+        // Compiled in only with the `subscription-usage` feature; listed in
+        // `FEATURE_METHODS`, not `METHODS`.
+        #[cfg(feature = "subscription-usage")]
+        "subscription_usage" => crate::subscription_usage::handle(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
@@ -6545,6 +6600,8 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
     let suggestions_before = settings.suggestions_enabled;
     let settlement_before = settings.settlement_estimate_enabled;
     let missions_before = settings.missions_enabled;
+    #[cfg(feature = "subscription-usage")]
+    let subscription_usage_before = settings.subscription_usage.codex;
     let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
@@ -6598,6 +6655,12 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
             let managed_options_changed = settings.managed_cli_options != managed_options_before
                 || settings.managed_folder_settings != managed_folders_before;
             let settlement_after = settings.settlement_estimate_enabled;
+            // Off forgets the held reading; on starts at `never_refreshed`
+            // and probes nothing until the contributor chooses Refresh.
+            #[cfg(feature = "subscription-usage")]
+            if subscription_usage_before && !settings.subscription_usage.codex {
+                shared.subscription_usage.clear();
+            }
             drop(settings);
             // Off stops a running scan's result, hides the estimate and
             // deletes the feature cache; on asks for a full scan.
@@ -9043,6 +9106,11 @@ pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");
+        // A build without the feature has no such setting to show, though
+        // it keeps a saved value in the file.
+        if !cfg!(feature = "subscription-usage") {
+            obj.remove("subscription_usage");
+        }
         for source in crate::source::declarable_source_names() {
             let Some(key) = crate::daemon::settings::source_settings_key(source) else {
                 continue;
@@ -14400,13 +14468,44 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
     }
 
+    /// Without the `subscription-usage` feature the surface does not exist:
+    /// the method is unknown, `hello` does not offer it, the setting is
+    /// refused, and `get_settings` does not show it.
+    #[cfg(not(feature = "subscription-usage"))]
+    #[test]
+    fn subscription_usage_is_absent_without_its_feature() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req("subscription_usage", serde_json::json!({"refresh": true})),
+        );
+        assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
+        assert!(!advertised_methods().contains(&"subscription_usage"));
+        let set = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"subscription_usage": {"codex": true}}),
+            ),
+        );
+        assert_eq!(
+            set.error.unwrap().message,
+            crate::daemon::settings::ERR_SETTINGS_UNKNOWN_FIELD
+        );
+        let got = handle_request(&s, &req("get_settings", serde_json::json!({})));
+        assert!(got.result.unwrap().get("subscription_usage").is_none());
+    }
+
     #[test]
     fn hello_advertises_the_schema_and_method_set() {
         let s = shared();
         let r = handle_request(&s, &req("hello", serde_json::json!({})));
         let result = r.result.unwrap();
         assert_eq!(result["schema_version"], IPC_SCHEMA);
-        assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
+        assert_eq!(
+            result["methods"].as_array().unwrap().len(),
+            advertised_methods().len()
+        );
     }
 
     #[test]
@@ -18521,15 +18620,20 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 96, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 97, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 76, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
-        let advertised: std::collections::BTreeSet<String> =
-            METHODS.iter().map(|m| (*m).to_string()).collect();
+        // A feature-gated arm is in the source whatever the features, so it
+        // is matched against every gated name, compiled or not.
+        let advertised: std::collections::BTreeSet<String> = METHODS
+            .iter()
+            .chain(FEATURE_METHODS.iter().map(|(m, _)| m))
+            .map(|m| (*m).to_string())
+            .collect();
         assert_eq!(
             advertised.len(),
-            METHODS.len(),
+            METHODS.len() + FEATURE_METHODS.len(),
             "a duplicate member would make hello advertise the same call twice"
         );
 
