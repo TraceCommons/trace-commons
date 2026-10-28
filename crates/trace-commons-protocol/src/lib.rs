@@ -17,6 +17,7 @@ pub mod local_credit_estimate;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_evaluation;
+pub mod model_training_consent;
 pub mod near_ai_measurements;
 pub mod onboarding;
 pub mod payout_link;
