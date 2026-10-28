@@ -32,7 +32,7 @@ enum UsesScreenLayout {
         return optional.filter { $0.name == uses.creditScope } + optional.filter { $0.name != uses.creditScope }
     }
 
-    /// The Always on section's title, naming the required use.
+    /// The Always on line, naming the required use.
     static func alwaysOnTitle(_ required: ConsentScope, uses: FirstRunCopy.Uses) -> String {
         FirstRunCopy.fill(uses.alwaysOn, ["title": required.title])
     }
@@ -623,8 +623,6 @@ struct UsesScreen: View {
     /// appear; nil shows the fallback line, and Start stays disabled.
     @State private var grant: AutomaticGrantCopy?
     @State private var grantRead = false
-    /// The Always on section starts collapsed.
-    @State private var requiredOpen = false
     @State private var flowSince = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -692,28 +690,16 @@ struct UsesScreen: View {
                     scopeRow(option)
                 }
             }
-            // The required use, in a collapsed section under the choices
-            // (owner, 2026-10-28): every box above is a real choice, so
-            // Only required leaves them all empty.
+            // The required use, one line under the choices (owner,
+            // 2026-10-28): every box above is a real choice, so Only
+            // required leaves them all empty. Its scope is the tooltip.
             if let required {
-                GlassExpander(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses), isOpen: $requiredOpen)
-                    .padding(.top, GlassTokens.Space.s3)
-                if requiredOpen {
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack(spacing: GlassTokens.Space.s2) {
-                            // The baseline permission is required for sharing.
-                            Text(required.title)
-                                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                            // Keep the required-sharing label inline rather than as a tag.
-                            Text(copy.uses.required)
-                                .glassType(GlassTokens.TypeScale.mono)
-                                .foregroundStyle(GlassTokens.Color.statusOnText.color)
-                        }
-                        .frame(minHeight: 32)
-                        .help(required.description)
-                    }
-                    .padding(.leading, GlassTokens.Space.s5)
-                }
+                Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))
+                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(required.description)
+                    .padding(.vertical, GlassTokens.Space.s3)
             }
             GlassHairline()
                 .padding(.top, GlassTokens.Space.s3)
@@ -760,6 +746,10 @@ struct UsesScreen: View {
                         .foregroundStyle(GlassTokens.Color.statusOnText.color)
                 }
             }
+            // Inside the label too: the checkbox style wraps the row in a
+            // button, which can keep a tooltip set outside it from showing.
+            .contentShape(Rectangle())
+            .help(option.description)
         }
         .toggleStyle(GlassCheckboxStyle())
         // The description is a plain hover tooltip (owner, 2026-10-28,

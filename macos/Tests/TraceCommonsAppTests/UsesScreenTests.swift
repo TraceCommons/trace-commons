@@ -75,11 +75,10 @@ final class UsesScreenTests: XCTestCase {
             ["ranking_training", "debugging_evaluation"])
         XCTAssertEqual(UsesScreenLayout.includingRequired(chosen, required: nil), chosen)
 
-        // The row carries Ron's inline "required"; its box is ticked and
-        // locked, and the person's toggle ticks only the optional ones.
+        // The required use is one "Always on" line (owner, 2026-10-28),
+        // never a box; the person's toggle ticks only the optional ones.
         let source = try Self.source()
-        XCTAssertTrue(source.contains("Text(copy.uses.required)"))
-        XCTAssertTrue(source.contains("Text(required.title)"))
+        XCTAssertTrue(source.contains("Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))"))
         XCTAssertFalse(source.contains("Toggle(required.title"), "the required use is a statement, not a choice")
         XCTAssertFalse(source.contains("scope(required.name)"))
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
@@ -149,21 +148,21 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source.contains(".onAppear { runner.state.scopes"))
     }
 
-    /// The required use sits in a collapsed Always on section under the
-    /// choices, so every box shown is a real choice (owner, 2026-10-28).
-    func test_theRequiredUseIsInACollapsedAlwaysOnSection() throws {
+    /// The required use is one Always on line under the choices, its scope
+    /// the tooltip, so every box shown is a real choice (owner, 2026-10-28).
+    func test_theRequiredUseIsOneAlwaysOnLine() throws {
         let uses = try copy().uses
         let required = try XCTUnwrap(UsesScreenLayout.requiredScope(options))
         XCTAssertEqual(
             UsesScreenLayout.alwaysOnTitle(required, uses: uses),
             "Always on: \(required.title) for shared traces")
         let source = try Self.source()
-        XCTAssertTrue(source.contains("@State private var requiredOpen = false"))
-        XCTAssertTrue(source.contains(
-            "GlassExpander(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses), isOpen: $requiredOpen)"))
-        let expander = try XCTUnwrap(source.range(of: "GlassExpander(UsesScreenLayout.alwaysOnTitle"))
+        XCTAssertTrue(source.contains("Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))"))
+        XCTAssertFalse(source.contains("GlassExpander("), "nothing to expand")
+        XCTAssertFalse(source.contains("Text(copy.uses.required)"), "the line already says always on")
+        let line = try XCTUnwrap(source.range(of: "Text(UsesScreenLayout.alwaysOnTitle"))
         let rows = try XCTUnwrap(source.range(of: "ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses))"))
-        XCTAssertLessThan(rows.lowerBound, expander.lowerBound, "the section follows the choices")
+        XCTAssertLessThan(rows.lowerBound, line.lowerBound, "the line follows the choices")
     }
 
     /// The Sharing radios show no choice until the person picks one, and
