@@ -48,6 +48,19 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
     }
 }
 #[test]
+fn the_credit_outcome_reason_is_documented_with_every_label() {
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    assert!(contract.contains("### Credit outcome on history rows"));
+    assert!(contract.contains("`credit_outcome_reason`"));
+    for label in trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS {
+        assert!(
+            contract.contains(&format!("`{label}`")),
+            "missing credit outcome label: {label}"
+        );
+    }
+}
+
+#[test]
 fn first_run_picker_methods_are_documented_with_every_label() {
     use trace_commons_contributor::daemon::past_sessions as past;
     let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");

@@ -11,6 +11,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let destination: String
     /// The line under the destination's title, from the Rust.
     public let subtitle: String
+    /// Said after `subtitle` only while NEAR AI answers calls (`running`).
+    public let subtitleCredit: String
     public let offerTitle: String
     public let offerWhat: String
     public let offerExposure: String
@@ -298,6 +300,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case destination
         case subtitle
+        case subtitleCredit = "subtitle_credit"
         case offerTitle = "offer_title"
         case offerWhat = "offer_what"
         case offerExposure = "offer_exposure"

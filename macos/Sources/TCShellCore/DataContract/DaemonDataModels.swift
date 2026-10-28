@@ -1291,6 +1291,11 @@ extension DaemonData {
         public let consentScopes: [String]?
         public let creditPointsPending: Double?
         public let creditPointsFinal: Double?
+        /// Why a final figure of 0 earned no credit: the server's reason
+        /// label (`trace_commons_protocol::credit_outcome`), shown through
+        /// the core's words (`PublicRunCopy.creditOutcomeLabel(for:)`), never
+        /// raw. `nil` while pending and on a credited row.
+        public let creditOutcomeReason: String?
         public let explanations: [String]?
         public let lastRefreshedAt: Date?
         public let withdrawnAt: Date?
@@ -1315,6 +1320,7 @@ extension DaemonData {
             case consentScopes = "consent_scopes"
             case creditPointsPending = "credit_points_pending"
             case creditPointsFinal = "credit_points_final"
+            case creditOutcomeReason = "credit_outcome_reason"
             case lastRefreshedAt = "last_refreshed_at"
             case withdrawnAt = "withdrawn_at"
             case revokedAt = "revoked_at"

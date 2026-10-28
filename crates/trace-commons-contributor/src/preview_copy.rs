@@ -1337,6 +1337,10 @@ pub struct MonitorHomeHistoryCopy {
     pub status_line: &'static str,
     /// A row's settled credit; `{amount}` is the figure.
     pub row_credit: &'static str,
+    /// A decided row that earned no credit, in place of `row_credit`;
+    /// `{label}` is the reason's words (`history_copy::CREDIT_OUTCOME_LABELS`).
+    /// DRAFT, NEEDS APPROVAL.
+    pub row_no_credit: &'static str,
     /// The privacy review card's heading, by count.
     pub held_count_one: &'static str,
     pub held_count: &'static str,
@@ -1647,6 +1651,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             records: "{count} records",
             status_line: "Status: {label}",
             row_credit: "credit {amount}",
+            row_no_credit: "no credit: {label}",
             held_count_one: "1 held for privacy review",
             held_count: "{count} held for privacy review",
             public_standing: "Public standing",
@@ -1952,6 +1957,7 @@ mod tests {
         assert_eq!(copy.contribution_history, "Contribution history");
         assert_eq!(copy.status_line, "Status: {label}");
         assert_eq!(copy.row_credit, "credit {amount}");
+        assert!(copy.row_no_credit.contains("{label}"));
         assert!(copy.sources.contains("{count}") && !copy.sources_one.contains('{'));
         assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
         assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));

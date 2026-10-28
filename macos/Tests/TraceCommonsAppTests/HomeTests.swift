@@ -165,6 +165,38 @@ final class HomeTests: XCTestCase {
         XCTAssertNil(HomeFormat.credit(try decode(#"{"submission_id":"u","credit_points_final":null}"#)))
     }
 
+    /// A row decided with no award reads the core's words for its reason,
+    /// never the raw label and never pending; a reason the core does not
+    /// name reads its fallback. A credited or pending row has no reason
+    /// line, and without the core's copy there is none either.
+    func test_aNoCreditRowShowsItsReasonInTheCoresWords() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let decode = { (json: String) in
+            try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(json.utf8))
+        }
+        let withheld = try decode(
+            #"{"submission_id":"w","credit_points_final":0,"credit_outcome_reason":"duplicate"}"#)
+        let words = try XCTUnwrap(HomeFormat.noCreditReason(withheld, copy: copy))
+        XCTAssertEqual(words, copy.creditOutcomeLabel(for: "duplicate"))
+        XCTAssertNotEqual(words, "duplicate")
+        XCTAssertEqual(copy.creditOutcomeLabels.count, 8)
+
+        let unknown = try decode(
+            #"{"submission_id":"x","credit_points_final":0,"credit_outcome_reason":"a_label_from_later"}"#)
+        XCTAssertEqual(HomeFormat.noCreditReason(unknown, copy: copy), copy.creditOutcomeUnavailable)
+
+        let credited = try decode(#"{"submission_id":"c","credit_points_final":5}"#)
+        XCTAssertNil(HomeFormat.noCreditReason(credited, copy: copy))
+        XCTAssertEqual(HomeFormat.credit(credited), HomeFormat.points(5))
+        let pending = try decode(#"{"submission_id":"p","credit_points_final":null}"#)
+        XCTAssertNil(HomeFormat.noCreditReason(pending, copy: copy))
+        XCTAssertNil(HomeFormat.noCreditReason(withheld, copy: nil))
+
+        let table = try XCTUnwrap(MonitorWords.table?.homeHistory)
+        XCTAssertTrue(table.noCredit(words).contains(words))
+        XCTAssertFalse(table.noCredit(words).contains("{label}"))
+    }
+
     /// A row's day is month and day, compact or not: a weekday alone would
     /// read a months-old row as this week. In full it adds the uploaded
     /// size and when a withdrawal was seen.

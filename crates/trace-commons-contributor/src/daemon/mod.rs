@@ -2515,6 +2515,7 @@ mod tests {
                 consent_scopes: vec![],
                 credit_points_pending: 1.0,
                 credit_points_final: None,
+                credit_outcome_reason: None,
                 explanations: vec![],
                 last_refreshed_at: Some(at(0)),
                 withdrawn_at: None,

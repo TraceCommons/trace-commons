@@ -7505,7 +7505,9 @@ impl TraceCorpusStore for PgBackend {
                         credit_withheld_reason,
                         chunk_count,
                         total_chunk_count,
-                        chunks_capped
+                        chunks_capped,
+                        perplexity_passed,
+                        novelty_passed
                  FROM trace_gate_decisions
                  WHERE tenant_id = $1
                    AND submission_id = ANY($2)
@@ -7525,6 +7527,8 @@ impl TraceCorpusStore for PgBackend {
                 chunk_count: row.get("chunk_count"),
                 total_chunk_count: row.get("total_chunk_count"),
                 chunks_capped: row.get("chunks_capped"),
+                perplexity_passed: Some(row.get("perplexity_passed")),
+                novelty_passed: Some(row.get("novelty_passed")),
             })
             .collect())
     }
