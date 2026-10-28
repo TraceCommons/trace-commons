@@ -35,12 +35,15 @@ enum TracesScreenLayout {
     }
 
     /// The one estimate line, as the core words it, or nil for none
-    /// (nothing found or counted yet). The core picks dollars or points.
+    /// (nothing found or counted yet). The core picks dollars or points,
+    /// and, while the use that earns credit is off (`earnsCredit` false),
+    /// words it as what the traces could earn (Zaki's review of #1690).
     static func estimate(
-        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?
+        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?,
+        earnsCredit: Bool = true
     ) -> String? {
         guard let found, found > 0 else { return nil }
-        var request: [String: Any] = ["traces": found]
+        var request: [String: Any] = ["traces": found, "earns_credit": earnsCredit]
         if let range = dollars?.usdMicrosPerAcceptedTrace {
             request["usd_micros_per_accepted_trace"] = ["min": range.min, "max": range.max]
         }
@@ -251,7 +254,9 @@ struct TracesScreen: View {
     @ViewBuilder
     private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
-        if let line = TracesScreenLayout.estimate(found: found, lookup: runner.lookup, dollars: runner.dollarEstimate) {
+        if let line = TracesScreenLayout.estimate(
+            found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+            earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)) {
             Text(line)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)

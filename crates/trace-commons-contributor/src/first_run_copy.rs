@@ -255,16 +255,26 @@ pub struct TracesCopy {
     /// `{min}`: the same, when the total is a single figure ("an estimated
     /// $X in NEAR AI credit"). Approved 2026-10-23.
     pub estimate_usd_one: &'static str,
+    /// The same four lines while the use that earns credit
+    /// (`uses.credit_scope`) is not ticked: what the traces could earn if
+    /// the person allowed it, worded as conditional so the headline never
+    /// promises what the note under it takes away (Zaki's review of #1690,
+    /// 2026-10-28, approved in these words).
+    pub could_estimate_points: &'static str,
+    pub could_estimate_points_one: &'static str,
+    pub could_estimate_usd: &'static str,
+    pub could_estimate_usd_one: &'static str,
     /// The per-trace range Traces multiplies before an invite's lookup
     /// gives one, in points per accepted trace (owner, 2026-10-22: 3 to 8,
     /// marked as an estimate). An invite's own range replaces it; a server
     /// dollar range replaces both. The owner's figure.
     pub estimate: EstimateRange,
-    /// Under the estimate while the use that earns credit
+    /// Under the conditional estimate while the use that earns credit
     /// (`uses.credit_scope`) is not ticked, with `back_to_uses`, a link to
-    /// the Uses step. A neutral note, not a warning. Owner, 2026-10-27
-    /// (dictated), pending approval; the one line that names going back,
-    /// since it opens a step the footer's Back would not name.
+    /// the Uses step. A neutral note, not a warning, and it names no going
+    /// back: only the link does, since it opens a step the footer's Back
+    /// would not name. Owner, 2026-10-27; approved in these words in
+    /// Zaki's review of #1690 (2026-10-28).
     pub no_credit: &'static str,
     pub back_to_uses: &'static str,
 }
@@ -712,8 +722,12 @@ pub fn first_run_copy() -> FirstRunCopy {
             estimate_points_one: "An estimated {min} points",
             estimate_usd: "An estimated {min}–{max} in NEAR AI credit",
             estimate_usd_one: "An estimated {min} in NEAR AI credit",
+            could_estimate_points: "You could earn an estimated {min}–{max} points",
+            could_estimate_points_one: "You could earn an estimated {min} points",
+            could_estimate_usd: "You could earn an estimated {min}–{max} in NEAR AI credit",
+            could_estimate_usd_one: "You could earn an estimated {min} in NEAR AI credit",
             estimate: EstimateRange { min: 3, max: 8 },
-            no_credit: "You didn't allow Train coding models, so your traces won't earn credit. To earn credit, go back to Uses and allow it.",
+            no_credit: "Allow Train coding models to earn it.",
             back_to_uses: "Go back to Uses",
         },
         passkey: PasskeyCopy {
@@ -817,13 +831,51 @@ pub fn traces_estimate_line(
     usd: Option<UsdMicrosRange>,
     points: Option<CreditRange>,
 ) -> Option<String> {
+    estimate_line(copy, traces, usd, points, true)
+}
+
+/// [`traces_estimate_line`] while the use that earns credit is not ticked:
+/// the same total, worded as what the traces could earn
+/// (`could_estimate_*`).
+#[must_use]
+pub fn traces_could_earn_line(
+    copy: &TracesCopy,
+    traces: Option<u64>,
+    usd: Option<UsdMicrosRange>,
+    points: Option<CreditRange>,
+) -> Option<String> {
+    estimate_line(copy, traces, usd, points, false)
+}
+
+fn estimate_line(
+    copy: &TracesCopy,
+    traces: Option<u64>,
+    usd: Option<UsdMicrosRange>,
+    points: Option<CreditRange>,
+    earns_credit: bool,
+) -> Option<String> {
+    let (usd_range, usd_one, points_range, points_one) = if earns_credit {
+        (
+            copy.estimate_usd,
+            copy.estimate_usd_one,
+            copy.estimate_points,
+            copy.estimate_points_one,
+        )
+    } else {
+        (
+            copy.could_estimate_usd,
+            copy.could_estimate_usd_one,
+            copy.could_estimate_points,
+            copy.could_estimate_points_one,
+        )
+    };
     let traces = traces.filter(|n| *n > 0)?;
     if let Some(usd) = usd.filter(UsdMicrosRange::is_valid) {
         let min = traces.checked_mul(usd.min)?;
         let max = traces.checked_mul(usd.max)?;
         return Some(fill_range(
-            copy.estimate_usd,
-            copy.estimate_usd_one,
+            usd_range,
+            usd_one,
             usd_figure(min),
             usd_figure(max),
         ));
@@ -834,12 +886,7 @@ pub fn traces_estimate_line(
         .unwrap_or((u64::from(copy.estimate.min), u64::from(copy.estimate.max)));
     let min = traces.checked_mul(per_min)?;
     let max = traces.checked_mul(per_max)?;
-    Some(fill_range(
-        copy.estimate_points,
-        copy.estimate_points_one,
-        group(min),
-        group(max),
-    ))
+    Some(fill_range(points_range, points_one, group(min), group(max)))
 }
 
 /// What a shell sends to word Traces' estimate: the traces it found, the
@@ -853,6 +900,10 @@ struct EstimateRequest {
     usd_micros_per_accepted_trace: Option<UsdMicrosRange>,
     #[serde(default)]
     credit_range: Option<CreditRange>,
+    /// Whether the use that earns credit is ticked; absent means it is, so
+    /// an older shell keeps its words.
+    #[serde(default)]
+    earns_credit: Option<bool>,
 }
 
 /// [`traces_estimate_line`] over a shell's JSON request (`tc_first_run_estimate_line`).
@@ -860,11 +911,12 @@ struct EstimateRequest {
 #[must_use]
 pub fn traces_estimate_line_json(request: &str) -> Option<String> {
     let request: EstimateRequest = serde_json::from_str(request).ok()?;
-    traces_estimate_line(
+    estimate_line(
         &first_run_copy().traces,
         request.traces,
         request.usd_micros_per_accepted_trace,
         request.credit_range,
+        request.earns_credit.unwrap_or(true),
     )
 }
 
@@ -984,15 +1036,13 @@ mod tests {
     }
 
     /// Back is a button in the footer, never an instruction: no line tells
-    /// the person to go back. The one exception is Traces' note when the
-    /// use that earns credit is off, with its link to Uses (owner,
-    /// 2026-10-27).
+    /// the person to go back. The one exception is the link under Traces'
+    /// note when the use that earns credit is off (owner, 2026-10-27; the
+    /// note itself no longer says it, Zaki's review of #1690).
     #[test]
     fn no_line_says_to_go_back() {
         let mut copy = first_run_copy();
-        assert!(copy.traces.no_credit.contains("go back to Uses"));
         assert_eq!(copy.traces.back_to_uses, "Go back to Uses");
-        copy.traces.no_credit = "";
         copy.traces.back_to_uses = "";
         let json = serde_json::to_string(&copy).unwrap();
         assert!(
@@ -1001,17 +1051,74 @@ mod tests {
         );
     }
 
-    /// The note names the use that earns credit by its title.
+    /// The note names the use that earns credit by its title, and says
+    /// what allowing it does, not what the person did not do.
     #[test]
     fn the_no_credit_note_names_the_use_that_earns_it() {
         let copy = first_run_copy();
         assert_eq!(copy.uses.credit_scope, "model_training");
-        assert!(
-            copy.traces
-                .no_credit
-                .starts_with("You didn't allow Train coding models,")
+        assert_eq!(
+            copy.traces.no_credit,
+            "Allow Train coding models to earn it."
         );
-        assert!(copy.traces.no_credit.contains("won't earn credit"));
+        assert!(!copy.traces.no_credit.contains("didn't"));
+    }
+
+    /// While the use that earns credit is off, the headline says what the
+    /// traces could earn, in each of its four forms; with it on, the
+    /// headline is unchanged (Zaki's review of #1690).
+    #[test]
+    fn the_estimate_is_conditional_while_credit_is_off() {
+        let copy = first_run_copy().traces;
+        let usd = |min, max| Some(UsdMicrosRange { min, max });
+        let points = |min, max| {
+            Some(CreditRange {
+                min,
+                max,
+                unit: CREDIT_RANGE_UNIT_POINTS.to_owned(),
+            })
+        };
+        for (earning, could) in [
+            (
+                traces_estimate_line(&copy, Some(10), usd(120_000, 340_000), None),
+                traces_could_earn_line(&copy, Some(10), usd(120_000, 340_000), None),
+            ),
+            (
+                traces_estimate_line(&copy, Some(3), usd(500_000, 500_000), None),
+                traces_could_earn_line(&copy, Some(3), usd(500_000, 500_000), None),
+            ),
+            (
+                traces_estimate_line(&copy, Some(10), None, None),
+                traces_could_earn_line(&copy, Some(10), None, None),
+            ),
+            (
+                traces_estimate_line(&copy, Some(10), None, points(4, 4)),
+                traces_could_earn_line(&copy, Some(10), None, points(4, 4)),
+            ),
+        ] {
+            let earning = earning.expect("a line");
+            let could = could.expect("a line");
+            assert!(earning.starts_with("An estimated "), "{earning}");
+            assert_eq!(could, format!("You could earn an e{}", &earning[4..]));
+        }
+        assert_eq!(
+            traces_could_earn_line(&copy, Some(10), usd(120_000, 340_000), None).as_deref(),
+            Some("You could earn an estimated $1.20–$3.40 in NEAR AI credit")
+        );
+        assert_eq!(traces_could_earn_line(&copy, Some(0), None, None), None);
+        let json = |v: serde_json::Value| traces_estimate_line_json(&v.to_string());
+        assert_eq!(
+            json(serde_json::json!({"traces": 10, "earns_credit": false})).as_deref(),
+            Some("You could earn an estimated 30–80 points")
+        );
+        assert_eq!(
+            json(serde_json::json!({"traces": 10, "earns_credit": true})).as_deref(),
+            Some("An estimated 30–80 points")
+        );
+        assert_eq!(
+            json(serde_json::json!({"traces": 10})).as_deref(),
+            Some("An estimated 30–80 points")
+        );
     }
 
     /// Watching only queues picked past sessions on this Mac and sends

@@ -132,8 +132,8 @@ public enum FirstRunNavigation {
         state.holdsEnrolment
     }
 
-    /// The sharing paths Uses offers: Ask, then Automatic, tagged
-    /// Recommended; neither is chosen for the person (owner, 2026-10-27).
+    /// The sharing paths Uses offers: Ask, then Automatic, with no tag;
+    /// neither is chosen for the person (owner, 2026-10-27).
     /// Uses comes before sign-in, and sign-in is required (owner,
     /// 2026-10-12), so Automatic is offered there and said to turn on once
     /// the person signs in (Ron's 2026-10-21 canvas). Start on Join grants

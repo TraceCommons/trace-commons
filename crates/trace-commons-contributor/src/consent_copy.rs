@@ -700,8 +700,9 @@ pub const SCOPE_TAG_REQUIRED: &str = "required to share";
 /// Distinguish trace-scoring eligibility from other optional reward uses.
 /// Scope choice grants permission; acceptance and scoring still decide credit.
 /// Read by the first-run Uses screen and Settings' data uses. Owner,
-/// 2026-10-27 (dictated), pending approval.
-pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces, allow Train coding models. Without it, your traces earn nothing. Create benchmarks and Train evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.";
+/// 2026-10-27; approved in these words in Zaki's review of #1690
+/// (2026-10-28).
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.";
 
 /// The scope [`DATA_USE_REWARD_OPPORTUNITIES`] names as the one that earns
 /// credit (`model_training`, "Train coding models").
@@ -4221,7 +4222,8 @@ mod payout_link_copy_tests {
         assert_eq!(scope["grants_data_use"], true);
         let title = scope["title"].as_str().expect("title");
         assert!(DATA_USE_REWARD_OPPORTUNITIES.contains(&format!("allow {title}.")));
-        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("Without it, your traces earn nothing."));
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("are extra uses that may earn more."));
+        assert!(!DATA_USE_REWARD_OPPORTUNITIES.contains("earn nothing"));
         assert_eq!(DATA_USE_CREDIT_REQUIRED, "Required to earn credit.");
     }
 }
