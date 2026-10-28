@@ -96,7 +96,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_claude_detail",
-        "Refresh uses this saved Claude Code sign-in to ask Anthropic for usage. macOS may ask for Claude Code-credentials. Always Allow grants continuing access to that sign-in; this app still reads it only on Refresh.",
+        "Reads your Claude Code sign-in only when you press Refresh. macOS may ask to allow access.",
     ),
     (
         "analytics_subscriptions_claude_captured",
