@@ -2,6 +2,7 @@
 //! stay in memory and never cross IPC; the display reads a bounded snapshot.
 
 mod claude;
+mod claude_cli;
 mod claude_token_cache;
 mod codex_oauth;
 pub(super) mod providers;
@@ -118,6 +119,18 @@ pub(super) struct Reading {
     pub identity: Identity,
     /// Post-validation file revision witnessed by the native collector.
     pub native_revision: Option<String>,
+    /// Where the figures came from; shown as the login's `source`.
+    pub source: ReadingSource,
+}
+
+/// `api`: a provider usage endpoint or native app-server. `cli`: read off
+/// the Claude Code CLI's `/usage` screen, whole percentages and resets only
+/// when stated in the local zone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReadingSource {
+    Api,
+    Cli,
 }
 
 #[derive(Clone, Debug)]
@@ -409,7 +422,8 @@ impl State {
                 json!({"id":entry.login.id,"label":entry.login.label,"default_login":entry.login.default_login,
                     "state":if reading.is_some() {"observed"} else {"unknown"},"reason":entry.reason,
                     "updated_at":entry.measured_at,"stale":stale,"windows":windows,"refreshing":entry.refreshing,
-                    "banked_resets":reading.and_then(|reading| reading.banked_resets)})
+                    "banked_resets":reading.and_then(|reading| reading.banked_resets),
+                    "source":reading.map(|reading| reading.source)})
             }).collect();
             json!({"provider":provider,"enabled":self.enabled[provider.index()],
                 "refreshing":self.entries.values().any(|entry| entry.login.provider == provider && entry.refreshing),"logins":logins})
@@ -500,7 +514,7 @@ fn native_metadata_revision(root: &std::path::Path) -> String {
 fn login_revision(login: &LoginSpec) -> String {
     match login.provider {
         Provider::Codex => native_metadata_revision(&login.root),
-        Provider::Claude => claude::metadata_revision(login),
+        Provider::Claude => claude::published_revision(login),
     }
 }
 
@@ -851,6 +865,7 @@ mod tests {
         Reading {
             identity: identity.into(),
             native_revision: None,
+            source: ReadingSource::Api,
             banked_resets: Some(2),
             windows: vec![Window {
                 lane: "weekly".into(),
@@ -860,6 +875,26 @@ mod tests {
                 resets_at: Some(reset),
             }],
         }
+    }
+    #[test]
+    fn a_reading_names_its_source_and_no_reading_names_none() {
+        let (mut state, claim) = prepared();
+        let logins = |state: &State| state.value(now())["providers"][0]["logins"][0].clone();
+        assert!(logins(&state)["source"].is_null());
+        let mut cli = reading("account", now() + Duration::days(1));
+        cli.source = ReadingSource::Cli;
+        state.complete(&claim, Ok(cli), now());
+        assert_eq!(logins(&state)["source"], "cli");
+        let claim = state
+            .claims(now() + Duration::hours(1), true, None, None)
+            .pop()
+            .unwrap();
+        state.complete(
+            &claim,
+            Ok(reading("account", now() + Duration::days(1))),
+            now() + Duration::hours(1),
+        );
+        assert_eq!(logins(&state)["source"], "api");
     }
     fn prepared() -> (State, Claim) {
         let mut state = State::default();
@@ -1600,6 +1635,7 @@ mod integration_tests {
                             banked_resets: None,
                             identity: "fixture".into(),
                             native_revision: None,
+                            source: ReadingSource::Api,
                         })
                     })
                     .await
@@ -1710,6 +1746,7 @@ mod integration_tests {
                     banked_resets: Some(3),
                     identity: "fixture".into(),
                     native_revision: None,
+                    source: ReadingSource::Api,
                 })
             })
         }));
@@ -1832,6 +1869,7 @@ mod integration_tests {
                     banked_resets: None,
                     identity: "fixture-owner".into(),
                     native_revision: None,
+                    source: ReadingSource::Api,
                 })
             })
         }));

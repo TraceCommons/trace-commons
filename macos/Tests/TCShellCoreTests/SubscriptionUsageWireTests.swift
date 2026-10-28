@@ -104,6 +104,18 @@ final class SubscriptionUsageWireTests: XCTestCase {
         }
     }
 
+    func testReadingSourceIsOptionalAndToleratesOlderDaemons() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let cli = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"observed","stale":false,"windows":[],"source":"cli"}"#.utf8)
+        XCTAssertEqual(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: cli).source, "cli")
+        let none = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"unknown","stale":false,"windows":[],"source":null}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: none).source)
+        let older = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"unknown","stale":false,"windows":[]}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: older).source)
+        let malformed = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"observed","stale":false,"windows":[],"source":7}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: malformed).source)
+    }
+
     func testInvalidOptionalMeasurementDoesNotDiscardValidNeighbors() throws {
         for invalid in ["true", "\"20\"", "-1", "1001", "null"] {
             let data = Data("{\"lane\":\"weekly\",\"label\":null,\"used_permille\":\(invalid),\"remaining_text\":\"do not infer\",\"resets_at\":\"invalid\"}".utf8)

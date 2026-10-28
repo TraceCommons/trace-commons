@@ -792,6 +792,7 @@ fn parse_codex(value: &Value, identity: Identity) -> Result<Reading, &'static st
         banked_resets,
         identity,
         native_revision: None,
+        source: super::ReadingSource::Api,
     })
 }
 

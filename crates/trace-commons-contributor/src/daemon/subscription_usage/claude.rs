@@ -2,11 +2,13 @@
 //! of IPC. The access token, never the refresh token, is kept in this app's
 //! own Keychain item (`claude_token_cache`) so a Refresh does not reopen
 //! Claude Code's item each time. Tokens are never renewed here, and there is
-//! no cookie fallback.
+//! no cookie fallback. When OAuth cannot produce a reading, a user-pressed
+//! Refresh falls back to the user's own `claude` CLI (`claude_cli`).
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -15,11 +17,12 @@ use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use trace_commons_contributor_platform::external_claude_credentials as external;
 
+use super::claude_cli::{self, CliProbe};
 use super::claude_token_cache::TokenCache;
 use super::providers::{
     bounded_json, failure, fingerprint, native_read, request_error, usage_client,
 };
-use super::{Identity, LoginSpec, ProbeFailure, Reading, Window, file_revision};
+use super::{Identity, LoginSpec, ProbeFailure, Reading, ReadingSource, Window, file_revision};
 
 const MAX_BYTES: usize = 1024 * 1024;
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -61,6 +64,95 @@ pub(super) fn metadata_revision(login: &LoginSpec) -> String {
         file_revision(&account_path(login)),
         file_revision(&login.root.join(".config.json"))
     )
+}
+
+/// A CLI probe makes Claude Code rewrite its own `.claude.json` (start count,
+/// the probe directory's trust entry), which changes `metadata_revision`.
+/// Left alone, that would look like an account change: the service would
+/// replace the login's entry mid-probe and cancel the probe that caused it.
+/// While a probe runs, and afterwards for as long as the files stay exactly
+/// as it left them, the revision published to the service is the one from
+/// before the probe. The next real change ends the alias.
+enum ProbeAlias {
+    Running { before: String },
+    Settled { before: String, after: String },
+}
+
+fn probe_aliases() -> &'static Mutex<BTreeMap<String, ProbeAlias>> {
+    static ALIASES: OnceLock<Mutex<BTreeMap<String, ProbeAlias>>> = OnceLock::new();
+    ALIASES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// The revision the service compares: `metadata_revision`, except while a
+/// probe's own writes are being masked.
+pub(super) fn published_revision(login: &LoginSpec) -> String {
+    let actual = metadata_revision(login);
+    let Ok(mut aliases) = probe_aliases().lock() else {
+        return actual;
+    };
+    match aliases.get(&login.id) {
+        None => actual,
+        Some(ProbeAlias::Running { before }) => before.clone(),
+        Some(ProbeAlias::Settled { before, after }) if *after == actual => before.clone(),
+        Some(ProbeAlias::Settled { .. }) => {
+            aliases.remove(&login.id);
+            actual
+        }
+    }
+}
+
+/// Masks a running probe's writes until settled or dropped. Dropping it
+/// unsettled (failure, cancellation, panic) removes the alias, so a real
+/// change made during the probe is seen at once.
+struct ProbeRevisionGuard {
+    login: String,
+    before: String,
+    settled: bool,
+}
+
+impl ProbeRevisionGuard {
+    fn begin(login: &LoginSpec) -> Self {
+        let before = published_revision(login);
+        if let Ok(mut aliases) = probe_aliases().lock() {
+            aliases.insert(
+                login.id.clone(),
+                ProbeAlias::Running {
+                    before: before.clone(),
+                },
+            );
+        }
+        Self {
+            login: login.id.clone(),
+            before,
+            settled: false,
+        }
+    }
+
+    /// Keep masking exactly the files as they are now.
+    fn settle(mut self, after: String) -> String {
+        if let Ok(mut aliases) = probe_aliases().lock() {
+            aliases.insert(
+                self.login.clone(),
+                ProbeAlias::Settled {
+                    before: self.before.clone(),
+                    after,
+                },
+            );
+        }
+        self.settled = true;
+        self.before.clone()
+    }
+}
+
+impl Drop for ProbeRevisionGuard {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Ok(mut aliases) = probe_aliases().lock() {
+            aliases.remove(&self.login);
+        }
+    }
 }
 
 fn service(login: &LoginSpec) -> Result<String, &'static str> {
@@ -127,6 +219,8 @@ pub(super) struct Deps {
     /// Shared with `UsageService`, which clears it on unenroll and when the
     /// Claude switch is turned off.
     pub cache: Arc<TokenCache>,
+    /// The user's `claude` CLI, for the `/usage` fallback.
+    pub cli: Arc<dyn CliProbe>,
 }
 
 impl Deps {
@@ -134,6 +228,7 @@ impl Deps {
         Self {
             keychain: Arc::new(ClaudeCodeKeychain),
             cache,
+            cli: claude_cli::for_build(),
         }
     }
 }
@@ -346,7 +441,7 @@ fn corroborate_profile(local: &Identity, remote: &Identity) -> Result<(), &'stat
 }
 
 fn load(login: &LoginSpec, interactive: bool, deps: &Deps) -> Result<Credential, &'static str> {
-    let revision = metadata_revision(login);
+    let revision = published_revision(login);
     let local_identity = local_identity(login)?;
     let path = credential_path(login);
     let (token, source) = if path.exists() {
@@ -391,7 +486,7 @@ fn load(login: &LoginSpec, interactive: bool, deps: &Deps) -> Result<Credential,
             },
         )
     };
-    if metadata_revision(login) != revision {
+    if published_revision(login) != revision {
         return Err("auth_changed");
     }
     Ok(Credential {
@@ -407,7 +502,7 @@ fn unchanged(
     credential: &Credential,
     deps: &Deps,
 ) -> Result<bool, &'static str> {
-    if metadata_revision(login) != credential.revision {
+    if published_revision(login) != credential.revision {
         return Ok(false);
     }
     match &credential.source {
@@ -449,7 +544,81 @@ async fn body(response: reqwest::Response) -> Result<Value, &'static str> {
     bounded_json(response).await
 }
 
+/// OAuth failures the `claude` CLI can still answer: no readable credential,
+/// a Keychain permission need or Deny, or a token Anthropic refused. Not
+/// rate limits, timeouts or network failures, which the CLI would hit too.
+const CLI_FALLBACK: &[&str] = &[
+    "auth_missing",
+    "auth_expired",
+    "keychain_needs_permission",
+    "scope_missing",
+];
+const CLI_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub(super) async fn collect(
+    login: &LoginSpec,
+    interactive: bool,
+    lease: Arc<OwnedSemaphorePermit>,
+    deps: &Deps,
+) -> Result<Reading, ProbeFailure> {
+    let failure = match collect_oauth(login, interactive, Arc::clone(&lease), deps).await {
+        Ok(reading) => return Ok(reading),
+        Err(failure) => failure,
+    };
+    // Only a user-pressed Refresh may launch the CLI.
+    if !interactive || !CLI_FALLBACK.contains(&failure.reason) {
+        return Err(failure);
+    }
+    // The CLI's own failure labels are internal; the OAuth reason still says
+    // what the person can do about it.
+    collect_cli(login, lease, deps)
+        .await
+        .map_err(|reason| match reason {
+            "auth_changed" => super::providers::failure(reason, None),
+            _ => failure,
+        })
+}
+
+async fn collect_cli(
+    login: &LoginSpec,
+    lease: Arc<OwnedSemaphorePermit>,
+    deps: &Deps,
+) -> Result<Reading, &'static str> {
+    let spec = login.clone();
+    let cli = Arc::clone(&deps.cli);
+    // The whole probe, including the child's lifetime, belongs to the leased
+    // native thread: dropping this future cannot orphan the process.
+    let (screen, revision, identity) = tokio::time::timeout(
+        CLI_TIMEOUT,
+        native_read(lease, move || {
+            let identity = local_identity(&spec)?;
+            let guard = ProbeRevisionGuard::begin(&spec);
+            let screen = cli.usage_screen(&spec)?;
+            // An account switch while the probe ran is not masked.
+            if local_identity(&spec)? != identity {
+                return Err("auth_changed");
+            }
+            let revision = guard.settle(metadata_revision(&spec));
+            Ok::<_, &'static str>((screen, revision, identity))
+        }),
+    )
+    .await
+    .map_err(|_| "cli_timeout")???;
+    let windows = claude_cli::parse_usage(
+        &screen,
+        chrono::Local::now(),
+        claude_cli::local_zone_name().as_deref(),
+    )?;
+    Ok(Reading {
+        windows,
+        banked_resets: None,
+        identity,
+        native_revision: Some(revision),
+        source: ReadingSource::Cli,
+    })
+}
+
+async fn collect_oauth(
     login: &LoginSpec,
     interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
@@ -615,6 +784,7 @@ fn parse_usage(value: &Value, identity: Identity) -> Result<Reading, &'static st
         banked_resets: None,
         identity,
         native_revision: None,
+        source: ReadingSource::Api,
     })
 }
 
@@ -685,6 +855,7 @@ mod tests {
         Deps {
             keychain,
             cache: Arc::new(TokenCache::for_build()),
+            cli: Arc::new(claude_cli::NoCli),
         }
     }
     const KEYCHAIN_DOC: &[u8] = br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4102444800000,"refreshToken":"never-used"}}"#;
@@ -836,6 +1007,161 @@ mod tests {
                 .is_none()
         );
         assert!(keychain.reads().is_empty());
+    }
+
+    /// A stand-in for the `claude` CLI: returns a fixed screen and can
+    /// change the profile's files the way a real session does.
+    struct FakeCli {
+        screen: Result<String, &'static str>,
+        rewrite: Option<(PathBuf, &'static [u8])>,
+        calls: std::sync::Mutex<usize>,
+    }
+    impl CliProbe for FakeCli {
+        fn usage_screen(&self, _login: &LoginSpec) -> Result<String, &'static str> {
+            *self.calls.lock().unwrap() += 1;
+            if let Some((path, bytes)) = &self.rewrite {
+                std::fs::write(path, bytes).unwrap();
+            }
+            self.screen.clone()
+        }
+    }
+    const CLI_PANEL: &str = "Current session\n 23% used\nCurrent week (all models)\n 70% left\n";
+    fn cli_deps(
+        keychain: Arc<FakeKeychain>,
+        screen: Result<String, &'static str>,
+        rewrite: Option<(PathBuf, &'static [u8])>,
+    ) -> (Deps, Arc<FakeCli>) {
+        let cli = Arc::new(FakeCli {
+            screen,
+            rewrite,
+            calls: std::sync::Mutex::new(0),
+        });
+        let deps = Deps {
+            keychain,
+            cache: Arc::new(TokenCache::for_build()),
+            cli: Arc::clone(&cli) as Arc<dyn CliProbe>,
+        };
+        (deps, cli)
+    }
+    async fn lease() -> Arc<OwnedSemaphorePermit> {
+        Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_denied_keychain_on_a_user_refresh_falls_back_to_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = login(dir.path());
+        spec.id = "claude-cli-fallback".into();
+        std::fs::write(
+            account_path(&spec),
+            br#"{"oauthAccount":{"accountUuid":"account-a"}}"#,
+        )
+        .unwrap();
+        let keychain = FakeKeychain::new(
+            Err(external::INTERACTION_REQUIRED),
+            Err("keychain_needs_permission"),
+        );
+        // Claude Code rewrites its config while the probe runs.
+        let (deps, cli) = cli_deps(
+            keychain,
+            Ok(CLI_PANEL.into()),
+            Some((
+                account_path(&spec),
+                br#"{"oauthAccount":{"accountUuid":"account-a"},"numStartups":2}"#,
+            )),
+        );
+        let before = published_revision(&spec);
+        let reading = collect(&spec, true, lease().await, &deps).await.unwrap();
+        assert_eq!(*cli.calls.lock().unwrap(), 1);
+        assert_eq!(reading.source, ReadingSource::Cli);
+        assert_eq!(reading.windows[0].used_permille, Some(230));
+        assert_eq!(reading.windows[1].used_permille, Some(300));
+        assert!(reading.identity.account.is_some());
+        // The probe's own write is not an account change for the service...
+        assert_ne!(metadata_revision(&spec), before);
+        assert_eq!(published_revision(&spec), before);
+        assert_eq!(reading.native_revision.as_deref(), Some(before.as_str()));
+        // ...until the files change again.
+        std::fs::write(
+            account_path(&spec),
+            br#"{"oauthAccount":{"accountUuid":"account-b"}}"#,
+        )
+        .unwrap();
+        assert_eq!(published_revision(&spec), metadata_revision(&spec));
+    }
+
+    #[tokio::test]
+    async fn the_cli_never_runs_off_a_background_refresh_or_for_other_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = login(dir.path());
+        spec.id = "claude-cli-gated".into();
+        let keychain = FakeKeychain::new(Err(external::INTERACTION_REQUIRED), Err("unused"));
+        let (deps, cli) = cli_deps(keychain, Ok(CLI_PANEL.into()), None);
+        assert_eq!(
+            collect(&spec, false, lease().await, &deps)
+                .await
+                .unwrap_err()
+                .reason,
+            "keychain_needs_permission"
+        );
+        assert_eq!(*cli.calls.lock().unwrap(), 0);
+
+        // A Keychain failure that is not a permission need.
+        let keychain = FakeKeychain::new(Err("unavailable"), Err("unused"));
+        let (deps, cli) = cli_deps(keychain, Ok(CLI_PANEL.into()), None);
+        assert_eq!(
+            collect(&spec, true, lease().await, &deps)
+                .await
+                .unwrap_err()
+                .reason,
+            "unavailable"
+        );
+        assert_eq!(*cli.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_cli_reports_the_original_reason_and_unmasks_its_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = login(dir.path());
+        spec.id = "claude-cli-failed".into();
+        let keychain = FakeKeychain::new(Ok(None), Err("unused"));
+        let (deps, cli) = cli_deps(
+            keychain,
+            Err("cli_signed_out"),
+            Some((account_path(&spec), br#"{"oauthAccount":{}}"#)),
+        );
+        let failure = collect(&spec, true, lease().await, &deps)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.reason, "auth_missing");
+        assert_eq!(*cli.calls.lock().unwrap(), 1);
+        assert_eq!(published_revision(&spec), metadata_revision(&spec));
+
+        // An account switch during the probe is reported as one.
+        std::fs::write(
+            account_path(&spec),
+            br#"{"oauthAccount":{"accountUuid":"account-a"}}"#,
+        )
+        .unwrap();
+        let keychain = FakeKeychain::new(Ok(None), Err("unused"));
+        let (deps, _) = cli_deps(
+            keychain,
+            Ok(CLI_PANEL.into()),
+            Some((
+                account_path(&spec),
+                br#"{"oauthAccount":{"accountUuid":"account-b"}}"#,
+            )),
+        );
+        let failure = collect(&spec, true, lease().await, &deps)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.reason, "auth_changed");
+        assert_eq!(published_revision(&spec), metadata_revision(&spec));
     }
 
     #[test]
