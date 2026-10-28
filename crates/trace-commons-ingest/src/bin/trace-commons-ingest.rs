@@ -66137,10 +66137,17 @@ fn submission_status_from_record(
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
         // The receipt already resolved estimate-vs-gate figure; the two
-        // surfaces must never disagree about the same record.
-        credit_points_pending: receipt
-            .credit_points_pending
-            .unwrap_or(record.credit_points_pending),
+        // surfaces must never disagree about the same record. Once the
+        // outcome is final nothing is pending: daemons before #1703 add
+        // pending and final together, so sending both counts a decided
+        // trace twice on their Home.
+        credit_points_pending: if outcome.credit_points_final.is_some() {
+            0.0
+        } else {
+            receipt
+                .credit_points_pending
+                .unwrap_or(record.credit_points_pending)
+        },
         credit_points_final: outcome.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,
