@@ -279,7 +279,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     public struct PrivateAi: Decodable, Equatable, Sendable {
         public let loading: String
         public let unavailable: String
-        public let toggleLoading: String
         /// The offer's first two sentences, shown before "Learn more".
         public let offerLead: String
         /// The rest of the offer's first paragraph, disclosed by "Learn more".

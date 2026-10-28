@@ -522,8 +522,9 @@ pub struct PasskeyCopy {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PrivateAiCopy {
     pub loading: &'static str,
+    /// While the offer's words cannot be read. The step has had no switch
+    /// since #1685, so it says nothing about enabling.
     pub unavailable: &'static str,
-    pub toggle_loading: &'static str,
     /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
     /// the only words the Uses card shows before "Learn more" (owner,
     /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
@@ -764,8 +765,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
-            unavailable: "Disclosure unavailable. Enabling is disabled.",
-            toggle_loading: "Loading disclosure",
+            unavailable: "Disclosure unavailable.",
             offer_lead: "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it.",
             offer_more: "Requests are logged on this computer.",
             learn_more: "Learn more",
