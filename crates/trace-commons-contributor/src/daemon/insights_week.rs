@@ -4072,15 +4072,16 @@ fn near_ai_credit_value(
     })
 }
 
-/// The wire word for an inferred task, as `inferred_task` spells it.
+/// The wire word for an inferred task, as `inferred_task` spells it, with
+/// `no_edits` grouped under `other`, as the shared label
+/// (`InferredTask::task_category`) and the Sessions task words group it.
 fn inferred_task_key(task: InferredTask) -> &'static str {
     match task {
         InferredTask::BugFix => "bug_fix",
         InferredTask::Refactor => "refactor",
         InferredTask::Tests => "tests",
         InferredTask::Docs => "docs",
-        InferredTask::Other => "other",
-        InferredTask::NoEdits => "no_edits",
+        InferredTask::Other | InferredTask::NoEdits => "other",
     }
 }
 

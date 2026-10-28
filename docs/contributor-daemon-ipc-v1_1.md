@@ -4962,8 +4962,8 @@ sessions on disk. Otherwise:
   zero; a window with no call is a true 0. `week` also carries `by_task[]`,
   `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
   calls_without_charge}`, grouped by the session's stored row: `key` is the
-  inferred task (`bug_fix`, `refactor`, `tests`, `docs`, `other`,
-  `no_edits`), the tool (`claude_code`, `codex`) or the folder's label as
+  inferred task (`bug_fix`, `refactor`, `tests`, `docs` or `other`, which
+  takes `no_edits` too, as the task words do), the tool (`claude_code`, `codex`) or the folder's label as
   `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
   this view: a folder name is answered over this socket and shown on this
   Mac only, never sent anywhere), and `null` when unknown (a session with

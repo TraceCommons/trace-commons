@@ -32,7 +32,7 @@ use super::insights_route_tally::{HourCharge, NearAiCharge};
 pub(crate) struct CreditSession<'a> {
     pub charge: &'a NearAiCharge,
     pub last_call_at: DateTime<Utc>,
-    /// `bug_fix`, `refactor`, `tests`, `docs`, `other` or `no_edits`.
+    /// `bug_fix`, `refactor`, `tests`, `docs` or `other`.
     pub task: Option<&'a str>,
     /// `claude_code` or `codex`.
     pub tool: Option<&'a str>,
