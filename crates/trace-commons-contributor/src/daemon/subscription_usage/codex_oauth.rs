@@ -7,6 +7,8 @@
 //! (request and response shape), `.../Codex/CodexProviderDescriptor.swift`
 //! (`CodexOAuthFetchStrategy`: rereads and fallback rules) and
 //! `.../Codex/CodexAdditionalRateLimitMapper.swift` (extra limits).
+//! After a successful usage read it also asks, best effort, for the banked
+//! reset inventory the way CodexBar's app does (see `reset_credit_count`).
 //!
 //! auth.json is only ever read. Codex owns that file and its refresh token, so
 //! a token due for renewal is never redeemed here; the caller hands that case
@@ -29,12 +31,15 @@ use tokio::sync::OwnedSemaphorePermit;
 use trace_commons_contributor_platform::external_claude_credentials::SecretBytes;
 
 use super::providers::{
-    CodexStore, bounded_json, codex_completion_revision, codex_file_identity, failure, fingerprint,
-    native_read, percent, request_error, unix_reset, usage_client,
+    CodexStore, HTTP_TIMEOUT, bounded_json, codex_completion_revision, codex_file_identity,
+    failure, fingerprint, native_read, percent, request_error, unix_reset, usage_client,
 };
 use super::{Identity, LoginSpec, ProbeFailure, Reading, Window};
 
 const MAX_BYTES: usize = 1024 * 1024;
+/// CodexBar `fetchRateLimitResetCredits(timeout: TimeInterval = 4)`; it is
+/// further capped by what is left of the usage request's budget.
+const RESET_CREDITS_TIMEOUT: Duration = Duration::from_secs(4);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// CodexBar rereads a missing, unreadable, partially written or stale file
 /// twice, 50 ms apart, in case Codex is replacing it.
@@ -55,6 +60,7 @@ pub(super) struct Target {
     client: reqwest::Client,
     /// Test-only endpoint override; `None` in production.
     base: Option<reqwest::Url>,
+    reset_credits_timeout: Duration,
 }
 
 impl Target {
@@ -62,6 +68,7 @@ impl Target {
         Ok(Self {
             client: usage_client()?,
             base: None,
+            reset_credits_timeout: RESET_CREDITS_TIMEOUT,
         })
     }
 }
@@ -252,8 +259,8 @@ async fn load(
     }
 }
 
-/// `resolveUsageURL` / `normalizeChatGPTBaseURL`.
-fn usage_url(base: &str) -> Result<reqwest::Url, &'static str> {
+/// `normalizeChatGPTBaseURL`.
+fn normalized_base(base: &str) -> String {
     let mut base = base.trim();
     if base.is_empty() {
         base = "https://chatgpt.com/backend-api/";
@@ -264,12 +271,67 @@ fn usage_url(base: &str) -> Result<reqwest::Url, &'static str> {
     {
         url.push_str("/backend-api");
     }
+    url
+}
+
+/// `resolveUsageURL`.
+fn usage_url(base: &str) -> Result<reqwest::Url, &'static str> {
+    let mut url = normalized_base(base);
     url.push_str(if url.contains("/backend-api") {
         "/wham/usage"
     } else {
         "/api/codex/usage"
     });
     reqwest::Url::parse(&url).map_err(|_| "base_url_refused")
+}
+
+/// `resolveRateLimitResetCreditsURL`: the same base for every path shape.
+fn reset_credits_url(base: &str) -> Result<reqwest::Url, &'static str> {
+    reqwest::Url::parse(&(normalized_base(base) + "/wham/rate-limit-reset-credits"))
+        .map_err(|_| "base_url_refused")
+}
+
+/// The count is authoritative, as on the native path (`rateLimitResetCredits.
+/// availableCount`); per-credit details are not needed for the display.
+fn parse_reset_credits(value: &Value) -> Option<u64> {
+    value.get("available_count").and_then(Value::as_u64)
+}
+
+/// Best-effort banked-reset inventory, following CodexBar at 5f93dc3:
+/// `CodexOAuthUsageFetcher.fetchRateLimitResetCredits` (CodexOAuthUsageFetcher.swift
+/// lines 524-562: GET, Bearer, Accept, `OpenAI-Beta: codex-1`,
+/// `originator: Codex Desktop`, `ChatGPT-Account-ID`, 4 s timeout) called from
+/// `CodexOAuthFetchStrategy.fetchResetCreditsIfRequested`
+/// (CodexProviderDescriptor.swift lines 800-819), which turns every failure
+/// into "no inventory". Any failure here leaves banked resets unknown; it
+/// never fails the usage reading or falls back. Only GET is ever sent; credits
+/// are never redeemed or modified. Our User-Agent stays our own.
+async fn reset_credit_count(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    token: &str,
+    account: Option<&str>,
+    budget: Duration,
+) -> Option<u64> {
+    if budget.is_zero() {
+        return None;
+    }
+    tokio::time::timeout(budget, async {
+        let response = request(client, url, token, account)
+            .header("OpenAI-Beta", "codex-1")
+            .header("originator", "Codex Desktop")
+            .timeout(budget)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        parse_reset_credits(&bounded_json(response).await.ok()?)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn request(
@@ -424,7 +486,8 @@ fn parse_usage(value: &Value, expected_account: Option<&str>) -> Result<Reading,
     windows.extend(additional_windows(value.get("additional_rate_limits")));
     Ok(Reading {
         windows,
-        // wham/usage carries no banked-reset inventory; see the operator doc.
+        // wham/usage carries no banked-reset inventory; `collect` asks for it
+        // separately, best effort.
         banked_resets: None,
         identity: Identity {
             account: expected_account
@@ -445,8 +508,9 @@ pub(super) async fn collect(
     base_url: &str,
     target: &Target,
 ) -> Result<Option<Reading>, ProbeFailure> {
-    let url = usage_url(target.base.as_ref().map_or(base_url, reqwest::Url::as_str))
-        .map_err(|reason| failure(reason, None))?;
+    let base = target.base.as_ref().map_or(base_url, reqwest::Url::as_str);
+    let url = usage_url(base).map_err(|reason| failure(reason, None))?;
+    let credits_url = reset_credits_url(base).map_err(|reason| failure(reason, None))?;
     let Some(loaded) = load(&login.root, lease).await? else {
         return Ok(None);
     };
@@ -459,9 +523,14 @@ pub(super) async fn collect(
         email: None,
         organization: None,
     };
+    // One budget for both requests: the inventory gets only what the usage
+    // request left of the usual HTTP timeout, so Refresh never waits longer.
+    let deadline = tokio::time::Instant::now() + HTTP_TIMEOUT;
+    let token =
+        std::str::from_utf8(&loaded.credential.token).map_err(|_| failure("auth_missing", None))?;
     let result = async {
-        let token = std::str::from_utf8(&loaded.credential.token).map_err(|_| "auth_missing")?;
         let response = request(&target.client, &url, token, account)
+            .timeout(HTTP_TIMEOUT)
             .send()
             .await
             .map_err(request_error)?;
@@ -480,6 +549,11 @@ pub(super) async fn collect(
     if reading.identity.account.is_none() {
         return Err(failure("identity_unavailable", None));
     }
+    let budget = target
+        .reset_credits_timeout
+        .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    reading.banked_resets =
+        reset_credit_count(&target.client, &credits_url, token, account, budget).await;
     // Same witness as the native path: storage selection and account are
     // unchanged, and the returned revision is what this reading belongs to.
     let revision = codex_completion_revision(

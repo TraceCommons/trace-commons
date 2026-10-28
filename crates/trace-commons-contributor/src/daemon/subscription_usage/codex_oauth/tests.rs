@@ -34,7 +34,10 @@ fn fresh_auth(access_token: &str) -> Value {
 
 #[derive(Clone, Debug)]
 struct Seen {
+    method: String,
     path: String,
+    beta: Option<String>,
+    originator: Option<String>,
     authorization: Option<String>,
     account: Option<String>,
     accept: Option<String>,
@@ -45,11 +48,20 @@ struct FakeServer {
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
+/// The reset-credit inventory endpoint's reply: status, body, delay.
+type Credits = (u16, &'static str, Duration);
+
+const NO_CREDITS_ENDPOINT: Credits = (404, "", Duration::ZERO);
+
 async fn fake_server(status: u16, body: &'static str) -> FakeServer {
+    fake_server_with_credits(status, body, NO_CREDITS_ENDPOINT).await
+}
+
+async fn fake_server_with_credits(status: u16, body: &'static str, credits: Credits) -> FakeServer {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&seen);
     let app = axum::Router::new().fallback(
-        move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+        move |method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap| {
             let record = Arc::clone(&record);
             async move {
                 let header = |name: &str| {
@@ -59,11 +71,20 @@ async fn fake_server(status: u16, body: &'static str) -> FakeServer {
                         .map(str::to_owned)
                 };
                 record.lock().unwrap().push(Seen {
+                    method: method.to_string(),
                     path: uri.path().to_owned(),
+                    beta: header("openai-beta"),
+                    originator: header("originator"),
                     authorization: header("authorization"),
                     account: header("chatgpt-account-id"),
                     accept: header("accept"),
                 });
+                let (status, body) = if uri.path().ends_with("/wham/rate-limit-reset-credits") {
+                    tokio::time::sleep(credits.2).await;
+                    (credits.0, credits.1)
+                } else {
+                    (status, body)
+                };
                 (
                     axum::http::StatusCode::from_u16(status).unwrap(),
                     body.to_owned(),
@@ -90,6 +111,7 @@ fn target(server: &FakeServer) -> Target {
             .build()
             .unwrap(),
         base: Some(server.base.clone()),
+        reset_credits_timeout: Duration::from_millis(300),
     }
 }
 
@@ -167,7 +189,8 @@ async fn fresh_token_reads_usage_while_codex_runs_and_never_writes_auth() {
         .unwrap();
 
     let seen = server.seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), 2, "usage, then the reset-credit inventory");
+    assert_eq!(seen[0].method, "GET");
     assert_eq!(seen[0].path, "/backend-api/wham/usage");
     assert_eq!(
         seen[0].authorization.as_deref(),
@@ -268,6 +291,7 @@ async fn unauthorized_falls_back_but_server_and_decode_failures_keep_their_label
             .await
             .unwrap_err();
         assert_eq!(failure.reason, expected, "status {status}");
+        // A failed usage read never asks for the reset-credit inventory.
         assert_eq!(server.seen.lock().unwrap().len(), 1, "status {status}");
         if expected != "native_tool_running" {
             assert_eq!(
@@ -506,4 +530,107 @@ fn usage_parse_keeps_unknown_values_unknown() {
         parse_usage(&json!({"accountId":"b"}), Some("a")).err(),
         Some("auth_changed")
     );
+}
+
+const CREDITS: &str = r#"{"credits":[
+    {"id":"c1","reset_type":"weekly","status":"available","granted_at":"2026-10-01T00:00:00Z"},
+    {"id":"c2","reset_type":"weekly","status":"available","granted_at":"2026-10-02T00:00:00Z"}],
+    "available_count": 2}"#;
+
+async fn fresh_read(server: &FakeServer) -> Result<Reading, ProbeFailure> {
+    let dir = tempfile::tempdir().unwrap();
+    let token = jwt(json!({"exp": Utc::now().timestamp() + 3600}));
+    std::fs::write(
+        dir.path().join("auth.json"),
+        serde_json::to_vec(&fresh_auth(&token)).unwrap(),
+    )
+    .unwrap();
+    collect_codex_via(&login(dir.path()), lease(), &target(server)).await
+}
+
+#[tokio::test]
+async fn reset_credit_inventory_is_read_with_codexbar_headers_and_only_a_get() {
+    let server = fake_server_with_credits(200, USAGE, (200, CREDITS, Duration::ZERO)).await;
+    let reading = fresh_read(&server).await.unwrap();
+    assert_eq!(reading.banked_resets, Some(2));
+    assert_eq!(reading.windows.len(), 5);
+    let seen = server.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    let credits = &seen[1];
+    assert_eq!(credits.method, "GET");
+    assert_eq!(credits.path, "/backend-api/wham/rate-limit-reset-credits");
+    assert!(
+        credits
+            .authorization
+            .as_deref()
+            .is_some_and(|value| value.starts_with("Bearer "))
+    );
+    assert_eq!(credits.account.as_deref(), Some("account-fixture"));
+    assert_eq!(credits.accept.as_deref(), Some("application/json"));
+    assert_eq!(credits.beta.as_deref(), Some("codex-1"));
+    assert_eq!(credits.originator.as_deref(), Some("Codex Desktop"));
+    // The usage request itself carries neither inventory-only header.
+    assert_eq!(seen[0].beta, None);
+    assert_eq!(seen[0].originator, None);
+}
+
+#[tokio::test]
+async fn reset_credit_failures_leave_banked_resets_unknown_and_keep_the_reading() {
+    for credits in [
+        (404, "", Duration::ZERO),
+        (500, "PRIVATE_PROVIDER_ERROR", Duration::ZERO),
+        (401, "{}", Duration::ZERO),
+        (200, "PRIVATE_PROVIDER_NON_JSON", Duration::ZERO),
+        (
+            200,
+            r#"{"credits":[],"available_count":-1}"#,
+            Duration::ZERO,
+        ),
+        (200, r#"{"credits":[]}"#, Duration::ZERO),
+        (200, CREDITS, Duration::from_secs(5)),
+    ] {
+        let server = fake_server_with_credits(200, USAGE, credits).await;
+        let started = std::time::Instant::now();
+        let reading = fresh_read(&server).await.unwrap();
+        assert_eq!(reading.banked_resets, None, "{credits:?}");
+        assert_eq!(reading.windows.len(), 5, "{credits:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the inventory request is bounded"
+        );
+        assert_eq!(server.seen.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn reset_credit_url_follows_codexbar_normalization() {
+    for (base, expected) in [
+        (
+            "https://chatgpt.com/backend-api/",
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+        ),
+        (
+            "https://chatgpt.com",
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+        ),
+        (
+            "https://api.openai.com/custom/",
+            "https://api.openai.com/custom/wham/rate-limit-reset-credits",
+        ),
+    ] {
+        assert_eq!(reset_credits_url(base).unwrap().as_str(), expected);
+    }
+}
+
+#[test]
+fn reset_credit_count_is_authoritative_like_the_native_path() {
+    for (body, expected) in [
+        (json!({"credits":[],"available_count":3}), Some(3)),
+        (json!({"credits":null,"available_count":4}), Some(4)),
+        (json!({"available_count":-1}), None),
+        (json!({"available_count":"2"}), None),
+        (json!([]), None),
+    ] {
+        assert_eq!(parse_reset_credits(&body), expected, "{body}");
+    }
 }

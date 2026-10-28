@@ -28,7 +28,7 @@ use super::{
 
 const MAX_BYTES: usize = 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) async fn collect(
     login: &LoginSpec,
