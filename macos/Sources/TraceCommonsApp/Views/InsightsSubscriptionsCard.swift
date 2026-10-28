@@ -15,7 +15,10 @@ struct InsightsSubscriptionsCard: View {
             VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
                 Text(text(model.supportedProviders.contains(where: { $0.provider == "claude" })
                           ? "analytics_subscriptions_captured_limits" : "analytics_subscriptions_current")).insightsCaption()
-                Text(text("analytics_subscriptions_refresh_hint")).insightsCaption()
+                // Only beside a Refresh button: a failed read draws no rows.
+                if !model.supportedProviders.isEmpty, !model.isRefreshing {
+                    Text(text("analytics_subscriptions_refresh_hint")).insightsCaption()
+                }
                 VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                     if let failure = model.failureKey {
                         Text(text(failure)).insightsError()

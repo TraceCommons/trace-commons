@@ -523,6 +523,10 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertFalse(overview.contains("analytics_subscriptions_title"))
         XCTAssertFalse(overview.contains("analytics_subscriptions_claude_captured"))
         XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_refresh_hint\"))"))
+        // Kristi's #1687 review: no "Refresh..." line without a Refresh button.
+        let gate = try XCTUnwrap(overview.range(of: "if !model.supportedProviders.isEmpty, !model.isRefreshing {"))
+        let hint = try XCTUnwrap(overview.range(of: "Text(text(\"analytics_subscriptions_refresh_hint\"))"))
+        XCTAssertLessThan(gate.lowerBound, hint.lowerBound)
         XCTAssertTrue(settings.contains("analytics_subscriptions_title"))
         let copy = try uiCopy()
         XCTAssertEqual(copy["analytics_subscriptions_refresh_hint"], "Refresh to see your latest limits.")
