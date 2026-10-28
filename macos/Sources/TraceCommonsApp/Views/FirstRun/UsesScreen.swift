@@ -692,14 +692,16 @@ struct UsesScreen: View {
             }
             // The required use, one line under the choices (owner,
             // 2026-10-28): every box above is a real choice, so Only
-            // required leaves them all empty. Its scope is the tooltip.
+            // required leaves them all empty. Its scope is behind the "i".
             if let required {
-                Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .help(required.description)
-                    .padding(.vertical, GlassTokens.Space.s3)
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+                    Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    infoButton(title: required.title, text: required.description)
+                }
+                .padding(.vertical, GlassTokens.Space.s3)
             }
             GlassHairline()
                 .padding(.top, GlassTokens.Space.s3)
@@ -735,26 +737,28 @@ struct UsesScreen: View {
 
     /// Each permission names its use; its scope is the row's hover tooltip.
     private func scopeRow(_ option: ConsentScope) -> some View {
-        Toggle(isOn: scope(option.name)) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                // The use that earns credit says so, in the required use's
-                // inline style, no louder.
-                if option.name == copy.uses.creditScope {
-                    Text(copy.uses.creditRequired)
-                        .glassType(GlassTokens.TypeScale.mono)
-                        .foregroundStyle(GlassTokens.Color.statusOnText.color)
+        // The description is behind the "i" beside the title (owner,
+        // 2026-10-28, replacing #1290's always-visible line to keep the box
+        // short). The button sits outside the checkbox, so pressing it never
+        // ticks the box.
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+            Toggle(isOn: scope(option.name)) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    // The use that earns credit says so, in the required
+                    // use's inline style, no louder.
+                    if option.name == copy.uses.creditScope {
+                        Text(copy.uses.creditRequired)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassTokens.Color.statusOnText.color)
+                    }
                 }
             }
-            // Inside the label too: the checkbox style wraps the row in a
-            // button, which can keep a tooltip set outside it from showing.
-            .contentShape(Rectangle())
-            .help(option.description)
+            .toggleStyle(GlassCheckboxStyle())
+            .fixedSize(horizontal: true, vertical: false)
+            infoButton(title: option.title, text: option.description)
+            Spacer(minLength: 0)
         }
-        .toggleStyle(GlassCheckboxStyle())
-        // The description is a plain hover tooltip (owner, 2026-10-28,
-        // replacing #1290's always-visible line to keep the box short).
-        .help(option.description)
         .padding(.vertical, GlassTokens.Space.s3)
     }
 

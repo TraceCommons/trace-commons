@@ -464,12 +464,18 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(SharingDisclosureFlow.isNeeded(for: joined))
     }
 
-    /// Each use's scope is its row's plain hover tooltip (owner,
-    /// 2026-10-28, replacing #1290's always-visible description).
-    func test_scopeDescriptionsAreHoverTooltips() throws {
+    /// Each use's scope is behind the "i" beside its title (owner,
+    /// 2026-10-28, replacing #1290's always-visible description), outside
+    /// the checkbox so pressing it never ticks the box.
+    func test_scopeDescriptionsAreBehindInfoButtons() throws {
         let source = try Self.source()
-        XCTAssertTrue(source.contains(".help(required.description)"))
-        XCTAssertTrue(source.contains(".help(option.description)"))
+        XCTAssertTrue(source.contains("infoButton(title: required.title, text: required.description)"))
+        XCTAssertTrue(source.contains("infoButton(title: option.title, text: option.description)"))
+        XCTAssertFalse(source.contains(".help("))
+        let row = try XCTUnwrap(source.range(of: "    private func scopeRow(_ option: ConsentScope) -> some View {"))
+        let style = try XCTUnwrap(source.range(of: ".toggleStyle(GlassCheckboxStyle())", range: row.upperBound..<source.endIndex))
+        let info = try XCTUnwrap(source.range(of: "infoButton(title: option.title", range: row.upperBound..<source.endIndex))
+        XCTAssertLessThan(style.lowerBound, info.lowerBound, "the i is outside the checkbox")
         XCTAssertFalse(source.contains("Text(option.description)"))
         XCTAssertFalse(source.contains("Text(required.description)"))
         XCTAssertTrue(source.contains("ScrollView {"), "choices remain reachable in the default-height window")
