@@ -1482,6 +1482,13 @@ mod integration_tests {
                 })
             })
         }));
+        // Both readers start on (#1688), so the test turns them off itself.
+        {
+            let mut settings = shared.settings.lock().unwrap();
+            settings.subscription_usage_codex_enabled = false;
+            settings.subscription_usage_claude_on = false;
+        }
+        settings_changed(&shared);
         tick(&shared, Utc::now());
         let request = Request {
             id: 1,
@@ -1489,7 +1496,9 @@ mod integration_tests {
             params: json!({"refresh":true,"interactive":true}),
         };
         assert!(handle(&shared, &request).error.is_none());
-        tokio::task::yield_now().await;
+        // Long enough for a spawned probe to run: one yield let a collector
+        // that was wrongly started finish after the assertion.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(!shared.store.dir().join("managed-profiles").exists());
     }
