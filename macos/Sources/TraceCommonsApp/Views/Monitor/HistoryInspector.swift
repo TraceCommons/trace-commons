@@ -35,6 +35,9 @@ struct HistoryDetailInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             summary
+            // Train coding models on this sent trace: offered while it
+            // lacks the use, then Credit pending until its credit shows.
+            SentTraceTrainingSection(model: model.sentTracesTraining, row: row)
             defects
             // A new row is a new detail: its editor draft, withdrawal
             // confirmation and Skills panel are the record's, and the

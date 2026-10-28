@@ -5644,6 +5644,19 @@ fn the_account_devices_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_sent_traces_training_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::sent_traces_training_copy;
+    use trace_commons_contributor_ffi::tc_sent_traces_training_copy_json;
+    let copy = json_owned(tc_sent_traces_training_copy_json());
+    assert_eq!(
+        copy,
+        serde_json::to_value(sent_traces_training_copy()).unwrap()
+    );
+    assert!(copy["body_other"].as_str().unwrap().contains("{count}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
     use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
     use trace_commons_contributor_ffi::tc_settings_ranges_json;

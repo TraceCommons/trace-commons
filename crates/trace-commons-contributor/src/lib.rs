@@ -93,6 +93,7 @@ pub mod mission_attempt;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_draft_service;
+pub mod model_training_consent;
 pub(crate) mod near_ai_login;
 pub mod nudge_copy;
 pub mod nudge_render;
