@@ -98,7 +98,7 @@ struct MenuBarGlassPanel: View {
            let name = model.privateInferenceCopy?.destination
         {
             GlassEyebrowCard(name, accessory: {
-                PrivateAIStatusLabel()
+                PrivateAIStatusLabel { open(.settings(.privateAI)) }
             }, content: {
                 if MenuPanelStatus.showsToolButtons(snapshot) {
                     HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
@@ -300,17 +300,27 @@ struct WatchingMenuButton: View {
     }
 }
 
-/// Private AI's On or Off, with its dot (owner, 2026-10-22): the
+/// Private AI's one word, with its dot (owner, 2026-10-22, 2026-10-28): the
 /// menu-bar popover's Private AI section has it, and the edge rail's
 /// Private AI peek beside its title.
 struct PrivateAIStatusLabel: View {
     @EnvironmentObject private var model: AppModel
+    /// Where a click goes; nil draws the label alone.
+    var action: (() -> Void)?
 
     var body: some View {
         let state = MenuPanelStatus.privateAI(model)
-        GlassStatusLabel(MenuPanelStatus.privateAIValue(state, model: model), status: MenuPanelStatus.privateAIDot(state))
-            .multilineTextAlignment(.trailing)
-            .lineLimit(2)
+        let label = GlassStatusLabel(MenuPanelStatus.privateAIValue(state, model: model), status: MenuPanelStatus.privateAIDot(state))
+            .lineLimit(1)
+        let sentence = MenuPanelStatus.privateAISentence(model) ?? ""
+        if let action {
+            Button(action: action) { label }
+                .buttonStyle(.plain)
+                .help(sentence)
+                .accessibilityHint(sentence)
+        } else {
+            label.help(sentence).accessibilityHint(sentence)
+        }
     }
 }
 
@@ -768,60 +778,74 @@ enum MenuPanelStatus {
         return SettlementLine(text: estimate.text, label: label, action: action)
     }
 
-    /// The Private AI pill's state.
+    /// The Private AI row's state.
     enum PrivateAI: Equatable {
-        /// The core has not said whether the switch is on.
+        /// The core has not said whether the switch is on, or has no word
+        /// for the listener's state.
         case unknown
         case off
-        /// The switch is on and the listener reports clear.
-        case on
-        /// The switch is on but the listener refused, crashed, is stopping
-        /// or reports anything else: never drawn On.
-        case notWorking
+        /// The switch is on: the core's one word for the listener's state
+        /// and the tone of its dot. Only a clear tone is drawn green.
+        case listener(word: String, tone: PrivateInferenceTone)
     }
 
-    /// On only while the switch is on AND the listener's tone is clear
-    /// (`PrivateInferenceIndicator.status`); fail closed otherwise.
-    static func privateAI(on: Bool?, tone: PrivateInferenceTone) -> PrivateAI {
+    /// Off while the switch is off; otherwise the core's word and tone for
+    /// the listener's state, so a switch left on over a dead listener never
+    /// reads On and an On that is not answering is not drawn green.
+    static func privateAI(on: Bool?, menu: (word: String, tone: PrivateInferenceTone)?) -> PrivateAI {
         guard let on else { return .unknown }
         guard on else { return .off }
-        return PrivateInferenceIndicator.status(tone) == .on ? .on : .notWorking
+        guard let menu else { return .unknown }
+        return .listener(word: menu.word, tone: menu.tone)
     }
 
-    /// Private AI's state: the listener's reported tone, never the switch
-    /// alone, so a switch left on over a dead listener never reads On. A
-    /// switch the core did not report is unknown, never Off.
+    /// Private AI's state: the listener's reported state, never the switch
+    /// alone. A switch the core did not report is unknown, never Off.
     @MainActor
     static func privateAI(_ model: AppModel) -> PrivateAI {
         privateAI(
             on: model.daemonSettings?.privateInference,
-            tone: PrivateInferenceSurface.tone(model.privateInferenceState, calls: model.privateInferenceCalls))
+            menu: PrivateInferenceSurface.menuState(model.privateInferenceState, calls: model.privateInferenceCalls))
     }
 
-    /// On and Off in the core's words; a listener that is not working while
-    /// the switch is on reads the core's state line for it; unknown is a
+    /// One word, in the core's words (owner, 2026-10-28): the full state
+    /// sentence truncated here and read as an error, so it stays on the
+    /// Private AI page and the dot carries the difference. Unknown is a
     /// dash, never Off.
     @MainActor
     static func privateAIValue(_ state: PrivateAI, model: AppModel) -> String {
         switch state {
-        case .on: MenuWords.on
+        case .listener(let word, _): word
         case .off: MonitorWords.off
-        case .notWorking:
-            model.privateInferenceCopy.map {
-                PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: $0, calls: model.privateInferenceCalls)
-            } ?? "—"
         case .unknown: "—"
         }
     }
 
-    /// The dot beside Private AI's state: on only while it is On, outside
-    /// while it is on but not working, off otherwise.
+    /// The dot beside Private AI's word: green only for a clear tone, amber
+    /// for On with something to look at, red for a listener that is not
+    /// working, grey otherwise.
     static func privateAIDot(_ state: PrivateAI) -> GlassStatus {
         switch state {
-        case .on: .on
-        case .notWorking: .outside
+        case .listener(_, let tone): privateAIDot(tone)
         case .off, .unknown: .off
         }
+    }
+
+    static func privateAIDot(_ tone: PrivateInferenceTone) -> GlassStatus {
+        switch tone {
+        case .clear: .on
+        case .attention: .ask
+        case .refused: .outside
+        case .neutral, .held: .off
+        }
+    }
+
+    /// The row's full sentence for a tooltip and the accessibility hint:
+    /// the same sentence the Private AI page shows.
+    @MainActor
+    static func privateAISentence(_ model: AppModel) -> String? {
+        guard let copy = model.privateInferenceCopy else { return nil }
+        return PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: copy, calls: model.privateInferenceCalls)
     }
 
     /// Whether Private AI's section draws the tool buttons: only while a
