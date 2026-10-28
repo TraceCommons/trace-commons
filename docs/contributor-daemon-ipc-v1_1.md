@@ -4958,9 +4958,11 @@ sessions on disk. Otherwise:
   money, overriding owner decision D5 for Insights) is where NEAR AI credit
   went, from the route tallies' charges; `null` while
   `routing_available` is false. `basis` is `near_ai_ledger`. `week` is the
-  week on screen, `today` today and `last_31_days` today and the 30 local
-  days before it (neither moves with the week on screen), each from local
-  midnight to local midnight. Each window is `{from, to, usd_micros,
+  week on screen, `today` today, `by_day[]` each of the last 7 local days
+  (oldest first, today last, each window also carrying its `date`,
+  `YYYY-MM-DD`) and `last_31_days` today and the 30 local days before it
+  (none of these moves with the week on screen), each from local midnight
+  to local midnight. Each window is `{from, to, usd_micros,
   sessions, calls, calls_without_charge}`: the calls through the NEAR AI
   route started in it (by clock hour), their sum in integer USD micros, the
   sessions they came from, and the calls with no charge. `usd_micros` is

@@ -4011,8 +4011,9 @@ fn charge_map(
 /// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
 /// (product owner, 2026-10-28), from every route tally's charge
 /// (`insights_credit`). `week` is the selected local week, by task, tool
-/// and folder; `today` and `last_31_days` (today and the 30 local days
-/// before it) are sums only, and do not move with the selected week.
+/// and folder; `today`, `by_day` (the last 7 local days, oldest first) and
+/// `last_31_days` (today and the 30 local days before it) are sums only,
+/// and do not move with the selected week.
 ///
 /// A tally is grouped by the stored row of its session, matched by the
 /// keyed harness-session digest: its task is the person's own label when
@@ -4078,6 +4079,22 @@ fn near_ai_credit_value(
     };
     let today = now.with_timezone(&tz).date_naive();
     let tomorrow = midnight(today + Duration::days(1));
+    // The last 7 local days, oldest first, today last (owner, 2026-10-28:
+    // the NEAR AI card's spend by day).
+    let by_day: Vec<serde_json::Value> = (0..7)
+        .rev()
+        .map(|back| {
+            let day = today - Duration::days(back);
+            let mut value = window_value(
+                &sessions,
+                midnight(day),
+                midnight(day + Duration::days(1)),
+                false,
+            );
+            value["date"] = serde_json::json!(day.to_string());
+            value
+        })
+        .collect();
     serde_json::json!({
         "basis": "near_ai_ledger",
         "week": window_value(
@@ -4087,6 +4104,7 @@ fn near_ai_credit_value(
             true,
         ),
         "today": window_value(&sessions, midnight(today), tomorrow, false),
+        "by_day": by_day,
         "last_31_days": window_value(
             &sessions,
             midnight(today - Duration::days(30)),
@@ -5997,6 +6015,15 @@ mod tests {
         assert_eq!(credit["today"]["usd_micros"], 250_000);
         assert_eq!(credit["last_31_days"]["usd_micros"], 250_000);
         assert!(credit["today"].get("by_task").is_none());
+        let days = credit["by_day"].as_array().unwrap();
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[6]["date"], "2026-09-14", "today last");
+        assert_eq!(days[0]["date"], "2026-09-08");
+        assert_eq!(days[6]["usd_micros"], 250_000);
+        assert_eq!(
+            days[5]["usd_micros"], 0,
+            "a day with no call is a true zero"
+        );
         let this = &credit["week"];
         assert_eq!(this["usd_micros"], 250_000);
         assert_eq!(this["sessions"], 1);
