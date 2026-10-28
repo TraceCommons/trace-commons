@@ -2,6 +2,7 @@
 //! stay in memory and never cross IPC; the display reads a bounded snapshot.
 
 mod claude;
+mod codex_oauth;
 pub(super) mod providers;
 
 use chrono::{DateTime, Duration, Utc};

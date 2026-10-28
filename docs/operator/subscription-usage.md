@@ -14,11 +14,15 @@ Fixed OAuth usage and profile requests supply session, weekly and model-specific
 
 ## Codex
 
-In Settings → Tools, **Read Codex usage** permits current native subscription limits. It is off by default. Enabling saves permission only; choose **Refresh** in Insights to acquire a reading. The app reads file-backed default/saved managed profiles through the native Codex app, which may renew its own sign-in.
+In Settings → Tools, **Read Codex usage** permits current native subscription limits. It is off by default. Enabling saves permission only; choose **Refresh** in Insights to acquire a reading.
 
-Detected Codex processes or ambiguous relevant process metadata refuse a probe. Close Codex before Refresh. Keyring and automatic stores return `native_storage_unsupported` before credential access or native launch. Their account changes cannot safely be verified through file metadata alone; check limits in Codex for those stores.
+Refresh follows CodexBar's preferred Codex source. It reads the file-backed sign-in in `$CODEX_HOME/auth.json` (default and saved managed profiles) without writing it, and sends its access token in a bearer header to `GET <chatgpt_base_url>/wham/usage` (`https://chatgpt.com/backend-api/wham/usage` by default; `<chatgpt_base_url>/api/codex/usage` when the configured base has no `/backend-api` path), with `ChatGPT-Account-Id` when the account is known. A missing, unreadable or partially written file, or one due for renewal, is reread twice, 50 ms apart. This path does not need Codex to be closed: nothing is written, so it cannot race Codex renewing its own sign-in.
 
-The native `account/rateLimits/read` interface supplies session/weekly allowance and banked resets. Modern parameters retry without parameters only for recognized older-schema rejection. Resets are not redeemed.
+A sign-in is due for renewal when its access token expires within five minutes, or, without a recognized expiry, when its saved `last_refresh` is older than eight days (file modification time is not used). The app never redeems the refresh token. A sign-in that is due for renewal, that the server rejects with HTTP 401, or that has no refresh token is handed to the native `codex app-server`, which may renew it. Only that path refuses while a Codex process or ambiguous relevant process metadata is detected, with **Codex needs to renew its sign-in. Close Codex, then Refresh.** Network, timeout, other HTTP status and decode failures keep their own labels and do not fall back. API-key sign-ins and files without OAuth tokens report a missing sign-in without launching Codex.
+
+Keyring and automatic stores return `native_storage_unsupported` before credential access, a network request or native launch. Their account changes cannot safely be verified through file metadata alone; check limits in Codex for those stores. `chatgpt_base_url` must be an HTTPS ChatGPT or OpenAI host on both paths.
+
+`rate_limit.primary_window` and `secondary_window` supply the session and weekly windows by their reported duration, and `additional_rate_limits[]` supply named model-specific windows. That response has no banked-reset count, so banked resets are shown only when a reading comes from the native path. The native `account/rateLimits/read` interface supplies session/weekly allowance and banked resets; modern parameters retry without parameters only for recognized older-schema rejection. Resets are not redeemed.
 
 ## Capture and lifecycle
 
@@ -28,4 +32,4 @@ Account/binding removal or changes and unenroll invalidate cached/pending readin
 
 The Codex permission can be configured with `subscription_usage_codex_enabled`. The legacy `subscription_usage_claude_enabled` setting is cleanup-only and no longer controls Claude availability. Use `near-ai config schema` and `near-ai config preview` for current configuration metadata, with the CLI bundled with the app/channel being configured.
 
-References: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [CodexBar Claude acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/claude.md), [owner decision](../superpowers/specs/2026-10-27-claude-subscription-activation-design.md).
+References: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [CodexBar Codex acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/codex.md), [CodexBar Claude acquisition](https://github.com/steipete/CodexBar/blob/5f93dc3068b3bee3f8753f3772614cc2949c335d/docs/claude.md), [owner decision](../superpowers/specs/2026-10-27-claude-subscription-activation-design.md).

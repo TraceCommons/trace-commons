@@ -159,7 +159,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_subscriptions_setting_codex", "Read Codex usage"),
     (
         "analytics_subscriptions_codex_detail",
-        "On Refresh, Trace Commons reads the saved Codex sign-in file for your default and saved managed subscription profiles to ask the Codex app for usage. Codex may renew its own sign-in. There are no background credential reads.",
+        "On Refresh, Trace Commons reads the saved Codex sign-in file for your default and saved managed subscription profiles and asks ChatGPT for usage. If a sign-in needs renewing, it asks the Codex app instead, which may renew it. There are no background credential reads.",
     ),
     (
         "analytics_subscriptions_not_checked",
@@ -167,7 +167,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_subscriptions_native_tool_running",
-        "Close Codex, then Refresh to read usage.",
+        "Codex needs to renew its sign-in. Close Codex, then Refresh.",
     ),
     (
         "analytics_subscriptions_base_url_refused",
