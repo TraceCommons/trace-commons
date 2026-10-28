@@ -1289,6 +1289,14 @@ pub struct MonitorHomeHistoryCopy {
     pub section_traces: &'static str,
     pub section_account: &'static str,
     pub private_ai_sign_in: &'static str,
+    /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
+    /// MVP is "contribute traces, earn credit", so it is the first and
+    /// largest card, over Private AI): its title, one line on what
+    /// contributing is and what it earns, and the way into Traces.
+    /// DRAFT, NEEDS APPROVAL.
+    pub traces_hero_title: &'static str,
+    pub traces_hero_body: &'static str,
+    pub traces_hero_action: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
     /// this Mac saw, `{amount}` signed. No change says nothing (owner,
     /// 2026-10-16). DRAFT, NEEDS APPROVAL.
@@ -1615,6 +1623,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_traces: "Traces",
             section_account: "Account",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
+            traces_hero_title: "Contribute traces, earn credit",
+            traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
+            traces_hero_action: "Start earning",
             credit_delta: "{amount} since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
