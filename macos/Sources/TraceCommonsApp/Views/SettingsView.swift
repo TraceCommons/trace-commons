@@ -100,8 +100,8 @@ enum SettingsLegacyWords {
     static var optionalEachOne: String { words?.optionalDataUse ?? "" }
     static var rewardOpportunities: String { words?.rewardOpportunities ?? "" }
     static var credit: String { words?.credit ?? "" }
-    /// The always-on scope's tag, the first run's own ("required to
-    /// share").
+    /// The always-on scope's tag, the core's one spelling ("always on"),
+    /// matching the first run's "Always on" line.
     static var alwaysOn: String { words?.required ?? "" }
     static var nothingPreselected: String { words?.nothingPreselected ?? "" }
     static var auditHeading: String { SettingsContent.auditHeading }

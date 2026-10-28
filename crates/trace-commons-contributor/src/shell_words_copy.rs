@@ -458,9 +458,9 @@ pub struct SettingsWords {
     pub optional_data_use: &'static str,
     pub reward_opportunities: &'static str,
     pub credit: &'static str,
-    /// The tag on the always-on scope: the one spelling the first run's
-    /// Uses screen shows too (`consent_copy::SCOPE_TAG_REQUIRED`), so
-    /// Settings and the first run never tag the same use differently.
+    /// The tag on the always-on scope: the core's one spelling
+    /// (`consent_copy::SCOPE_TAG_REQUIRED`, "always on"), matching the
+    /// first run's "Always on" line, so the two never differ.
     pub required: &'static str,
     pub nothing_preselected: &'static str,
     pub nothing_changed: &'static str,

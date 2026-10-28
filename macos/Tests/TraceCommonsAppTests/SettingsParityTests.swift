@@ -221,8 +221,9 @@ final class SettingsParityTests: XCTestCase {
     /// the core's (`shell_words_copy`), in Ron's words where #1146 has them.
     func test_settingsAndProfileWordsAreTheCoresInRonsWords() {
         XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
-        // The first run's tag since #1662, so the two never differ.
-        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required to share")
+        // The core's one tag, matching the first run's "Always on" line
+        // (owner, 2026-10-28), so the two never differ.
+        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "always on")
         XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
         XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
