@@ -12,11 +12,12 @@ use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use trace_commons_contributor_platform::external_claude_credentials as external;
 
-use super::providers::{failure, fingerprint, native_read};
+use super::providers::{
+    bounded_json, failure, fingerprint, native_read, request_error, usage_client,
+};
 use super::{Identity, LoginSpec, ProbeFailure, Reading, Window, file_revision};
 
 const MAX_BYTES: usize = 1024 * 1024;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(180);
 const USAGE: &str = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
 const LEGACY_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -295,13 +296,6 @@ fn request(client: &reqwest::Client, token: &str, endpoint: Endpoint) -> reqwest
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
 }
-fn request_error(error: reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        "request_timeout"
-    } else {
-        "unavailable"
-    }
-}
 fn status(status: u16) -> Result<(), &'static str> {
     match status {
         200 => Ok(()),
@@ -310,22 +304,9 @@ fn status(status: u16) -> Result<(), &'static str> {
         _ => Err("unavailable"),
     }
 }
-async fn body(mut response: reqwest::Response) -> Result<Value, &'static str> {
+async fn body(response: reqwest::Response) -> Result<Value, &'static str> {
     status(response.status().as_u16())?;
-    if response
-        .content_length()
-        .is_some_and(|len| len > MAX_BYTES as u64)
-    {
-        return Err("invalid_response");
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-        if chunk.len() > MAX_BYTES - bytes.len() {
-            return Err("invalid_response");
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| "invalid_response")
+    bounded_json(response).await
 }
 
 pub(super) async fn collect(
@@ -342,18 +323,7 @@ pub(super) async fn collect(
     .map_err(|_| failure("credential_read_timeout", None))?
     .map_err(|reason| failure(reason, None))?
     .map_err(|reason| failure(reason, None))?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(HTTP_TIMEOUT)
-        .no_proxy()
-        .https_only(true)
-        .user_agent(concat!(
-            "TraceCommons/",
-            env!("CARGO_PKG_VERSION"),
-            " subscription-usage"
-        ))
-        .build()
-        .map_err(|_| failure("unavailable", None))?;
+    let client = usage_client().map_err(|reason| failure(reason, None))?;
     // Requests use one token and a required stable profile identity. The local
     // config is corroboration only and never substitutes for provider evidence.
     let mut observed_identity = None;
