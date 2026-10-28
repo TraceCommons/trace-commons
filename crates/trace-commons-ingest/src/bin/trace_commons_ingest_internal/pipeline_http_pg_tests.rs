@@ -7416,9 +7416,15 @@ fn assert_duplicate_pair_reads_as_mains(
     for (database_reads, first_document, second_document) in documents {
         let mode = if *database_reads { "database" } else { "file" };
         let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+        // Once an award makes the credit final, nothing is pending beside
+        // it (#1707); before that, the gate figure is.
+        let expected_first_pending = if first_document["credit_points_final"].is_null() {
+            f64::from(credit_points_from_quality_micros(first_quality))
+        } else {
+            0.0
+        };
         assert!(
-            (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs()
-                < 1e-4,
+            (first_pending - expected_first_pending).abs() < 1e-4,
             "{mode} reads: {first_document}"
         );
         let first_explanation = explanation_lines(first_document);
@@ -7579,10 +7585,9 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
     )
     .await;
     let shadow = score_shadow_credit_decision(&runtime, &tenant, &run).await;
-    let shadow_quality = shadow
+    shadow
         .credit_quality_micros
         .expect("a compatibility Score records a shadow credit quality");
-    let expected_pending = f64::from(credit_points_from_quality_micros(shadow_quality));
     let expected_basis = gate_credit_basis_line(&shadow);
     assert!(
         expected_basis.starts_with("Credit reflects the gate's scoring (calibration V"),
@@ -7622,9 +7627,11 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         let pending = document["credit_points_pending"]
             .as_f64()
             .expect("a pending figure");
+        // The award below makes the credit final, so the shadow credit
+        // quality is no longer reported as pending beside it (#1707).
         assert!(
-            (pending - expected_pending).abs() < 1e-4,
-            "{mode} reads: the shadow credit quality is the pending figure: {document}"
+            pending.abs() < 1e-4,
+            "{mode} reads: nothing is pending beside a final figure: {document}"
         );
         // The NoveltyUtility award is the trace's final credit, and the
         // ledger figure leaves it out, so `total` is still final + ledger.
