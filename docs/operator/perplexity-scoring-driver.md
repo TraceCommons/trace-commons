@@ -143,6 +143,29 @@ real row contents (trace bodies, contributor identity, raw scores tied to a
 specific submission) into tickets or logs; the count above is safe because
 it carries no per-row content.
 
+## Awards withheld for lack of model training
+
+A scored trace whose submission did not carry the `model_training` use has
+its award withheld (`credit_withheld_reason = 'policy_mismatch'`). The
+contributor can add the use afterwards from the app
+(`/v1/contributors/me/model-training-consent`, V141); that re-runs the
+withheld award from the stored decision, as this driver's issuer
+(`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), without scoring the
+trace again, and clears the row's withheld reason when it pays. There is no
+operator path that adds consent for a contributor. To watch it, count, never
+list:
+
+```sql
+SELECT count(*) FROM trace_consent_grants;
+SELECT count(*) FROM trace_gate_decisions WHERE credit_withheld_reason = 'policy_mismatch';
+```
+
+The grant is capped by the device's tenant access grant. On a deployment
+whose issuer does not attach the grant database
+(`TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB`), or whose grant
+template leaves out `model_training`, every device has the floor ceiling and
+the route answers `model_training_not_permitted`.
+
 ## Resetting retry bookkeeping after a fix
 
 When a submission fails scoring, the driver bumps

@@ -241,6 +241,63 @@ replaces it. Only statuses that carry pending credit (`accepted`,
 0.0. The credit ledger's delayed-utility events, `credit_points_final`, and
 the signed score attestation are unchanged.
 
+### Adding model training to traces already sent
+
+The scoring award (`NoveltyUtility`) requires `model_training` in a
+submission's stored allowed uses, and the tenant policy's allowlists must
+admit it; a trace sent without it is withheld as `policy_mismatch`. Stored
+consent used to be fixed at upload. Since V141 a contributor may add that one
+use to traces already sent (owner decisions 2026-10-28), for production and
+staging alike:
+
+```http
+GET  /v1/contributors/me/model-training-consent
+POST /v1/contributors/me/model-training-consent
+Authorization: Bearer <device status claim>
+
+{ "selection": "all_eligible" }
+{ "selection": "submission_ids", "submission_ids": ["..."] }
+```
+
+- **Who and which traces.** Tenant and actor come from the credential. A
+  trace is eligible when it is the caller's own (its principal's, or its
+  account's when the caller is linked to one; never the shared legacy
+  principal), `accepted`, not withdrawn (either ledger, or its source
+  session), revoked, purged or expired, and does not carry `model_training`.
+  Quarantined, held-for-review and still-processing traces are not eligible.
+  A payout hold is on the account, not the trace, and does not affect
+  eligibility; it applies to the award as to any other. There is no time
+  limit beyond the trace still being stored. At most 500 ids per call; the
+  answer says how many remain.
+- **Ceiling.** The grant is capped by the caller's access-grant ceiling: the
+  issuer-signed claim's `allowed_consent_scopes` and `allowed_uses` (the
+  device's tenant access grant, or the floor without one) must both name
+  `model_training`, and the tenant policy, when present or required, must
+  allow it. Otherwise both routes refuse with `403`
+  `model_training_not_permitted`. A credential with no scoped allowlist (a
+  static token) is refused: widening a trace's uses needs a ceiling that
+  names the use, not the absence of one. Contributors only.
+- **Add-only, dated, audited.** The grant appends the `model_training`
+  consent scope and allowed use to `trace_submissions` (and to the file
+  record, when the deployment keeps one) and removes nothing; removal stays
+  withdrawal. Each grant is one `trace_consent_grants` row with the time the
+  server accepted it, never backdated, and one hash-only audit event
+  (`model_training_consent`, a `PolicyUpdate` row whose metadata is the
+  kind's hashed label and a `granted` count). A repeat is `already_granted`
+  and changes nothing. The envelope stored at upload is not rewritten.
+- **The award, not a rescore.** For each granted trace whose latest gate
+  decision is a legacy-gate decision that passed both floors and was
+  withheld as `policy_mismatch`, the stored decision goes through
+  `emit_scoring_award_for_scored_decision`, issued as the scoring driver
+  issues it. Every check that path makes applies: production gate, central
+  issuer, tenant policy, accepted status, one paid award per submission
+  (so never twice), the payout cut-over (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`,
+  read against the award's own time), holds and settlement. On success the
+  decision row's withheld reason is cleared. A trace not yet scored is
+  answered `pending`: scoring reads the new uses. A versioned-pipeline run
+  whose Trace Credit leg already completed withheld is not re-opened; a run
+  that has not reached Settle reads the new uses there.
+
 Reviewers/admins append delayed credit once downstream utility is known:
 
 ```http
@@ -444,6 +501,8 @@ Contributor self-service:
 - `GET /v1/contributors/me/credit`
 - `GET /v1/contributors/me/credit-events`
 - `POST /v1/contributors/me/submission-status`
+- `GET|POST /v1/contributors/me/model-training-consent` (see
+  [Adding model training to traces already sent](#adding-model-training-to-traces-already-sent))
 
 Review and analytics:
 
@@ -1179,6 +1238,10 @@ export, credit, or derived datasets.
 - **Bulk export controls** — dataset export requires an authorized role, explicit
   purpose, consent/use filter, privacy-risk filter, review-state filter, output
   manifest, and a per-source audit event.
+- **Consent widening** — consent on a stored trace only ever grows through
+  the contributor's own model-training grant: add-only, capped by the
+  signed access-grant ceiling and the tenant policy, dated when given,
+  audited hash-only. No operator path adds consent on a contributor's behalf.
 - **Delayed credit abuse** — delayed credit append must be privileged,
   append-only, audited, policy-bounded, and linked to a concrete downstream
   artifact or review decision.

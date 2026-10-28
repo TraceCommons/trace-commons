@@ -651,8 +651,8 @@ reads, policy administration, review decisions, or unrestricted credit mutation.
 | `submitted_tenant_scope_ref` | Envelope tenant scope ref for analytics only. |
 | `schema_version` | Envelope schema version. |
 | `consent_policy_version` | Submitted consent policy version. |
-| `consent_scopes` | Normalized list or join table. |
-| `allowed_uses` | Centralized allowed-use projection. |
+| `consent_scopes` | Normalized list. Fixed at upload, except that the contributor's model-training grant (V141) may append `model_training`; nothing removes an entry. |
+| `allowed_uses` | Centralized allowed-use projection. Same rule: the model-training grant may append `model_training`, and only that. |
 | `retention_policy_id` | Central retention policy selected at ingest. |
 | `status` | `received`, `accepted`, `quarantined`, `rejected`, `revoked`, `expired`, `purged`. |
 | `privacy_risk` | Server-computed residual risk. |
@@ -667,6 +667,24 @@ reads, policy administration, review decisions, or unrestricted credit mutation.
 | `received_at`, `reviewed_at`, `revoked_at`, `expires_at`, `purged_at` | Lifecycle timestamps. |
 
 Indexes: `(tenant_id, submission_id) unique`, `(tenant_id, status, received_at)`, `(tenant_id, canonical_summary_hash)`, `(tenant_id, expires_at)`, `(tenant_id, contributor_pseudonym)`, `(tenant_id, status, review_lease_expires_at, received_at)`.
+
+`trace_consent_grants` (V141)
+
+One row per trace per consent the contributor added after upload. Today the
+only scope and use the table accepts is `model_training` (CHECK
+constraints). Forced RLS through `trace_current_tenant_id()`; the ingest
+runtime holds `SELECT, INSERT` on it and `UPDATE (consent_scopes,
+allowed_uses, updated_at)` on `trace_submissions`. Insert-only: a repeat
+grant leaves the first row.
+
+| Column | Purpose |
+|--------|---------|
+| `tenant_id`, `submission_id` | The trace; FK to `trace_submissions`, cascading. |
+| `consent_scope`, `allowed_use` | `model_training`. |
+| `actor_principal_ref` | The principal storage ref the grant authenticated as. |
+| `granted_at` | When the server accepted the grant. Never backdated. |
+
+Primary key: `(tenant_id, submission_id, consent_scope)`.
 
 ### Envelopes and Object References
 
