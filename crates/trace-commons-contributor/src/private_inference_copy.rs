@@ -117,6 +117,12 @@ pub const DESTINATION: &str = "Private AI";
 /// The one line under the destination's title saying what it is for.
 pub const SUBTITLE: &str = "Add a privacy layer to AI models you are already using.";
 
+/// Said after [`SUBTITLE`] only while NEAR AI answers calls (`running`),
+/// the one place this surface may say "credit" (product owner,
+/// 2026-10-28). With NEAR AI not connected, calls use the accounts the
+/// tools already have, so a shell must not show it then.
+pub const SUBTITLE_CREDIT: &str = "It uses your NEAR AI credit.";
+
 /// The offer’s heading names the intended provider. The body explains that
 /// existing provider connections are not changed by enabling the service.
 pub const OFFER_TITLE: &str = "Route AI requests through NEAR AI";
@@ -527,6 +533,8 @@ pub fn quit_needs_notice(requested_on: bool, label: &str) -> bool {
 pub struct PrivateInferenceCopy {
     pub destination: &'static str,
     pub subtitle: &'static str,
+    /// Shown after `subtitle` only in the `running` state.
+    pub subtitle_credit: &'static str,
     pub offer_title: &'static str,
     pub offer_what: &'static str,
     pub offer_exposure: &'static str,
@@ -2397,6 +2405,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
     PrivateInferenceCopy {
         destination: DESTINATION,
         subtitle: SUBTITLE,
+        subtitle_credit: SUBTITLE_CREDIT,
         offer_title: OFFER_TITLE,
         offer_what: OFFER_WHAT,
         offer_exposure: OFFER_EXPOSURE,
@@ -4964,7 +4973,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            181,
+            182,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -5288,6 +5297,7 @@ mod tests {
             SUBTITLE,
             "Add a privacy layer to AI models you are already using."
         );
+        assert_eq!(SUBTITLE_CREDIT, "It uses your NEAR AI credit.");
         let source = include_str!("private_inference_copy.rs");
         let region = source
             .split_once("PRIVATE-INFERENCE-SURFACE-BEGIN")
@@ -5496,7 +5506,8 @@ mod tests {
                 let text = text
                     .replace(DESTINATION, "")
                     .replace("Route AI requests through NEAR AI", "")
-                    .replace(OFFER_LEARN_MORE, "");
+                    .replace(OFFER_LEARN_MORE, "")
+                    .replace(SUBTITLE_CREDIT, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"

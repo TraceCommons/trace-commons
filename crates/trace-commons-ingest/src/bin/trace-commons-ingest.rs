@@ -18296,6 +18296,8 @@ fn compatibility_credit_decision(
         chunk_count: count(quality.chunk_count),
         total_chunk_count: count(quality.total_chunk_count),
         chunks_capped: quality.chunks_capped,
+        perplexity_passed: None,
+        novelty_passed: None,
     })
 }
 
@@ -18423,18 +18425,37 @@ fn submission_status_from_pipeline(
     } else {
         Vec::new()
     };
+    // A leg `main`'s credit checks withheld is decided with no award: final
+    // 0, and the withheld reason on the contributor's closed set, as `main`'s
+    // own document says for the same refusal (`trace_credit_outcome`).
+    let withheld_reason = (status.credit == PipelineCreditStatus::Withheld).then(|| {
+        status
+            .instruments
+            .iter()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .and_then(|instrument| instrument.reason_label.as_deref())
+            .map_or(
+                trace_commons_protocol::credit_outcome::OTHER,
+                credit_outcome_reason_for_withheld_label,
+            )
+    });
+    let credit_points_final = match status.credit {
+        PipelineCreditStatus::Finalized => Some(trace_credit_points),
+        PipelineCreditStatus::Withheld => Some(0.0),
+        _ => None,
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
         status: main_status_for_pipeline(status).to_string(),
         credit_points_pending,
-        credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
-            .then_some(trace_credit_points),
+        credit_points_final,
         credit_points_ledger: 0.0,
         credit_points_total: None,
         explanation,
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
+        credit_outcome_reason: withheld_reason.map(str::to_string),
         pipeline: Some(pipeline_status_for_protocol(status)),
     }
 }
@@ -66067,15 +66088,22 @@ fn submission_status_from_record(
         .iter()
         .filter(|event| event.submission_id == record.submission_id)
         .collect::<Vec<_>>();
+    let outcome = trace_credit_outcome(record, gate_decision, &delayed_events);
+    // An award the outcome already reports as final is not counted again
+    // in the ledger figure, so `total` stays `final + ledger`.
     let ledger_points = if delayed_credit_applies_to_record(record) {
         delayed_events
             .iter()
+            .filter(|event| {
+                !(outcome.absorbs_scoring_awards
+                    && event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            })
             .map(|event| event.credit_points_delta)
             .sum::<f32>()
     } else {
         0.0
     };
-    let base_final = record.credit_points_final.unwrap_or(0.0);
+    let base_final = outcome.credit_points_final.unwrap_or(0.0);
     let credit_points_total = if delayed_events.is_empty() || record.is_terminal() {
         None
     } else {
@@ -66109,17 +66137,140 @@ fn submission_status_from_record(
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
         // The receipt already resolved estimate-vs-gate figure; the two
-        // surfaces must never disagree about the same record.
-        credit_points_pending: receipt
-            .credit_points_pending
-            .unwrap_or(record.credit_points_pending),
-        credit_points_final: record.credit_points_final,
+        // surfaces must never disagree about the same record. Once the
+        // outcome is final nothing is pending: daemons before #1703 add
+        // pending and final together, so sending both counts a decided
+        // trace twice on their Home.
+        credit_points_pending: if outcome.credit_points_final.is_some() {
+            0.0
+        } else {
+            receipt
+                .credit_points_pending
+                .unwrap_or(record.credit_points_pending)
+        },
+        credit_points_final: outcome.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,
         explanation: receipt.explanation,
         delayed_credit_explanations,
         consent_scopes: record.consent_scopes.clone(),
+        credit_outcome_reason: outcome.reason.map(str::to_string),
         pipeline: None,
+    }
+}
+
+/// A trace's credit outcome as the contributor's status read-back reports
+/// it: the final figure, and, when that figure is 0 because the trace was
+/// decided without an award, why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraceCreditOutcome {
+    /// `None` while the trace is still pending.
+    credit_points_final: Option<f32>,
+    /// One of `trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS`,
+    /// only beside a final figure of 0 with no award.
+    reason: Option<&'static str>,
+    /// Whether `credit_points_final` is the sum of the trace's
+    /// `NoveltyUtility` events, which the ledger figure then leaves out.
+    absorbs_scoring_awards: bool,
+}
+
+/// The one place a trace's final credit is derived, at read time, from the
+/// three things that decide it: the submission row, the trace's latest gate
+/// decision, and its ledger events (`events` is already this submission's).
+///
+/// Derived rather than stored. The row's `credit_points_final` belongs to
+/// the review and retention paths (approve clears it, reject and the
+/// terminal statuses set 0), and the tenant credit summary adds it to the
+/// ledger figure, so writing the gate's award there would count it twice.
+/// Every writer of an award (the gate worker route, the scoring driver, a
+/// compatibility pipeline run, a later award once the contributor adds a
+/// use the award needed) writes the ledger, so reading the ledger here
+/// covers them all, and a later award or reversal is reflected on the next
+/// read with nothing to backfill.
+///
+/// In order:
+/// 1. A figure the row already carries wins, unchanged.
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): the row's
+///    figure as it stands (none unless review stored one), never its gate
+///    award, which the account summary and the ledger figure leave out and
+///    settlement never pays (owner, 2026-10-28: the trace, the summary and
+///    the payout agree).
+/// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
+///    never below 0, with no reason.
+/// 4. A held or non-crediting status: still pending.
+/// 5. A decision with a withheld label, or one that failed a floor: 0 and
+///    the reason. A passing decision with neither is its award still being
+///    written: pending.
+/// 6. No decision: pending.
+fn trace_credit_outcome(
+    record: &TraceCommonsSubmissionRecord,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+    events: &[&TraceCommonsCreditLedgerRecord],
+) -> TraceCreditOutcome {
+    let pending = TraceCreditOutcome {
+        credit_points_final: record.credit_points_final,
+        reason: None,
+        absorbs_scoring_awards: false,
+    };
+    if record.credit_points_final.is_some() {
+        return pending;
+    }
+    if record.is_terminal() {
+        return pending;
+    }
+    let awards = events
+        .iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .map(|event| event.credit_points_delta)
+        .collect::<Vec<_>>();
+    if !awards.is_empty() {
+        return TraceCreditOutcome {
+            credit_points_final: Some(awards.iter().sum::<f32>().max(0.0)),
+            reason: None,
+            absorbs_scoring_awards: true,
+        };
+    }
+    if record.status != TraceCorpusStatus::Accepted {
+        return pending;
+    }
+    let Some(decision) = decision else {
+        return pending;
+    };
+    let reason = match decision.credit_withheld_reason.as_deref() {
+        Some(label) => Some(credit_outcome_reason_for_withheld_label(label)),
+        None if decision.novelty_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::NOVELTY_FAILED)
+        }
+        None if decision.perplexity_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::PERPLEXITY_FAILED)
+        }
+        None => None,
+    };
+    match reason {
+        Some(reason) => TraceCreditOutcome {
+            credit_points_final: Some(0.0),
+            reason: Some(reason),
+            absorbs_scoring_awards: false,
+        },
+        None => pending,
+    }
+}
+
+/// Folds a gate decision's `credit_withheld_reason` (or a withheld pipeline
+/// leg's reason label) onto the contributor's closed reason set. A label
+/// this build does not map is `other`, never passed through: the finer
+/// labels name operator configuration a contributor has no use for.
+fn credit_outcome_reason_for_withheld_label(label: &str) -> &'static str {
+    use trace_commons_protocol::credit_outcome as reason;
+    match label {
+        "policy_mismatch" => reason::POLICY_MISMATCH,
+        "skipped_duplicate" | "cached" => reason::DUPLICATE,
+        "submission_not_accepted" => reason::SUBMISSION_NOT_ACCEPTED,
+        INSUFFICIENT_COVERAGE_LABEL => reason::INSUFFICIENT_COVERAGE,
+        "central_issuer_denied" | "non_production_gate" | CREDIT_CHECK_ERROR_LABEL => {
+            reason::CREDIT_NOT_ISSUED
+        }
+        _ => reason::OTHER,
     }
 }
 

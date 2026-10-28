@@ -202,7 +202,8 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(tools.contains("GlassTokens.Color.purpleText"))
         let uses = try Self.appSource("Views/FirstRun/UsesScreen.swift")
         XCTAssertFalse(uses.contains("GlassTag(copy.uses.required"))
-        XCTAssertTrue(uses.contains("Text(copy.uses.required)"))
+        // The required use is one "Always on" line now (owner, 2026-10-28).
+        XCTAssertFalse(uses.contains("Text(copy.uses.required)"))
         XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
         XCTAssertTrue(join.contains("busy: starting && runner.isCommitting"))

@@ -72,7 +72,8 @@ struct ManagedSessionsSection: View {
     // MARK: NEAR AI sign-in
 
     /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), drawn
-    /// only while signed in. A button for each tool, its logo and name, in
+    /// only while signed in, under a title naming the tools that run
+    /// Private AI (product owner, 2026-10-28). A button for each tool, its logo and name, in
     /// a row at the foot of the card (owner, 2026-10-19): Claude Code,
     /// Codex and, once OpenCode is installed, OpenCode. Each opens the
     /// launch dialog, where a folder is chosen and the tool opened in the
@@ -82,7 +83,7 @@ struct ManagedSessionsSection: View {
     private func signInCard(_ snapshot: ManagedSnapshot) -> some View {
         GlassIconCard(
             systemImage: "sparkles",
-            title: model.managedText("near_ai"),
+            title: model.managedText("sign_in_title"),
             subtitle: [ManagedSurface.signInScope(
                 model.managedText("sign_in_scope"),
                 destination: snapshot.capabilities.terminalDestination,

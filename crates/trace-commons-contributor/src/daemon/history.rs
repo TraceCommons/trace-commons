@@ -142,6 +142,14 @@ pub struct HistoryRecord {
     pub consent_scopes: Vec<String>,
     pub credit_points_pending: f32,
     pub credit_points_final: Option<f32>,
+    /// Why `credit_points_final` is 0: the server's label from
+    /// `trace_commons_protocol::credit_outcome`, present only on a trace
+    /// decided without an award. A row with any final figure is decided,
+    /// not pending. Absent on the wire when there is none, and
+    /// `#[serde(default)]` so a cache line written before this field
+    /// existed still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_outcome_reason: Option<String>,
     /// The server's own prose about this submission, e.g. why it was held.
     pub explanations: Vec<String>,
     pub last_refreshed_at: Option<DateTime<Utc>>,
@@ -336,6 +344,7 @@ pub fn join(
                 consent_scopes: update.map(|u| scope_names(u)).unwrap_or_default(),
                 credit_points_pending: update.map(|u| u.credit_points_pending).unwrap_or(0.0),
                 credit_points_final: update.and_then(|u| u.credit_points_final),
+                credit_outcome_reason: update.and_then(|u| u.credit_outcome_reason.clone()),
                 explanations: update
                     .map(|u| {
                         u.explanation
@@ -454,6 +463,7 @@ pub fn merge_new_receipts(
             consent_scopes: Vec::new(),
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: Vec::new(),
             last_refreshed_at: None,
             withdrawn_at: None,
@@ -519,9 +529,11 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
         if is_taken_back(rec) {
             r.taken_back += 1;
         }
-        r.credit_pending += rec.credit_points_pending;
-        if let Some(f) = rec.credit_points_final {
-            r.credit_final += f;
+        // A final figure, 0 included, means the trace is decided: whatever
+        // pending figure the server still reports beside it is not pending.
+        match rec.credit_points_final {
+            Some(f) => r.credit_final += f,
+            None => r.credit_pending += rec.credit_points_pending,
         }
         if rec.last_refreshed_at > r.last_refreshed_at {
             r.last_refreshed_at = rec.last_refreshed_at;
@@ -567,7 +579,9 @@ pub fn contributed_since(
         if !rec.project_label.is_empty() {
             out.project_labels.insert(rec.project_label.clone());
         }
-        out.credit_pending += rec.credit_points_pending;
+        if rec.credit_points_final.is_none() {
+            out.credit_pending += rec.credit_points_pending;
+        }
     }
     out
 }
@@ -657,6 +671,7 @@ mod tests {
             explanation: vec!["held for privacy review".into()],
             delayed_credit_explanations: vec![],
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            credit_outcome_reason: None,
             pipeline: None,
         }
     }
@@ -689,6 +704,7 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
             withdrawn_at: None,
@@ -989,6 +1005,9 @@ mod tests {
         assert_eq!(r.all_time.accepted, 3);
     }
 
+    /// A row with a final figure is decided, so whatever pending figure
+    /// the server still reports beside it is not pending credit: only the
+    /// undecided row's pending figure counts.
     #[test]
     fn rollup_sums_pending_and_final_credit_separately() {
         let mut a = record("accepted", "2026-08-08T10:00:00Z");
@@ -998,8 +1017,59 @@ mod tests {
         b.credit_points_pending = 0.5;
         b.credit_points_final = None;
         let r = rollup(&[a, b], at("2026-08-08T12:00:00Z"));
-        assert_eq!(r.credit_pending, 2.0);
+        assert_eq!(r.credit_pending, 0.5);
         assert_eq!(r.credit_final, 2.0);
+    }
+
+    /// Staging, 2026-10-28: a trace decided with no award (final 0 and a
+    /// reason) still showed its gate figure as pending. It is decided: it
+    /// adds 0 to the final total and nothing to pending.
+    #[test]
+    fn a_no_credit_outcome_is_not_pending() {
+        let mut decided = record("accepted", "2026-08-08T10:00:00Z");
+        decided.credit_points_pending = 3.0;
+        decided.credit_points_final = Some(0.0);
+        decided.credit_outcome_reason = Some("policy_mismatch".into());
+        let r = rollup(std::slice::from_ref(&decided), at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.credit_pending, 0.0);
+        assert_eq!(r.credit_final, 0.0);
+        let since = contributed_since(&[decided], None);
+        assert_eq!(since.credit_pending, 0.0);
+    }
+
+    /// The server's reason label rides from the status read-back onto the
+    /// history row, and is absent on the wire while there is none.
+    #[test]
+    fn join_carries_the_credit_outcome_reason() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let mut withheld = update(id, "accepted", 3.0, Some(0.0));
+        withheld.credit_outcome_reason = Some("duplicate".into());
+        let recs = join(
+            &receipts,
+            &[withheld],
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(recs[0].credit_points_final, Some(0.0));
+        assert_eq!(recs[0].credit_outcome_reason.as_deref(), Some("duplicate"));
+
+        let pending = join(
+            &receipts,
+            &[update(id, "accepted", 3.0, None)],
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(pending[0].credit_outcome_reason, None);
+        let json = serde_json::to_value(&pending[0]).unwrap();
+        assert!(json.get("credit_outcome_reason").is_none(), "{json}");
     }
 
     #[test]
@@ -1099,6 +1169,7 @@ mod tests {
             consent_scopes: vec![],
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,

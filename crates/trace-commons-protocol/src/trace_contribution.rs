@@ -8278,6 +8278,14 @@ pub struct TraceSubmissionStatusUpdate {
     pub delayed_credit_explanations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consent_scopes: Vec<ConsentScope>,
+    /// Why `credit_points_final` is 0: one of
+    /// [`crate::credit_outcome::CREDIT_OUTCOME_REASONS`], present only on a
+    /// trace decided without an award. Absent while the trace is still
+    /// pending and once it has an award, so a later award (for example
+    /// after the contributor adds a use the award needed) clears it. An
+    /// older server never sends it, and an older client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_outcome_reason: Option<String>,
     /// Where the versioned pipeline stands with this submission, for a
     /// submission a pipeline run processes. Absent on the wire otherwise, so
     /// a legacy document keeps its shape and an older client reads a newer
@@ -8529,6 +8537,29 @@ mod pipeline_status_wire_tests {
             "no pipeline key: {written}"
         );
         assert_eq!(written, legacy, "the document serializes back unchanged");
+        assert!(update.credit_outcome_reason.is_none());
+    }
+
+    /// A decided trace with no award: final 0 and the reason label, which
+    /// round-trips as an optional key beside `credit_points_final`.
+    #[test]
+    fn a_no_credit_outcome_carries_its_reason_label() {
+        let document = serde_json::json!({
+            "submission_id": Uuid::nil(),
+            "trace_id": Uuid::nil(),
+            "status": "accepted",
+            "credit_points_pending": 0.0,
+            "credit_points_final": 0.0,
+            "credit_outcome_reason": crate::credit_outcome::POLICY_MISMATCH,
+        });
+        let update: TraceSubmissionStatusUpdate =
+            serde_json::from_value(document.clone()).expect("the document deserializes");
+        assert_eq!(update.credit_points_final, Some(0.0));
+        assert_eq!(
+            update.credit_outcome_reason.as_deref(),
+            Some("policy_mismatch")
+        );
+        assert_eq!(serde_json::to_value(&update).unwrap(), document);
     }
 
     #[test]

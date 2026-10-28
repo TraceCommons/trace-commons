@@ -113,10 +113,13 @@ public enum FirstRunNavigation {
         case .tools:
             return state.watchesAnything && state.watchedTwice.isEmpty && state.sessionRoots.settingsJSON() != nil
         case .uses:
-            return requiredScope != nil
+            // A Sharing choice is the person's to pick; none is preselected.
+            return requiredScope != nil && state.sharingChosen
         case .join:
             guard requiredScope != nil else { return false }
             let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
+            // Watching only shares nothing, so it needs no Sharing choice.
+            guard watchesOnly || state.sharingChosen else { return false }
             return watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
         }
     }
@@ -129,7 +132,8 @@ public enum FirstRunNavigation {
         state.holdsEnrolment
     }
 
-    /// The sharing paths Uses offers: Ask, the default, then Automatic.
+    /// The sharing paths Uses offers: Ask, then Automatic, with no tag;
+    /// neither is chosen for the person (owner, 2026-10-27).
     /// Uses comes before sign-in, and sign-in is required (owner,
     /// 2026-10-12), so Automatic is offered there and said to turn on once
     /// the person signs in (Ron's 2026-10-21 canvas). Start on Join grants
