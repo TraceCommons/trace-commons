@@ -1293,7 +1293,7 @@ pub struct MonitorHomeHistoryCopy {
     /// MVP is "contribute traces, earn credit", so it is the first and
     /// largest card, over Private AI): its title, one line on what
     /// contributing is and what it earns, and the way into Traces.
-    /// DRAFT, NEEDS APPROVAL.
+    /// Approved by the product owner 2026-10-28.
     pub traces_hero_title: &'static str,
     pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
