@@ -21,7 +21,7 @@ use trace_commons_contributor::identity::DeviceIdentity;
 /// The service names of this build's channel (production's in a default
 /// build, staging's in a `near-ai-staging` build). A test build must never
 /// create an item under any of them.
-const CHANNEL_SERVICES: [&str; 3] = trace_commons_contributor::channel::KEYCHAIN.services();
+const CHANNEL_SERVICES: [&str; 4] = trace_commons_contributor::channel::KEYCHAIN.services();
 
 /// The storage key the device-key record points at (`cloud-v1-<simple uuid>`),
 /// read from the record file the credential store leaves in the config dir.

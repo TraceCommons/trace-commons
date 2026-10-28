@@ -4819,13 +4819,22 @@ sessions on disk. Otherwise:
     ],
     "by_day": [
       { "date": "2026-10-05", "uncached": 1200, "cache_read": 402000,
-        "cache_write": 31000, "output": 9100 }
+        "cache_write": 31000, "output": 9100 },
+      { "date": "2026-10-06", "uncached": 1000, "cache_read": 590000,
+        "cache_write": 30000, "output": 19000 },
+      { "date": "2026-10-07", "uncached": 6800, "cache_read": 618000,
+        "cache_write": 110000, "output": 22120 },
+      { "date": "2026-10-08", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-09", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-10", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-11", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 }
     ],
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
     "sessions": [
       { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [],
         "cache_share": { "numerator": 801000, "denominator": 900000 },
+        "by_day": [0, 412000, 500000, 0, 0, 0, 0],
         "started_at": "2026-10-06T08:12:40+00:00",
         "routing": { "category": "mixed", "reasons": [],
                      "tokens": { "verified": 410200, "routed_unverified": 0,
@@ -4883,6 +4892,14 @@ sessions on disk. Otherwise:
   adds the store's tag, and refuse the short name. The order is stable from
   one answer to the next while no row is re-read. The Sessions tab lists the
   same rows, each with its opaque reference, through `insights_sessions`.
+- `rollup.sessions[].by_day` (additive) is a Claude Code session's tokens on
+  each local day of the week, seven integers, Monday first, counted from the
+  same turns as `rollup.by_day`, so on each day the sessions' amounts sum to
+  that day's four series. It is `null` for a Codex session (its deltas are
+  intervals, not days), for a session with no known figure, and from a
+  daemon that predates it; a shell then shows the session in no day, never
+  as zero. It carries amounts only, never a session ID, a digest, a path or
+  a model name.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
@@ -9127,11 +9144,11 @@ an operating-system permission.
 
 `subscription_usage` returns `schema_version: "trace_commons.subscription_usage.v1"` and supported provider/login snapshots. Codex and Claude are each controlled by a setting, both on by default: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`. A provider whose setting is off reports `enabled: false` with no logins, so a client must handle `enabled: false` for Claude as well as Codex. The legacy `subscription_usage_claude_enabled` field is cleanup-only and does not control availability. Opening views and background ticks do not acquire credentials.
 
-A provider has `provider`, `enabled`, `refreshing`, and `logins`. Each login has a local `id`, label, default-profile flag, observation state/reason, capture time, stale marker, optional `refreshing`, windows and nullable banked inventory. Windows carry lane, label, optional positive `duration_mins`, optional usage and reset fields. Missing values remain unknown and reset expiry invalidates old allowance.
+A provider has `provider`, `enabled`, `refreshing`, and `logins`. Each login has a local `id`, label, default-profile flag, observation state/reason, capture time, stale marker, optional `refreshing`, windows, nullable banked inventory and nullable `source`: `"api"` for figures from a provider endpoint or native app-server, `"cli"` for Claude figures read off the Claude Code CLI's `/usage` screen, `null` with no reading. Older daemons omit `source`. Windows carry lane, label, optional positive `duration_mins`, optional usage and reset fields. Missing values remain unknown and reset expiry invalidates old allowance.
 
 `refresh:true` is explicit acquisition. For Claude it requires `provider:"claude"` and one known local `login`; unscoped refreshes cannot silently acquire Claude credentials. `interactive:true` requires Refresh and permits the expected macOS Keychain prompt for that selected profile. A request cannot transfer another login's interactive authority. Reads are serialized, and native OS workers retain their lease even if the caller times out or is cancelled.
 
-Claude uses fixed OAuth profile/usage endpoints, stable account/organization evidence and exact native credential scope. Its successful reason `captured_on_refresh` and stale/capture context mean point-in-time usage, not continuously tracked current identity. File metadata detects known changes; no Keychain API runs in the background. Known credential changes invalidate prior figures. Native CLI invocation, OAuth token renewal, cookies and credential persistence are not part of Claude acquisition.
+Claude uses fixed OAuth profile/usage endpoints, stable account/organization evidence and exact native credential scope. Its successful reason `captured_on_refresh` and stale/capture context mean point-in-time usage, not continuously tracked current identity. File metadata detects known changes; no Keychain API runs in the background. Known credential changes invalidate prior figures. A Refresh reads Claude Code's Keychain item with UI suppressed first; only `interactive:true` permits a second read that may show the dialog. The access token (never the refresh token) is kept in the app's own Keychain item and reused until expiry, a 401/403, or a change in the item's attribute revision, the account evidence or the login spec; unenroll and `subscription_usage_claude_on: false` delete it. When OAuth cannot produce a reading (`auth_missing`, `auth_expired`, `keychain_needs_permission`, `scope_missing`) and the request is `interactive:true`, the daemon runs the user's `claude` CLI under a pseudo-terminal in a private probe directory, reads `/usage` and kills it; the reason stays `captured_on_refresh` on success, and a failed or missing CLI reports the original OAuth reason. OAuth token renewal and cookies are not part of Claude acquisition.
 
 Codex remains file-backed and refuses native-running/ambiguous-process or unsupported-storage cases. Its successful native renewal still requires a matching final identity/revision witness. Both providers use bounded sanitized failures and in-memory snapshots, limited to 128 logins. No credential, filesystem path, raw provider account identifier or raw provider error crosses IPC.
 

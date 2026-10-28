@@ -296,16 +296,17 @@ final class MenuBarGlassPanelTests: XCTestCase {
     /// switch left on over a listener that refused to start, crashed or is
     /// stopping is never drawn On. Unknown is unknown, never Off.
     func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
-        let running = PrivateInferenceSurface.tone(
-            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        let calls = PrivateInferenceMenuBarTests.coreCalls
+        let running = PrivateInferenceSurface.menuState(
+            PrivateInferenceState(label: "running", port: 8080), calls: calls)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, menu: running), .listener(word: "On", tone: .clear))
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
-            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
-                           "a switch on over \(label) must not read On")
+            let menu = PrivateInferenceSurface.menuState(PrivateInferenceState(label: label, port: nil), calls: calls)
+            XCTAssertNotEqual(MenuPanelStatus.privateAIDot(MenuPanelStatus.privateAI(on: true, menu: menu)), .on,
+                              "a switch on over \(label) must not read green")
         }
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, menu: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, menu: running), .unknown)
         // The pill's fill and value come from that, not from the switch.
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

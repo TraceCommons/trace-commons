@@ -100,6 +100,7 @@ fn the_channel_json_carries_no_key() {
         keychain.cloud_service,
         keychain.account_service,
         keychain.insights_digest_key_service,
+        keychain.claude_usage_service,
     ];
     // Every field is a string but the provider list, which holds strings.
     let values = json.values().flat_map(|value| match value.as_array() {

@@ -2345,6 +2345,52 @@ pub fn runtime_word(label: &str) -> &'static str {
     }
 }
 
+/// The menu-bar popover's Private AI word for a listener that is running,
+/// whatever it can reach. The dot says whether anything is wrong.
+pub const MENU_WORD_ON: &str = "On";
+/// `off`.
+pub const MENU_WORD_OFF: &str = "Off";
+/// `stopping`.
+pub const MENU_WORD_STOPPING: &str = "Stopping";
+/// `port_in_use`, `start_failed`, `crashed`: asked for, and not working.
+pub const MENU_WORD_NOT_WORKING: &str = "Not working";
+/// Unreported, or a label this build does not know. Never "On" or "Off".
+pub const MENU_WORD_UNKNOWN: &str = "Unknown";
+
+/// The menu-bar popover's one word for a Private AI state label, and the
+/// tone its dot is painted in.
+///
+/// ONE WORD, NOT THE SENTENCE. The popover row is narrow and a truncated
+/// sentence read as an error; the full sentence stays at [`state_line`] on
+/// the Private AI page and everywhere else. The dot carries the difference:
+/// [`PrivateInferenceTone::Clear`] is green, [`PrivateInferenceTone::Attention`]
+/// amber, [`PrivateInferenceTone::Refused`] red, and
+/// [`PrivateInferenceTone::Neutral`] grey.
+///
+/// Only `running` is `Clear`. Every other running label is "On" with an
+/// `Attention` dot, so the word never claims more than the dot. A label this
+/// build does not know is "Unknown" and `Neutral`, never "On".
+///
+/// Every label in [`STATE_LABELS`] is named here; the test
+/// `every_state_label_has_a_menu_word` fails when a new label is added
+/// without one.
+#[must_use]
+pub fn menu_state(label: &str) -> (&'static str, PrivateInferenceTone) {
+    match label {
+        LABEL_RUNNING => (MENU_WORD_ON, PrivateInferenceTone::Clear),
+        LABEL_RUNNING_NO_BACKENDS
+        | LABEL_RUNNING_ANSWERED_ELSEWHERE
+        | LABEL_RUNNING_DESTINATION_UNKNOWN
+        | LABEL_RUNNING_ELSEWHERE => (MENU_WORD_ON, PrivateInferenceTone::Attention),
+        LABEL_OFF => (MENU_WORD_OFF, PrivateInferenceTone::Neutral),
+        LABEL_STOPPING => (MENU_WORD_STOPPING, PrivateInferenceTone::Neutral),
+        LABEL_PORT_IN_USE | LABEL_START_FAILED | LABEL_CRASHED => {
+            (MENU_WORD_NOT_WORKING, PrivateInferenceTone::Refused)
+        }
+        _ => (MENU_WORD_UNKNOWN, PrivateInferenceTone::Neutral),
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -5535,5 +5581,67 @@ mod state_table_tests {
             wire,
             serde_json::json!({"line": STATE_RUNNING, "working": true})
         );
+    }
+
+    /// The popover's one word and its dot, for every label.
+    #[test]
+    fn every_state_label_has_a_menu_word() {
+        use PrivateInferenceTone as T;
+        let expected = [
+            (LABEL_RUNNING, MENU_WORD_ON, T::Clear),
+            (
+                LABEL_RUNNING_DESTINATION_UNKNOWN,
+                MENU_WORD_ON,
+                T::Attention,
+            ),
+            (LABEL_RUNNING_ANSWERED_ELSEWHERE, MENU_WORD_ON, T::Attention),
+            (LABEL_RUNNING_NO_BACKENDS, MENU_WORD_ON, T::Attention),
+            (LABEL_RUNNING_ELSEWHERE, MENU_WORD_ON, T::Attention),
+            (LABEL_STOPPING, MENU_WORD_STOPPING, T::Neutral),
+            (LABEL_OFF, MENU_WORD_OFF, T::Neutral),
+            (LABEL_PORT_IN_USE, MENU_WORD_NOT_WORKING, T::Refused),
+            (LABEL_START_FAILED, MENU_WORD_NOT_WORKING, T::Refused),
+            (LABEL_CRASHED, MENU_WORD_NOT_WORKING, T::Refused),
+        ];
+        // A label added to STATE_LABELS without a row here fails this.
+        assert_eq!(expected.len(), STATE_LABELS.len());
+        for label in STATE_LABELS {
+            assert!(
+                expected.iter().any(|(l, _, _)| *l == label),
+                "{label} has no expected menu word"
+            );
+            assert_ne!(menu_state(label).0, MENU_WORD_UNKNOWN, "{label}");
+        }
+        for (label, word, tone) in expected {
+            assert_eq!(menu_state(label), (word, tone), "{label}");
+        }
+    }
+
+    /// The word is one word of the popover's own, never the sentence, and
+    /// an unreported or unfamiliar label claims neither On nor Off.
+    #[test]
+    fn the_menu_word_is_short_and_never_over_claims() {
+        for label in STATE_LABELS {
+            let (word, tone) = menu_state(label);
+            assert!(word.split_whitespace().count() <= 2, "{label}");
+            assert_ne!(word, state_line(label), "{label}");
+            // Green only for the one state that may be painted as working.
+            assert_eq!(
+                tone.reads_as_working(),
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+            // Anything the state table refuses is never "On".
+            if state_tone(label) == PrivateInferenceTone::Refused {
+                assert_eq!(tone, PrivateInferenceTone::Refused, "{label}");
+                assert_ne!(word, MENU_WORD_ON, "{label}");
+            }
+        }
+        for label in ["", "a_state_from_a_later_daemon"] {
+            assert_eq!(
+                menu_state(label),
+                (MENU_WORD_UNKNOWN, PrivateInferenceTone::Neutral)
+            );
+        }
     }
 }

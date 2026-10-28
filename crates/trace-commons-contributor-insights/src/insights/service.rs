@@ -1641,6 +1641,7 @@ mod tests {
             cloud_service: "example.cloud",
             account_service: "example.account",
             insights_digest_key_service: "example.insights",
+            claude_usage_service: "example.claude-usage",
         },
         state_dir_name: "example-channel",
     };

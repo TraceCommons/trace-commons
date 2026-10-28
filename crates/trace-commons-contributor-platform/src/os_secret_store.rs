@@ -33,15 +33,19 @@ pub struct KeychainIdentity {
     pub account_service: &'static str,
     /// The Insights digest and counter keys.
     pub insights_digest_key_service: &'static str,
+    /// The daemon's own copy of a Claude Code usage access token, so a
+    /// Refresh does not reopen Claude Code's Keychain item every time.
+    pub claude_usage_service: &'static str,
 }
 
 impl KeychainIdentity {
     /// Every service name, for checks that they share one namespace.
-    pub const fn services(&self) -> [&'static str; 3] {
+    pub const fn services(&self) -> [&'static str; 4] {
         [
             self.cloud_service,
             self.account_service,
             self.insights_digest_key_service,
+            self.claude_usage_service,
         ]
     }
 }
@@ -64,6 +68,10 @@ const INSIGHTS_DIGEST_KEY_ACCOUNT: &str = "insights-digest-key-v1";
 // entry from the in-process store's key: the daemon's digests never leave
 // it, and clearing its store on unenroll forgets only this key.
 const INSIGHTS_COUNTER_KEY_ACCOUNT: &str = "insights-counter-key-v1";
+// The Claude usage token cache: one fixed entry per OS user holding every
+// cached login, so unenroll and the Claude switch can clear it in one delete
+// without enumerating logins that have since gone away.
+const CLAUDE_USAGE_CACHE_ACCOUNT: &str = "claude-usage-token-cache-v1";
 
 impl OsSecretBackend {
     pub fn new(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
@@ -76,6 +84,14 @@ impl OsSecretBackend {
     /// (the CLI, a test runner) is refused rather than prompted.
     pub fn insights_digest_key(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
         Self::protected(identity, identity.insights_digest_key_service)
+    }
+
+    /// The store holding the daemon's Claude usage token cache. The same
+    /// data-protection store and access group as the Cloud credential, so the
+    /// signed app reads its own item without a dialog and an unentitled
+    /// process is refused rather than prompted.
+    pub fn claude_usage_cache(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
+        Self::protected(identity, identity.claude_usage_service)
     }
 
     fn protected(
@@ -201,6 +217,20 @@ impl OsSecretBackend {
 
     pub fn delete_insights_counter_key(&self) -> Result<(), CredentialError> {
         self.delete_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    /// Read the Claude usage token cache entry. Only meaningful on the store
+    /// from [`OsSecretBackend::claude_usage_cache`].
+    pub fn read_claude_usage_cache(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(CLAUDE_USAGE_CACHE_ACCOUNT)
+    }
+
+    pub fn write_claude_usage_cache(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(CLAUDE_USAGE_CACHE_ACCOUNT, bytes)
+    }
+
+    pub fn delete_claude_usage_cache(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(CLAUDE_USAGE_CACHE_ACCOUNT)
     }
 
     fn read_fixed(&self, account: &str) -> Result<Vec<u8>, CredentialError> {
@@ -347,6 +377,7 @@ mod tests {
         cloud_service: "trace-commons.near-ai.credentials",
         account_service: "trace-commons.account.credentials",
         insights_digest_key_service: "trace-commons.insights.digest-key",
+        claude_usage_service: "trace-commons.claude-usage.token-cache",
     };
     use keyring_core::Error as KeyringError;
 

@@ -261,6 +261,12 @@ pub struct SessionWeek {
     /// This session's own share of input read from cache, normalized for its
     /// source. `None` when its figure is unknown.
     pub cache_share: Option<CacheShare>,
+    /// Claude only: this session's tokens on each local date, Monday first,
+    /// from the same turns as the week's `by_day`, so they sum to it day by
+    /// day. `None` for Codex, whose deltas are intervals, and for a session
+    /// with no known figure.
+    #[serde(default)]
+    pub by_day: Option<Vec<u64>>,
 }
 
 /// Claude tokens on one local date, stacked. Cache write is its own series.
@@ -382,6 +388,7 @@ struct Contribution {
     cache_read: u64,
     cache_write: u64,
     codex: Option<CodexObserved>,
+    by_day: Option<[u64; 7]>,
 }
 
 /// Roll up the completed local ISO week starting at `week_start`.
@@ -459,6 +466,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     let mut known = 0u32;
                     let mut unknown = 0u32;
                     let mut tokens = 0u64;
+                    let mut session_days = [0u64; 7];
                     for turn in &prepared.kept_turns {
                         let Some(when) = turn.at else {
                             unknown += 1;
@@ -477,7 +485,9 @@ pub fn week_rollup<Tz: TimeZone>(
                         contribution.cache_read += u64::from(usage.cache_read);
                         contribution.cache_write += usage.cache_write.total();
                         let local = when.with_timezone(tz).date_naive();
-                        let day = &mut days[(local - week_start).num_days() as usize];
+                        let offset = (local - week_start).num_days() as usize;
+                        session_days[offset] += usage.total();
+                        let day = &mut days[offset];
                         day.uncached += u64::from(usage.uncached_input);
                         day.cache_read += u64::from(usage.cache_read);
                         day.cache_write += usage.cache_write.total();
@@ -499,6 +509,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     } else {
                         any_claude_known = true;
                         contribution.tokens = Some(tokens);
+                        contribution.by_day = Some(session_days);
                         if unknown > 0 {
                             contribution
                                 .reasons
@@ -620,6 +631,10 @@ pub fn week_rollup<Tz: TimeZone>(
             state,
             reasons: contribution.reasons.into_iter().collect(),
             cache_share: session_share,
+            by_day: contribution
+                .tokens
+                .and(contribution.by_day)
+                .map(|days| days.to_vec()),
         });
     }
 
@@ -1277,6 +1292,115 @@ mod tests {
             (200, 1_200, 600, 100)
         );
         assert_eq!(days[0].output, 0);
+    }
+
+    /// Each day's per-session amounts, summed, against the week's `by_day`.
+    fn assert_sessions_sum_to_by_day(rollup: &WeekRollup) {
+        let days = rollup.by_day.as_ref().unwrap();
+        for (offset, day) in days.iter().enumerate() {
+            let sessions: u64 = rollup
+                .sessions
+                .iter()
+                .filter_map(|s| s.by_day.as_ref())
+                .map(|by_day| by_day[offset])
+                .sum();
+            assert_eq!(
+                sessions,
+                day.uncached + day.cache_read + day.cache_write + day.output,
+                "day {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_claude_session_carries_its_tokens_by_day_summing_to_the_week() {
+        let rollup = roll(&[
+            // Crosses midnight from Tuesday into Wednesday.
+            claude(
+                "late",
+                1,
+                vec![
+                    turn(0, Some(at(6, 23)), None),
+                    turn(1, Some(at(7, 0)), None),
+                    turn(2, Some(at(7, 1)), None),
+                ],
+            ),
+            claude("early", 2, vec![turn(0, Some(at(6, 9)), None)]),
+            codex("c", 3, at(6, 1), at(6, 2)),
+        ]);
+        assert_eq!(
+            session(&rollup, "late").by_day,
+            Some(vec![0, TURN_TOTAL, 2 * TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            session(&rollup, "early").by_day,
+            Some(vec![0, TURN_TOTAL, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(session(&rollup, "c").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_by_day_counts_a_reimported_turn_once() {
+        let first = claude(
+            "old",
+            1,
+            vec![keyed(0, at(6, 9), 1), keyed(1, at(7, 10), 2)],
+        );
+        let regrown = claude(
+            "new",
+            2,
+            vec![
+                keyed(0, at(6, 9), 1),
+                keyed(1, at(7, 10), 2),
+                keyed(2, at(8, 11), 3),
+            ],
+        );
+        let wholly = claude("again", 3, vec![keyed(0, at(6, 9), 1)]);
+        let rollup = roll(&[regrown, first, wholly]);
+        assert_eq!(
+            session(&rollup, "old").by_day,
+            Some(vec![0, TURN_TOTAL, TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            session(&rollup, "new").by_day,
+            Some(vec![0, 0, 0, TURN_TOTAL, 0, 0, 0])
+        );
+        assert_eq!(session(&rollup, "again").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_by_day_leaves_out_an_overlapped_unkeyed_snapshot() {
+        let older = claude(
+            "older",
+            1,
+            vec![turn(0, Some(at(6, 1)), None), turn(1, Some(at(6, 5)), None)],
+        );
+        let newer = claude(
+            "newer",
+            2,
+            vec![turn(0, Some(at(6, 5)), None), turn(1, Some(at(7, 5)), None)],
+        );
+        let rollup = roll(&[older, newer]);
+        assert_eq!(session(&rollup, "older").by_day, None);
+        assert_eq!(
+            session(&rollup, "newer").by_day,
+            Some(vec![0, TURN_TOTAL, TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_with_no_known_turn_has_no_by_day() {
+        let mut only = turn(0, Some(at(6, 9)), None);
+        only.cache_read = None;
+        let rollup = roll(&[
+            claude("a", 1, vec![only]),
+            claude("b", 2, vec![turn(0, Some(at(8, 9)), None)]),
+        ]);
+        assert_eq!(session(&rollup, "a").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
     }
 
     #[test]

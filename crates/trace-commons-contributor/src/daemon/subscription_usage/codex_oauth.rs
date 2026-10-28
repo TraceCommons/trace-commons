@@ -497,6 +497,7 @@ fn parse_usage(value: &Value, expected_account: Option<&str>) -> Result<Reading,
             organization: None,
         },
         native_revision: None,
+        source: super::ReadingSource::Api,
     })
 }
 
