@@ -972,8 +972,60 @@ struct InsightsCounterSessions: Equatable, Sendable {
     /// `nil` for an answer with no rollup.
     init?(week: DaemonData.InsightsWeek) {
         guard let sessions = week.rollup?.sessions else { return nil }
+        self.init(sessions: sessions, column: InsightsRouteWords.column(week))
+    }
+
+    init(sessions: [DaemonData.InsightsWeekSession], column: InsightsRouteWords.Column) {
         rows = sessions.enumerated().map { Row(id: $0.offset, session: $0.element) }
-        column = InsightsRouteWords.column(week)
+        self.column = column
+    }
+}
+
+/// One day picked on "Tokens by day": its place in the week, Monday first,
+/// as each session's `by_day` counts it, and its weekday for the title.
+struct InsightsDayPick: Equatable {
+    let index: Int
+    let weekday: String
+
+    /// The day dated `date` among the week's `days`; `nil` when none is.
+    /// The weekday is in `locale`, the person's own outside the tests.
+    static func pick(_ date: String?, days: [InsightsDayTokens]?,
+                     locale: Locale = .autoupdatingCurrent) -> InsightsDayPick? {
+        guard let date, let index = days?.firstIndex(where: { $0.date == date }) else { return nil }
+        let parse = Date.ISO8601FormatStyle().year().month().day()
+        let wide = Date.FormatStyle(locale: locale, calendar: Calendar(identifier: .gregorian),
+                                    timeZone: TimeZone(secondsFromGMT: 0) ?? .current).weekday(.wide)
+        return InsightsDayPick(index: index, weekday: (try? Date(date, strategy: parse))?.formatted(wide) ?? date)
+    }
+}
+
+/// The Sessions breakdown for a picked day: the sessions with tokens that
+/// day, most first, each with that day's tokens from its own `by_day`. A
+/// session with no split (Codex, or an unknown figure) is in no day.
+enum InsightsDayBreakdown {
+    struct Row<Session: Identifiable>: Identifiable {
+        let session: Session
+        let tokens: UInt64
+        var id: Session.ID { session.id }
+    }
+
+    /// `nil` when no session carries a split, as from a daemon or core
+    /// that predates it: the week shows, never an empty day.
+    static func rows<Session: Identifiable>(_ sessions: [Session], day: Int,
+                                            split: (Session) -> [UInt64]?) -> [Row<Session>]? {
+        guard sessions.contains(where: { split($0) != nil }) else { return nil }
+        let counted = sessions.enumerated().compactMap { offset, session -> (offset: Int, row: Row<Session>)? in
+            guard let days = split(session), days.indices.contains(day), days[day] > 0 else { return nil }
+            return (offset, Row(session: session, tokens: days[day]))
+        }
+        // Ties keep the breakdown's own order.
+        return counted.sorted { $0.row.tokens != $1.row.tokens ? $0.row.tokens > $1.row.tokens : $0.offset < $1.offset }
+            .map(\.row)
+    }
+
+    /// A feed T row's split, in the core's unsigned figures.
+    static func split(_ session: DaemonData.InsightsWeekSession) -> [UInt64]? {
+        session.byDay?.map { UInt64(max(0, $0)) }
     }
 }
 
@@ -1874,9 +1926,11 @@ enum InsightsSessionsWords {
 
     /// A counted session's label (feed T): its recorded activity range,
     /// harness and transcript tokens, beneath its folder and reference.
+    /// `tokens`, when given, stands in for the week's (a picked day's).
     /// A missing or invalid last event retains the first-event-only label.
-    static func counterLabel(_ row: DaemonData.InsightsWeekSession, copy: [String: String],
+    static func counterLabel(_ row: DaemonData.InsightsWeekSession, tokens: UInt64? = nil, copy: [String: String],
                              timeZone: TimeZone = .current) -> String {
+        let tokens = tokens ?? row.tokens.flatMap { UInt64(exactly: $0) }
         let first = row.startedAt.flatMap(parseEvent)
         if let first, let last = row.lastEventAt.flatMap(parseEvent), last > first,
            let template = copy["analytics_session_label_range"] {
@@ -1894,11 +1948,10 @@ enum InsightsSessionsWords {
             return InsightsOverviewWords.fill(template, [
                 "span": first.formatted(startStyle) + " – " + end,
                 "harness": InsightsOverviewWords.harness(row.source, copy: copy),
-                "t": InsightsOverviewWords.figure(row.tokens.flatMap { UInt64(exactly: $0) }, copy: copy),
+                "t": InsightsOverviewWords.figure(tokens, copy: copy),
             ])
         }
-        return label(first: first, source: row.source, tokens: row.tokens.flatMap { UInt64(exactly: $0) },
-                     copy: copy, timeZone: timeZone)
+        return label(first: first, source: row.source, tokens: tokens, copy: copy, timeZone: timeZone)
     }
 
     private static func label(first: Date?, source: String?, tokens: UInt64?, copy: [String: String],
