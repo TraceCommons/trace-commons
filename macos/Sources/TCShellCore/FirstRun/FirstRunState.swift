@@ -109,7 +109,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var sharing: SharingPath {
         didSet { grantReady = false }
     }
-    /// The Private AI step's switch.
+    /// Whether setup turns Private AI on. The step lost its switch in
+    /// #1685, so the app never sets it; the plan still honours it
+    /// (`FirstRunPlan`) for a caller that does.
     public var privateAI: Bool
     /// The witness the disclosure showed, passed to `grant_automatic`.
     public var witnessSigningAddress: String?
