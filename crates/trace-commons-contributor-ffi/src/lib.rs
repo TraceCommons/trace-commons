@@ -6141,6 +6141,21 @@ pub extern "C" fn tc_account_devices_copy_json() -> *mut c_char {
     })
 }
 
+/// The words for adding Train coding models to traces already sent
+/// (`consent_copy::sent_traces_training_copy`), as a JSON object of
+/// `SentTracesTrainingCopy`'s fields. Every string is a draft for owner
+/// review; count templates carry `{count}`.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_sent_traces_training_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::sent_traces_training_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The Flow 1 grant screens' sentences
 /// (`consent_copy::automatic_contribution_copy`), as a JSON object of
 /// `AutomaticGrantCopy`'s fields, for the contributor configuration in

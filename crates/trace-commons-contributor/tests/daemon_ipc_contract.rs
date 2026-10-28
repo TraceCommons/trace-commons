@@ -48,6 +48,40 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
     }
 }
 #[test]
+fn model_training_consent_methods_are_documented_with_every_label() {
+    use trace_commons_contributor::model_training_consent::ConsentCallError;
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for method in [
+        "model_training_consent_status",
+        "model_training_consent_grant",
+    ] {
+        assert!(METHODS.contains(&method), "not served: {method}");
+        let row = format!("| `{method}` |");
+        assert!(contract.contains(&row), "missing method row: {method}");
+    }
+    for error in [
+        ConsentCallError::NotPermitted,
+        ConsentCallError::Unavailable,
+        ConsentCallError::BadSelection,
+        ConsentCallError::Failed,
+    ] {
+        let label = format!("`{}`", error.label());
+        assert!(contract.contains(&label), "missing label: {label}");
+    }
+    for required in [
+        "`selection-required`",
+        "`submission_ids-invalid`",
+        "`already_granted`",
+        "`not_eligible`",
+        "`credited`",
+        "`pending`",
+        "`remaining_eligible`",
+    ] {
+        assert!(contract.contains(required), "missing: {required}");
+    }
+}
+
+#[test]
 fn the_credit_outcome_reason_is_documented_with_every_label() {
     let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
     assert!(contract.contains("### Credit outcome on history rows"));

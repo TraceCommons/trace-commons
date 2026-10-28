@@ -712,6 +712,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
+| `model_training_consent_status` | — | `eligible_count`, `submission_ids[]` | performs real network I/O; see "Adding model training to sent traces" below |
+| `model_training_consent_grant` | `all_eligible: true`, or `submission_ids[]` (1 to 500) | `results[]` of `{submission_id, outcome, granted_at?, award, award_withheld_reason?}`, `remaining_eligible` | performs real network I/O; see "Adding model training to sent traces" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
 | `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
@@ -7845,6 +7847,59 @@ the contributor to account sign-in instead of showing a dead end, once
 account sign-in exists to route to. Acquiring an account session is separate
 work, tracked outside this document; nothing in this contract should be
 read as that flow already existing.
+
+### Adding model training to sent traces
+
+A trace sent without the `model_training` use ("Train coding models") has
+its scoring award withheld (`policy_mismatch`). The contributor can add that
+use to traces already sent, and those traces then earn the award
+(owner decisions 2026-10-28). Both methods relay
+`/v1/contributors/me/model-training-consent` on the device's status claim,
+the credential `submit::status` uses; neither needs an account session.
+
+- `model_training_consent_status` answers `eligible_count` (every eligible
+  trace) and `submission_ids` (the oldest 500 of them). A trace is eligible
+  when it is this contributor's (this device's principal, or its account's),
+  `accepted`, not withdrawn, revoked, purged or expired, and does not carry
+  `model_training`. Quarantined and still-processing traces are not
+  eligible.
+- `model_training_consent_grant` takes exactly one of `all_eligible: true`
+  or a non-empty `submission_ids` of at most 500 ids; anything else is
+  refused with `bad_params` and `selection-required` or
+  `submission_ids-invalid`. Nothing is preselected: a shell sends this only
+  after the person chooses. The answer is the server's, per trace:
+  - `outcome`: `granted` (added now), `already_granted` (a repeat, or sent
+    with the use), or `not_eligible` (nothing changed).
+  - `granted_at`: when the use was added, set by the server when it
+    accepted the grant, never earlier. Absent for a trace sent with it.
+  - `award`: `credited` (the withheld award is written, now or before),
+    `pending` (not scored yet, or the award could not be checked this time;
+    granting again retries), or `none` (no award follows: the trace did not
+    pass scoring, or its award was withheld for another reason, named in
+    `award_withheld_reason`).
+  - `remaining_eligible`: eligible traces left, for a contributor with more
+    than 500.
+
+  `all_eligible` asks the server again while traces remain (500 per call,
+  at most 20 calls), and the answer carries every call's results. A grant
+  asks the history poller to read statuses back at once.
+
+The grant is add-only: it adds the `model_training` consent scope and
+allowed use and removes nothing. Taking a use back is withdrawal. The trace
+is not scored again; only its withheld award is re-run, and it is paid,
+held and settled like any other award.
+
+Refusals carry `unavailable` and a fixed message, never a server body:
+
+| Message | Meaning |
+|---|---|
+| `model-training-not-permitted` | The device's grant ceiling, or the deployment's policy, does not include model training. Do not offer the grant. |
+| `model-training-consent-unavailable` | The server cannot record a grant, or predates the route. |
+| `model-training-consent-failed` | Anything else: no identity, a failed claim, transport, a server error. |
+| `not-logged-in` | No enrollment on this machine. |
+
+`model-training-consent-bad-selection` comes back with `bad_params` if the
+server refuses the selection.
 
 ### Connecting inference
 
