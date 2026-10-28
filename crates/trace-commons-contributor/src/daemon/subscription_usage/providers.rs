@@ -163,8 +163,20 @@ pub(super) fn codex_file_identity(bytes: &[u8]) -> Result<(String, Option<String
         .get("access_token")
         .or_else(|| tokens.get("accessToken"))
         .and_then(Value::as_str);
+    // Without a saved account id, prefer the account the JWT claims carry
+    // (CodexBar `accountIDFromJWT`) over the token itself, so a renewal for
+    // the same account is not mistaken for an account switch.
+    let jwt_account = account.filter(|s| !s.is_empty()).is_none().then(|| {
+        let id_token = tokens
+            .get("id_token")
+            .or_else(|| tokens.get("idToken"))
+            .and_then(Value::as_str);
+        codex_oauth::account_from_jwt([id_token, access])
+    });
+    let jwt_account = jwt_account.flatten();
     let identity = account
         .filter(|s| !s.is_empty())
+        .or(jwt_account.as_deref())
         .or_else(|| access.filter(|s| !s.is_empty()))
         .ok_or("auth_missing")?;
     Ok((

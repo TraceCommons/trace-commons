@@ -137,7 +137,7 @@ fn jwt_payload(token: &str) -> Option<Value> {
 }
 
 /// `accountIDFromJWT`: id token first, then access token.
-fn account_from_jwt(tokens: [Option<&str>; 2]) -> Option<String> {
+pub(super) fn account_from_jwt(tokens: [Option<&str>; 2]) -> Option<String> {
     tokens.into_iter().flatten().find_map(|token| {
         let payload = jwt_payload(token)?;
         let text =
@@ -546,8 +546,11 @@ pub(super) async fn collect(
         Err(reason) => return Err(failure(reason, Some(identity))),
         Ok(reading) => reading,
     };
+    // Without account evidence from the file, its JWTs or the response this
+    // reading cannot be attributed. The native app-server identifies the
+    // account through `account/read`, so hand off rather than fail.
     if reading.identity.account.is_none() {
-        return Err(failure("identity_unavailable", None));
+        return Ok(None);
     }
     let budget = target
         .reset_credits_timeout

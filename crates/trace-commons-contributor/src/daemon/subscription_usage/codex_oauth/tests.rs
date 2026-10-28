@@ -135,7 +135,10 @@ fn login(root: &std::path::Path) -> LoginSpec {
 }
 
 /// A process the Codex process guard recognizes, alive for the test's duration.
+/// Unix only, like every test that needs one (it symlinks `/bin/sleep`).
+#[cfg(unix)]
 struct RunningCodex(std::process::Child);
+#[cfg(unix)]
 impl Drop for RunningCodex {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -632,5 +635,107 @@ fn reset_credit_count_is_authoritative_like_the_native_path() {
         (json!([]), None),
     ] {
         assert_eq!(parse_reset_credits(&body), expected, "{body}");
+    }
+}
+
+const USAGE_WITHOUT_ACCOUNT: &str =
+    r#"{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000}}}"#;
+
+#[tokio::test]
+async fn fresh_token_without_any_account_id_hands_off_to_the_native_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = jwt(json!({"exp": Utc::now().timestamp() + 3600}));
+    std::fs::write(
+        dir.path().join("auth.json"),
+        serde_json::to_vec(&json!({"tokens":{"access_token":token,"refresh_token":"r",
+            "id_token": jwt(json!({"email":"fixture@example.test"}))}}))
+        .unwrap(),
+    )
+    .unwrap();
+    let server = fake_server(200, USAGE_WITHOUT_ACCOUNT).await;
+    // The native app-server identifies the account through account/read, so
+    // missing account evidence here is a hand-off, not a failure.
+    let handed_off = collect(
+        &login(dir.path()),
+        &lease(),
+        "https://chatgpt.com/backend-api/",
+        &target(&server),
+    )
+    .await
+    .unwrap();
+    assert!(handed_off.is_none());
+    let seen = server.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "no inventory request without an account");
+    assert_eq!(seen[0].account, None);
+}
+
+/// Codex renews its own token while the usage request is in flight.
+async fn renewing_server(auth: std::path::PathBuf, renewed: Vec<u8>) -> reqwest::Url {
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        let (auth, renewed) = (auth.clone(), renewed.clone());
+        async move {
+            if uri.path().ends_with("/wham/usage") {
+                // Atomic replacement, as the native client publishes it.
+                let staging = auth.with_extension("renewing");
+                std::fs::write(&staging, &renewed).unwrap();
+                std::fs::rename(&staging, &auth).unwrap();
+                (axum::http::StatusCode::OK, USAGE_WITHOUT_ACCOUNT.to_owned())
+            } else {
+                (axum::http::StatusCode::NOT_FOUND, String::new())
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}/backend-api/").parse().unwrap()
+}
+
+#[tokio::test]
+async fn renewal_for_the_same_jwt_account_keeps_the_reading_and_a_switch_does_not() {
+    let auth_for = |account: &str, exp_offset: i64| {
+        let token = jwt(json!({"exp": Utc::now().timestamp() + exp_offset,
+            "https://api.openai.com/auth": {"chatgpt_account_id": account}}));
+        // No tokens.account_id: the account is known only from the JWT.
+        serde_json::to_vec(&json!({"tokens":{"access_token":token,"refresh_token":"r"}})).unwrap()
+    };
+    for (renewed_account, expected) in [
+        ("account-jwt", None),
+        ("someone-else", Some("auth_changed")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, auth_for("account-jwt", 3600)).unwrap();
+        let renewed = auth_for(renewed_account, 7200);
+        let mut target = target(&FakeServer {
+            base: renewing_server(path.clone(), renewed.clone()).await,
+            seen: Arc::default(),
+        });
+        target.reset_credits_timeout = Duration::from_millis(300);
+        let result = collect(
+            &login(dir.path()),
+            &lease(),
+            "https://chatgpt.com/backend-api/",
+            &target,
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            renewed,
+            "the renewal happened"
+        );
+        match expected {
+            None => {
+                let reading = result.unwrap().expect("a reading, not a hand-off");
+                assert_eq!(reading.identity.account, Some(fingerprint(b"account-jwt")));
+                assert_eq!(
+                    reading.native_revision,
+                    Some(native_metadata_revision(dir.path()))
+                );
+            }
+            Some(reason) => assert_eq!(result.unwrap_err().reason, reason),
+        }
     }
 }
