@@ -260,7 +260,20 @@ curl -sf "https://issuer.${TC_PUBLIC_HOST}/.well-known/trace-commons-ed25519-key
 sudo systemctl enable --now trace-commons-ingest.service
 sleep 8
 sudo systemctl is-active trace-commons-ingest.service
-INGEST_HEALTH="$(curl -sfS http://127.0.0.1:3907/health)"
+# Asked until it answers, for up to a minute, each ask bounded: a first
+# install applies every migration, so the ingest may not listen yet, and a
+# refused connection must not end the deploy before the channel check
+# (pull-and-install.sh waits the same way, #1684).
+INGEST_HEALTH=""
+for _ in $(seq 1 30); do
+  INGEST_HEALTH="$(curl -sfS --connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health || true)"
+  [ -n "$INGEST_HEALTH" ] && break
+  sleep 2
+done
+if [ -z "$INGEST_HEALTH" ]; then
+  echo "REFUSING: the ingest /health did not answer within a minute." >&2
+  withdraw_ingest
+fi
 printf '%s' "$INGEST_HEALTH" | head -c 400; echo
 check_health_channel "$INGEST_HEALTH"
 

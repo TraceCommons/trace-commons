@@ -26,6 +26,6 @@ curl -sf https://issuer.pilot.example.invalid/.well-known/trace-commons-ed25519-
 sudo systemctl enable --now trace-commons-ingest.service
 sleep 8
 sudo systemctl is-active trace-commons-ingest.service
-curl -sfS http://127.0.0.1:3907/health
+curl -sfS --connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health
 curl -sf https://ingest.pilot.example.invalid/health
 curl -sfS https://ingest.pilot.example.invalid/v1/source

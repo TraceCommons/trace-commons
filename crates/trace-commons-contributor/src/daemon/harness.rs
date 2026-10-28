@@ -1443,7 +1443,8 @@ pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response
     };
     let major = match tokio::task::spawn_blocking(opencode::native_major).await {
         Ok(Ok(major)) => major,
-        _ => return opencode_refusal(req, PlanOutcome::UnsupportedVersion),
+        Ok(Err(error)) => return opencode_refusal(req, version_refusal(error)),
+        Err(_) => return opencode_refusal(req, PlanOutcome::UnsupportedVersion),
     };
     let models = match opencode::live_models(port).await {
         Ok(models) => models,
@@ -1454,6 +1455,17 @@ pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_NO_DESTINATION);
     }
     handle_plan_with_opencode(shared, req, Some(&opencode::Context { major, models }))
+}
+
+/// Why a connect stops at the version probe: a missing executable is not
+/// installed, whatever its config folder says (#1664's review: it read
+/// "unsupported version"); any other failure is a version it cannot use.
+fn version_refusal(error: &str) -> PlanOutcome {
+    if error == opencode::ERR_NO_EXECUTABLE {
+        PlanOutcome::NotInstalled
+    } else {
+        PlanOutcome::UnsupportedVersion
+    }
 }
 
 fn opencode_refusal(req: &Request, outcome: PlanOutcome) -> Response {
@@ -1552,6 +1564,21 @@ pub fn handle_commit(shared: &DaemonShared, req: &Request) -> Response {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// A connect whose OpenCode executable is gone says not installed, not
+    /// unsupported version; every other probe failure stays a version
+    /// refusal.
+    #[test]
+    fn a_missing_opencode_executable_is_not_installed() {
+        assert_eq!(
+            version_refusal(opencode::ERR_NO_EXECUTABLE),
+            PlanOutcome::NotInstalled
+        );
+        assert_eq!(
+            version_refusal(opencode::ERR_VERSION),
+            PlanOutcome::UnsupportedVersion
+        );
+    }
     use std::sync::{Mutex as StdMutex, MutexGuard, PoisonError};
 
     /// Points this test thread's Claude Code default login at `dir`, through
