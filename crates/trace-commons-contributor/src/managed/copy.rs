@@ -12,9 +12,8 @@
 //!   `guide_step_use` -- the Private AI tab's step-by-step card, first on
 //!   the tab and closed with its X. Approved by the product owner
 //!   2026-10-28, with `sign_in_title` and `title` "My Private AI sessions".
-//! - `sign_in_title` "Run Private AI in Claude Code, Codex or OpenCode" --
-//!   the launch card's title on the Private AI tab (product owner,
-//!   2026-10-28: make it clear that a tool is how Private AI runs).
+//! - `sign_in_title` "Start a Private AI session" -- the launch card's
+//!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
 //!   folder you choose." Shells fill `{destination}` from
 //!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
@@ -191,11 +190,11 @@ pub fn copy() -> serde_json::Value {
             "start_opencode": "Start OpenCode",
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
-            "guide_body": "Use the NEAR AI credit you earn from your traces to run the AI models you already use through Private AI.",
-            "guide_step_earn": "Contribute traces to earn NEAR AI credit.",
+            "guide_body": "Pay for the AI you already use with credit from your traces.",
+            "guide_step_earn": "Share traces to earn NEAR AI credit.",
             "guide_step_start": "Start Claude Code, Codex or OpenCode below.",
-            "guide_step_use": "Work as usual. Its AI calls go through Private AI and are paid with your NEAR AI credit.",
-            "sign_in_title": "Run Private AI in Claude Code, Codex or OpenCode",
+            "guide_step_use": "Work as usual. Calls go through Private AI and use your credit.",
+            "sign_in_title": "Start a Private AI session",
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
@@ -247,10 +246,7 @@ mod tests {
         assert_eq!(copy["start_claude"], "Start Claude Code");
         assert_eq!(copy["start_codex"], "Start Codex");
         assert_eq!(copy["start_opencode"], "Start OpenCode");
-        assert_eq!(
-            copy["sign_in_title"],
-            "Run Private AI in Claude Code, Codex or OpenCode"
-        );
+        assert_eq!(copy["sign_in_title"], "Start a Private AI session");
         assert_eq!(
             copy["sign_in_scope"],
             "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."

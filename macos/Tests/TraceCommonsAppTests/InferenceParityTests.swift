@@ -573,7 +573,9 @@ final class InferenceParityTests: XCTestCase {
         // shared heading over the core's dot and sentence.
         XCTAssertTrue(views.contains("GlassTabHeading(copy.inspectorStatus) {"))
         // The core's subtitle sits under the Status row, once (owner, 2026-10-27).
-        XCTAssertEqual(views.components(separatedBy: "Text(copy.subtitle)").count - 1, 1,
+        // Through `subtitle(_:state:)`, which adds the credit sentence only
+        // while NEAR AI answers (2026-10-28).
+        XCTAssertEqual(views.components(separatedBy: "Text(Self.subtitle(copy, state: store.privateAI?.state))").count - 1, 1,
                        "the inspector summary draws the core's subtitle once")
         XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
@@ -733,4 +735,33 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }
+
+    /// The credit sentence follows the subtitle only while NEAR AI answers
+    /// calls; with NEAR AI not connected, calls use the tools' own accounts.
+    func testTheSubtitleSaysCreditOnlyWhileNearAIAnswers() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let running = DaemonData.PrivateInferenceState(state: "running", port: 1)
+        let elsewhere = DaemonData.PrivateInferenceState(state: "running_answered_elsewhere", port: 1)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: running), copy.subtitle + " " + copy.subtitleCredit)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: elsewhere), copy.subtitle)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
+    }
+
+    /// The step-by-step card explains and is not a button: no action.
+    func testTheGuideCardIsNotAButton() throws {
+        let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/InferenceViews.swift"), encoding: .utf8)
+        let guide = try XCTUnwrap(views.range(of: "struct PrivateAIGuideCard: View {"))
+        let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
+        let card = String(views[guide.lowerBound..<next.lowerBound])
+        XCTAssertFalse(card.contains("action:"), "the guide card has no action")
+        XCTAssertTrue(card.contains("closeLabel: MonitorWords.close"))
+        let hero = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
+        XCTAssertTrue(hero.contains("if let action {"))
+        XCTAssertTrue(hero.contains("card.accessibilityElement(children: .combine)"))
+    }
+
 }

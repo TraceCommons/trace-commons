@@ -378,12 +378,6 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
-/// The Status row, then the core's subtitle (owner, 2026-10-27; the main
-/// pane still has none). The row is the listener's state in the core's
-/// sentence (never the switch: what was asked for is not what happened). The credential and
-/// Connected tools rows and the connected / not connected pair are gone
-/// (owner, 2026-10-12): sign-in and the tools are in Settings. The balance
-/// card is the main pane's, further down.
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
 /// the tab, in the managed copy's words, until it is closed with its X.
 /// Closed, it stays closed on this Mac.
@@ -396,10 +390,10 @@ struct PrivateAIGuideCard: View {
 
     var body: some View {
         if !closed {
+            // The card explains; it has no action, so it is not a button.
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaign,
                 title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
-                action: {},
                 closeLabel: MonitorWords.close, onClose: { closed = true }
             ) {
                 GlassHeroSymbol("lock.shield")
@@ -421,6 +415,12 @@ struct PrivateAIGuideCard: View {
     }
 }
 
+/// The Status row, then the core's subtitle (owner, 2026-10-27; the main
+/// pane still has none). The row is the listener's state in the core's
+/// sentence (never the switch: what was asked for is not what happened). The credential and
+/// Connected tools rows and the connected / not connected pair are gone
+/// (owner, 2026-10-12): sign-in and the tools are in Settings. The balance
+/// card is the main pane's, further down.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     @EnvironmentObject private var model: AppModel
@@ -465,7 +465,7 @@ struct PrivateAIInspectorView: View {
             .accessibilityElement(children: .combine)
             // What the destination is for, in the core's words, at the
             // title size (product owner, 2026-10-28: make it bigger).
-            Text(copy.subtitle)
+            Text(Self.subtitle(copy, state: store.privateAI?.state))
                 .glassType(GlassTokens.TypeScale.title)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -474,6 +474,12 @@ struct PrivateAIInspectorView: View {
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
     /// listener is working, outside otherwise.
+    /// The subtitle, with the credit sentence only while NEAR AI answers
+    /// calls (`running`): otherwise calls use the tools' own accounts.
+    static func subtitle(_ copy: PrivateInferenceCopy, state: DaemonData.PrivateInferenceState?) -> String {
+        state?.state == "running" ? copy.subtitle + " " + copy.subtitleCredit : copy.subtitle
+    }
+
     static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
         PrivateInferenceIndicator.dotStatus(
             PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
