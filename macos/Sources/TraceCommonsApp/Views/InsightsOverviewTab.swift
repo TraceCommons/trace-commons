@@ -45,6 +45,9 @@ struct InsightsOverviewTab: View {
     @State private var breakdown: Breakdown = .model
     /// The day the by-day chart is reading, by its label; `nil` reads the week.
     @State private var readDay: String?
+    /// The day clicked on the by-day chart, by its date; `nil` is the whole
+    /// week. The Sessions breakdown then shows that day's sessions.
+    @State private var pickedDay: String?
 
     /// By project is not drawn: analyzed files carry no project and
     /// watched-folder rows keep only a digest of one (owner decision D7,
@@ -61,7 +64,7 @@ struct InsightsOverviewTab: View {
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
                     header(overview)
-                    sessionsBreakdown
+                    sessionsBreakdown(overview)
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(overview.sources) { source in
                             harnessCard(source, overview: overview)
@@ -94,6 +97,7 @@ struct InsightsOverviewTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .insightsSurface()
         }
+        .onChange(of: model.shown?.week_start) { _, _ in pickedDay = nil }
     }
 
     /// The week picker on its own row, on the right as on Patterns (owner,
@@ -122,15 +126,17 @@ struct InsightsOverviewTab: View {
     /// The Sessions figure's breakdown, always shown right under it (owner,
     /// 2026-10-22: it opened from a chevron on the card, and drew below the
     /// harnesses): the daemon's rows under feed T, the core's under feed S.
-    /// A week with no rows draws none, never an empty card.
+    /// A week with no rows draws none, never an empty card. A day picked on
+    /// the by-day chart narrows it to that day's sessions.
     @ViewBuilder
-    private var sessionsBreakdown: some View {
+    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {
+        let day = InsightsDayPick.pick(pickedDay, days: overview.by_day)
         if let sessions = model.counterSessions {
             if !sessions.rows.isEmpty {
-                InsightsCounterSessionsView(sessions: sessions, copy: copy)
+                InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day) { pickedDay = nil }
             }
         } else if let inputs = model.sessionsInputs, !inputs.sessions.isEmpty {
-            InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
+            InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy, day: day) { pickedDay = nil }
         }
     }
 
@@ -344,10 +350,13 @@ struct InsightsOverviewTab: View {
     }
 
     /// Claude Code's days, stacked on the chart surface. Hovering a day
-    /// reads it out in the legend; leaving the chart reads the week.
+    /// reads it out in the legend; leaving the chart reads the week, or the
+    /// picked day. Clicking a day picks it, and clicking it again puts the
+    /// week back.
     private func byDay(_ raw: [InsightsDayTokens]) -> some View {
         let days = Self.days(raw)
-        let reading = days.first { $0.name == readDay }
+        let picked = days.first { $0.id == pickedDay }
+        let reading = days.first { $0.name == readDay } ?? picked
         // The axis runs a little past the tallest day, not to the next round
         // number, so the bars use the plot's height.
         let tallest = days.map { $0.values.values.reduce(0, +) }.max() ?? 0
@@ -367,7 +376,11 @@ struct InsightsOverviewTab: View {
                 }
             }
             Chart {
-                if let readDay {
+                if let picked {
+                    RectangleMark(x: .value(text("analytics_card_tokens_by_day"), picked.name))
+                        .foregroundStyle(GlassColor.ink(0.14))
+                }
+                if let readDay, readDay != picked?.name {
                     RectangleMark(x: .value(text("analytics_card_tokens_by_day"), readDay))
                         .foregroundStyle(GlassColor.ink(0.08))
                 }
@@ -384,6 +397,11 @@ struct InsightsOverviewTab: View {
                                        range: InsightsSeries.allCases.map { $0.color.color })
             .chartLegend(.hidden)
             .chartXSelection(value: $readDay)
+            // A click lands on the day the pointer reads.
+            .simultaneousGesture(TapGesture().onEnded {
+                guard let day = days.first(where: { $0.name == readDay }) else { return }
+                pickedDay = pickedDay == day.id ? nil : day.id
+            })
             // The days in their own order, always. Without it the hover
             // wash, drawn first, made the hovered day the first category,
             // and the bars reordered under the pointer.
@@ -403,15 +421,49 @@ struct InsightsOverviewTab: View {
                 AxisMarks { value in
                     AxisValueLabel {
                         if let name = value.as(String.self) {
-                            Text(name).insightsTick(current: name == readDay)
+                            Text(name).insightsTick(current: name == readDay || name == picked?.name)
                         }
                     }
                 }
             }
             .frame(height: 120)
             .insightsPlot()
-            .accessibilityHidden(true)
+            // The keyboard and VoiceOver pick a day too: the arrow keys and
+            // the adjustable action step through the days, Escape and the
+            // last step past either end put the week back.
+            .focusable()
+            .onMoveCommand { direction in
+                switch direction {
+                case .left: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
+                case .right: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                default: break
+                }
+            }
+            .onExitCommand { pickedDay = nil }
+            .accessibilityElement()
+            .accessibilityLabel(text("analytics_card_tokens_by_day"))
+            .accessibilityValue(picked?.label ?? "")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .decrement: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
+                case .increment: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                @unknown default: break
+                }
+            }
+            .accessibilityActions {
+                ForEach(days) { day in
+                    Button(day.label) { pickedDay = pickedDay == day.id ? nil : day.id }
+                }
+            }
         }
+    }
+
+    /// The day `by` steps from `current` among `ids`: from the week, the
+    /// first or the last day; past either end, the week again.
+    nonisolated static func step(_ ids: [String], from current: String?, by: Int) -> String? {
+        guard let current, let index = ids.firstIndex(of: current) else { return by > 0 ? ids.first : ids.last }
+        let next = index + by
+        return ids.indices.contains(next) ? ids[next] : nil
     }
 
     /// The same week's patterns, by name and figure, in the core's order.
@@ -556,6 +608,10 @@ struct InsightsShareBar: View {
 struct InsightsCounterSessionsView: View {
     let sessions: InsightsCounterSessions
     let copy: [String: String]
+    /// The day picked on "Tokens by day"; `nil` is the whole week.
+    var day: InsightsDayPick?
+    /// "Show week": the whole week again.
+    var showWeek: () -> Void = {}
     /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
     /// every row, as the responder-scale tests do.
     @State var showAll = false
@@ -564,30 +620,31 @@ struct InsightsCounterSessionsView: View {
     private var routed: Bool { sessions.column == .shown }
 
     var body: some View {
+        let dayRows = day.flatMap { day in
+            InsightsDayBreakdown.rows(sessions.rows, day: day.index) { InsightsDayBreakdown.split($0.session) }
+        }
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(text("analytics_drill_title")).insightsTitle()
+            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy, showWeek: showWeek)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 // A week can contain thousands of sessions. Keep selectable
                 // text hosts off the responder tree until their rows are visible.
-                LazyVStack(spacing: 0) {
-                    ForEach(InsightsBreakdownFold.shown(sessions.rows, all: showAll)) { row in
-                        #if DEBUG
-                        let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
-                        #endif
-                        InsightsDrillRow(
-                            title: InsightsSessionsWords.counterTitle(row.session, copy: copy),
-                            figure: InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
-                                                                copy: copy),
-                            label: InsightsSessionsWords.counterLabel(row.session, copy: copy),
-                            state: InsightsOverviewWords.state(row.session.state, copy: copy),
-                            reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                                .joined(separator: " \u{b7} ")
-                        ) {
-                            if routed { route(row.session.routing) }
+                if let dayRows {
+                    LazyVStack(spacing: 0) {
+                        ForEach(InsightsBreakdownFold.shown(dayRows, all: showAll)) { row in
+                            self.row(row.session, figure: row.tokens)
                         }
                     }
+                    InsightsBreakdownFold(count: dayRows.count, showAll: $showAll, copy: copy)
+                    InsightsDayNotes(empty: dayRows.isEmpty,
+                                     codex: sessions.rows.contains { $0.session.source == "codex" }, copy: copy)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(InsightsBreakdownFold.shown(sessions.rows, all: showAll)) { row in
+                            self.row(row, figure: row.session.tokens.flatMap { UInt64(exactly: $0) })
+                        }
+                    }
+                    InsightsBreakdownFold(count: sessions.rows.count, showAll: $showAll, copy: copy)
                 }
-                InsightsBreakdownFold(count: sessions.rows.count, showAll: $showAll, copy: copy)
                 if routed {
                     Text(text("analytics_route_measure_note")).insightsCaption()
                 }
@@ -600,6 +657,26 @@ struct InsightsCounterSessionsView: View {
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+        // A picked day, or the week again, opens folded.
+        .onChange(of: day) { _, _ in showAll = false }
+    }
+
+    /// One session; `figure`, on the right and in its label, is its week's
+    /// tokens, or its tokens on the picked day.
+    private func row(_ row: InsightsCounterSessions.Row, figure: UInt64?) -> some View {
+        #if DEBUG
+        let _ = OtherCollectionRowBodies.record("insightsCounterSessions", String(row.id))
+        #endif
+        return InsightsDrillRow(
+            title: InsightsSessionsWords.counterTitle(row.session, copy: copy),
+            figure: InsightsOverviewWords.figure(figure, copy: copy),
+            label: InsightsSessionsWords.counterLabel(row.session, tokens: figure, copy: copy),
+            state: InsightsOverviewWords.state(row.session.state, copy: copy),
+            reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                .joined(separator: " \u{b7} ")
+        ) {
+            if routed { route(row.session.routing) }
+        }
     }
 
     /// "Private AI", the category's word, then its split in proxy tokens
@@ -628,6 +705,11 @@ struct InsightsCardInputsView: View {
     let inputs: InsightsCardInputs
     let snapshots: [LocalInsight]
     let copy: [String: String]
+    /// The day picked on "Tokens by day"; `nil` is the whole week. Only the
+    /// Sessions breakdown passes one.
+    var day: InsightsDayPick?
+    /// "Show week": the whole week again.
+    var showWeek: () -> Void = {}
     /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
     /// every row, as the responder-scale tests do.
     @State var showAll = false
@@ -635,8 +717,9 @@ struct InsightsCardInputsView: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
+        let dayRows = day.flatMap { day in InsightsDayBreakdown.rows(inputs.sessions, day: day.index) { $0.by_day } }
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(text("analytics_drill_title")).insightsTitle()
+            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy, showWeek: showWeek)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 if inputs.card == "cache_share" {
                     ForEach(inputs.sources) { source in
@@ -649,30 +732,51 @@ struct InsightsCardInputsView: View {
                 }
                 // Saved-session breakdowns share the same viewport-bound
                 // rendering as watched sessions, while retaining text selection.
-                LazyVStack(spacing: 0) {
-                    ForEach(InsightsBreakdownFold.shown(inputs.sessions, all: showAll)) { session in
-                        #if DEBUG
-                        let _ = OtherCollectionRowBodies.record("insightsSavedSessions", session.session_ref)
-                        #endif
-                        InsightsDrillRow(
-                            title: InsightsOverviewWords.harness(session.source, copy: copy),
-                            figure: inputs.card == "cache_share"
+                if let dayRows {
+                    LazyVStack(spacing: 0) {
+                        ForEach(InsightsBreakdownFold.shown(dayRows, all: showAll)) { row in
+                            self.row(row.session, figure: InsightsOverviewWords.figure(row.tokens, copy: copy),
+                                     tokens: row.tokens)
+                        }
+                    }
+                    InsightsBreakdownFold(count: dayRows.count, showAll: $showAll, copy: copy)
+                    InsightsDayNotes(empty: dayRows.isEmpty,
+                                     codex: inputs.sessions.contains { $0.source == "codex" }, copy: copy)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(InsightsBreakdownFold.shown(inputs.sessions, all: showAll)) { session in
+                            row(session, figure: inputs.card == "cache_share"
                                 ? fraction(session.cache_share)
                                 : InsightsOverviewWords.figure(session.tokens, copy: copy),
-                            label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: session.tokens,
-                                                                  snapshots: snapshots, copy: copy),
-                            state: InsightsOverviewWords.state(session.state, copy: copy),
-                            reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                                .joined(separator: " \u{b7} "))
+                                tokens: session.tokens)
+                        }
                     }
+                    InsightsBreakdownFold(count: inputs.sessions.count, showAll: $showAll, copy: copy)
                 }
-                InsightsBreakdownFold(count: inputs.sessions.count, showAll: $showAll, copy: copy)
             }
             .insightsCardBody()
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+        // A picked day, or the week again, opens folded.
+        .onChange(of: day) { _, _ in showAll = false }
+    }
+
+    /// One session; `tokens`, in its label, is its week's tokens or its
+    /// tokens on the picked day.
+    private func row(_ session: InsightsCardSession, figure: String, tokens: UInt64?) -> some View {
+        #if DEBUG
+        let _ = OtherCollectionRowBodies.record("insightsSavedSessions", session.session_ref)
+        #endif
+        return InsightsDrillRow(
+            title: InsightsOverviewWords.harness(session.source, copy: copy),
+            figure: figure,
+            label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: tokens,
+                                                  snapshots: snapshots, copy: copy),
+            state: InsightsOverviewWords.state(session.state, copy: copy),
+            reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                .joined(separator: " \u{b7} "))
     }
 
     /// Numerator over denominator, both the core's counts.
@@ -680,5 +784,40 @@ struct InsightsCardInputsView: View {
         guard let share else { return text("analytics_unavailable") }
         return InsightsOverviewWords.figure(share.numerator, copy: copy) + " / "
             + InsightsOverviewWords.figure(share.denominator, copy: copy)
+    }
+}
+
+/// The Breakdown card's title: "Breakdown", or "Breakdown · Tuesday" with
+/// "Show week" beside it while a day is picked.
+struct InsightsBreakdownTitle: View {
+    let day: InsightsDayPick?
+    let copy: [String: String]
+    let showWeek: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+            if let day {
+                Text(InsightsOverviewWords.fill(copy["analytics_drill_title_day"] ?? "", ["day": day.weekday]))
+                    .insightsTitle()
+                Spacer(minLength: GlassTokens.Space.s4)
+                Button(copy["analytics_drill_day_week"] ?? "") { showWeek() }
+                    .buttonStyle(GlassButtonStyle(.link))
+            } else {
+                Text(copy["analytics_drill_title"] ?? "").insightsTitle()
+            }
+        }
+    }
+}
+
+/// Under a picked day's sessions: that no session had tokens that day, and
+/// that Codex sessions, counted over intervals, are in no day.
+struct InsightsDayNotes: View {
+    let empty: Bool
+    let codex: Bool
+    let copy: [String: String]
+
+    var body: some View {
+        if empty { Text(copy["analytics_drill_day_none"] ?? "").insightsCaption() }
+        if codex { Text(copy["analytics_drill_day_codex"] ?? "").insightsCaption() }
     }
 }

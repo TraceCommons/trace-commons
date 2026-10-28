@@ -1289,6 +1289,14 @@ pub struct MonitorHomeHistoryCopy {
     pub section_traces: &'static str,
     pub section_account: &'static str,
     pub private_ai_sign_in: &'static str,
+    /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
+    /// MVP is "contribute traces, earn credit", so it is the first and
+    /// largest card, over Private AI): its title, one line on what
+    /// contributing is and what it earns, and the way into Traces.
+    /// Approved by the product owner 2026-10-28.
+    pub traces_hero_title: &'static str,
+    pub traces_hero_body: &'static str,
+    pub traces_hero_action: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
     /// this Mac saw, `{amount}` signed. No change says nothing (owner,
     /// 2026-10-16). DRAFT, NEEDS APPROVAL.
@@ -1329,6 +1337,10 @@ pub struct MonitorHomeHistoryCopy {
     pub status_line: &'static str,
     /// A row's settled credit; `{amount}` is the figure.
     pub row_credit: &'static str,
+    /// A decided row that earned no credit, in place of `row_credit`;
+    /// `{label}` is the reason's words (`history_copy::CREDIT_OUTCOME_LABELS`).
+    /// DRAFT, NEEDS APPROVAL.
+    pub row_no_credit: &'static str,
     /// The privacy review card's heading, by count.
     pub held_count_one: &'static str,
     pub held_count: &'static str,
@@ -1615,6 +1627,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_traces: "Traces",
             section_account: "Account",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
+            traces_hero_title: "Contribute traces, earn credit",
+            traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
+            traces_hero_action: "Start earning",
             credit_delta: "{amount} since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
@@ -1636,6 +1651,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             records: "{count} records",
             status_line: "Status: {label}",
             row_credit: "credit {amount}",
+            row_no_credit: "no credit: {label}",
             held_count_one: "1 held for privacy review",
             held_count: "{count} held for privacy review",
             public_standing: "Public standing",
@@ -1941,6 +1957,7 @@ mod tests {
         assert_eq!(copy.contribution_history, "Contribution history");
         assert_eq!(copy.status_line, "Status: {label}");
         assert_eq!(copy.row_credit, "credit {amount}");
+        assert!(copy.row_no_credit.contains("{label}"));
         assert!(copy.sources.contains("{count}") && !copy.sources_one.contains('{'));
         assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
         assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));

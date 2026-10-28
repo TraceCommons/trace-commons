@@ -259,8 +259,8 @@ struct MonitorCommands: Commands {
     static func shortcut(_ tab: MonitorWindowView.Tab) -> Character {
         switch tab {
         case .home: "1"
-        case .inference: "2"
-        case .traces: "3"
+        case .traces: "2"
+        case .inference: "3"
         case .insights: "4"
         }
     }

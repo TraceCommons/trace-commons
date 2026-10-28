@@ -3781,6 +3781,65 @@ pub unsafe extern "C" fn tc_private_inference_state_line(state: *const c_char) -
     })
 }
 
+/// The menu-bar popover's one word for one `private_inference_state` label
+/// (`private_inference_copy::menu_state`): "On", "Off", "Stopping", "Not
+/// working", or "Unknown" for an unreported or unfamiliar label. The full
+/// sentence stays at [`tc_private_inference_state_line`].
+///
+/// Exported so no shell re-implements the label-to-word mapping. Its dot is
+/// [`tc_private_inference_menu_tone`].
+///
+/// An empty, NULL or non-UTF-8 label answers the unknown word. Returns an
+/// owned string; free it with [`tc_string_free`]. NULL only on a caught
+/// panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_inference_menu_word(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::menu_state(state).0,
+        ))
+    })
+}
+
+/// The tone of the dot beside [`tc_private_inference_menu_word`]'s word, as a
+/// `TC_PRIVATE_INFERENCE_TONE_*` value: CLEAR green, ATTENTION amber, REFUSED
+/// red, NEUTRAL grey.
+///
+/// Answers `TC_PRIVATE_INFERENCE_TONE_NEUTRAL` for a label this build has
+/// never heard of, for a NULL or non-UTF-8 `state`, and on a caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_inference_menu_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::menu_state(state).1 {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
 /// The Private AI runtime tile's word for one `private_inference_state`
 /// label (`private_inference_copy::runtime_word`): every running label is
 /// "On", a stopped one "Off", and an unreported or unfamiliar label

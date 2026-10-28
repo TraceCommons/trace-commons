@@ -699,7 +699,18 @@ pub const SCOPE_TAG_REQUIRED: &str = "required to share";
 
 /// Distinguish trace-scoring eligibility from other optional reward uses.
 /// Scope choice grants permission; acceptance and scoring still decide credit.
-pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for traces, allow Train coding models. Creating benchmarks and training evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.";
+/// Read by the first-run Uses screen and Settings' data uses. Owner,
+/// 2026-10-27; approved in these words in Zaki's review of #1690
+/// (2026-10-28).
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.";
+
+/// The scope [`DATA_USE_REWARD_OPPORTUNITIES`] names as the one that earns
+/// credit (`model_training`, "Train coding models").
+pub const DATA_USE_CREDIT_SCOPE: &str = "model_training";
+
+/// The line under [`DATA_USE_CREDIT_SCOPE`]'s description. Owner,
+/// 2026-10-27; approved as written in Zaki's review of #1690 (2026-10-28).
+pub const DATA_USE_CREDIT_REQUIRED: &str = "Required to earn credit.";
 
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
@@ -4360,5 +4371,25 @@ mod payout_link_copy_tests {
             render_org_name("Credit goes to {org_name}", "Synthetic Org"),
             "Credit goes to Synthetic Org"
         );
+    }
+
+    /// The scope that earns credit is an optional data use, and the
+    /// sentence above the uses names it by its title (owner, 2026-10-27).
+    #[test]
+    fn the_credit_scope_is_the_optional_use_the_reward_line_names() {
+        let options = crate::daemon::enroll::consent_options();
+        let scope = options["scopes"]
+            .as_array()
+            .expect("scopes")
+            .iter()
+            .find(|scope| scope["name"] == DATA_USE_CREDIT_SCOPE)
+            .expect("the credit scope is offered");
+        assert_eq!(scope["always_on"], false);
+        assert_eq!(scope["grants_data_use"], true);
+        let title = scope["title"].as_str().expect("title");
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains(&format!("allow {title}.")));
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("are extra uses that may earn more."));
+        assert!(!DATA_USE_REWARD_OPPORTUNITIES.contains("earn nothing"));
+        assert_eq!(DATA_USE_CREDIT_REQUIRED, "Required to earn credit.");
     }
 }

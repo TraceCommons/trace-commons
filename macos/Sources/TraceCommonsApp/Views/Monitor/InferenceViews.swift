@@ -63,21 +63,24 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // status leads (a static dot and the core's sentence; the
-                // owner set aside a switch here on 2026-10-19), then the
-                // NEAR AI balance with billing under it, then the managed
-                // cards (owner ruling O3: in the main pane), then the
-                // calls, and last the card that opens Settings, where the
-                // switch, the tools and the connection are. The offer and
-                // the NEAR AI sign-in are popover notices over the tab
+                // step-by-step card leads until it is closed (product
+                // owner, 2026-10-28), then the status (a static dot and the
+                // core's sentence; the owner set aside a switch here on
+                // 2026-10-19), then the managed cards, whose tool buttons
+                // are how Private AI runs, then the calls, then the NEAR AI
+                // balance with billing under it (product owner, 2026-10-28:
+                // further down), and last the card that opens Settings,
+                // where the switch, the tools and the connection are. The offer and the NEAR AI
+                // sign-in are popover notices over the tab
                 // (`MonitorNotices`).
+                PrivateAIGuideCard()
                 PrivateAIInspectorView(store: store)
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
                 SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
-                InferenceBalanceSection()
                 ManagedSessionsSection()
                 ledgerSections
+                InferenceBalanceSection()
                 InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
             }
         }
@@ -375,6 +378,43 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
+/// How Private AI works, step by step (product owner, 2026-10-28): first on
+/// the tab, in the managed copy's words, until it is closed with its X.
+/// Closed, it stays closed on this Mac.
+struct PrivateAIGuideCard: View {
+    static let closedKey = "privateAI.guideClosed"
+    @AppStorage(Self.closedKey) private var closed = false
+    @EnvironmentObject private var model: AppModel
+
+    static let stepKeys = ["guide_step_earn", "guide_step_start", "guide_step_use"]
+
+    var body: some View {
+        if !closed {
+            // The card explains; it has no action, so it is not a button.
+            GlassHeroCard(
+                gradient: GlassTokens.Gradient.heroCampaign,
+                title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
+                closeLabel: MonitorWords.close, onClose: { closed = true }
+            ) {
+                GlassHeroSymbol("lock.shield")
+            } content: {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(Array(Self.stepKeys.enumerated()), id: \.offset) { index, key in
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+                            Text(verbatim: "\(index + 1).")
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                            Text(model.managedText(key))
+                                .glassType(GlassTokens.TypeScale.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(GlassTokens.Color.heroInk.color)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The Status row, then the core's subtitle (owner, 2026-10-27; the main
 /// pane still has none). The row is the listener's state in the core's
 /// sentence (never the switch: what was asked for is not what happened). The credential and
@@ -423,16 +463,23 @@ struct PrivateAIInspectorView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
-            // What the destination is for, in the core's words.
-            Text(copy.subtitle)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
+            // What the destination is for, in the core's words, at the
+            // title size (product owner, 2026-10-28: make it bigger).
+            Text(Self.subtitle(copy, state: store.privateAI?.state))
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
     /// listener is working, outside otherwise.
+    /// The subtitle, with the credit sentence only while NEAR AI answers
+    /// calls (`running`): otherwise calls use the tools' own accounts.
+    static func subtitle(_ copy: PrivateInferenceCopy, state: DaemonData.PrivateInferenceState?) -> String {
+        state?.state == "running" ? copy.subtitle + " " + copy.subtitleCredit : copy.subtitle
+    }
+
     static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
         PrivateInferenceIndicator.dotStatus(
             PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))

@@ -2437,6 +2437,12 @@ pub struct TraceGateCreditDecisionRow {
     pub chunk_count: Option<i32>,
     pub total_chunk_count: Option<i32>,
     pub chunks_capped: Option<bool>,
+    /// The decision's two floors. `Some` on a stored decision (both
+    /// columns are NOT NULL); `None` on a gate-equivalent decision derived
+    /// from a pipeline run before Settle stored one, which records no
+    /// floors.
+    pub perplexity_passed: Option<bool>,
+    pub novelty_passed: Option<bool>,
 }
 
 /// Safe, label-only missing-control name returned when a storage backend has

@@ -139,6 +139,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   withdrawal; it does not move on a later poll that only re-confirms the same
   status. See
   ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **Credit outcome on history rows.** `list_history` rows now carry
+  `credit_outcome_reason`, and a row's `credit_points_final` is now set for
+  every trace the server has decided: the award, or `0.0` with a reason
+  label when the trace was decided without one. A row with any final
+  figure is decided; `history_rollup.credit_pending` no longer counts it.
+  See ["Credit outcome on history rows"](#credit-outcome-on-history-rows).
 - **K15 (the native View menu's Group by and Sort by).** No field is added
   for this. Every Group by and Sort by option the native Traces tab needs
   is already answerable from `list_pending`'s entry fields, `list_projects`,
@@ -649,7 +655,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, `revoked_at`, and `credit_outcome_reason` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)", "Withdrawal dates on revoked rows (K12)" and "Credit outcome on history rows" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `points_unknown_reason` (`account-session-required` when no account session could be used or renewed, else null), `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -4821,13 +4827,22 @@ sessions on disk. Otherwise:
     ],
     "by_day": [
       { "date": "2026-10-05", "uncached": 1200, "cache_read": 402000,
-        "cache_write": 31000, "output": 9100 }
+        "cache_write": 31000, "output": 9100 },
+      { "date": "2026-10-06", "uncached": 1000, "cache_read": 590000,
+        "cache_write": 30000, "output": 19000 },
+      { "date": "2026-10-07", "uncached": 6800, "cache_read": 618000,
+        "cache_write": 110000, "output": 22120 },
+      { "date": "2026-10-08", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-09", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-10", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-11", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 }
     ],
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
     "sessions": [
       { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [],
         "cache_share": { "numerator": 801000, "denominator": 900000 },
+        "by_day": [0, 412000, 500000, 0, 0, 0, 0],
         "started_at": "2026-10-06T08:12:40+00:00",
         "routing": { "category": "mixed", "reasons": [],
                      "tokens": { "verified": 410200, "routed_unverified": 0,
@@ -4885,6 +4900,14 @@ sessions on disk. Otherwise:
   adds the store's tag, and refuse the short name. The order is stable from
   one answer to the next while no row is re-read. The Sessions tab lists the
   same rows, each with its opaque reference, through `insights_sessions`.
+- `rollup.sessions[].by_day` (additive) is a Claude Code session's tokens on
+  each local day of the week, seven integers, Monday first, counted from the
+  same turns as `rollup.by_day`, so on each day the sessions' amounts sum to
+  that day's four series. It is `null` for a Codex session (its deltas are
+  intervals, not days), for a session with no known figure, and from a
+  daemon that predates it; a shell then shows the session in no day, never
+  as zero. It carries amounts only, never a session ID, a digest, a path or
+  a model name.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
@@ -6775,6 +6798,44 @@ timestamp, so a `revoked` row had no date to show at all.
 `#[serde(default)]` on the wire, like every other field on this row, so a
 cached row written before this field existed still loads, reading `null`
 until the next poll re-observes the revocation and dates it.
+
+### Credit outcome on history rows
+
+Before this, the server's status read-back never set `credit_points_final`
+for a trace the gate decided, so every such row read as pending forever,
+whether it had earned an award or had been decided without one. The server
+now derives the final figure from the trace's ledger and its latest gate
+decision, and says why when there is no award. `list_history` rows
+(`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "credit_points_final": 0.0,
+  "credit_outcome_reason": "policy_mismatch"
+}
+```
+
+- **`credit_points_final`** -- `null` while the trace is still pending. A
+  number, `0.0` included, once it is decided: the award when the server's
+  ledger holds one, else `0.0`.
+- **`credit_outcome_reason`** -- present only beside a final `0.0` for a
+  trace decided without an award; absent (not `null`) otherwise, including
+  once a later award arrives (for example after the contributor adds a use
+  the award needed). One of the closed set in
+  `trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS`:
+  `policy_mismatch`, `novelty_failed`, `perplexity_failed`, `duplicate`,
+  `submission_not_accepted`, `insufficient_coverage`, `credit_not_issued`,
+  `other`. A client treats a label it does not know as `other`, and shows
+  each one through the core's copy (`tc_public_run_copy`'s
+  `credit_outcome_labels`), never as the raw label.
+
+A row with any final figure is decided: `history_rollup.credit_final` sums
+it and `credit_pending` leaves out whatever pending figure the server still
+reports beside it, and the digest's pending credit does the same. An older
+server never sends the reason, and an older cache line without it still
+loads (`#[serde(default)]`).
 
 ### `history_rollup`
 

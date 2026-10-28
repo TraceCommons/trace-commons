@@ -32,7 +32,8 @@ final class JoinScreenTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let grant = try XCTUnwrap(AutomaticGrantCopy.decode(
             fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: dir.path)))
-        let state = FirstRunState(step: .join, account: .nearAI, enrolledInvite: "INVITE-1", signedIn: true)
+        let state = FirstRunState(
+            step: .join, account: .nearAI, sharingChosen: true, enrolledInvite: "INVITE-1", signedIn: true)
         let required = ConsentScope(name: "debugging_evaluation", title: "Debugging", description: "",
                                     alwaysOn: true, grantsDataUse: true)
         func ready(scope: ConsentScope?, attempted: Bool = false, organizationReady: Bool = true) -> Bool {

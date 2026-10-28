@@ -35,19 +35,20 @@ use trace_commons_contributor_ffi::{
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
     tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
     tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
-    tc_private_inference_copy, tc_private_inference_quit_needs_notice,
-    tc_private_inference_runtime_word, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
-    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
-    tc_session_notification_copy, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_private_inference_copy, tc_private_inference_menu_tone, tc_private_inference_menu_word,
+    tc_private_inference_quit_needs_notice, tc_private_inference_runtime_word,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3491,6 +3492,7 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "evidence_kind_choices" => Some(9),
             "contribution_status_choices" => Some(10),
             "history_status_labels" => Some(11),
+            "credit_outcome_labels" => Some(8),
             "permitted_use_choices" => Some(6),
             "reuse_permissions" => Some(2),
             _ => None,
@@ -3779,6 +3781,53 @@ fn the_runtime_word_crosses_as_the_core_picks_it() {
     assert_eq!(
         take_owned(unsafe { tc_private_inference_runtime_word(std::ptr::null()) }),
         copy::RUNTIME_UNKNOWN
+    );
+}
+
+/// The popover's word and its dot cross as the core picks them: every label
+/// maps as `menu_state` does, and an unreported, unfamiliar or missing label
+/// is "Unknown" on a grey dot, never "On" or "Off".
+#[test]
+fn the_menu_word_and_dot_cross_as_the_core_picks_them() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let word = |state: &str| {
+        let state = CString::new(state).unwrap();
+        take_owned(unsafe { tc_private_inference_menu_word(state.as_ptr()) })
+    };
+    let tone = |state: &str| {
+        let state = CString::new(state).unwrap();
+        unsafe { tc_private_inference_menu_tone(state.as_ptr()) }
+    };
+    for label in
+        copy::STATE_LABELS
+            .into_iter()
+            .chain(["", "RUNNING", "a_state_from_a_later_daemon"])
+    {
+        let (expected_word, expected_tone) = copy::menu_state(label);
+        assert_eq!(word(label), expected_word, "{label:?}");
+        let expected = match expected_tone {
+            copy::PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            copy::PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+            copy::PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            copy::PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            copy::PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        };
+        assert_eq!(tone(label), expected, "{label:?}");
+    }
+    assert_eq!(word("running_destination_unknown"), "On");
+    assert_eq!(
+        tone("running_destination_unknown"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    assert_eq!(word("crashed"), "Not working");
+    assert_eq!(tone("crashed"), TC_PRIVATE_INFERENCE_TONE_REFUSED);
+    assert_eq!(
+        take_owned(unsafe { tc_private_inference_menu_word(std::ptr::null()) }),
+        copy::MENU_WORD_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_private_inference_menu_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
     );
 }
 

@@ -35,12 +35,15 @@ enum TracesScreenLayout {
     }
 
     /// The one estimate line, as the core words it, or nil for none
-    /// (nothing found or counted yet). The core picks dollars or points.
+    /// (nothing found or counted yet). The core picks dollars or points,
+    /// and, while the use that earns credit is off (`earnsCredit` false),
+    /// words it as what the traces could earn (Zaki's review of #1690).
     static func estimate(
-        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?
+        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?,
+        earnsCredit: Bool = true
     ) -> String? {
         guard let found, found > 0 else { return nil }
-        var request: [String: Any] = ["traces": found]
+        var request: [String: Any] = ["traces": found, "earns_credit": earnsCredit]
         if let range = dollars?.usdMicrosPerAcceptedTrace {
             request["usd_micros_per_accepted_trace"] = ["min": range.min, "max": range.max]
         }
@@ -51,6 +54,17 @@ enum TracesScreenLayout {
             let json = String(data: data, encoding: .utf8)
         else { return nil }
         return TCCoreCopy.firstRunEstimateLine(requestJSON: json)
+    }
+
+    /// Whether Traces notes that the traces won't earn credit: the use that
+    /// earns it (`uses.creditScope`) is not ticked (owner, 2026-10-27).
+    static func showsNoCredit(_ state: FirstRunState, uses: FirstRunCopy.Uses) -> Bool {
+        !state.scopes.contains(uses.creditScope)
+    }
+
+    /// The note's link: back to Uses, every answer kept.
+    static func backToUses(_ state: FirstRunState) -> FirstRunState {
+        FirstRunNavigation.back(to: .uses, from: state)
     }
 
     /// The count rises after the orbs start, over 1.9s.
@@ -109,7 +123,12 @@ struct TracesScreen: View {
         } title: {
             FirstRunTitle(light: copy.traces.titleLight, bold: copy.traces.titleBold)
         } content: {
-            estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
+            VStack(spacing: GlassTokens.Space.s4) {
+                estimate(found: TracesScreenLayout.found(runner.state, discovered: memory.discovered))
+                if TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses) {
+                    noCredit
+                }
+            }
         }
         .onAppear {
             openedAt = memory.tracesCounted ? .distantPast : Date()
@@ -215,11 +234,29 @@ struct TracesScreen: View {
         .accessibilityHidden(true)
     }
 
+    /// A neutral note, in the caption's secondary colour, with its link.
+    private var noCredit: some View {
+        VStack(spacing: GlassTokens.Space.s2) {
+            Text(copy.traces.noCredit)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(copy.traces.backToUses) {
+                runner.state = TracesScreenLayout.backToUses(runner.state)
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+        }
+        .frame(maxWidth: 460)
+    }
+
     /// The one estimated total, or nothing at all when there is none.
     @ViewBuilder
     private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
-        if let line = TracesScreenLayout.estimate(found: found, lookup: runner.lookup, dollars: runner.dollarEstimate) {
+        if let line = TracesScreenLayout.estimate(
+            found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+            earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)) {
             Text(line)
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)

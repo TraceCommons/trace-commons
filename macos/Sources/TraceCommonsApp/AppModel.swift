@@ -411,7 +411,9 @@ final class AppModel: ObservableObject {
         stateTone: { TCPrivateInference.stateTone(state: $0) },
         servingLine: { TCPrivateInference.servingLine(port: $0) },
         shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
-        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) }
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) }
     )
 
     /// What the listener is doing, from the daemon's own report.

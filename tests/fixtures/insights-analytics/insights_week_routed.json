@@ -120,6 +120,15 @@
           "numerator": 24500,
           "denominator": 37115
         },
+        "by_day": [
+          37235,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
         "source": "claude_code",
         "tokens": 37235,
         "state": "partial",
@@ -143,6 +152,7 @@
           "numerator": 40,
           "denominator": 80
         },
+        "by_day": null,
         "source": "codex",
         "tokens": 110,
         "state": "partial",

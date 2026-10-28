@@ -726,6 +726,11 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sectionTraces: String
     public let sectionAccount: String
     public let privateAISignIn: String
+    /// Home's Traces hero: its title, line and way into Traces (owner,
+    /// 2026-10-28).
+    public let tracesHeroTitle: String
+    public let tracesHeroBody: String
+    public let tracesHeroAction: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -747,6 +752,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let records: String
     public let statusLine: String
     public let rowCredit: String
+    /// A decided row that earned no credit, around the reason's words.
+    public let rowNoCredit: String
     public let heldCountOne: String
     public let heldCount: String
     public let publicStanding: String
@@ -777,6 +784,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sectionTraces = "section_traces"
         case sectionAccount = "section_account"
         case privateAISignIn = "private_ai_sign_in"
+        case tracesHeroTitle = "traces_hero_title"
+        case tracesHeroBody = "traces_hero_body"
+        case tracesHeroAction = "traces_hero_action"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
@@ -798,6 +808,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case records
         case statusLine = "status_line"
         case rowCredit = "row_credit"
+        case rowNoCredit = "row_no_credit"
         case heldCountOne = "held_count_one"
         case heldCount = "held_count"
         case publicStanding = "public_standing"
@@ -837,6 +848,11 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     /// A row's settled credit, around its figure.
     public func credit(_ amount: String) -> String {
         rowCredit.replacingOccurrences(of: "{amount}", with: amount)
+    }
+
+    /// A decided row's no-credit line, around the reason's words.
+    public func noCredit(_ reason: String) -> String {
+        rowNoCredit.replacingOccurrences(of: "{label}", with: reason)
     }
 
     /// The community panel's accepted cell, around the commons' window.
