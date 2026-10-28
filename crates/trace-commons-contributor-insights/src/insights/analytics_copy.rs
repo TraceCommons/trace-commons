@@ -200,6 +200,17 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_native_storage_unsupported",
         "Usage is unavailable for this Codex sign-in storage. Check limits in Codex.",
     ),
+    // The limits table over the subscription card (product owner,
+    // 2026-10-28): one row per login, CodexBar-style. Pace reads the
+    // weekly window, else the session window.
+    ("analytics_limits_title", "Limits at a glance"),
+    ("analytics_limits_account", "Account"),
+    ("analytics_limits_session_left", "Session left"),
+    ("analytics_limits_weekly_left", "Weekly left"),
+    ("analytics_limits_next_reset", "Next reset"),
+    ("analytics_limits_pace", "Pace"),
+    ("analytics_limits_on_pace", "On pace"),
+    ("analytics_limits_runs_out", "Runs out in {time}"),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),
     ("analytics_subscriptions_weekly", "Weekly"),

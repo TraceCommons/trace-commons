@@ -1925,6 +1925,8 @@ mod tests {
             "analytics_analyze_how",
             "analytics_tip_context",
             "analytics_subscriptions_session",
+            // The quota's Session window again, in the limits table.
+            "analytics_limits_session_left",
         ];
         assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {

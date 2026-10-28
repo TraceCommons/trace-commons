@@ -61,6 +61,9 @@ struct InsightsOverviewTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let credit { credit }
+                if let subscriptions, subscriptions.isVisible {
+                    InsightsLimitsTable(model: subscriptions, copy: copy)
+                }
                 if let subscriptions { InsightsSubscriptionsCard(model: subscriptions, copy: copy) }
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
