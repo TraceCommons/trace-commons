@@ -4819,13 +4819,22 @@ sessions on disk. Otherwise:
     ],
     "by_day": [
       { "date": "2026-10-05", "uncached": 1200, "cache_read": 402000,
-        "cache_write": 31000, "output": 9100 }
+        "cache_write": 31000, "output": 9100 },
+      { "date": "2026-10-06", "uncached": 1000, "cache_read": 590000,
+        "cache_write": 30000, "output": 19000 },
+      { "date": "2026-10-07", "uncached": 6800, "cache_read": 618000,
+        "cache_write": 110000, "output": 22120 },
+      { "date": "2026-10-08", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-09", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-10", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-11", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 }
     ],
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
     "sessions": [
       { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [],
         "cache_share": { "numerator": 801000, "denominator": 900000 },
+        "by_day": [0, 412000, 500000, 0, 0, 0, 0],
         "started_at": "2026-10-06T08:12:40+00:00",
         "routing": { "category": "mixed", "reasons": [],
                      "tokens": { "verified": 410200, "routed_unverified": 0,
@@ -4883,6 +4892,14 @@ sessions on disk. Otherwise:
   adds the store's tag, and refuse the short name. The order is stable from
   one answer to the next while no row is re-read. The Sessions tab lists the
   same rows, each with its opaque reference, through `insights_sessions`.
+- `rollup.sessions[].by_day` (additive) is a Claude Code session's tokens on
+  each local day of the week, seven integers, Monday first, counted from the
+  same turns as `rollup.by_day`, so on each day the sessions' amounts sum to
+  that day's four series. It is `null` for a Codex session (its deltas are
+  intervals, not days), for a session with no known figure, and from a
+  daemon that predates it; a shell then shows the session in no day, never
+  as zero. It carries amounts only, never a session ID, a digest, a path or
+  a model name.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
