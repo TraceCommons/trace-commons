@@ -2707,7 +2707,8 @@ pub const SENT_TRACES_TRAINING_ALLOW_ACCESSIBILITY_NAME: &str =
 /// DRAFT, NEEDS APPROVAL. Closes the sheet and changes nothing.
 pub const SENT_TRACES_TRAINING_NOT_NOW_BUTTON: &str = "Not now";
 /// DRAFT, NEEDS APPROVAL. The not-now button's accessibility name.
-pub const SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME: &str = "Keep sent traces as they are";
+pub const SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME: &str =
+    "Not now, and keep sent traces as they are";
 /// DRAFT, NEEDS APPROVAL. The quiet line on the Insights card while such
 /// traces exist, for one trace.
 pub const SENT_TRACES_TRAINING_LINE_ONE: &str = "1 sent trace doesn't allow Train coding models.";
@@ -2839,6 +2840,15 @@ mod tests {
             assert!(!text.trim().is_empty());
             assert!(!text.to_lowercase().contains("go back"), "{text}");
             assert!(text.matches(". ").count() == 0, "one sentence: {text}");
+        }
+        // Each accessible name includes its visible label (copy guide 5).
+        for (label, name) in [
+            (copy.allow_button, copy.allow_accessibility_name),
+            (copy.not_now_button, copy.not_now_accessibility_name),
+            (copy.review_button, copy.review_accessibility_name),
+            (copy.trace_button, copy.trace_accessibility_name),
+        ] {
+            assert!(name.starts_with(label), "{name} must include {label}");
         }
         assert!(copy.allow_button.split_whitespace().count() <= 2);
         assert!(copy.not_now_button.split_whitespace().count() <= 2);
