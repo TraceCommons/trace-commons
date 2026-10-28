@@ -43,6 +43,7 @@ pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub mod device_codes;
+pub mod model_training_consent;
 pub(crate) mod setup_completion;
 /// Moved to the platform crate, which the Insights crate shares; re-exported
 /// here at its old path.
