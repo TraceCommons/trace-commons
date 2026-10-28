@@ -75,11 +75,10 @@ final class UsesScreenTests: XCTestCase {
             ["ranking_training", "debugging_evaluation"])
         XCTAssertEqual(UsesScreenLayout.includingRequired(chosen, required: nil), chosen)
 
-        // The row carries Ron's inline "required"; its box is ticked and
-        // locked, and the person's toggle ticks only the optional ones.
+        // The required use is one "Always on" line (owner, 2026-10-28),
+        // never a box; the person's toggle ticks only the optional ones.
         let source = try Self.source()
-        XCTAssertTrue(source.contains("Text(copy.uses.required)"))
-        XCTAssertTrue(source.contains("Text(required.title)"))
+        XCTAssertTrue(source.contains("Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))"))
         XCTAssertFalse(source.contains("Toggle(required.title"), "the required use is a statement, not a choice")
         XCTAssertFalse(source.contains("scope(required.name)"))
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
@@ -105,6 +104,99 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.group([], optional: UsesScreenLayout.optionalScopes(options)), .none)
     }
 
+    /// The optional uses start unticked (R7) and two buttons of equal weight
+    /// sit above them (owner, 2026-10-27): Allow all ticks every optional
+    /// data use, never the handle; Only required unticks them and keeps the
+    /// required use. Nothing ticks a box but the person.
+    func test_theOptionalUsesStartUntickedAndTheTwoButtonsAreEqual() throws {
+        let uses = try copy().uses
+        XCTAssertEqual(uses.allowAll, "Allow all")
+        XCTAssertEqual(uses.onlyRequired, "Only required")
+        let optional = UsesScreenLayout.optionalScopes(options)
+        let fresh = UsesScreenLayout.includingRequired(
+            FirstRunState(step: .uses), required: UsesScreenLayout.requiredScope(options))
+        XCTAssertEqual(fresh.scopes, ["debugging_evaluation"], "nothing optional is ticked for the person")
+        XCTAssertEqual(UsesScreenLayout.group(fresh.scopes, optional: optional), .none)
+
+        let all = UsesScreenLayout.pressing(.allowAll, fresh, optional: optional)
+        XCTAssertEqual(
+            all.scopes, ["debugging_evaluation", "benchmark_only", "ranking_training", "model_training"])
+        XCTAssertFalse(all.scopes.contains("public_attribution"))
+        XCTAssertEqual(UsesScreenLayout.pressing(.allowAll, all, optional: optional), all, "pressing again changes nothing")
+
+        let required = UsesScreenLayout.pressing(.onlyRequired, all, optional: optional)
+        XCTAssertEqual(required.scopes, ["debugging_evaluation"])
+        XCTAssertEqual(UsesScreenLayout.pressing(.onlyRequired, required, optional: optional), required)
+
+        // A box still toggles on its own after either press, and nothing
+        // but the scopes changes.
+        var one = required
+        one.scopes.insert("ranking_training")
+        XCTAssertEqual(UsesScreenLayout.group(one.scopes, optional: optional), .some)
+        var others = all
+        others.scopes = fresh.scopes
+        XCTAssertEqual(others, fresh)
+
+        // Same style, same width, side by side, in one loop: neither is
+        // emphasised.
+        let source = try Self.source()
+        XCTAssertEqual(UsesScreenLayout.Bulk.allCases, [.allowAll, .onlyRequired])
+        XCTAssertTrue(source.contains("ForEach(UsesScreenLayout.Bulk.allCases, id: \\.self) { bulk in"))
+        XCTAssertTrue(source.contains("Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)"))
+        XCTAssertEqual(source.components(separatedBy: "GlassButtonStyle(").count - 1, 1)
+        XCTAssertFalse(source.contains("uses.allowAll)"), "no button of its own for either")
+        XCTAssertFalse(source.contains(".onAppear { runner.state.scopes"))
+    }
+
+    /// The required use is one Always on line under the choices, its scope
+    /// the tooltip, so every box shown is a real choice (owner, 2026-10-28).
+    func test_theRequiredUseIsOneAlwaysOnLine() throws {
+        let uses = try copy().uses
+        let required = try XCTUnwrap(UsesScreenLayout.requiredScope(options))
+        XCTAssertEqual(
+            UsesScreenLayout.alwaysOnTitle(required, uses: uses),
+            "Always on: \(required.title) for shared traces")
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))"))
+        XCTAssertFalse(source.contains("GlassExpander("), "nothing to expand")
+        XCTAssertFalse(source.contains("Text(copy.uses.required)"), "the line already says always on")
+        let line = try XCTUnwrap(source.range(of: "Text(UsesScreenLayout.alwaysOnTitle"))
+        let rows = try XCTUnwrap(source.range(of: "ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses))"))
+        XCTAssertLessThan(rows.lowerBound, line.lowerBound, "the line follows the choices")
+    }
+
+    /// The Sharing radios show no choice until the person picks one, and
+    /// neither is tagged or emphasised (owner, 2026-10-27).
+    func test_noSharingChoiceIsPreselected() throws {
+        let fresh = FirstRunState(step: .uses)
+        XCTAssertNil(UsesScreenLayout.sharingSelection(fresh))
+        XCTAssertEqual(UsesScreenLayout.choosingSharing(fresh, nil), fresh)
+        let automatic = UsesScreenLayout.choosingSharing(fresh, .automatic)
+        XCTAssertTrue(automatic.sharingChosen)
+        XCTAssertEqual(UsesScreenLayout.sharingSelection(automatic), .automatic)
+        let ask = UsesScreenLayout.choosingSharing(automatic, .askMe)
+        XCTAssertEqual(UsesScreenLayout.sharingSelection(ask), .askMe)
+
+        let uses = try copy().uses
+        let options = UsesScreenLayout.sharingOptions(for: fresh, modes: try modes(), grant: try grant(), uses: uses)
+        XCTAssertEqual(options.map(\.value), [.askMe, .automatic])
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("get: { UsesScreenLayout.sharingSelection(runner.state) }"))
+        XCTAssertFalse(source.contains("Recommended"))
+        XCTAssertFalse(source.contains("GlassTag("))
+    }
+
+    /// Someone who already joined never sees the first run, and a pick on
+    /// it is sent as before: Ask still stops an earlier Automatic first.
+    func test_peopleWhoJoinedAreUnaffected() {
+        XCTAssertFalse(OnboardingNavigation.hostsFirstRun(startup: .running, requiresOnboarding: false, entered: true))
+        var state = FirstRunState(step: .join, account: .enrolled, scopes: ["debugging_evaluation"])
+        state = UsesScreenLayout.choosingSharing(state, .askMe)
+        XCTAssertEqual(
+            Array(FirstRunPlan.calls(for: state, at: .start).prefix(2)),
+            [.setAskEachTime, .setConsentScopes(["debugging_evaluation"])])
+    }
+
     /// All optional data uses are independently visible. Attribution belongs
     /// in Public profile, so opening the data-use screen cannot grant it.
     func test_dataUsesAreVisibleAndPublicAttributionIsSeparate() throws {
@@ -114,9 +206,10 @@ final class UsesScreenTests: XCTestCase {
         let source = try Self.source()
         XCTAssertFalse(source.contains("Toggle(sources:"), "a bulk choice obscures independent permissions")
         XCTAssertFalse(source.contains("ForEach(UsesScreenLayout.handleScopes(options))"))
-        XCTAssertTrue(source.contains("Text(copy.uses.rewardOpportunities"))
+        // Off the first run's Uses (owner, 2026-10-28); Settings keeps it.
+        XCTAssertFalse(source.contains("Text(copy.uses.rewardOpportunities"))
         XCTAssertEqual(try copy().uses.rewardOpportunities,
-                       "To earn credit for traces, allow Train coding models. Creating benchmarks and training evaluators are optional and may qualify for extra rewards. Credit depends on acceptance and scoring.")
+                       "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.")
         let profile = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PublicProfileSection.swift"), encoding: .utf8)
@@ -133,7 +226,7 @@ final class UsesScreenTests: XCTestCase {
     func test_startDoesNotWaitForATick() throws {
         let grant = try grant()
         let uses = try copy().uses
-        let state = FirstRunState(step: .join, account: .nearAI, enrolledInvite: "INVITE-1")
+        let state = FirstRunState(step: .join, account: .nearAI, sharingChosen: true, enrolledInvite: "INVITE-1")
         let required = UsesScreenLayout.requiredScope(options)
         XCTAssertTrue(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
@@ -169,7 +262,8 @@ final class UsesScreenTests: XCTestCase {
         let uses = try copy().uses
         let required = UsesScreenLayout.requiredScope(options)
         var state = FirstRunState(
-            step: .join, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
+            step: .join, account: .nearAI, scopes: ["debugging_evaluation"], sharingChosen: true,
+            enrolledInvite: "INVITE-1")
 
         let noAskFirst = try grant(without: "path_ask_first_title")
         XCTAssertEqual(
@@ -370,13 +464,20 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(SharingDisclosureFlow.isNeeded(for: joined))
     }
 
-    /// Permission scope stays visible before a person makes the choice.
-    func test_scopeDescriptionsAreVisibleBeforeChoosing() throws {
+    /// Each use's scope is behind the "i" beside its title (owner,
+    /// 2026-10-28, replacing #1290's always-visible description), outside
+    /// the checkbox so pressing it never ticks the box.
+    func test_scopeDescriptionsAreBehindInfoButtons() throws {
         let source = try Self.source()
-        XCTAssertTrue(source.contains("Text(required.description)"))
-        XCTAssertTrue(source.contains("Text(option.description)"))
-        XCTAssertFalse(source.contains("infoButton(title: option.title, text: option.description)"))
-        XCTAssertTrue(source.contains(".fixedSize(horizontal: false, vertical: true)"))
+        XCTAssertTrue(source.contains("infoButton(title: required.title, text: required.description)"))
+        XCTAssertTrue(source.contains("infoButton(title: option.title, text: option.description)"))
+        XCTAssertFalse(source.contains(".help("))
+        let row = try XCTUnwrap(source.range(of: "    private func scopeRow(_ option: ConsentScope) -> some View {"))
+        let style = try XCTUnwrap(source.range(of: ".toggleStyle(GlassCheckboxStyle())", range: row.upperBound..<source.endIndex))
+        let info = try XCTUnwrap(source.range(of: "infoButton(title: option.title", range: row.upperBound..<source.endIndex))
+        XCTAssertLessThan(style.lowerBound, info.lowerBound, "the i is outside the checkbox")
+        XCTAssertFalse(source.contains("Text(option.description)"))
+        XCTAssertFalse(source.contains("Text(required.description)"))
         XCTAssertTrue(source.contains("ScrollView {"), "choices remain reachable in the default-height window")
     }
 
