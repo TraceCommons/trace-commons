@@ -14,6 +14,8 @@ mod activity_missions_tests;
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
 mod mission_catalog_tests;
+#[path = "tests/model_training_consent_tests.rs"]
+mod model_training_consent_tests;
 #[path = "tests/native_passkey_tests.rs"]
 mod native_passkey_tests;
 #[path = "tests/native_session_sliding_expiry_tests.rs"]

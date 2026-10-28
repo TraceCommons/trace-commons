@@ -31,6 +31,8 @@ mod file_witness;
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
 mod legacy_invite_link_routes;
+#[path = "trace_commons_ingest_internal/model_training_consent.rs"]
+mod model_training_consent;
 #[path = "trace_commons_ingest_internal/payout_link.rs"]
 mod payout_link_routes;
 #[path = "trace_commons_ingest_internal/payout_rails.rs"]
@@ -8944,6 +8946,13 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
+        )
+        // Add the model_training use to traces already sent, and re-run
+        // the scoring award withheld for lack of it.
+        .route(
+            trace_commons_protocol::model_training_consent::MODEL_TRAINING_CONSENT_PATH,
+            get(model_training_consent::eligibility_handler)
+                .post(model_training_consent::grant_handler),
         )
         .route(
             "/v1/contributors/me/score-attestation",
@@ -26107,6 +26116,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
             | PIPELINE_ACTIVATION_AUDIT_KIND
+            | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -77070,7 +77080,10 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
+        "tenant_policy_update"
+        | "tenant_access_grant_update"
+        | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -77189,6 +77202,7 @@ fn audit_backfill_storage_projection(
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
         | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -83459,6 +83473,36 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// One model-training grant on one trace
+    /// (`model_training_consent`): the kind's label as the purpose
+    /// (hashed), and `granted` as the one count. The event names the trace
+    /// and the actor's principal ref, and no consent text.
+    fn model_training_consent(auth: &TenantAuth, submission_id: Uuid) -> Self {
+        let kind = model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND;
+        let purpose_hash = sha256_prefixed(kind);
+        let action_counts = BTreeMap::from([("granted".to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
         }
