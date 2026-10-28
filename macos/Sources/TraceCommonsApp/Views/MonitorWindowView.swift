@@ -19,8 +19,10 @@ struct MonitorWindowView: View {
     static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
-        case inference = "Inference"
+        /// Traces second and Private AI third (owner, 2026-10-28: the
+        /// macOS MVP is "contribute traces, earn credit").
         case traces = "Traces"
+        case inference = "Inference"
         /// Insights' own tab (2026-10-15), no longer a Home page. Last, so
         /// the first three keep their shortcuts.
         case insights = "Insights"
@@ -33,8 +35,8 @@ struct MonitorWindowView: View {
             guard let shell = MonitorWords.table?.shell else { return "" }
             return switch self {
             case .home: shell.tabHome
-            case .inference: shell.tabInference
             case .traces: shell.tabTraces
+            case .inference: shell.tabInference
             case .insights: HomeTabView.insightsHeading ?? ""
             }
         }

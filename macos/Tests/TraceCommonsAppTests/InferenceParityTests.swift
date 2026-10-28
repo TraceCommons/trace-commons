@@ -497,14 +497,17 @@ final class InferenceParityTests: XCTestCase {
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
         let balance = try XCTUnwrap(views.range(of: "                InferenceBalanceSection()\n"))
-        // The switch leads the page, then the balance with billing under
-        // it (owner, 2026-10-19), then the managed cards.
+        // The step-by-step card leads, then the status, then the managed
+        // cards with the tool buttons, then the calls, then the balance
+        // with billing under it (product owner, 2026-10-28).
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
-        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the status leads the page")
-        XCTAssertLessThan(balance.lowerBound, managed.lowerBound, "the balance sits under the switch")
-        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
-        XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
+        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard()\n"))
+        XCTAssertLessThan(scroll.lowerBound, guide.lowerBound)
+        XCTAssertLessThan(guide.lowerBound, toggle.lowerBound, "the step-by-step card leads the page")
+        XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the status follows the steps")
+        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the tool buttons sit under the status")
+        XCTAssertLessThan(calls.lowerBound, balance.lowerBound, "the balance follows the calls")
+        XCTAssertLessThan(balance.lowerBound, page.lowerBound, "the account cards follow the balance")
         XCTAssertFalse(views.contains("InspectorPrompts("), "the prompts are drawn inline again")
         // The balance card is the account section's alone.
         XCTAssertEqual(views.components(separatedBy: "PrivateAIBalanceCard(").count - 1, 0, "the balance card is drawn twice")
