@@ -156,7 +156,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_read_detail",
         "Enable usage reading in Settings; only Refresh asks the native app for usage.",
     ),
-    ("analytics_subscriptions_setting_codex", "Read Codex usage"),
+    // Switch labels follow CodexBar's "Show ... usage" (2026-10-27).
+    ("analytics_subscriptions_setting_codex", "Show Codex usage"),
+    (
+        "analytics_subscriptions_setting_claude",
+        "Show Claude Code usage",
+    ),
     (
         "analytics_subscriptions_codex_detail",
         "On Refresh, Trace Commons reads the saved Codex sign-in file for your default and saved managed subscription profiles to ask the Codex app for usage. Codex may renew its own sign-in. There are no background credential reads.",

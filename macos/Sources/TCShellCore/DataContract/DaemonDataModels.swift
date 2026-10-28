@@ -982,10 +982,13 @@ extension DaemonData {
         /// daemon runs the counter pass for `insights_week` (owner decision
         /// D4, open; off by default).
         public let insightsCounterPass: Bool?
-        /// Opt-in native subscription readers; nil means an older daemon.
-        /// The Overview usage snapshot remains authoritative for its controls.
+        /// Native subscription readers, on by default since 2026-10-27; nil
+        /// means an older daemon. The Overview usage snapshot remains
+        /// authoritative for its controls. `subscriptionUsageClaudeEnabled` is
+        /// the legacy cleanup flag; `subscriptionUsageClaudeOn` is Claude's switch.
         public let subscriptionUsageCodexEnabled: Bool?
         public let subscriptionUsageClaudeEnabled: Bool?
+        public let subscriptionUsageClaudeOn: Bool?
         /// The weekly summary card's only switch (owner decisions D1 and D4,
         /// open; on by default). The Insights window passes it to the core's
         /// `comparisons`; `nil` from a daemon that predates it.
@@ -1035,6 +1038,7 @@ extension DaemonData {
             case insightsCounterPass = "insights_counter_pass"
             case subscriptionUsageCodexEnabled = "subscription_usage_codex_enabled"
             case subscriptionUsageClaudeEnabled = "subscription_usage_claude_enabled"
+            case subscriptionUsageClaudeOn = "subscription_usage_claude_on"
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
             case settlementEstimateEnabled = "settlement_estimate_enabled"
             case missionsEnabled = "missions_enabled"

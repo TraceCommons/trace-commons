@@ -342,11 +342,13 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func setSubscriptionUsage(provider: String, on: Bool) async throws {
-        guard provider == "codex" else {
-            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        let key: String
+        switch provider {
+        case "codex": key = "subscription_usage_codex_enabled"
+        case "claude": key = "subscription_usage_claude_on"
+        default: throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
         }
-        _ = try await call("set_settings", params: ["subscription_usage_" + provider + "_enabled": on],
-                           as: DaemonData.NudgeAck.self)
+        _ = try await call("set_settings", params: [key: on], as: DaemonData.NudgeAck.self)
     }
 
     public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
