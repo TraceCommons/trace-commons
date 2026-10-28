@@ -155,20 +155,20 @@ pub struct CreditOutcomeLabel {
 /// row shows its points. Carried to macOS by `tc_public_run_copy`
 /// (`credit_outcome_labels`).
 ///
-/// DRAFT, NEEDS APPROVAL: every label in this table and
+/// Owner-approved 2026-10-28: every label in this table and
 /// [`NO_CREDIT_REASON_UNAVAILABLE`].
 pub const CREDIT_OUTCOME_LABELS: [CreditOutcomeLabel; 8] = [
     CreditOutcomeLabel {
         reason: "policy_mismatch",
-        label: "Needs Train coding models",
+        label: "Needs Train consent",
     },
     CreditOutcomeLabel {
         reason: "novelty_failed",
-        label: "Too similar to existing traces",
+        label: "Too similar",
     },
     CreditOutcomeLabel {
         reason: "perplexity_failed",
-        label: "Too predictable to score",
+        label: "Too predictable",
     },
     CreditOutcomeLabel {
         reason: "duplicate",
@@ -180,11 +180,11 @@ pub const CREDIT_OUTCOME_LABELS: [CreditOutcomeLabel; 8] = [
     },
     CreditOutcomeLabel {
         reason: "insufficient_coverage",
-        label: "Too long to score fully",
+        label: "Too long",
     },
     CreditOutcomeLabel {
         reason: "credit_not_issued",
-        label: "Not issued by this server",
+        label: "Server error",
     },
     CreditOutcomeLabel {
         reason: "other",
@@ -193,8 +193,8 @@ pub const CREDIT_OUTCOME_LABELS: [CreditOutcomeLabel; 8] = [
 ];
 
 /// The words for a reason label this build does not know, and for `other`.
-/// DRAFT, NEEDS APPROVAL.
-pub const NO_CREDIT_REASON_UNAVAILABLE: &str = "Reason not given";
+/// Owner-approved 2026-10-28.
+pub const NO_CREDIT_REASON_UNAVAILABLE: &str = "No reason given";
 
 /// The words for a no-credit reason: its [`CREDIT_OUTCOME_LABELS`] entry, or
 /// [`NO_CREDIT_REASON_UNAVAILABLE`] for a label this build does not know.
