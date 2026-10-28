@@ -38,6 +38,15 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The words for adding Train coding models to sent traces, as a JSON
+    /// object, or nil on a caught panic. Every string is a draft awaiting
+    /// owner approval. Decoded by `TCShellCore.SentTracesTrainingCopy`.
+    public static func sentTracesTrainingCopyJSON() -> String? {
+        guard let raw = tc_sent_traces_training_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The tooltip that explains the current answer, chosen by the ABI.
     ///
     /// Nil only on a caught panic. Do not recover this by picking between

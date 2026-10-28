@@ -369,6 +369,9 @@ struct MonitorWindowView: View {
         .onChange(of: model.missionsShown, initial: true) { _, shown in
             homePage = homePage.shown(missions: shown)
         }
+        // The sheet for sent traces without Train coding models, when the
+        // Insights line's Review or the first run raised it.
+        .modifier(SentTracesTrainingPresenter(site: .monitor))
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.

@@ -23,6 +23,9 @@ public struct GlassModalAction: Identifiable {
     /// Drawn as the primary button without being the default: an action
     /// that must never be one Return away (an irreversible send).
     public let isProminent: Bool
+    /// The button's accessibility name when it must say more than its
+    /// title (the core's `*_accessibility_name`); nil reads the title.
+    public let accessibilityName: String?
     public let action: () -> Void
 
     /// `isDefault` makes this the action Return takes, drawn as the primary
@@ -31,7 +34,8 @@ public struct GlassModalAction: Identifiable {
     /// `id` defaults to the title.
     public init(
         _ title: String, role: Role = .standard, isDefault: Bool = false, isEnabled: Bool = true,
-        isProminent: Bool = false, id: String? = nil, action: @escaping () -> Void
+        isProminent: Bool = false, id: String? = nil, accessibilityName: String? = nil,
+        action: @escaping () -> Void
     ) {
         self.id = id ?? title
         self.title = title
@@ -39,6 +43,7 @@ public struct GlassModalAction: Identifiable {
         self.isDefault = isDefault
         self.isEnabled = isEnabled
         self.isProminent = isProminent
+        self.accessibilityName = accessibilityName
         self.action = action
     }
 
@@ -197,6 +202,7 @@ public struct GlassModal<Content: View>: View {
                             .buttonStyle(GlassButtonStyle(GlassModalAction.kind(action, isDefault: isDefault), size: .bar, small: true))
                             .disabled(!action.isEnabled || (action.role == .cancel && !cancellable))
                             .keyboardShortcut(Self.shortcut(for: action, isDefault: isDefault, isTopmost: isTopmost))
+                            .accessibilityLabel(action.accessibilityName ?? action.title)
                     }
                 }
                 .padding(.top, 10)

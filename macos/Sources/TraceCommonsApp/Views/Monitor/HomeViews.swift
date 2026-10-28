@@ -269,6 +269,10 @@ private struct HomeOverview: View {
                         HomeInsightsVisual(glance: freshGlance, words: words)
                     }
                 }
+                // Sent traces without Train coding models, and Review, under
+                // the Insights card while there are any. Not closed with the
+                // card: it is the way back to a choice, not a promotion.
+                SentTracesTrainingLine(model: model.sentTracesTraining, history: store.history)
                 if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
                         systemImage: Self.catalogueIcon, title: catalogue,

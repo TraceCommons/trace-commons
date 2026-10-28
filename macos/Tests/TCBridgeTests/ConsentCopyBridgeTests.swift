@@ -79,4 +79,28 @@ final class ConsentCopyBridgeTests: XCTestCase {
         XCTAssertTrue(copy.unlinkConfirm.contains("{device}"))
         XCTAssertTrue(copy.lastSeen.contains("{when}"))
     }
+
+    /// The live export for adding Train coding models to sent traces is
+    /// exactly the fields this shell consumes, decodes whole, and counts
+    /// where it says it does.
+    func testTheSentTracesTrainingCopyDecodesFromTheLiveExport() {
+        guard let json = TCConsentCopy.sentTracesTrainingCopyJSON(),
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let copy = SentTracesTrainingCopy.decode(fromJSON: json)
+        else {
+            XCTFail("the live sent-traces payload must decode")
+            return
+        }
+        XCTAssertEqual(object.keys.sorted(), SentTracesTrainingCopy.consumedFields.sorted())
+        for template in [copy.bodyOther, copy.lineOther, copy.allowAccessibilityName] {
+            XCTAssertTrue(template.contains("{count}"), template)
+        }
+        for one in [copy.bodyOne, copy.lineOne] {
+            XCTAssertFalse(one.contains("{count}"), one)
+        }
+        XCTAssertFalse(copy.body(count: 3).contains("{count}"))
+        XCTAssertTrue(copy.line(count: 3).contains("3"))
+        XCTAssertEqual(copy.body(count: 1), copy.bodyOne)
+    }
 }
