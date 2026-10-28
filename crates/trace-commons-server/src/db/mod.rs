@@ -1814,6 +1814,51 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// The caller's traces that could take the `model_training` use (V141):
+    /// owned by one of `owner_principal_refs`, `accepted`, not revoked,
+    /// purged, expired or withdrawn (either withdrawal ledger), and without
+    /// `model_training` in their allowed uses. The count is all of them; the
+    /// ids are the oldest `limit`. No owners lists nothing.
+    async fn list_model_training_consent_eligible(
+        &self,
+        _tenant_id: &str,
+        _owner_principal_refs: &[String],
+        _limit: i64,
+    ) -> Result<ModelTrainingConsentEligible, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Add the `model_training` consent scope and allowed use to each listed
+    /// trace that is eligible (as above), in one transaction, and record one
+    /// dated grant row per trace. Add-only and idempotent: a trace that
+    /// already carries the use is answered `AlreadyGranted` and left as it
+    /// is; one that is not eligible is answered `NotEligible`.
+    async fn grant_model_training_consent(
+        &self,
+        _grant: ModelTrainingConsentGrant<'_>,
+    ) -> Result<Vec<ModelTrainingConsentGrantRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// The submission's latest gate decision when it is a legacy-gate
+    /// decision that passed both floors and whose scoring award was withheld
+    /// as `policy_mismatch`: the award a model-training grant re-runs.
+    /// `None` otherwise (never scored, a floor failed, withheld for another
+    /// reason, credited, or a pipeline Settle row).
+    async fn withheld_policy_mismatch_gate_award(
+        &self,
+        _tenant_id: &str,
+        _submission_id: uuid::Uuid,
+    ) -> Result<Option<WithheldGateAward>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
     /// Mint a one-time device code for `code.account_id`, after checking
     /// that `code.minter_device_key_id` is an active device of that account.
     async fn mint_account_device_code(
@@ -2541,6 +2586,52 @@ pub struct AccountDeviceSummary {
     pub contributed_traces: i64,
     /// When the newest of those was received; `None` with none.
     pub last_contributed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Safe label a backend without the V141 methods refuses with.
+pub const MODEL_TRAINING_CONSENT_BACKEND_MISSING: &str = "model_training_consent_backend_missing";
+
+/// What [`Database::list_model_training_consent_eligible`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelTrainingConsentEligible {
+    pub eligible_count: u64,
+    pub submission_ids: Vec<uuid::Uuid>,
+}
+
+/// A grant, as [`Database::grant_model_training_consent`] takes it.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelTrainingConsentGrant<'a> {
+    pub tenant_id: &'a str,
+    /// The principals whose traces the caller may grant on: its own, and
+    /// its account's when it is linked to one.
+    pub owner_principal_refs: &'a [String],
+    pub submission_ids: &'a [uuid::Uuid],
+    /// The authenticated principal storage ref, recorded on the grant row.
+    pub actor_principal_ref: &'a str,
+    /// When the contributor gave the consent; stored as given.
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One trace's answer from [`Database::grant_model_training_consent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTrainingConsentGrantRow {
+    pub submission_id: uuid::Uuid,
+    pub outcome: trace_commons_protocol::model_training_consent::ModelTrainingConsentOutcome,
+    /// The recorded grant time; `None` when nothing was recorded (not
+    /// eligible, or the trace was sent with the use).
+    pub granted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The stored gate decision whose withheld scoring award a model-training
+/// grant re-runs, as [`Database::withheld_policy_mismatch_gate_award`]
+/// returns it. Both floors passed, by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithheldGateAward {
+    pub decision_id: uuid::Uuid,
+    pub gate_policy_version: String,
+    pub gate_version_hash: String,
+    pub vector_entry_id: Option<uuid::Uuid>,
+    pub chunks_capped: bool,
 }
 
 /// A code to mint, as [`Database::mint_account_device_code`] takes it. Every
