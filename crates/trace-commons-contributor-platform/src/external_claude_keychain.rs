@@ -131,6 +131,8 @@ fn is_type(value: Ref, expected: usize) -> bool {
 #[derive(Clone, Copy)]
 enum Query {
     Metadata,
+    /// A payload read with authentication UI suppressed on this one query.
+    SilentSecret,
     ExplicitSecret,
 }
 fn query_entries(kind: Query, selector: Ref, search_list: Option<Ref>) -> Vec<(Ref, Ref)> {
@@ -143,6 +145,13 @@ fn query_entries(kind: Query, selector: Ref, search_list: Option<Ref>) -> Vec<(R
                 (kSecMatchLimit, kSecMatchLimitAll),
                 (kSecReturnAttributes, kCFBooleanTrue),
                 (kSecReturnPersistentRef, kCFBooleanTrue),
+                (kSecUseAuthenticationUI, kSecUseAuthenticationUIFail),
+            ],
+            Query::SilentSecret => vec![
+                (kSecClass, kSecClassGenericPassword),
+                (kSecValuePersistentRef, selector),
+                (kSecMatchLimit, kSecMatchLimitOne),
+                (kSecReturnData, kCFBooleanTrue),
                 (kSecUseAuthenticationUI, kSecUseAuthenticationUIFail),
             ],
             Query::ExplicitSecret => vec![
@@ -162,13 +171,18 @@ fn query_entries(kind: Query, selector: Ref, search_list: Option<Ref>) -> Vec<(R
 fn execute(query: &Owned) -> Result<Option<Owned>, &'static str> {
     let mut result = std::ptr::null();
     // SAFETY: owned dictionary, initialized Copy output. Only ExplicitSecret
-    // requests data and permits native UI. No global interaction setting changes.
+    // permits native UI. No global interaction setting changes.
     let status = unsafe { SecItemCopyMatching(query.0, &mut result) };
     let result = (!result.is_null()).then(|| Owned(result));
     match status {
         0 => result.map(Some).ok_or("unavailable"),
         -25300 => Ok(None),
-        -128 | -25293 | -25308 | -25243 => Err("keychain_needs_permission"),
+        // errSecInteractionNotAllowed: a UI-suppressed query that would have
+        // needed a dialog. The only status that justifies asking with UI.
+        -25308 => Err(INTERACTION_REQUIRED),
+        // User cancelled (Deny), authentication failed, no access: never
+        // retried with UI, so a Deny is not followed by another dialog.
+        -128 | -25293 | -25243 => Err("keychain_needs_permission"),
         _ => Err("unavailable"),
     }
 }
@@ -273,28 +287,60 @@ fn data(value: Ref) -> Result<Vec<u8>, &'static str> {
     Ok(unsafe { std::slice::from_raw_parts(bytes, length as usize) }.to_vec())
 }
 
+// errSecInteractionNotAllowed. Callers above this module see it only from a
+// silent read; everywhere else it is a permission need.
+use super::INTERACTION_REQUIRED;
+
 #[cfg(not(test))]
 pub(super) fn version(service: &str) -> Result<Option<String>, &'static str> {
-    metadata(service, None)?.map(|m| m.revision()).transpose()
+    metadata(service, None)
+        .map_err(permission_label)?
+        .map(|m| m.revision())
+        .transpose()
 }
 #[cfg(not(test))]
-pub(super) fn read(service: &str) -> Result<Option<Vec<u8>>, &'static str> {
-    read_in(service, None)
+pub(super) fn read(service: &str, allow_ui: bool) -> Result<Option<Vec<u8>>, &'static str> {
+    read_in(service, None, allow_ui)
 }
-fn read_in(service: &str, search_list: Option<Ref>) -> Result<Option<Vec<u8>>, &'static str> {
-    let Some(item) = metadata(service, search_list)? else {
+fn permission_label(reason: &'static str) -> &'static str {
+    if reason == INTERACTION_REQUIRED {
+        "keychain_needs_permission"
+    } else {
+        reason
+    }
+}
+fn read_in(
+    service: &str,
+    search_list: Option<Ref>,
+    allow_ui: bool,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    // A locked keychain can refuse even the attribute query. On a silent
+    // read that is an interaction need; with UI allowed it is final.
+    let item = metadata(service, search_list).map_err(|reason| {
+        if allow_ui {
+            permission_label(reason)
+        } else {
+            reason
+        }
+    })?;
+    let Some(item) = item else {
         return Ok(None);
     };
     let before = item.revision()?;
     let query = dictionary(&query_entries(
-        Query::ExplicitSecret,
+        if allow_ui {
+            Query::ExplicitSecret
+        } else {
+            Query::SilentSecret
+        },
         item.persistent_ref()?,
         search_list,
     ))?;
     let Some(result) = execute(&query)? else {
         return Ok(None);
     };
-    let after = metadata(service, search_list)?
+    let after = metadata(service, search_list)
+        .map_err(permission_label)?
         .map(|m| m.revision())
         .transpose()?;
     if after.as_deref() != Some(before.as_str()) {
@@ -318,6 +364,22 @@ mod tests {
             let secret = query_entries(Query::ExplicitSecret, service.0, None);
             assert!(secret.contains(&(kSecReturnData, kCFBooleanTrue)));
             assert!(!secret.iter().any(|(key, _)| *key == kSecAttrService));
+            assert!(
+                !secret
+                    .iter()
+                    .any(|(key, _)| *key == kSecUseAuthenticationUI)
+            );
+        }
+    }
+
+    #[test]
+    fn silent_secret_query_suppresses_authentication_ui() {
+        let service = string("Claude Code-credentials-fixture").unwrap();
+        let entries = query_entries(Query::SilentSecret, service.0, None);
+        unsafe {
+            assert!(entries.contains(&(kSecReturnData, kCFBooleanTrue)));
+            assert!(entries.contains(&(kSecUseAuthenticationUI, kSecUseAuthenticationUIFail)));
+            assert!(entries.contains(&(kSecValuePersistentRef, service.0)));
         }
     }
 
@@ -432,7 +494,7 @@ mod tests {
             .revision()
             .unwrap();
         assert_eq!(
-            read_in(service, Some(list.0)).unwrap().unwrap(),
+            read_in(service, Some(list.0), true).unwrap().unwrap(),
             b"synthetic-payload-1"
         );
         // The native store's modification clock may have one-second precision.
@@ -466,7 +528,7 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // A locked store may expose attributes or report interaction required;
         // neither outcome implies that decrypting its secret is authorized.
-        assert!(locked.is_ok() || matches!(locked, Err("keychain_needs_permission")));
+        assert!(locked.is_ok() || matches!(locked, Err(INTERACTION_REQUIRED)));
         assert_eq!(
             unsafe {
                 SecKeychainUnlock(

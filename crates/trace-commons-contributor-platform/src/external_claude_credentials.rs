@@ -1,7 +1,9 @@
 //! Read-only access to the exact Claude Code credential selected by its owner.
-//! Secret reads are explicit-user-action only. Metadata queries never ask for
-//! credential data, and suppress authentication UI on that individual query.
-//! No operation changes Keychain ACLs or the process-global interaction policy.
+//! A secret read first runs with authentication UI suppressed on that one
+//! query; only the caller decides whether a user action justifies a second,
+//! UI-permitted read. Metadata queries never ask for credential data and
+//! always suppress authentication UI. No operation changes Keychain ACLs or
+//! the process-global interaction policy.
 
 /// Transient credential payload. Debug output is redacted and dropping the
 /// buffer overwrites its initialized bytes, including after a canceled waiter.
@@ -49,30 +51,36 @@ pub fn wipe(bytes: &mut [u8]) {
 
 const PREFIX: &str = "Claude Code-credentials";
 
-/// Read a selected service on an explicit Refresh. No background secret query
-/// is possible, even when this process already has Keychain access.
+/// The error a UI-suppressed read returns when only a dialog could grant
+/// access (errSecInteractionNotAllowed). A Deny, failed authentication or a
+/// missing ACL entry is `keychain_needs_permission` instead, and must not be
+/// retried with UI.
+pub const INTERACTION_REQUIRED: &str = "keychain_interaction_required";
+
+/// Read a selected service. With `allow_ui` false the Security query itself
+/// refuses to show a dialog, so this never prompts; with it true macOS may
+/// ask, and the caller must hold an explicit user action for that.
 /// The caller must deserialize only needed fields and never log these bytes.
 /// Security may wait for a user dialog; use a leased dedicated OS thread.
-pub fn read(service: &str, interactive: bool) -> Result<Option<SecretBytes>, &'static str> {
+pub fn read(service: &str, allow_ui: bool) -> Result<Option<SecretBytes>, &'static str> {
     if !valid_service(service) {
         return Err("unavailable");
     }
-    if !interactive {
-        return Err("keychain_needs_permission");
-    }
     #[cfg(any(test, feature = "test-credential-store"))]
     {
+        let _ = allow_ui;
         Err("keychain_needs_permission")
     }
     #[cfg(all(target_os = "macos", not(any(test, feature = "test-credential-store"))))]
     {
-        native::read(service).map(|bytes| bytes.map(SecretBytes::new))
+        native::read(service, allow_ui).map(|bytes| bytes.map(SecretBytes::new))
     }
     #[cfg(all(
         not(target_os = "macos"),
         not(any(test, feature = "test-credential-store"))
     ))]
     {
+        let _ = allow_ui;
         Ok(None)
     }
 }

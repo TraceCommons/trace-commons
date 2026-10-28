@@ -37,7 +37,10 @@ pub(super) async fn collect(
 ) -> Result<Reading, ProbeFailure> {
     match login.provider {
         Provider::Codex => collect_codex(login, interactive, lease).await,
-        Provider::Claude => super::claude::collect(login, interactive, lease).await,
+        Provider::Claude => {
+            super::claude::collect(login, interactive, lease, &super::claude::Deps::for_build())
+                .await
+        }
     }
 }
 
