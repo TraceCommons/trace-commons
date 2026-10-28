@@ -211,6 +211,35 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_limits_pace", "Pace"),
     ("analytics_limits_on_pace", "On pace"),
     ("analytics_limits_runs_out", "Runs out in {time}"),
+    // Where NEAR AI credit went (product owner, 2026-10-28): what NEAR AI
+    // charged per trace, totalled by task, tool and project over the last
+    // `{n}` days. An unread charge is counted, never added.
+    ("analytics_credit_title", "Where NEAR AI credit went"),
+    ("analytics_credit_window", "Last {n} days"),
+    ("analytics_credit_spent", "Spent"),
+    ("analytics_credit_traces", "Traces"),
+    ("analytics_credit_task", "Task"),
+    ("analytics_credit_tool", "Tool"),
+    ("analytics_credit_project", "Project"),
+    ("analytics_credit_by_task", "By task"),
+    ("analytics_credit_by_tool", "By tool"),
+    ("analytics_credit_by_project", "By project"),
+    ("analytics_credit_other_project", "Other folders"),
+    ("analytics_credit_tool_claude_code", "Claude Code"),
+    ("analytics_credit_tool_codex", "Codex"),
+    (
+        "analytics_credit_unknown",
+        "{n} traces used NEAR AI but their charge couldn't be read. They're counted, not added.",
+    ),
+    (
+        "analytics_credit_none",
+        "No NEAR AI credit spent in the last {n} days.",
+    ),
+    (
+        "analytics_credit_unavailable",
+        "Where credit went shows once Private AI calls are recorded on this Mac.",
+    ),
+    ("analytics_credit_details", "See details"),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),
     ("analytics_subscriptions_weekly", "Weekly"),

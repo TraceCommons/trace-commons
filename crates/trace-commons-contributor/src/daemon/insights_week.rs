@@ -2424,6 +2424,88 @@ impl CounterPass {
         })
     }
 
+    /// The `insights_credit` answer (product owner, 2026-10-28): where NEAR
+    /// AI credit went over the `window_days` ending `now`, from the charge
+    /// each listed session's route tally kept. Totals by task (the person's
+    /// label, else the inferred task), by tool and by folder label. Only
+    /// sessions with a NEAR AI charge count. A session whose charge is not
+    /// fully known adds to `unknown_sessions` and never to `usd_micros`, so
+    /// an unknown is never a zero. With the ledger feed off, no ledger
+    /// declared, or ledger money held (`LEDGER_MONEY_IN_INSIGHTS`), nothing
+    /// is read and `ledger` is false. No reference, digest or path crosses.
+    pub(crate) fn credit_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        folders: &[(String, String)],
+        ledger_feed: bool,
+        ledger_present: bool,
+        now: DateTime<Utc>,
+    ) -> serde_json::Value {
+        if !enabled {
+            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+        }
+        let (key, store) = match self.visible_store() {
+            Ok(found) => found,
+            Err(reason) => return unreadable_value(reason),
+        };
+        let ledger = ledger_feed && ledger_present && LEDGER_MONEY_IN_INSIGHTS;
+        let since = now - chrono::Duration::days(CREDIT_WINDOW_DAYS);
+        let mut rollup = CreditRollup::default();
+        if let (Some(key), Some(store), true) = (&key, &store, ledger) {
+            let never = never_digests(key, never_project_keys);
+            let labels = self.readable_labels(&store.key_fingerprint);
+            let folder_labels = folder_digests(Some(key), folders);
+            for (session, row) in store.rows.iter().filter(|(_, row)| is_listed(row, &never)) {
+                if !row.listed_at().is_some_and(|at| at >= since && at <= now) {
+                    continue;
+                }
+                let Some(charge) = row
+                    .harness_session
+                    .as_ref()
+                    .and_then(|digest| store.routing.get(digest))
+                    .and_then(|tally| tally.charge.as_ref())
+                else {
+                    continue;
+                };
+                let task = labels
+                    .get(session)
+                    .and_then(|label| label.task)
+                    .map(|task| serde_json::to_value(task).ok())
+                    .unwrap_or_else(|| {
+                        row.inferred_task()
+                            .and_then(|task| serde_json::to_value(task).ok())
+                    });
+                let source = match &row.body {
+                    RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+                    RowBody::Codex { .. } => AnalyticsSource::Codex,
+                    RowBody::Unknown { source, .. } => *source,
+                };
+                rollup.add(
+                    task.as_ref().and_then(|value| value.as_str()),
+                    serde_json::to_value(source)
+                        .ok()
+                        .as_ref()
+                        .and_then(|value| value.as_str()),
+                    folder_labels.get(&row.project).copied(),
+                    charge.known(),
+                );
+            }
+        }
+        serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "ledger": ledger,
+            "updated_at": self.updated_at(),
+            "window_days": CREDIT_WINDOW_DAYS,
+            "total": rollup.total.value(None),
+            "by_task": CreditRollup::values(&rollup.by_task),
+            "by_tool": CreditRollup::values(&rollup.by_tool),
+            "by_folder": CreditRollup::values(&rollup.by_folder),
+        })
+    }
+
     /// When a pass last finished, RFC 3339.
     fn updated_at(&self) -> Option<String> {
         self.last_pass_at
@@ -3645,6 +3727,121 @@ fn session_row_value(
         // whole-file analysis refuses its file, so a shell does not offer it.
         "analyzable": row.not_analyzable.is_none(),
     })
+}
+
+/// How far back `insights_credit` reads, in days.
+pub(crate) const CREDIT_WINDOW_DAYS: i64 = 30;
+
+/// NEAR AI credit over a set of sessions: the known charge, the sessions
+/// with a charge, and those whose charge is not fully known.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CreditFigure {
+    usd_micros: u64,
+    sessions: u64,
+    unknown_sessions: u64,
+}
+
+impl CreditFigure {
+    fn add(&mut self, known: Option<u64>) {
+        self.sessions += 1;
+        match known {
+            Some(micros) => self.usd_micros = self.usd_micros.saturating_add(micros),
+            None => self.unknown_sessions += 1,
+        }
+    }
+
+    fn value(&self, key: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "key": key,
+            "usd_micros": self.usd_micros,
+            "sessions": self.sessions,
+            "unknown_sessions": self.unknown_sessions,
+        })
+    }
+}
+
+/// `insights_credit`'s totals; a missing task, tool or folder is the `None`
+/// key, answered as `null`.
+#[derive(Debug, Default)]
+struct CreditRollup {
+    total: CreditFigure,
+    by_task: BTreeMap<Option<String>, CreditFigure>,
+    by_tool: BTreeMap<Option<String>, CreditFigure>,
+    by_folder: BTreeMap<Option<String>, CreditFigure>,
+}
+
+impl CreditRollup {
+    fn add(
+        &mut self,
+        task: Option<&str>,
+        tool: Option<&str>,
+        folder: Option<&str>,
+        known: Option<u64>,
+    ) {
+        self.total.add(known);
+        self.by_task
+            .entry(task.map(str::to_owned))
+            .or_default()
+            .add(known);
+        self.by_tool
+            .entry(tool.map(str::to_owned))
+            .or_default()
+            .add(known);
+        self.by_folder
+            .entry(folder.map(str::to_owned))
+            .or_default()
+            .add(known);
+    }
+
+    /// Largest known charge first, then most sessions, then by key.
+    fn values(groups: &BTreeMap<Option<String>, CreditFigure>) -> Vec<serde_json::Value> {
+        let mut sorted: Vec<_> = groups.iter().collect();
+        sorted.sort_by(|(a_key, a), (b_key, b)| {
+            b.usd_micros
+                .cmp(&a.usd_micros)
+                .then(b.sessions.cmp(&a.sessions))
+                .then(a_key.cmp(b_key))
+        });
+        sorted
+            .into_iter()
+            .map(|(key, figure)| figure.value(key.as_deref()))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod credit_rollup_tests {
+    use super::CreditRollup;
+
+    #[test]
+    fn an_unknown_charge_counts_the_session_and_adds_no_money() {
+        let mut rollup = CreditRollup::default();
+        rollup.add(
+            Some("refactor"),
+            Some("codex"),
+            Some("api"),
+            Some(2_000_000),
+        );
+        rollup.add(Some("refactor"), Some("codex"), None, None);
+        rollup.add(
+            Some("docs"),
+            Some("claude_code"),
+            Some("api"),
+            Some(500_000),
+        );
+        assert_eq!(rollup.total.usd_micros, 2_500_000);
+        assert_eq!(rollup.total.sessions, 3);
+        assert_eq!(rollup.total.unknown_sessions, 1);
+        let tasks = CreditRollup::values(&rollup.by_task);
+        assert_eq!(tasks[0]["key"], "refactor");
+        assert_eq!(tasks[0]["usd_micros"], 2_000_000);
+        assert_eq!(tasks[0]["unknown_sessions"], 1);
+        assert_eq!(tasks[1]["key"], "docs");
+        let folders = CreditRollup::values(&rollup.by_folder);
+        assert_eq!(folders[0]["key"], "api");
+        assert_eq!(folders[0]["usd_micros"], 2_500_000);
+        assert!(folders[1]["key"].is_null());
+    }
 }
 
 /// What the answer joins to one engine row, by its `t{seq}` reference.

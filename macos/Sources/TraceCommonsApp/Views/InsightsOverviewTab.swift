@@ -35,6 +35,10 @@ struct InsightsOverviewTab: View {
     /// NEAR AI credit used and left, account-wide (product owner,
     /// 2026-10-28); `nil` hides it.
     var credit: AnyView?
+    /// Where NEAR AI credit went (`insights_credit`); `nil` hides it.
+    var creditModel: InsightsCreditModel?
+    /// "See details": the Details tab.
+    var showDetails: () -> Void = {}
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -61,6 +65,7 @@ struct InsightsOverviewTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let credit { credit }
+                if let creditModel { InsightsCreditCard(model: creditModel, copy: copy, showDetails: showDetails) }
                 if let subscriptions, subscriptions.isVisible {
                     InsightsLimitsTable(model: subscriptions, copy: copy)
                 }

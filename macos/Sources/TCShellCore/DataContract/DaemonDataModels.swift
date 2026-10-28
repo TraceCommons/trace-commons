@@ -2379,6 +2379,53 @@ extension DaemonData {
         public let session: CoreJSON?
     }
 
+    /// `insights_credit`: what NEAR AI charged, totalled by task, tool and
+    /// project over the last `windowDays` (`daemon/insights_credit.rs`).
+    /// `ledger` false means nothing could be read, never a zero. A group's
+    /// `unknownTraces` are counted in `traces` and added to no money.
+    public struct InsightsCredit: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let readable: Bool?
+        public let reason: String?
+        public let ledger: Bool?
+        public let windowDays: Int?
+        public let total: CreditGroup?
+        public let byTask: [CreditGroup]?
+        public let byTool: [CreditGroup]?
+        public let byFolder: [CreditGroup]?
+
+        public struct CreditGroup: Codable, Equatable, Sendable {
+            /// The task or tool's wire word, or the folder's label; `nil`
+            /// for none.
+            public let key: String?
+            public let usdMicros: UInt64
+            public let traces: Int
+            public let unknownTraces: Int
+
+            public init(key: String?, usdMicros: UInt64, traces: Int, unknownTraces: Int) {
+                self.key = key
+                self.usdMicros = usdMicros
+                self.traces = traces
+                self.unknownTraces = unknownTraces
+            }
+
+            public enum CodingKeys: String, CodingKey {
+                case key
+                case usdMicros = "usd_micros"
+                case traces = "sessions"
+                case unknownTraces = "unknown_sessions"
+            }
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, readable, reason, ledger, total
+            case windowDays = "window_days"
+            case byTask = "by_task"
+            case byTool = "by_tool"
+            case byFolder = "by_folder"
+        }
+    }
+
     /// `insights_model_answers`: the Models card's six answers over the
     /// daemon's counter pass (feed T), gated as `insights_week` is. Use it
     /// only when `showsCounterPass`; otherwise no card is drawn, never an

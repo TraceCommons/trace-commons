@@ -273,7 +273,7 @@ struct MonitorWindowView: View {
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
                                  inspector: insightsInspector)
-                    .credit(AnyView(InferenceBalanceSection()))
+                    .credit(AnyView(InferenceBalanceSection()), client: home.client)
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).

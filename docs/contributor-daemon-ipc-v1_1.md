@@ -614,6 +614,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
 | `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
+| `insights_credit` | none | `enabled`, `feed`, and while enabled `readable`, then `ledger`, `updated_at`, `window_days`, `total`, `by_task[]`, `by_tool[]`, `by_folder[]` (each `{key, usd_micros, sessions, unknown_sessions}`) | additive; read-only, no network; gated on `insights_counter_pass`; see "`insights_credit`" below |
 | `subscription_usage` | `refresh` (optional bool), `interactive` (optional bool; needs refresh), `provider` (optional `codex`/`claude`), `login` (optional local login ID; required for Claude Refresh) | versioned provider/login snapshots with current windows and banked reset inventory | display only; off answers without reading credentials. Explicit Refresh schedules bounded selected-login work and returns immediately; background ticks never acquire credentials. Each provider's `enabled` follows its setting: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`, both on by default. See “Subscription usage” below. |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -5308,6 +5309,20 @@ arguments and a path, never the values). They cross only on this socket,
 as the in-process `analyze` answer returns them to the app. Refused in a
 dry-run daemon: a save writes the person's real Insights store, outside the
 daemon's state directory, and can make its digest key.
+
+### `insights_credit`
+
+Where NEAR AI credit went over the last `window_days` (30), from the charge
+each listed session's route tally kept (the same tallies
+`insights_model_answers` joins for `near_ai_charge`). Sessions with a NEAR AI
+charge are totalled by task (the person's label, else the inferred task's wire
+word), by tool (`claude_code`, `codex`) and by folder label (`null` when the
+folder has none). `usd_micros` adds only fully known charges; a session whose
+charge is not fully known counts in `sessions` and `unknown_sessions` and adds
+nothing. Groups are ordered by `usd_micros`, then `sessions`. `ledger` is false,
+and every figure zero, while the ledger feed is off, no ledger is declared, or
+ledger money is held (`LEDGER_MONEY_IN_INSIGHTS`): a shell draws that as
+unavailable, never as zero spend. No session reference, digest or path crosses.
 
 ### `insights_model_answers`
 

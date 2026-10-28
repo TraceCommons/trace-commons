@@ -92,6 +92,7 @@ enum SampleDaemonData {
             return activityMissionsCatalogue
         // Insights feed T: hand-written, see `modelAnswers(_:)`.
         case "insights_model_answers": return modelAnswers(set)
+        case "insights_credit": return credit(set)
         default: return nil
         }
     }
@@ -318,6 +319,20 @@ enum SampleDaemonData {
         #"{"_sample":"hand-written","catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
 
     // MARK: - Insights feed T: hand-written, marked per reply
+
+    /// `insights_credit` in the shape the daemon serves
+    /// (`daemon/insights_credit.rs`), written by hand: a temp store has no
+    /// NEAR AI charges. SAMPLE figures, never a pilot observation.
+    static func credit(_ set: Sample) -> String {
+        switch set {
+        case .normalDay, .busyQueue:
+            return #"{"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":true,"ledger":true,"window_days":30,"total":{"key":null,"usd_micros":18420000,"sessions":23,"unknown_sessions":2},"by_task":[{"key":"refactor","usd_micros":8100000,"sessions":7,"unknown_sessions":1},{"key":"bug_fix","usd_micros":6020000,"sessions":9,"unknown_sessions":0},{"key":"tests","usd_micros":3100000,"sessions":5,"unknown_sessions":1},{"key":"docs","usd_micros":1200000,"sessions":2,"unknown_sessions":0}],"by_tool":[{"key":"claude_code","usd_micros":11300000,"sessions":13,"unknown_sessions":1},{"key":"codex","usd_micros":7120000,"sessions":10,"unknown_sessions":1}],"by_folder":[{"key":"payments-api","usd_micros":10400000,"sessions":12,"unknown_sessions":1},{"key":"dotfiles","usd_micros":5020000,"sessions":7,"unknown_sessions":0},{"key":null,"usd_micros":3000000,"sessions":4,"unknown_sessions":1}]}"#
+        case .unknownCounts:
+            return #"{"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":false,"reason":"store_unreadable"}"#
+        default:
+            return #"{"_sample":"hand-written","enabled":false,"feed":"counter_pass"}"#
+        }
+    }
 
     /// `insights_model_answers` in the shape the daemon serves
     /// (`daemon/insights_model_answers.rs`; its recorded answer is

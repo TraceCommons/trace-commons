@@ -264,6 +264,10 @@ public protocol DaemonDataClient: Sendable {
     /// `unknown_method`. Either way, and on any failed read, no card is
     /// drawn.
     func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
+    /// `insights_credit`: where NEAR AI credit went over the last days, by
+    /// task, tool and project. An older daemon refuses it as
+    /// `unknown_method`; then, and on any failed read, nothing is drawn.
+    func insightsCredit() async throws -> DaemonData.InsightsCredit
 
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.

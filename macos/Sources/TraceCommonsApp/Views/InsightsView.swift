@@ -27,12 +27,18 @@ struct InsightsView: View {
     /// The NEAR AI credit card at the top of Overview (product owner,
     /// 2026-10-28): drawn by the caller, which has the app's model.
     private var credit: AnyView?
+    /// The daemon client `insights_credit` is read through; `nil` hides
+    /// where credit went.
+    private var creditClient: (any DaemonDataClient)?
+    @State private var creditModel = InsightsCreditModel()
     @State private var source = "codex"
 
-    /// Puts `view` at the top of Overview, as NEAR AI credit used and left.
-    func credit(_ view: AnyView) -> InsightsView {
+    /// Puts `view` at the top of Overview, as NEAR AI credit used and left,
+    /// and reads where it went through `client`.
+    func credit(_ view: AnyView, client: (any DaemonDataClient)?) -> InsightsView {
         var copy = self
         copy.credit = view
+        copy.creditClient = client
         return copy
     }
 
@@ -188,6 +194,8 @@ struct InsightsView: View {
                     models: model.modelAnswers,
                     subscriptions: subscriptionModel,
                     credit: credit,
+                    creditModel: creditClient == nil ? nil : creditModel,
+                    showDetails: { tab = .patterns },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -199,9 +207,18 @@ struct InsightsView: View {
                 // failed read hides the card only until the next.
                 .onAppear { model.refreshModelAnswers() }
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
+                .task { await creditModel.load(creditClient) }
             case .patterns:
-                InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
-                                    selectWeek: selectWeek)
+                // Details, in place of Patterns (product owner, 2026-10-28):
+                // where NEAR AI credit went. Without a daemon client (saved
+                // imports only) the Patterns cards stay.
+                if creditClient != nil {
+                    InsightsDetailsTab(model: creditModel, copy: model.copy)
+                        .task { await creditModel.load(creditClient) }
+                } else {
+                    InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
+                                        selectWeek: selectWeek)
+                }
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),

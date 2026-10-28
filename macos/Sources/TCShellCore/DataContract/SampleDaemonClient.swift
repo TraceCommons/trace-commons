@@ -492,6 +492,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
     }
 
+    public func insightsCredit() async throws -> DaemonData.InsightsCredit {
+        try serve("insights_credit", as: DaemonData.InsightsCredit.self)
+    }
+
     public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
         try serve("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
