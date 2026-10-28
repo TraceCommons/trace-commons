@@ -671,13 +671,9 @@ struct UsesScreen: View {
     private func list(options: [ConsentScope], required: ConsentScope?) -> some View {
         let optional = UsesScreenLayout.optionalScopes(options)
         return VStack(alignment: .leading, spacing: 0) {
-            if !optional.isEmpty {
-                Text(copy.uses.rewardOpportunities ?? "")
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, GlassTokens.Space.s3)
-            }
+            // No credit paragraph (owner, 2026-10-28): "Required to earn
+            // credit." under Train coding models says it, and Traces notes
+            // when it is off.
             if !optional.isEmpty {
                 HStack(spacing: GlassTokens.Space.s3) {
                     // One style and one width for both: neither is the
@@ -714,10 +710,7 @@ struct UsesScreen: View {
                                 .foregroundStyle(GlassTokens.Color.statusOnText.color)
                         }
                         .frame(minHeight: 32)
-                        Text(required.description)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        .help(required.description)
                     }
                     .padding(.leading, GlassTokens.Space.s5)
                 }
@@ -754,15 +747,11 @@ struct UsesScreen: View {
             .padding(.bottom, GlassTokens.Space.s2)
     }
 
-    /// Each permission names its use and shows the scope before choosing.
+    /// Each permission names its use; its scope is the row's hover tooltip.
     private func scopeRow(_ option: ConsentScope) -> some View {
         Toggle(isOn: scope(option.name)) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                Text(option.description)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 // The use that earns credit says so, in the required use's
                 // inline style, no louder.
                 if option.name == copy.uses.creditScope {
@@ -773,6 +762,9 @@ struct UsesScreen: View {
             }
         }
         .toggleStyle(GlassCheckboxStyle())
+        // The description is a plain hover tooltip (owner, 2026-10-28,
+        // replacing #1290's always-visible line to keep the box short).
+        .help(option.description)
         .padding(.vertical, GlassTokens.Space.s3)
     }
 

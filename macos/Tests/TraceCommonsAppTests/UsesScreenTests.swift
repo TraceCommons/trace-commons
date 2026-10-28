@@ -207,7 +207,8 @@ final class UsesScreenTests: XCTestCase {
         let source = try Self.source()
         XCTAssertFalse(source.contains("Toggle(sources:"), "a bulk choice obscures independent permissions")
         XCTAssertFalse(source.contains("ForEach(UsesScreenLayout.handleScopes(options))"))
-        XCTAssertTrue(source.contains("Text(copy.uses.rewardOpportunities"))
+        // Off the first run's Uses (owner, 2026-10-28); Settings keeps it.
+        XCTAssertFalse(source.contains("Text(copy.uses.rewardOpportunities"))
         XCTAssertEqual(try copy().uses.rewardOpportunities,
                        "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.")
         let profile = try String(contentsOf: URL(fileURLWithPath: #filePath)
@@ -464,13 +465,14 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(SharingDisclosureFlow.isNeeded(for: joined))
     }
 
-    /// Permission scope stays visible before a person makes the choice.
-    func test_scopeDescriptionsAreVisibleBeforeChoosing() throws {
+    /// Each use's scope is its row's plain hover tooltip (owner,
+    /// 2026-10-28, replacing #1290's always-visible description).
+    func test_scopeDescriptionsAreHoverTooltips() throws {
         let source = try Self.source()
-        XCTAssertTrue(source.contains("Text(required.description)"))
-        XCTAssertTrue(source.contains("Text(option.description)"))
-        XCTAssertFalse(source.contains("infoButton(title: option.title, text: option.description)"))
-        XCTAssertTrue(source.contains(".fixedSize(horizontal: false, vertical: true)"))
+        XCTAssertTrue(source.contains(".help(required.description)"))
+        XCTAssertTrue(source.contains(".help(option.description)"))
+        XCTAssertFalse(source.contains("Text(option.description)"))
+        XCTAssertFalse(source.contains("Text(required.description)"))
         XCTAssertTrue(source.contains("ScrollView {"), "choices remain reachable in the default-height window")
     }
 
