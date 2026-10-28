@@ -14,8 +14,6 @@ public struct GlassStatCard: View {
     /// (a gain in green, a loss in red); nil draws none.
     private let detail: String?
     private let detailInk: GlassRGBA?
-    /// An independent caption, always neutral even when the main detail has a tone.
-    private let supplementaryDetail: String?
     /// A symbol on the card's leading side, in the accent, with no
     /// container (owner, 2026-10-12; moved to the leading side and enlarged,
     /// owner, 2026-10-15); nil draws none.
@@ -46,7 +44,6 @@ public struct GlassStatCard: View {
 
     public init(
         _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
-        supplementaryDetail: String? = nil,
         systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false,
         iconPlacement: IconPlacement = .leading
     ) {
@@ -57,7 +54,6 @@ public struct GlassStatCard: View {
         self.value = value
         self.detail = detail
         self.detailInk = detailInk
-        self.supplementaryDetail = supplementaryDetail
         self.interactive = interactive
     }
 
@@ -114,13 +110,6 @@ public struct GlassStatCard: View {
                 Text(detail)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(detailInk?.color ?? GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, GlassTokens.Space.s1)
-            }
-            if let supplementaryDetail {
-                Text(supplementaryDetail)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, GlassTokens.Space.s1)
             }
