@@ -693,9 +693,11 @@ pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each trace yourself.";
 pub const AUTO_PATH_ASK_FIRST_DETAIL: &str = "Nothing is contributed until you approve it.";
 
 /// The short tag beside the floor scope (`consent_options`' `always_on`).
-/// One spelling, read by `consent_options` and the first-run Uses screen
-/// (`first_run_copy`'s `uses.required`).
-pub const SCOPE_TAG_REQUIRED: &str = "required to share";
+/// One spelling, read by `consent_options`, Settings and the first-run copy
+/// (`first_run_copy`'s `uses.required`). "always on" matches the first
+/// run's "Always on: ..." line (owner, 2026-10-28, replacing "required to
+/// share", which read as confusing).
+pub const SCOPE_TAG_REQUIRED: &str = "always on";
 
 /// Distinguish trace-scoring eligibility from other optional reward uses.
 /// Scope choice grants permission; acceptance and scoring still decide credit.

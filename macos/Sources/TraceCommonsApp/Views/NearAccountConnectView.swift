@@ -82,7 +82,7 @@ struct NearAccountConnectView: View {
             if closed { await cancel(); return }
             if action == "start", let browser = result.browserURL {
                 guard let url = URL(string: browser) else { await cancel(); return }
-                let accepted = await withCheckedContinuation { continuation in openURL(url) { continuation.resume(returning: $0) } }
+                let accepted = await openURL.opened(url)
                 if !accepted { await cancel(); return }
             }
             while !closed, self.flow?.wait == true {

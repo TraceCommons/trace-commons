@@ -1312,6 +1312,21 @@ mod tests {
         );
         assert!(parse_usage(&json!([]), Identity::default()).is_err());
     }
+    /// Moves `path`'s modified time a second past what it was, as a later
+    /// write would.
+    fn later(path: &std::path::Path) {
+        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(modified + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn file_profile_changes_and_signout_invalidate_capture_witness() {
         let dir = tempfile::tempdir().unwrap();
@@ -1333,6 +1348,11 @@ mod tests {
             br#"{"claudeAiOauth":{"accessToken":"two"}}"#,
         )
         .unwrap();
+        // A rotation lands after the clock has moved on; written microseconds
+        // apart, a same-length rewrite shares its timestamps on a coarse clock
+        // (Windows, about 15 ms) and nothing else tells it apart, since the
+        // revision reads attributes only (`file_revision`).
+        later(&credential_path(&spec));
         assert!(!unchanged(&spec, &original, &test_deps()).unwrap());
         let rotated = load(&spec, false, &test_deps()).ok().unwrap();
         assert_eq!(original.local_identity, rotated.local_identity);
@@ -1341,6 +1361,7 @@ mod tests {
             br#"{"oauthAccount":{"accountUuid":"b"}}"#,
         )
         .unwrap();
+        later(&account_path(&spec));
         assert!(!unchanged(&spec, &rotated, &test_deps()).unwrap());
         std::fs::write(account_path(&spec), br#"{}"#).unwrap();
         assert!(matches!(

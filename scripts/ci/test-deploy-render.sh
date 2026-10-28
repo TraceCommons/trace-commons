@@ -114,9 +114,10 @@ printf '%s\n' "curl $*" >>"$TRACE"
 for arg; do
   case "$arg" in
     */health)
-      # FAKE_HEALTH_REFUSALS: refuse that many connections first, as an
-      # ingest still applying migrations does after its restart.
-      if [ -n "${FAKE_HEALTH_REFUSALS:-}" ]; then
+      # FAKE_HEALTH_REFUSALS: the ingest (port 3907) refuses that many
+      # connections first, as one still applying migrations does after its
+      # restart. Other services answer at once.
+      if [ -n "${FAKE_HEALTH_REFUSALS:-}" ] && [[ "$arg" == *:3907/health ]]; then
         n="$(cat "$TRACE.refused" 2>/dev/null || echo 0)"
         if [ "$n" -lt "$FAKE_HEALTH_REFUSALS" ]; then
           echo $((n + 1)) >"$TRACE.refused"
@@ -190,6 +191,34 @@ elif grep -q 'near_ai_staging' "$scratch/wrong.trace.err" \
 else
   fail "pilot deploy.sh failed for some other reason on a staging /health"
   cat "$scratch/wrong.trace.err" >&2
+fi
+
+# A first install applies every migration, so the ingest may refuse
+# connections for a while after its start: deploy.sh asks again rather than
+# ending on the first refusal, and bounds each ask.
+rm -f "$scratch/slow.trace.refused"
+if run_deploy "$scratch/slow.trace" "$pilot_health" FAKE_HEALTH_REFUSALS=5 \
+  && grep -q 'DEPLOY OK' "$scratch/slow.trace.out"; then
+  pass "pilot deploy.sh waits for a slow ingest's /health"
+else
+  fail "pilot deploy.sh ended on an ingest that was still starting"
+  cat "$scratch/slow.trace.err" >&2
+fi
+if grep -q -- '--connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health' "$scratch/slow.trace"; then
+  pass "pilot deploy.sh bounds each /health ask"
+else
+  fail "pilot deploy.sh asks /health with no time limit"
+fi
+# One that never answers is refused and taken down, never left running.
+rm -f "$scratch/silent.trace.refused"
+if run_deploy "$scratch/silent.trace" "$pilot_health" FAKE_HEALTH_REFUSALS=1000; then
+  fail "pilot deploy.sh carried on with an ingest whose /health never answered"
+elif grep -q 'did not answer' "$scratch/silent.trace.err" \
+  && grep -qx 'sudo systemctl stop trace-commons-ingest.service' "$scratch/silent.trace"; then
+  pass "pilot deploy.sh refuses and stops an ingest whose /health never answers"
+else
+  fail "pilot deploy.sh failed for some other reason when /health never answered"
+  cat "$scratch/silent.trace.err" >&2
 fi
 
 staging_args=(TC_DB_MODE=local TC_DEPLOY_LABEL=STAGING TC_EXPECT_STAGING=1
@@ -340,6 +369,11 @@ rm -f "$scratch/pull-slow.trace.refused"
 if run_pull "$scratch/pull-slow.trace" "$staging_health" TC_EXPECT_STAGING=1 FAKE_HEALTH_REFUSALS=5; then
   if ! grep -qxF "$rollback" "$scratch/pull-slow.trace"; then
     pass "pull-and-install.sh with TC_EXPECT_STAGING=1 waits for a slow ingest's /health"
+    if grep -q -- '--connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health' "$scratch/pull-slow.trace"; then
+      pass "pull-and-install.sh bounds each /health ask"
+    else
+      fail "pull-and-install.sh asks /health with no time limit"
+    fi
   else
     fail "pull-and-install.sh rolled back an ingest that was still starting"
   fi

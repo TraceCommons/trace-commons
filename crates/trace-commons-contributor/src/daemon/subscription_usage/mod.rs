@@ -471,8 +471,11 @@ fn native_login(
     Some(login)
 }
 
-/// A credential-free invalidation revision. Atomic replacement, same-length
-/// rewrites and signout are all changes. Keychain contents are never queried.
+/// A credential-free invalidation revision: file attributes only, never
+/// the contents. Atomic replacement and signout are always changes; a
+/// same-length rewrite is one once the file system's clock has moved on
+/// (a rewrite within one tick of the last write, about 15 ms on Windows,
+/// has nothing to tell it apart by). Keychain contents are never queried.
 fn file_revision(path: &std::path::Path) -> String {
     match std::fs::metadata(path) {
         Ok(metadata) => {
@@ -489,7 +492,17 @@ fn file_revision(path: &std::path::Path) -> String {
                     metadata.ino()
                 )
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            {
+                format!(
+                    "{}:{:?}:{:?}:{}",
+                    metadata.len(),
+                    metadata.modified(),
+                    metadata.created(),
+                    windows_file_identity(path).unwrap_or_default()
+                )
+            }
+            #[cfg(not(any(unix, windows)))]
             {
                 format!(
                     "{}:{:?}:{:?}",
@@ -501,6 +514,35 @@ fn file_revision(path: &std::path::Path) -> String {
         }
         Err(error) => format!("{:?}", error.kind()),
     }
+}
+
+/// Windows has no inode, and NTFS "tunnels" a file's creation time onto a
+/// file renamed over it within seconds, so an atomic replacement with the
+/// same length and modified time looks unchanged by those attributes. The
+/// volume serial and file index tell the two files apart. The file is
+/// opened with no access rights (access mode 0), which reads attributes
+/// only, never contents, and shares read, write and delete so the tool
+/// that owns it is never blocked. `MetadataExt::file_index` is unstable,
+/// so the call is made directly, as `trace_commons_contributor_insights`
+/// does for its file identity.
+#[cfg(windows)]
+fn windows_file_identity(path: &std::path::Path) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let file = std::fs::OpenOptions::new().access_mode(0).open(path).ok()?;
+    // SAFETY: the structure is plain integers, so a zeroed value is valid,
+    // and the handle stays live for the duration of the call.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let read = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) };
+    if read == 0 {
+        return None;
+    }
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Some(format!("{}:{index}", information.dwVolumeSerialNumber))
 }
 
 fn native_metadata_revision(root: &std::path::Path) -> String {
