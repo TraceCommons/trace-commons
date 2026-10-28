@@ -181,6 +181,60 @@
   },
   "routing_available": true,
   "routing_unavailable": null,
+  "near_ai_credit": {
+    "basis": "near_ai_ledger",
+    "week": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-21T00:00:00+00:00",
+      "by_task": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": "no_edits"
+        }
+      ],
+      "by_tool": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": "codex"
+        }
+      ],
+      "by_folder": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": null
+        }
+      ]
+    },
+    "today": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00"
+    },
+    "last_31_days": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-08-15T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00"
+    }
+  },
   "overview": {
     "feed": "counter_pass",
     "generation": 0,

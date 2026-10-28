@@ -40,7 +40,7 @@ pub fn handle_model_answers(shared: &DaemonShared, req: &Request) -> Response {
         .unwrap_or(false);
     // Asked after the settings lock is let go. Only whether a ledger is
     // declared: the answer never reads the ledger itself.
-    let ledger_present = ledger_feed && shared.routing_ledger().is_some();
+    let ledger_present = ledger_feed && super::insights_week::any_ledger(shared);
     Response::ok(
         req.id,
         shared.insights_counter.model_answers_value(

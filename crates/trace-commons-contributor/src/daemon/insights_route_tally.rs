@@ -1,5 +1,12 @@
 //! The per-session route tally: where a feed T session's proxy calls went,
-//! as counts, folded from the proxy ledger this daemon already reads.
+//! as counts, folded from the proxy ledger this daemon already reads and
+//! from each managed route's ledger, each by its own cursor
+//! (`insights_week::FoldPlans`).
+//!
+//! - Product owner, 2026-10-28: Insights may show money. The charge below
+//!   is kept by the hour its calls started in, and `insights_week`'s
+//!   `near_ai_credit` sums it by window, task, tool and folder
+//!   (`insights_credit`).
 //!
 //! - Owner question Q3 (default taken): the tally is persisted in the counter
 //!   store, counts only, so the split outlives the ledger's 24-hour window.
@@ -123,22 +130,140 @@ pub(crate) struct NearAiCharge {
     /// after that. Never the requested model: that is not who served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_model: Option<String>,
+    /// The same calls by the clock hour they started in (unix seconds over
+    /// 3600, UTC), so a window (today, the last 31 days, a week) takes only
+    /// the calls made inside it (product owner, 2026-10-28: Insights shows
+    /// where NEAR AI credit went). Empty in a tally written before hours
+    /// were kept, and left out of the file then; such a charge is read as
+    /// one hour, the tally's last call's ([`NearAiCharge::hours`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_hour: BTreeMap<i64, HourCharge>,
+}
+
+/// One clock hour's share of a session's NEAR AI charge. Known only when
+/// every call in it carried a valid charge and the sum never overflowed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HourCharge {
+    /// Calls through the NEAR AI route started in this hour.
+    pub calls: u64,
+    /// The sum of the charged calls, in integer USD micros.
+    pub usd_micros: u64,
+    /// Calls with no valid charge.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub calls_without_charge: u64,
+    /// The sum overflowed `u64`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overflowed: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl HourCharge {
+    /// Add `other` into this one; an overflow makes the sum unknown.
+    pub(crate) fn absorb(&mut self, other: &HourCharge) {
+        self.calls = self.calls.saturating_add(other.calls);
+        self.calls_without_charge = self
+            .calls_without_charge
+            .saturating_add(other.calls_without_charge);
+        self.overflowed |= other.overflowed;
+        match self.usd_micros.checked_add(other.usd_micros) {
+            Some(sum) => self.usd_micros = sum,
+            None => self.overflowed = true,
+        }
+    }
+
+    /// The charge, or `None` when it is unknown: never zero for a call
+    /// that carried no charge.
+    #[must_use]
+    pub(crate) fn known(&self) -> Option<u64> {
+        (self.calls_without_charge == 0 && !self.overflowed).then_some(self.usd_micros)
+    }
+}
+
+/// The unix hour `at` falls in.
+#[must_use]
+pub(crate) fn unix_hour(at: DateTime<Utc>) -> i64 {
+    at.timestamp().div_euclid(3600)
 }
 
 impl NearAiCharge {
+    /// The charge by hour; a charge kept before hours were is one hour,
+    /// `last_call_at`'s, holding the whole of it.
+    #[must_use]
+    pub(crate) fn hours(&self, last_call_at: DateTime<Utc>) -> BTreeMap<i64, HourCharge> {
+        if !self.by_hour.is_empty() {
+            return self.by_hour.clone();
+        }
+        let calls = self.charged_calls.saturating_add(self.calls_without_charge);
+        if calls == 0 {
+            return BTreeMap::new();
+        }
+        BTreeMap::from([(
+            unix_hour(last_call_at),
+            HourCharge {
+                calls,
+                usd_micros: self.usd_micros,
+                calls_without_charge: self.calls_without_charge,
+                overflowed: self.overflowed,
+            },
+        )])
+    }
+
+    /// The calls started in `[from, to)`, summed; `None` when none was.
+    /// An hour is in the window when it starts inside it.
+    #[must_use]
+    pub(crate) fn within(
+        &self,
+        last_call_at: DateTime<Utc>,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Option<HourCharge> {
+        let (first, end) = (hour_at_or_after(from), hour_at_or_after(to));
+        let mut sum: Option<HourCharge> = None;
+        for (_, hour) in self.hours(last_call_at).range(first..end) {
+            sum.get_or_insert_with(HourCharge::default).absorb(hour);
+        }
+        sum
+    }
+
     /// The charge, or `None` when it is unknown.
     #[must_use]
     pub(crate) fn known(&self) -> Option<u64> {
         (self.calls_without_charge == 0 && !self.overflowed).then_some(self.usd_micros)
     }
 
-    fn add(&mut self, usd: Option<f64>, served: Option<String>) {
+    fn add(
+        &mut self,
+        usd: Option<f64>,
+        served: Option<String>,
+        at: DateTime<Utc>,
+        last_call_at: DateTime<Utc>,
+    ) {
         if self.charged_calls == 0 && self.calls_without_charge == 0 {
             self.served_model = served;
         } else if self.served_model != served {
             self.served_model = None;
         }
-        match usd.and_then(usd_micros) {
+        let micros = usd.and_then(usd_micros);
+        // A tally kept before hours were: its charge so far becomes one
+        // hour, so the hours keep summing to the whole.
+        if self.by_hour.is_empty()
+            && self.charged_calls.saturating_add(self.calls_without_charge) > 0
+        {
+            self.by_hour = self.hours(last_call_at);
+        }
+        let hour = self.by_hour.entry(unix_hour(at)).or_default();
+        hour.absorb(&HourCharge {
+            calls: 1,
+            usd_micros: micros.unwrap_or(0),
+            calls_without_charge: u64::from(micros.is_none()),
+            overflowed: false,
+        });
+        match micros {
             Some(micros) => {
                 self.charged_calls = self.charged_calls.saturating_add(1);
                 match self.usd_micros.checked_add(micros) {
@@ -148,6 +273,17 @@ impl NearAiCharge {
             }
             None => self.calls_without_charge = self.calls_without_charge.saturating_add(1),
         }
+    }
+}
+
+/// The first whole hour starting at or after `at`.
+fn hour_at_or_after(at: DateTime<Utc>) -> i64 {
+    let seconds = at.timestamp();
+    let hour = seconds.div_euclid(3600);
+    if seconds.rem_euclid(3600) == 0 && at.timestamp_subsec_nanos() == 0 {
+        hour
+    } else {
+        hour + 1
     }
 }
 
@@ -392,9 +528,22 @@ pub(crate) struct FoldSummary {
 ///   takes by id only, so it cannot count a row twice.
 #[must_use]
 pub(crate) fn fold_plan(window: &[RoutedExchange], cursor: FoldCursor) -> FoldPlan<'_> {
+    let rows: Vec<&RoutedExchange> = window.iter().collect();
+    fold_plan_refs(&rows, cursor)
+}
+
+/// [`fold_plan`] over rows held elsewhere, such as one managed route's
+/// ledger in the daemon's managed-history snapshot. Each managed ledger
+/// numbers its rows on its own, so each is planned with its own cursor.
+#[must_use]
+pub(crate) fn fold_plan_refs<'a>(
+    window: &[&'a RoutedExchange],
+    cursor: FoldCursor,
+) -> FoldPlan<'a> {
     let highest = window.iter().filter_map(|row| row.id).max();
     let mut rows: Vec<&RoutedExchange> = window
         .iter()
+        .copied()
         .filter(|row| {
             row.id.is_some_and(|id| {
                 cursor.through.is_none_or(|through| id > through)
@@ -464,10 +613,13 @@ pub(crate) fn fold_into(
             }
         }
         if ledger_money && through_near_ai(row.proof) {
-            tally
-                .charge
-                .get_or_insert_with(NearAiCharge::default)
-                .add(row.cost_usd, served_label(row));
+            let last_call_at = tally.last_call_at;
+            tally.charge.get_or_insert_with(NearAiCharge::default).add(
+                row.cost_usd,
+                served_label(row),
+                row.started_at,
+                last_call_at,
+            );
         }
         tally.last_call_at = tally.last_call_at.max(row.started_at);
         summary.folded += 1;
@@ -860,6 +1012,14 @@ mod tests {
                 calls_without_charge: 0,
                 overflowed: false,
                 served_model: Some("glm-4.6".to_string()),
+                by_hour: BTreeMap::from([(
+                    unix_hour(at(1)),
+                    HourCharge {
+                        calls: 1,
+                        usd_micros: 12_500,
+                        ..HourCharge::default()
+                    }
+                )]),
             })
         );
 
@@ -1196,5 +1356,64 @@ mod tests {
         // Past the cap the oldest goes, matched or not.
         prune(&mut routing, &matched, &BTreeSet::new(), cutoff, 1);
         assert_eq!(routing.keys().copied().collect::<Vec<_>>(), vec![digest(3)]);
+    }
+
+    /// Product owner, 2026-10-28: a window takes only the calls made in
+    /// it. Calls in two hours land in two hours; a call with no charge
+    /// makes its hour unknown and leaves the other known.
+    #[test]
+    fn a_charge_is_kept_by_the_hour_its_calls_started_in() {
+        let mut early = codex(1, Some(ProofStatus::Verified));
+        early.cost_usd = Some(0.25);
+        let mut late = codex(2, Some(ProofStatus::Verified));
+        late.started_at = at(90);
+        late.cost_usd = None;
+        let mut routing = BTreeMap::new();
+        fold(&mut routing, &mut FoldCursor::default(), &[early, late]);
+        let tally = only(&routing);
+        let charge = tally.charge.as_ref().unwrap();
+        assert_eq!(charge.known(), None, "one call had no charge");
+        let first = charge
+            .within(tally.last_call_at, at(0), at(60))
+            .expect("the first hour had a call");
+        assert_eq!((first.calls, first.known()), (1, Some(250_000)));
+        let second = charge.within(tally.last_call_at, at(60), at(120)).unwrap();
+        assert_eq!((second.calls, second.known()), (1, None));
+        let both = charge.within(tally.last_call_at, at(0), at(120)).unwrap();
+        assert_eq!((both.calls, both.known()), (2, None));
+        assert_eq!(charge.within(tally.last_call_at, at(120), at(180)), None);
+    }
+
+    /// A charge kept before hours were is read as one hour, its last
+    /// call's, and a later fold keeps the hours summing to the whole.
+    #[test]
+    fn a_charge_from_before_hours_is_its_last_calls_hour() {
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        fold(
+            &mut routing,
+            &mut cursor,
+            &[codex(1, Some(ProofStatus::Verified))],
+        );
+        let tally = routing.values_mut().next().unwrap();
+        tally.charge.as_mut().unwrap().by_hour.clear();
+        let legacy = tally.charge.clone().unwrap();
+        assert_eq!(
+            legacy
+                .within(tally.last_call_at, at(0), at(60))
+                .and_then(|hour| hour.known()),
+            Some(1_000_000)
+        );
+        let mut later = codex(2, Some(ProofStatus::Verified));
+        later.started_at = at(120);
+        fold(&mut routing, &mut cursor, &[later]);
+        let tally = only(&routing);
+        let charge = tally.charge.as_ref().unwrap();
+        assert_eq!(charge.by_hour.len(), 2);
+        let all = charge
+            .within(tally.last_call_at, at(-600), at(600))
+            .unwrap();
+        assert_eq!(all.known(), charge.known());
+        assert_eq!(all.calls, 2);
     }
 }

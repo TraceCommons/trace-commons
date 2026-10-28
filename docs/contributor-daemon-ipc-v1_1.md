@@ -608,7 +608,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
@@ -4681,10 +4681,11 @@ Any other schema reads as
 `store_unreadable` and the pass starts the store again.
 
 Downgrade: a row's `facts`, `facts_version`, `automation` and
-`automation_read`, an eviction mark's `automated`, and a route tally's
-`charge` are left out of the file while they hold their defaults (no facts,
-version 0, automation unknown and not looked for, no allowance, no NEAR AI
-call), so a row with none of them is written as a daemon before them wrote
+`automation_read`, an eviction mark's `automated`, a route tally's
+`charge` and its `by_hour`, and the store's `managed_folded` are left out of
+the file while they hold their defaults (no facts, version 0, automation
+unknown and not looked for, no allowance, no NEAR AI call, no managed route
+folded), so a row with none of them is written as a daemon before them wrote
 it. Every row this build reads sets `facts_version` and `automation_read`,
 though, and an older daemon refuses fields it does not know: a store this
 build has written reads as `store_unreadable` there, and that daemon starts
@@ -4717,6 +4718,16 @@ the old highest or have climbed past it. Only Claude Code and Codex calls are
 folded, the two tools the counter pass counts. Backend names are never read
 into it, and no session ID is stored.
 
+The managed routes' ledgers (`<config>/managed-routes/<uuid>/ledger.sqlite`,
+the Private AI sessions started from the app) are folded too, with or
+without a shared proxy, from the snapshot the daemon already keeps of them.
+Each route numbers its calls on its own, so each keeps its own cursor (the
+same id and start time), stored by the route's UUID in `managed_folded`; a
+call is taken once by its route and id. Those ledgers keep their calls, so
+the whole of each is folded, not 24 hours of it. A route that is gone loses
+its cursor; while the routes cannot be read, the cursors are kept as they
+are.
+
 The tally also keeps the session's **NEAR AI charge** (owner decision D5,
 settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
 charge is taken as the call is folded or not at all. For each call through
@@ -4734,13 +4745,18 @@ and it is what the Models answers attribute a charge to a model by. With
 `LEDGER_MONEY_IN_INSIGHTS` held (owner decision D5) no charge is taken. A call with no `cost_usd`, or
 one that is not a finite, non-negative amount, is counted in
 `calls_without_charge` and makes that session's charge unknown, never zero;
+the charge is also kept by the clock hour each call started in (`by_hour`,
+unix hours, UTC, each `{calls, usd_micros}` with `calls_without_charge` and
+`overflowed` written only when set), so a window takes only the calls made
+in it; a charge written before hours were is read as one hour, its last
+call's;
 so does an overflow. `outside` calls add no charge (the proxy prices those
 whether or not anyone was billed), and neither do calls with no proof label
 (their route is unknown). A tally with no NEAR AI call writes no `charge`,
 and a tally written before charges loads with none. The store holds no list
 price: list prices are applied to stored tokens when an answer is built.
-The charge is the store's one money figure, and only
-`insights_model_answers` reads it. Calls whose tokens are unknown are kept per bucket, so the answer
+The charge is the store's one money figure; `insights_model_answers` and
+`insights_week`'s `near_ai_credit` read it. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
 settled 2026-10-09) and `insights_counter_pass` are on. A session in a Never
@@ -4905,7 +4921,7 @@ sessions on disk. Otherwise:
   `category` is one of, first match wins, every label from the proxy's
   proof label and never a backend name: `unobserved` (no tally: older than
   the ledger's window before the feed was on, a tool that sent no session
-  ID, a managed launch, an older proxy or no proxy; never "outside"),
+  ID, an older proxy or no proxy; never "outside"),
   `unrecorded` (no call carries a proof label), `outside` (every labelled
   call `outside`; the only category that says the calls did not go through
   the route), `mixed` (labelled calls both outside and through the route),
@@ -4929,9 +4945,33 @@ sessions on disk. Otherwise:
   turned the `insights_ledger_feed` setting off; it is on by default,
   owner decision D3, settled 2026-10-09; checked
   first, and a tally folded while it was on is not shown) or `no_ledger`
-  (no proxy ledger is declared, so a stored tally may lack every call
-  since). When it is true, `routing_unavailable` is `null`. The answer reads
+  (no proxy ledger is declared and no managed route has a ledger, so a
+  stored tally may lack every call since). When it is true, `routing_unavailable` is `null`. The answer reads
   only the store, never the ledger.
+- `near_ai_credit` (additive, product owner 2026-10-28: Insights may show
+  money, overriding owner decision D5 for Insights) is where NEAR AI credit
+  went, from the route tallies' charges; `null` while
+  `routing_available` is false. `basis` is `near_ai_ledger`. `week` is the
+  week on screen, `today` today and `last_31_days` today and the 30 local
+  days before it (neither moves with the week on screen), each from local
+  midnight to local midnight. Each window is `{from, to, usd_micros,
+  sessions, calls, calls_without_charge}`: the calls through the NEAR AI
+  route started in it (by clock hour), their sum in integer USD micros, the
+  sessions they came from, and the calls with no charge. `usd_micros` is
+  `null` when any call in it had no charge (or the sum overflowed), never
+  zero; a window with no call is a true 0. `week` also carries `by_task[]`,
+  `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
+  calls_without_charge}`, grouped by the session's stored row: `key` is the
+  inferred task (`bug_fix`, `refactor`, `tests`, `docs`, `other`,
+  `no_edits`), the tool (`claude_code`, `codex`) or the folder's label as
+  `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
+  this view: a folder name is answered over this socket and shown on this
+  Mac only, never sent anywhere), and `null` when unknown (a session with
+  no row, no facts, or no folder the daemon knows, an Analyze snapshot
+  included). A group's `usd_micros` is `null` when any call in it had no
+  charge. Groups are ordered by known charge, largest first, then the
+  unknown ones; ties by key, `null` last. A daemon that predates it omits
+  it; a shell reads that as no credit figure, never as zero.
 - `started_at`, `routing`, `routing_available` and `routing_unavailable`
   are additive: a daemon that predates them omits all four. A shell reads
   an absent `routing_available` as false and draws no route, and an absent
@@ -5437,8 +5477,9 @@ ledger feed off, or no proxy ledger declared, every session is treated as
 unobserved and no stored route tally is read. No label or field name is a
 ranking word.
 
-`insights_week` keeps its contract: it carries no price, whatever facts the
-rows store.
+`insights_week` carries no list price, whatever facts the rows store; its
+one money figure is `near_ai_credit`, the NEAR AI ledger's own charge
+(product owner, 2026-10-28).
 
 ### `set_settings`
 

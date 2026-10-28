@@ -58,6 +58,7 @@ pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
 pub mod insights_analyze;
+pub(crate) mod insights_credit;
 pub mod insights_glance;
 pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;

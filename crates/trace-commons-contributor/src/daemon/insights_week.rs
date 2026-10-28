@@ -636,6 +636,13 @@ struct CounterStore {
     /// `insights_route_tally::fold_plan`).
     #[serde(default)]
     ledger_folded_started: Option<DateTime<Utc>>,
+    /// Where the folds have reached in each managed route's own ledger
+    /// (`<config>/managed-routes/<uuid>/ledger.sqlite`), by the route's
+    /// UUID: each numbers its rows on its own, so each has its own cursor,
+    /// and a call is taken once by its route and id. Absent in a store
+    /// written before managed routes were folded, and left out while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    managed_folded: BTreeMap<String, StoredCursor>,
     /// Sessions the caps evicted, by the same keyed session digest as
     /// `rows`, with the observation their row was made from. A candidate
     /// with no row whose last write is no later than the newest of these is
@@ -655,6 +662,38 @@ struct CounterStore {
     #[serde(default)]
     generation: u32,
 }
+
+/// A [`FoldCursor`] as the store keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    through: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started: Option<DateTime<Utc>>,
+}
+
+impl From<StoredCursor> for FoldCursor {
+    fn from(cursor: StoredCursor) -> Self {
+        FoldCursor {
+            through: cursor.through,
+            started: cursor.started,
+        }
+    }
+}
+
+impl From<FoldCursor> for StoredCursor {
+    fn from(cursor: FoldCursor) -> Self {
+        StoredCursor {
+            through: cursor.through,
+            started: cursor.started,
+        }
+    }
+}
+
+/// Each managed route's rows by its UUID, as
+/// `ManagedHistory::rows_by_home` hands them out.
+pub(crate) type ManagedRows<'a> = BTreeMap<String, Vec<&'a crate::routing::RoutedExchange>>;
 
 /// The observation an evicted session's row was made from. No path and no
 /// counters: only what tells an unchanged file from a changed one.
@@ -689,6 +728,7 @@ impl CounterStore {
             routing: BTreeMap::new(),
             ledger_folded_through: None,
             ledger_folded_started: None,
+            managed_folded: BTreeMap::new(),
             evicted: BTreeMap::new(),
             generation: new_generation(),
         }
@@ -856,6 +896,9 @@ struct QueuedJob {
 /// left it, and the time it was read.
 struct FoldJob {
     window: Vec<crate::routing::RoutedExchange>,
+    /// The managed routes' ledgers, as the daemon's snapshot holds them;
+    /// `Err` when they could not be read.
+    managed: Result<Option<Arc<crate::routing::managed_history::ManagedHistory>>, ()>,
     now: DateTime<Utc>,
 }
 
@@ -1885,6 +1928,16 @@ impl CounterPass {
             _ => Vec::new(),
         };
         let week_start = week.unwrap_or_else(|| local_week_start(&now, &tz));
+        let credit = match (&key, &store) {
+            (Some(key), Some(store))
+                if routing_unavailable.is_none()
+                    && LEDGER_MONEY_IN_INSIGHTS
+                    && store.key_fingerprint == key_fingerprint(key) =>
+            {
+                near_ai_credit_value(store, key, never_project_keys, folders, week_start, tz, now)
+            }
+            _ => serde_json::Value::Null,
+        };
         let this = week_rollup(Feed::CounterPass, &inputs, week_start, &tz);
         let last = week_rollup(
             Feed::CounterPass,
@@ -1981,6 +2034,7 @@ impl CounterPass {
             "rollup": rollup_value(&this, &joined, routing_unavailable.is_none()),
             "routing_available": routing_unavailable.is_none(),
             "routing_unavailable": routing_unavailable,
+            "near_ai_credit": credit,
             "overview": overview,
             "patterns": patterns,
             "history": history,
@@ -2569,6 +2623,7 @@ impl CounterPass {
     /// meanwhile keeps its tallies and cursor; were the pass to write its
     /// starting store back, the next fold would take the rows still in the
     /// window again.
+    #[cfg(test)]
     pub(crate) fn fold_ledger(
         &self,
         enabled: &dyn Fn() -> bool,
@@ -2576,11 +2631,26 @@ impl CounterPass {
         speakers: &mut dyn FnMut() -> Speakers,
         now: DateTime<Utc>,
     ) -> Result<FoldSummary, &'static str> {
+        self.fold_ledgers(enabled, ledger, None, speakers, now)
+    }
+
+    /// [`Self::fold_ledger`], and each managed route's ledger in `managed`
+    /// by its own cursor. `managed` is `None` when the managed routes could
+    /// not be read: their cursors are then kept as they are. A route no
+    /// longer in a read `managed` loses its cursor.
+    pub(crate) fn fold_ledgers(
+        &self,
+        enabled: &dyn Fn() -> bool,
+        ledger: &dyn crate::routing::RoutingLedger,
+        managed: Option<&ManagedRows<'_>>,
+        speakers: &mut dyn FnMut() -> Speakers,
+        now: DateTime<Utc>,
+    ) -> Result<FoldSummary, &'static str> {
         let cleared = self.cleared.load(Ordering::SeqCst);
         if !enabled() {
             return Ok(FoldSummary::default());
         }
-        let result = self.fold_inner(cleared, ledger, speakers, now);
+        let result = self.fold_inner(cleared, ledger, managed, speakers, now);
         let failure = result.as_ref().err().copied();
         if let Ok(mut last) = self.last_fold_failure.lock() {
             if *last != failure {
@@ -2598,6 +2668,7 @@ impl CounterPass {
         &self,
         cleared: u64,
         ledger: &dyn crate::routing::RoutingLedger,
+        managed: Option<&ManagedRows<'_>>,
         speakers: &mut dyn FnMut() -> Speakers,
         now: DateTime<Utc>,
     ) -> Result<FoldSummary, &'static str> {
@@ -2610,14 +2681,12 @@ impl CounterPass {
         // A first look, without the lock, to learn whether anything is new
         // and the tools need reading.
         let peek = self.load_cached()?;
-        let cursor = peek
-            .as_ref()
-            .map_or_else(FoldCursor::default, |store| store.fold_cursor());
-        let plan = fold_plan(&window, cursor);
-        if plan.rows.is_empty() && plan.next == cursor {
+        let empty = CounterStore::empty(KeyedDigest([0; 32]));
+        let plans = FoldPlans::new(&window, managed, peek.as_deref().unwrap_or(&empty));
+        if plans.is_idle() {
             return Ok(FoldSummary::default());
         }
-        let speakers = if plan.needs_speakers() {
+        let speakers = if plans.needs_speakers() {
             speakers()
         } else {
             Vec::new()
@@ -2638,26 +2707,38 @@ impl CounterPass {
             Some(_) => return Ok(FoldSummary::default()),
             None => CounterStore::empty(fingerprint),
         };
-        // Planned again under the lock, from the cursor as it now stands.
-        let plan = fold_plan(&window, store.fold_cursor());
-        if plan.rows.is_empty() && plan.next == store.fold_cursor() {
+        // Planned again under the lock, from the cursors as they now stand.
+        let plans = FoldPlans::new(&window, managed, &store);
+        if plans.is_idle() {
             return Ok(FoldSummary::default());
         }
-        let summary = fold_into(
-            &mut store.routing,
-            &key,
-            &plan,
-            &speakers,
-            LEDGER_MONEY_IN_INSIGHTS,
-        );
+        let mut summary = FoldSummary::default();
+        for plan in std::iter::once(&plans.shared).chain(plans.managed.values()) {
+            let folded = fold_into(
+                &mut store.routing,
+                &key,
+                plan,
+                &speakers,
+                LEDGER_MONEY_IN_INSIGHTS,
+            );
+            summary.folded += folded.folded;
+            summary.skipped += folded.skipped;
+        }
         // A Never folder leaves nothing: a session the last pass found in
         // one keeps no tally, charge or model label.
         self.never_sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .purge(&mut store.routing);
-        store.ledger_folded_through = plan.next.through;
-        store.ledger_folded_started = plan.next.started;
+        store.ledger_folded_through = plans.shared.next.through;
+        store.ledger_folded_started = plans.shared.next.started;
+        if managed.is_some() {
+            store.managed_folded = plans
+                .managed
+                .iter()
+                .map(|(home, plan)| (home.clone(), StoredCursor::from(plan.next)))
+                .collect();
+        }
         prune_routing(
             &mut store,
             &BTreeSet::new(),
@@ -2692,6 +2773,65 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
     match source {
         AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
         AnalyticsSource::Codex => SourceFormat::Codex,
+    }
+}
+
+/// One fold's plans: the shared ledger's, and each managed route's by its
+/// own cursor.
+struct FoldPlans<'a> {
+    shared: super::insights_route_tally::FoldPlan<'a>,
+    managed: BTreeMap<String, super::insights_route_tally::FoldPlan<'a>>,
+    /// Whether the shared cursor moves.
+    shared_moved: bool,
+    /// Whether any managed cursor moves or goes.
+    managed_moved: bool,
+}
+
+impl<'a> FoldPlans<'a> {
+    fn new(
+        window: &'a [crate::routing::RoutedExchange],
+        managed: Option<&ManagedRows<'a>>,
+        store: &CounterStore,
+    ) -> Self {
+        let shared = fold_plan(window, store.fold_cursor());
+        let mut moved = false;
+        let managed: BTreeMap<String, super::insights_route_tally::FoldPlan<'a>> = managed
+            .map(|homes| {
+                moved |= store
+                    .managed_folded
+                    .keys()
+                    .any(|home| !homes.contains_key(home));
+                homes
+                    .iter()
+                    .map(|(home, rows)| {
+                        let cursor: FoldCursor = store
+                            .managed_folded
+                            .get(home)
+                            .copied()
+                            .unwrap_or_default()
+                            .into();
+                        let plan = super::insights_route_tally::fold_plan_refs(rows, cursor);
+                        moved |= !plan.rows.is_empty() || plan.next != cursor;
+                        (home.clone(), plan)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        FoldPlans {
+            shared_moved: shared.next != store.fold_cursor(),
+            shared,
+            managed,
+            managed_moved: moved,
+        }
+    }
+
+    /// Nothing to fold and no cursor to move.
+    fn is_idle(&self) -> bool {
+        self.shared.rows.is_empty() && !self.shared_moved && !self.managed_moved
+    }
+
+    fn needs_speakers(&self) -> bool {
+        self.shared.needs_speakers() || self.managed.values().any(|plan| plan.needs_speakers())
     }
 }
 
@@ -3361,23 +3501,50 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 /// the watcher tick: this reads the switches and, when both are on, the
 /// ledger's 24-hour window (already in memory), hands both to the worker
 /// and returns. The worker asks the switches again before it folds.
+///
+/// The managed routes' ledgers (`<config>/managed-routes/<uuid>`, the
+/// Private AI sessions started from the app) are folded too, from the
+/// daemon's managed-history snapshot, each by its own cursor, with or
+/// without a shared `ledger`. They keep their rows, so the whole of each
+/// is planned, not a 24-hour window.
 pub(crate) fn fold_ledger_after_refresh(
     shared: &Arc<DaemonShared>,
-    ledger: &dyn crate::routing::RoutingLedger,
+    ledger: Option<&dyn crate::routing::RoutingLedger>,
 ) {
     if !fold_enabled(shared) {
         return;
     }
     let now = Utc::now();
-    let window = ledger
-        .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS));
-    submit_ledger_fold(shared, FoldJob { window, now });
+    let window = ledger.map_or_else(Vec::new, |ledger| {
+        ledger
+            .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS))
+    });
+    let managed = super::managed_history::snapshot(shared);
+    if ledger.is_none() && !matches!(managed, Ok(Some(_))) {
+        return;
+    }
+    submit_ledger_fold(
+        shared,
+        FoldJob {
+            window,
+            managed,
+            now,
+        },
+    );
     // A test waits for the fold, unless it asked to watch it run on its
     // own; the daemon never does.
     #[cfg(test)]
     if !shared.insights_counter.detached_for_test() {
         shared.insights_counter.await_idle_for_test();
     }
+}
+
+/// Whether any proxy ledger feeds the route tallies: the shared proxy's,
+/// or a managed route's (the Private AI sessions started from the app),
+/// which are folded with or without a shared one.
+pub(crate) fn any_ledger(shared: &DaemonShared) -> bool {
+    shared.routing_ledger().is_some()
+        || matches!(super::managed_history::snapshot(shared), Ok(Some(_)))
 }
 
 /// Both switches the fold needs, `insights_ledger_feed` and
@@ -3396,9 +3563,18 @@ fn run_fold_job(shared: &DaemonShared, job: FoldJob) {
     let mut speakers =
         || super::inference_map::speakers_from_rows(&super::harness::rows_now(shared));
     let ledger = crate::routing::FixedLedger::new(job.window);
-    let _ = shared
-        .insights_counter
-        .fold_ledger(&enabled, &ledger, &mut speakers, job.now);
+    let homes = match &job.managed {
+        Ok(Some(history)) => Some(history.rows_by_home()),
+        Ok(None) => Some(ManagedRows::new()),
+        Err(()) => None,
+    };
+    let _ = shared.insights_counter.fold_ledgers(
+        &enabled,
+        &ledger,
+        homes.as_ref(),
+        &mut speakers,
+        job.now,
+    );
 }
 
 /// Drop the oldest sessions, by last write and then by the order they were
@@ -3696,7 +3872,9 @@ struct RowJoin<'a> {
 /// - `session_ref` is `CounterRow::reference()`, never a native session ID;
 ///   `folder` is the Sessions list's resolved display label. Both are null
 ///   when no matching metadata is present.
-/// - Never a native ID, a digest, a path, a backend, a model, a price or a title.
+/// - Never a native ID, a digest, a path, a backend, a model, a price or a
+///   title. The NEAR AI charge crosses beside the rollup, in
+///   `near_ai_credit`, never on a row.
 fn rollup_value(
     rollup: &WeekRollup,
     joined: &BTreeMap<String, RowJoin<'_>>,
@@ -3802,7 +3980,8 @@ fn route_map(
 /// session reference: absent when its session sent no call through NEAR AI
 /// (or routing is unavailable, as in `route_map`). Empty while
 /// `ledger_money` (`LEDGER_MONEY_IN_INSIGHTS`, owner decision D5) is held,
-/// so no stored charge is read.
+/// so no stored charge is read. The week's `near_ai_credit`
+/// (`near_ai_credit_value`) reads the same charges by window.
 fn charge_map(
     rows: &[&CounterRow],
     routing: &BTreeMap<KeyedDigest, RouteTally>,
@@ -3818,6 +3997,105 @@ fn charge_map(
             Some((row.reference(), session_charge(tally)?))
         })
         .collect()
+}
+
+/// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
+/// (product owner, 2026-10-28), from every route tally's charge
+/// (`insights_credit`). `week` is the selected local week, by task, tool
+/// and folder; `today` and `last_31_days` (today and the 30 local days
+/// before it) are sums only, and do not move with the selected week.
+///
+/// A tally is grouped by the stored row of its session, matched by the
+/// keyed harness-session digest; a tally with no row (a session the pass
+/// has not read, or whose row aged out) is in the sums and in each unknown
+/// group. A row in a Never folder is not read for its labels; its tally is
+/// already gone (`NeverSessions`).
+fn near_ai_credit_value(
+    store: &CounterStore,
+    key: &DigestKey,
+    never_project_keys: &NeverFolders,
+    folders: &[(String, String)],
+    week_start: NaiveDate,
+    tz: FixedOffset,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
+    use super::insights_credit::{CreditSession, window_value};
+    let never = never_digests(key, never_project_keys);
+    let labels = folder_labels_by_digest(key, folders);
+    let by_session: BTreeMap<KeyedDigest, &CounterRow> = store
+        .rows
+        .values()
+        .filter(|row| !never.contains(&row.project))
+        .filter_map(|row| Some((row.harness_session?, row)))
+        .collect();
+    let tasks: BTreeMap<KeyedDigest, Option<&'static str>> = by_session
+        .iter()
+        .map(|(digest, row)| (*digest, row.inferred_task().map(inferred_task_key)))
+        .collect();
+    let sessions: Vec<CreditSession<'_>> = store
+        .routing
+        .iter()
+        .filter_map(|(digest, tally)| {
+            let charge = tally.charge.as_ref()?;
+            let row = by_session.get(digest);
+            Some(CreditSession {
+                charge,
+                last_call_at: tally.last_call_at,
+                task: tasks.get(digest).copied().flatten(),
+                tool: row.map(|row| row_tool(row)),
+                folder: row.and_then(|row| labels.get(&row.project).copied()),
+            })
+        })
+        .collect();
+    let midnight = |date: NaiveDate| {
+        date.and_hms_opt(0, 0, 0)
+            .and_then(|local| local.and_local_timezone(tz).single())
+            .map_or(now, |at| at.with_timezone(&Utc))
+    };
+    let today = now.with_timezone(&tz).date_naive();
+    let tomorrow = midnight(today + Duration::days(1));
+    serde_json::json!({
+        "basis": "near_ai_ledger",
+        "week": window_value(
+            &sessions,
+            midnight(week_start),
+            midnight(week_start + Duration::days(7)),
+            true,
+        ),
+        "today": window_value(&sessions, midnight(today), tomorrow, false),
+        "last_31_days": window_value(
+            &sessions,
+            midnight(today - Duration::days(30)),
+            tomorrow,
+            false,
+        ),
+    })
+}
+
+/// The wire word for an inferred task, as `inferred_task` spells it.
+fn inferred_task_key(task: InferredTask) -> &'static str {
+    match task {
+        InferredTask::BugFix => "bug_fix",
+        InferredTask::Refactor => "refactor",
+        InferredTask::Tests => "tests",
+        InferredTask::Docs => "docs",
+        InferredTask::Other => "other",
+        InferredTask::NoEdits => "no_edits",
+    }
+}
+
+/// The tool a stored row was read from, as the rollup's `source` spells
+/// it (`claude_code`, `codex`).
+fn row_tool(row: &CounterRow) -> &'static str {
+    let source = match &row.body {
+        RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+        RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::Unknown { source, .. } => *source,
+    };
+    match source {
+        AnalyticsSource::ClaudeCode => "claude_code",
+        AnalyticsSource::Codex => "codex",
+    }
 }
 
 /// `insights_week`.
@@ -3857,7 +4135,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     };
     // Asked after the settings lock is let go. Only whether a ledger is
     // declared: the answer never reads the ledger itself.
-    options.ledger_present = options.ledger_feed && shared.routing_ledger().is_some();
+    options.ledger_present = options.ledger_feed && any_ledger(shared);
     let never = if enabled {
         match never_project_keys(shared) {
             Some(keys) => keys,
@@ -5654,6 +5932,87 @@ mod tests {
         }
     }
 
+    /// Product owner, 2026-10-28: the week answers where NEAR AI credit
+    /// went, by task, tool and the local folder label, and today and the
+    /// last 31 days as sums; a call with no charge makes every figure it
+    /// is in unknown, never zero.
+    #[test]
+    fn the_week_answers_where_near_ai_credit_went() {
+        let f = Fixture::new();
+        let codex = f.write("codex.jsonl", &codex_bytes_for("SESSION-SECRET"));
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let mut charged = ledger_call(1, 30, "SESSION-SECRET");
+        charged.cost_usd = Some(0.25);
+        assert_eq!(fold_with(&f.pass, true, vec![charged]).unwrap().folded, 1);
+        let folders = [(PROJECT.to_string(), "app".to_string())];
+        let week = |options| {
+            f.pass.week_value_with_folders(
+                true,
+                Some(monday()),
+                utc(),
+                now(),
+                &NeverFolders::NONE,
+                (options, &folders),
+            )
+        };
+        let value = week(routed());
+        let credit = &value["near_ai_credit"];
+        assert_eq!(credit["basis"], "near_ai_ledger");
+        assert_eq!(credit["today"]["usd_micros"], 250_000);
+        assert_eq!(credit["last_31_days"]["usd_micros"], 250_000);
+        assert!(credit["today"].get("by_task").is_none());
+        let this = &credit["week"];
+        assert_eq!(this["usd_micros"], 250_000);
+        assert_eq!(this["sessions"], 1);
+        assert_eq!(this["by_tool"][0]["key"], "codex");
+        assert_eq!(this["by_folder"][0]["key"], "app");
+        assert_eq!(this["by_folder"][0]["usd_micros"], 250_000);
+        assert_eq!(this["by_task"].as_array().unwrap().len(), 1);
+
+        // Another call with no charge: unknown, never zero.
+        assert_eq!(
+            fold_with(&f.pass, true, vec![ledger_call(2, 20, "SESSION-SECRET")])
+                .unwrap()
+                .folded,
+            1
+        );
+        let value = week(routed());
+        let this = &value["near_ai_credit"]["week"];
+        assert_eq!(this["usd_micros"], serde_json::Value::Null);
+        assert_eq!(this["calls_without_charge"], 1);
+        assert_eq!(this["by_folder"][0]["usd_micros"], serde_json::Value::Null);
+        assert_eq!(
+            value["near_ai_credit"]["today"]["usd_micros"],
+            serde_json::Value::Null
+        );
+
+        // The week before has none of it; a true zero.
+        let before = f.pass.week_value_with_folders(
+            true,
+            Some(monday() - Duration::days(7)),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            (routed(), &folders),
+        );
+        assert_eq!(before["near_ai_credit"]["week"]["usd_micros"], 0);
+        assert_eq!(before["near_ai_credit"]["week"]["sessions"], 0);
+        // Today does not move with the week on screen.
+        assert_eq!(
+            before["near_ai_credit"]["today"]["calls"],
+            value["near_ai_credit"]["today"]["calls"]
+        );
+
+        // No money where routing is not shown.
+        for options in [WeekOptions::default(), {
+            let mut no_ledger = routed();
+            no_ledger.ledger_present = false;
+            no_ledger
+        }] {
+            assert_eq!(week(options)["near_ai_credit"], serde_json::Value::Null);
+        }
+    }
+
     /// A week row carries its Sessions row's short name; the Sessions
     /// methods take that name tagged with the store it was answered from.
     #[test]
@@ -5877,12 +6236,11 @@ mod tests {
         let mut outside = ledger_call(2, 20, "PRIVATE-CODEX-ID");
         outside.proof = Some(crate::routing::ProofStatus::Outside);
         outside.output_tokens = None;
-        fold_with(
-            &f.pass,
-            true,
-            vec![ledger_call(1, 30, "PRIVATE-CODEX-ID"), outside],
-        )
-        .unwrap();
+        // A charged call through NEAR AI, so `near_ai_credit` has a known
+        // figure; the outside call adds no charge.
+        let mut charged = ledger_call(1, 30, "PRIVATE-CODEX-ID");
+        charged.cost_usd = Some(0.0125);
+        fold_with(&f.pass, true, vec![charged, outside]).unwrap();
         let value = f.week_routed();
         let mut categories: Vec<String> = sessions_of(&value)
             .iter()
@@ -5893,6 +6251,9 @@ mod tests {
         // The shells decode this answer from the committed fixture, so the
         // fixture is this answer, rows in order: a change to the wire fails
         // here first.
+        println!("BEGIN insights_week");
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        println!("END insights_week");
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/insights-analytics/insights_week_routed.json"
         ))
@@ -5902,9 +6263,6 @@ mod tests {
             "re-record tests/fixtures/insights-analytics/insights_week_routed.json \
              from this test's --nocapture output"
         );
-        println!("BEGIN insights_week");
-        println!("{}", serde_json::to_string_pretty(&value).unwrap());
-        println!("END insights_week");
     }
 
     /// `started_at` is the transcript's first recorded event (owner question
@@ -6679,6 +7037,64 @@ mod tests {
         call.cost_usd = Some(0.25);
         call.served_model = Some("PRIVATE-SERVED-MODEL".to_string());
         call
+    }
+
+    /// Kristi, 2026-10-28: Private AI sessions started from the app go
+    /// through managed routes, whose ledgers sit apart from the shared
+    /// proxy's. Each is folded by its own cursor, so two routes' calls with
+    /// the same id both count, a second fold takes neither again, and a
+    /// call older than the shared ledger's 24-hour window still counts.
+    #[test]
+    fn managed_route_ledgers_fold_each_call_once_by_route_and_id() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let mut old = charged_call(1, 60 * 48, "SESSION-SECRET");
+        old.cost_usd = Some(0.5);
+        let other = charged_call(1, 30, "SESSION-SECRET");
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), vec![&old]);
+        homes.insert("route-b".to_string(), vec![&other]);
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let fold = |homes: &ManagedRows<'_>| {
+            f.pass
+                .fold_ledgers(&|| true, &none, Some(homes), &mut Vec::new, now())
+                .unwrap()
+        };
+        assert_eq!(fold(&homes).folded, 2);
+        let charge = |pass: &CounterPass| {
+            let all = tallies(pass);
+            assert_eq!(all.len(), 1);
+            all.values().next().unwrap().charge.clone().unwrap()
+        };
+        assert_eq!(charge(&f.pass).known(), Some(750_000));
+        assert_eq!(fold(&homes).folded, 0, "each call once");
+        assert_eq!(charge(&f.pass).charged_calls, 2);
+
+        // A new call on one route is the only one taken.
+        let next = charged_call(2, 10, "SESSION-SECRET");
+        homes.get_mut("route-b").unwrap().push(&next);
+        assert_eq!(fold(&homes).folded, 1);
+        assert_eq!(charge(&f.pass).known(), Some(1_000_000));
+
+        // A route that is gone loses its cursor; unreadable routes keep
+        // theirs.
+        homes.remove("route-a");
+        fold(&homes);
+        let cursors = |pass: &CounterPass| {
+            pass.load_cached()
+                .unwrap()
+                .unwrap()
+                .managed_folded
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cursors(&f.pass), ["route-b"]);
+        f.pass
+            .fold_ledgers(&|| true, &none, None, &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(cursors(&f.pass), ["route-b"]);
+        assert!(!f.rows_text().contains("SESSION-SECRET"));
     }
 
     /// A session in a Never folder has no row (it is never read), so the
