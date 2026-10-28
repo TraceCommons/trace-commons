@@ -480,6 +480,7 @@ mod tests {
                 consent_scopes: Vec::new(),
                 credit_points_pending: 0.0,
                 credit_points_final: None,
+                credit_outcome_reason: None,
                 explanations: Vec::new(),
                 last_refreshed_at: None,
                 withdrawn_at: None,

@@ -1976,6 +1976,17 @@ pub async fn profile(
     Ok(())
 }
 
+/// The FINAL cell of the status and history tables: the final figure, with
+/// the server's reason label beside a figure decided without an award, and
+/// `-` while the trace is still pending.
+fn final_credit_cell(final_points: Option<f32>, reason: Option<&str>) -> String {
+    match (final_points, reason) {
+        (Some(points), Some(reason)) => format!("{points:.2} ({reason})"),
+        (Some(points), None) => format!("{points:.2}"),
+        (None, _) => "-".to_string(),
+    }
+}
+
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()
@@ -1996,9 +2007,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
                 u.status.clone(),
                 scopes_cell(&u.consent_scopes),
                 format!("{:.2}", u.credit_points_pending),
-                u.credit_points_final
-                    .map(|f| format!("{f:.2}"))
-                    .unwrap_or_else(|| "-".to_string()),
+                final_credit_cell(u.credit_points_final, u.credit_outcome_reason.as_deref()),
             ]
         })
         .collect();
@@ -2204,6 +2213,18 @@ pub async fn import_antigravity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decided trace with no award shows 0 and why; a pending one shows
+    /// no figure.
+    #[test]
+    fn the_final_cell_names_a_no_credit_reason() {
+        assert_eq!(
+            final_credit_cell(Some(0.0), Some("duplicate")),
+            "0.00 (duplicate)"
+        );
+        assert_eq!(final_credit_cell(Some(5.0), None), "5.00");
+        assert_eq!(final_credit_cell(None, None), "-");
+    }
 
     /// The three zero-import causes must each get their own sentence, and
     /// in particular a run whose matches were all empty must NOT be told
@@ -4673,10 +4694,10 @@ pub async fn daemon_history(
                     r["project_label"].as_str().unwrap_or("-").to_string(),
                     r["status"].as_str().unwrap_or("-").to_string(),
                     format!("{:.2}", r["credit_points_pending"].as_f64().unwrap_or(0.0)),
-                    r["credit_points_final"]
-                        .as_f64()
-                        .map(|f| format!("{f:.2}"))
-                        .unwrap_or_else(|| "-".to_string()),
+                    final_credit_cell(
+                        r["credit_points_final"].as_f64().map(|f| f as f32),
+                        r["credit_outcome_reason"].as_str(),
+                    ),
                 ]
             })
             .collect();
