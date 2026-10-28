@@ -49,6 +49,24 @@ public enum TCPrivateInference {
         return String(cString: raw)
     }
 
+    /// The menu-bar popover's one word for one `private_inference_state`
+    /// label, as the core's `menu_state` picks it: "On", "Off", "Stopping",
+    /// "Not working", or "Unknown" for an unreported or unfamiliar label.
+    /// The sentence stays `stateLine`. Nil only on a caught panic.
+    public static func menuWord(state: String) -> String? {
+        guard let raw = state.withCString({ tc_private_inference_menu_word($0) }) else {
+            return nil
+        }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The dot beside `menuWord`, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
+    /// value. An unknown state and a caught panic both answer neutral.
+    public static func menuTone(state: String) -> Int32 {
+        state.withCString { tc_private_inference_menu_tone($0) }
+    }
+
     /// How firmly that sentence reads, as a raw
     /// `TC_PRIVATE_INFERENCE_TONE_*` value.
     ///
