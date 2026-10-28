@@ -452,7 +452,8 @@ pub struct UsesCopy {
     /// Two buttons of equal weight above the optional data uses, which
     /// start unticked (R7): `allow_all` ticks every optional use, the
     /// public handle excepted; `only_required` unticks them, leaving the
-    /// required use. Owner, 2026-10-27. DRAFT, NEEDS APPROVAL.
+    /// required use. Owner, 2026-10-27; approved as written in Zaki's
+    /// review of #1690 (2026-10-28).
     pub allow_all: &'static str,
     pub only_required: &'static str,
     /// The optional use that earns credit, shown first among them, with

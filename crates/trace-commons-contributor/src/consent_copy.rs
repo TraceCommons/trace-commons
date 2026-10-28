@@ -709,7 +709,7 @@ pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces,
 pub const DATA_USE_CREDIT_SCOPE: &str = "model_training";
 
 /// The line under [`DATA_USE_CREDIT_SCOPE`]'s description. Owner,
-/// 2026-10-27 (dictated), pending approval.
+/// 2026-10-27; approved as written in Zaki's review of #1690 (2026-10-28).
 pub const DATA_USE_CREDIT_REQUIRED: &str = "Required to earn credit.";
 
 /// The tag beside a scope that permits a use of the traces
