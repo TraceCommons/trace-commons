@@ -149,6 +149,23 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source.contains(".onAppear { runner.state.scopes"))
     }
 
+    /// The required use sits in a collapsed Always on section under the
+    /// choices, so every box shown is a real choice (owner, 2026-10-28).
+    func test_theRequiredUseIsInACollapsedAlwaysOnSection() throws {
+        let uses = try copy().uses
+        let required = try XCTUnwrap(UsesScreenLayout.requiredScope(options))
+        XCTAssertEqual(
+            UsesScreenLayout.alwaysOnTitle(required, uses: uses),
+            "Always on: \(required.title) for shared traces")
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("@State private var requiredOpen = false"))
+        XCTAssertTrue(source.contains(
+            "GlassExpander(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses), isOpen: $requiredOpen)"))
+        let expander = try XCTUnwrap(source.range(of: "GlassExpander(UsesScreenLayout.alwaysOnTitle"))
+        let rows = try XCTUnwrap(source.range(of: "ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses))"))
+        XCTAssertLessThan(rows.lowerBound, expander.lowerBound, "the section follows the choices")
+    }
+
     /// The Sharing radios show no choice until the person picks one, and
     /// neither is tagged or emphasised (owner, 2026-10-27).
     func test_noSharingChoiceIsPreselected() throws {

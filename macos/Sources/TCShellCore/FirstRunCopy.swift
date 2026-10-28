@@ -210,6 +210,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// The two equal buttons above the optional uses.
         public let allowAll: String
         public let onlyRequired: String
+        /// The collapsed section holding the required use; `{title}` is its
+        /// title.
+        public let alwaysOn: String
         /// The optional use that earns credit, shown first, with
         /// `creditRequired` under it.
         public let creditScope: String

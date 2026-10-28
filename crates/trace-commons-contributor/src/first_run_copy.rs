@@ -456,6 +456,9 @@ pub struct UsesCopy {
     /// review of #1690 (2026-10-28).
     pub allow_all: &'static str,
     pub only_required: &'static str,
+    /// The collapsed section under the optional uses that holds the
+    /// required use; `{title}` is that use's title. Owner, 2026-10-28.
+    pub always_on: &'static str,
     /// The optional use that earns credit, shown first among them, with
     /// `credit_required` under its description (owner, 2026-10-27).
     pub credit_scope: &'static str,
@@ -712,6 +715,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             automatic_after_sign_in: "Starts when setup finishes after sign-in.",
             allow_all: "Allow all",
             only_required: "Only required",
+            always_on: "Always on: {title} for shared traces",
             credit_scope: crate::consent_copy::DATA_USE_CREDIT_SCOPE,
             credit_required: crate::consent_copy::DATA_USE_CREDIT_REQUIRED,
         },
@@ -1049,6 +1053,20 @@ mod tests {
         assert!(
             !json.contains("Go back") && !json.contains("go back"),
             "{json}"
+        );
+    }
+
+    /// The required use sits in a collapsed section named for it (owner,
+    /// 2026-10-28).
+    #[test]
+    fn the_always_on_section_names_the_required_use() {
+        let copy = first_run_copy();
+        assert_eq!(copy.uses.always_on, "Always on: {title} for shared traces");
+        assert_eq!(
+            copy.uses
+                .always_on
+                .replace("{title}", "Debugging and evaluation"),
+            "Always on: Debugging and evaluation for shared traces"
         );
     }
 

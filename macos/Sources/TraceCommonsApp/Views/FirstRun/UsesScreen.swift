@@ -32,6 +32,11 @@ enum UsesScreenLayout {
         return optional.filter { $0.name == uses.creditScope } + optional.filter { $0.name != uses.creditScope }
     }
 
+    /// The Always on section's title, naming the required use.
+    static func alwaysOnTitle(_ required: ConsentScope, uses: FirstRunCopy.Uses) -> String {
+        FirstRunCopy.fill(uses.alwaysOn, ["title": required.title])
+    }
+
     /// Scopes that grant no data use (the public handle), beside them.
     static func handleScopes(_ options: [ConsentScope]) -> [ConsentScope] {
         options.filter { !$0.alwaysOn && !$0.grantsDataUse }
@@ -618,6 +623,8 @@ struct UsesScreen: View {
     /// appear; nil shows the fallback line, and Start stays disabled.
     @State private var grant: AutomaticGrantCopy?
     @State private var grantRead = false
+    /// The Always on section starts collapsed.
+    @State private var requiredOpen = false
     @State private var flowSince = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -671,22 +678,6 @@ struct UsesScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, GlassTokens.Space.s3)
             }
-            if let required {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    // The baseline permission is required for sharing.
-                    Text(required.title)
-                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    // Keep the required-sharing label inline rather than as a tag.
-                    Text(copy.uses.required)
-                        .glassType(GlassTokens.TypeScale.mono)
-                        .foregroundStyle(GlassTokens.Color.statusOnText.color)
-                }
-                .frame(minHeight: 32)
-                Text(required.description)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             if !optional.isEmpty {
                 HStack(spacing: GlassTokens.Space.s3) {
                     // One style and one width for both: neither is the
@@ -703,6 +694,32 @@ struct UsesScreen: View {
                 .padding(.top, GlassTokens.Space.s3)
                 ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses)) { option in
                     scopeRow(option)
+                }
+            }
+            // The required use, in a collapsed section under the choices
+            // (owner, 2026-10-28): every box above is a real choice, so
+            // Only required leaves them all empty.
+            if let required {
+                GlassExpander(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses), isOpen: $requiredOpen)
+                    .padding(.top, GlassTokens.Space.s3)
+                if requiredOpen {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: GlassTokens.Space.s2) {
+                            // The baseline permission is required for sharing.
+                            Text(required.title)
+                                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                            // Keep the required-sharing label inline rather than as a tag.
+                            Text(copy.uses.required)
+                                .glassType(GlassTokens.TypeScale.mono)
+                                .foregroundStyle(GlassTokens.Color.statusOnText.color)
+                        }
+                        .frame(minHeight: 32)
+                        Text(required.description)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, GlassTokens.Space.s5)
                 }
             }
             GlassHairline()
