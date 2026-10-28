@@ -99,8 +99,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Reads your Claude Code sign-in only when you press Refresh. macOS may ask to allow access.",
     ),
     (
-        "analytics_subscriptions_claude_captured",
-        "Captured on Refresh. Refresh again after changing Claude accounts.",
+        "analytics_subscriptions_refresh_hint",
+        "Refresh to see your latest limits.",
     ),
     (
         "analytics_subscriptions_refresh_login_accessibility",

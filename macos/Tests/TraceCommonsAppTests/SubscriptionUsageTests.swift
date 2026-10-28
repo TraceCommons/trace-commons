@@ -500,7 +500,8 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertTrue(overview.contains("ForEach(model.supportedProviders)"))
         XCTAssertTrue(overview.contains("InsightsOverviewWords.fill(text(\"analytics_subscriptions_no_logins\"), [\"harness\": name])"))
         XCTAssertFalse(overview.contains("setEnabled"))
-        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
+        XCTAssertTrue(overview.contains("InsightsInfo(name, [text(\"analytics_subscriptions_claude_detail\")])"))
+        XCTAssertFalse(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
         XCTAssertTrue(overview.contains("model.refresh(provider: provider, login: login)"))
         XCTAssertTrue(overview.contains("analytics_subscriptions_refresh_login_accessibility"))
         XCTAssertFalse(overview.contains("model.refresh()"))
@@ -511,6 +512,21 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertTrue(settings.contains("app.subscriptionUsageModel"))
         let monitor = try SettingsParityTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(monitor.contains("subscriptions: model.subscriptionUsageModel"))
+    }
+
+    /// 2026-10-27 owner review: the Insights card drops its title and the
+    /// Claude paragraphs, keeps the keychain note behind an info button, and
+    /// asks people to Refresh. Settings keeps the title on its own card.
+    func testInsightsCardHasNoTitleOrClaudeParagraphsAndAsksForRefresh() throws {
+        let overview = try SettingsParityTests.text("Views/InsightsSubscriptionsCard.swift")
+        let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
+        XCTAssertFalse(overview.contains("analytics_subscriptions_title"))
+        XCTAssertFalse(overview.contains("analytics_subscriptions_claude_captured"))
+        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_refresh_hint\"))"))
+        XCTAssertTrue(settings.contains("analytics_subscriptions_title"))
+        let copy = try uiCopy()
+        XCTAssertEqual(copy["analytics_subscriptions_refresh_hint"], "Refresh to see your latest limits.")
+        XCTAssertNil(copy["analytics_subscriptions_claude_captured"])
     }
 
     func testAnExpiredWindowBecomesUnknownWithoutAFullAllowanceOrNewReset() throws {
