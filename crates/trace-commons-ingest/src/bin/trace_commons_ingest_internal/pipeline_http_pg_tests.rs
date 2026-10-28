@@ -7626,13 +7626,15 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
             (pending - expected_pending).abs() < 1e-4,
             "{mode} reads: the shadow credit quality is the pending figure: {document}"
         );
-        assert!(
-            document.get("credit_points_final").is_none(),
+        // The NoveltyUtility award is the trace's final credit, and the
+        // ledger figure leaves it out, so `total` is still final + ledger.
+        assert_eq!(
+            document["credit_points_final"].as_f64(),
+            Some(2.5),
             "{mode} reads: {document}"
         );
-        assert_eq!(
-            document["credit_points_ledger"].as_f64(),
-            Some(2.5),
+        assert!(
+            document.get("credit_points_ledger").is_none(),
             "{mode} reads: {document}"
         );
         assert_eq!(
@@ -16009,10 +16011,18 @@ async fn a_run_whose_privacy_pass_removed_pii_completes_accepted() {
     let documents = documents.as_array().expect("a document list").clone();
     assert_eq!(documents.len(), 1, "{documents:?}");
     assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
+    // The run's NoveltyUtility award is the trace's final credit, as for
+    // any accepted run, and is not counted a second time in the ledger
+    // figure.
     assert_eq!(
-        documents[0]["credit_points_ledger"].as_f64(),
+        documents[0]["credit_points_final"].as_f64(),
         Some(2.5),
         "the run's NoveltyUtility credit counts like any accepted run's: {documents:?}"
+    );
+    assert!(
+        documents[0].get("credit_points_ledger").is_none()
+            && documents[0].get("credit_outcome_reason").is_none(),
+        "{documents:?}"
     );
 
     let gate_rows: i64 = owner
@@ -16505,9 +16515,13 @@ async fn accept_medium_setting_admits_a_found_and_removed_upload() {
     assert_eq!(documents.len(), 1, "{documents:?}");
     assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
     assert_eq!(
-        documents[0]["credit_points_ledger"].as_f64(),
+        documents[0]["credit_points_final"].as_f64(),
         Some(2.5),
         "credit as for any admitted run: {documents:?}"
+    );
+    assert!(
+        documents[0].get("credit_points_ledger").is_none(),
+        "the award is final, not counted again in the ledger figure: {documents:?}"
     );
 }
 
