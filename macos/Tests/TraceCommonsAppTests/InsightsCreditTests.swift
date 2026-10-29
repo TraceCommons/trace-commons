@@ -185,4 +185,20 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertEqual(cards.components(separatedBy: "InsightsUsageBars(").count - 1, 1,
                        "one bar component, drawn by the card itself")
     }
+
+    /// The referral split (referral spec section 6): the NEAR AI card draws
+    /// the payout rail's own-traces and referrals rows, which the window
+    /// reads from the daemon's payout status and passes down.
+    func testTheNearAiCardDrawsTheReferralSplit() throws {
+        let cards = try GlassSurfaceRulesTests.text("Views/InsightsUsageCards.swift")
+        XCTAssertTrue(cards.contains("var earnings: [NearAiEarningsSplit.Row] = []"))
+        XCTAssertTrue(cards.contains("ForEach(earnings) { row in"))
+        let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
+        XCTAssertTrue(overview.contains("showProjects: showProjects, earnings: earnings)"))
+        let window = try GlassSurfaceRulesTests.text("Views/InsightsView.swift")
+        XCTAssertTrue(window.contains("earnings: earnings,"))
+        XCTAssertTrue(window.contains("NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)"))
+        let monitor = try GlassSurfaceRulesTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(monitor.contains("payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient)"))
+    }
 }

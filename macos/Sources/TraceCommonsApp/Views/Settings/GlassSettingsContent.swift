@@ -28,6 +28,7 @@ struct GlassSettingsContent: View {
                 InsightsSettingsCard()
                 SubscriptionUsageSettingsSection()
             case .privateAI: PrivateAISection()
+            case .referrals: ReferralsSection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()
             case .changes: ChangesSection()

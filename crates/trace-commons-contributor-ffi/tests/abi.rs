@@ -5634,6 +5634,48 @@ fn the_payout_link_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_referral_copy_crosses_the_abi() {
+    use trace_commons_contributor::referral_copy::referral_copy;
+    use trace_commons_contributor_ffi::tc_referral_copy_json;
+    let copy = json_owned(tc_referral_copy_json());
+    assert_eq!(copy, serde_json::to_value(referral_copy()).unwrap());
+    assert!(
+        copy["copy_accessibility_name"]
+            .as_str()
+            .unwrap()
+            .contains("{code}")
+    );
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn a_typed_referral_code_is_shown_as_the_daemon_reads_it() {
+    use trace_commons_contributor_ffi::tc_referral_code_display;
+    for (typed, shown) in [
+        ("tc-7k3m9-qx2rd", "TC-7K3M9-QX2RD"),
+        (" 7K3M9 QX2RD ", "TC-7K3M9-QX2RD"),
+        ("TC-IL0O1-ABCDE", "TC-11001-ABCDE"),
+    ] {
+        let arg = cstr_str(typed);
+        assert_eq!(
+            take_owned(unsafe { tc_referral_code_display(arg.as_ptr()) }),
+            shown,
+            "{typed}"
+        );
+    }
+    for typed in ["", "not a code", "TC-7K3M9-QX2RU", "7K3M9QX2R"] {
+        let arg = cstr_str(typed);
+        assert!(
+            unsafe { tc_referral_code_display(arg.as_ptr()) }.is_null(),
+            "{typed}"
+        );
+    }
+    assert!(unsafe { tc_referral_code_display(std::ptr::null()) }.is_null());
+    let invalid = [0xffu8, 0xfe, 0];
+    assert!(unsafe { tc_referral_code_display(invalid.as_ptr().cast()) }.is_null());
+}
+
+#[test]
 fn the_account_devices_copy_crosses_the_abi() {
     use trace_commons_contributor::consent_copy::account_devices_copy;
     use trace_commons_contributor_ffi::tc_account_devices_copy_json;

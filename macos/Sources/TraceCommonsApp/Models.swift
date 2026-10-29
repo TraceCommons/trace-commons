@@ -987,12 +987,34 @@ struct NearAiEnrollment: Decodable, Sendable, Equatable {
     let tenantID: String
     let accountID: String
     let deviceKeyID: String
+    /// `applied` or `not_applied`, only when a referral code was sent. Not
+    /// shown at sign-up: Settings > Referrals says whether one is applied.
+    var referral: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case enrolled
         case tenantID = "tenant_id"
         case accountID = "account_id"
         case deviceKeyID = "device_key_id"
+        case referral
+    }
+
+    init(enrolled: Bool, tenantID: String, accountID: String, deviceKeyID: String, referral: String? = nil) {
+        self.enrolled = enrolled
+        self.tenantID = tenantID
+        self.accountID = accountID
+        self.deviceKeyID = deviceKeyID
+        self.referral = referral
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enrolled = try c.decode(Bool.self, forKey: .enrolled)
+        tenantID = try c.decode(String.self, forKey: .tenantID)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        deviceKeyID = try c.decode(String.self, forKey: .deviceKeyID)
+        // Never fails the enrolment it rides on.
+        referral = try? c.decodeIfPresent(String.self, forKey: .referral)
     }
 }
 

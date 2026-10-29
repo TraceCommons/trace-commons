@@ -240,9 +240,40 @@ pub struct PayoutLinkConfirmed {
     pub version: i64,
 }
 
-/// One rail's link state. Never a recipient, an org id or a name.
+/// Which credit a stream carries: the account's own (`earned`), or the
+/// referral bonus it earns on the accounts it referred (`referral`;
+/// docs/superpowers/specs/2026-10-29-referral-rewards-design.md, R7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayoutStreamKind {
+    Earned,
+    Referral,
+}
+
+/// One stream's amounts on a rail, in the rail's atomic units (nano-USD on
+/// `near_ai`), as decimal strings so a `u128` survives JSON. `owed` is from
+/// accruals (earned) or referral bonus rows (referral); `sent` sums that
+/// stream's confirmed lines across every link; `waiting` is `owed - sent`
+/// floored at zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PayoutStreamStatus {
+    pub stream: PayoutStreamKind,
+    pub owed: String,
+    pub sent: String,
+    pub waiting: String,
+    /// The label of a hold that stops this stream's sends, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_label: Option<String>,
+}
+
+/// One rail's link state. Never a recipient, an org id or a name.
+///
+/// Not `deny_unknown_fields`, unlike the other answers here: a status gains
+/// fields as rails gain streams, and an app reading an older contract
+/// should show what it knows. `streams` is absent from an answer that has
+/// none, so an answer without streams is the pre-referral shape exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayoutRailLinkStatus {
     pub rail_id: String,
     /// `disabled` never appears; `dry_run` or `live`.
@@ -265,6 +296,11 @@ pub struct PayoutRailLinkStatus {
     pub unlink_requested: bool,
     /// The rail answered that the recipient is gone.
     pub recipient_unavailable: bool,
+    /// Own credit and referral credit, one entry per stream, earned first.
+    /// Empty (and left out of the JSON) while the rail runs no referral
+    /// stream.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<PayoutStreamStatus>,
 }
 
 /// The answer to the status route.
@@ -407,6 +443,66 @@ mod tests {
             "a fresh key gives a fresh ref, so the ref does not name the org"
         );
         assert!(!near_ai_recipient_ref(key, org).contains(ORG));
+    }
+
+    fn status_without_streams() -> serde_json::Value {
+        serde_json::json!({
+            "rail_id": "near_ai",
+            "mode": "live",
+            "linked": true,
+            "recipient_ref": null,
+            "state": "active",
+            "version": 1,
+            "request_state": null,
+            "unlink_requested": false,
+            "recipient_unavailable": false,
+        })
+    }
+
+    #[test]
+    fn a_status_without_streams_reads_and_writes_the_old_shape() {
+        let parsed: PayoutRailLinkStatus =
+            serde_json::from_value(status_without_streams()).unwrap();
+        assert!(parsed.streams.is_empty());
+        let written = serde_json::to_value(&parsed).unwrap();
+        assert!(written.get("streams").is_none(), "{written}");
+        assert_eq!(written, status_without_streams());
+        // A newer server's field an older app does not know is tolerated.
+        let mut newer = status_without_streams();
+        newer["something_new"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<PayoutRailLinkStatus>(newer).is_ok());
+    }
+
+    #[test]
+    fn streams_round_trip_with_amounts_as_strings() {
+        let mut body = status_without_streams();
+        body["streams"] = serde_json::json!([
+            {"stream": "earned", "owed": "340282366920938463463374607431768211455",
+             "sent": "0", "waiting": "340282366920938463463374607431768211455"},
+            {"stream": "referral", "owed": "100", "sent": "40", "waiting": "60",
+             "hold_label": "referral_code_suspended"},
+        ]);
+        let parsed: PayoutRailLinkStatus = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(parsed.streams.len(), 2);
+        assert_eq!(parsed.streams[0].stream, PayoutStreamKind::Earned);
+        assert_eq!(parsed.streams[0].owed.parse::<u128>().unwrap(), u128::MAX);
+        assert_eq!(parsed.streams[0].hold_label, None);
+        assert_eq!(parsed.streams[1].stream, PayoutStreamKind::Referral);
+        assert_eq!(
+            parsed.streams[1].hold_label.as_deref(),
+            Some("referral_code_suspended")
+        );
+        let written = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(written, body);
+        assert!(written["streams"][0].get("hold_label").is_none());
+
+        // A stream entry is closed: an unknown stream or field is refused.
+        let mut unknown = body.clone();
+        unknown["streams"][0]["stream"] = serde_json::json!("bonus");
+        assert!(serde_json::from_value::<PayoutRailLinkStatus>(unknown).is_err());
+        let mut extra = body;
+        extra["streams"][1]["account_id"] = serde_json::json!("x");
+        assert!(serde_json::from_value::<PayoutRailLinkStatus>(extra).is_err());
     }
 
     #[test]

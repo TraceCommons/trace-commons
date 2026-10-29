@@ -106,6 +106,16 @@ final class DaemonClient: Sendable {
         try call("near_ai_account_enroll", as: NearAiEnrollment.self)
     }
 
+    /// The same, with the referral code typed beside the sign-in, if any
+    /// (`referral_code`, referral spec section 6). The daemon normalizes it
+    /// and sends only a well-formed code; one that does not apply is
+    /// answered as `referral: not_applied` and never fails the enrolment.
+    func nearAiAccountEnroll(referralCode: String?) throws -> NearAiEnrollment {
+        guard let referralCode else { return try nearAiAccountEnroll() }
+        return try call("near_ai_account_enroll", params: ["referral_code": referralCode],
+                        as: NearAiEnrollment.self)
+    }
+
     /// Sign in again on a NEAR AI account (`near_ai_account_sign_in`): the
     /// daemon runs the provisioning ceremony again with the NEAR AI login it
     /// holds. Refused with `near_ai_sign_in_required` when NEAR AI no longer

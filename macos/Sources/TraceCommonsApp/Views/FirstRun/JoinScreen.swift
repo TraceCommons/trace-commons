@@ -515,6 +515,8 @@ struct JoinScreen: View {
     @State private var starting = false
     @State private var signedInAt: Date?
     @State private var onboarding = TCOnboardingCopy.load()
+    /// The referral words, for the optional code under NEAR AI's Sign in.
+    @State private var referralWords = TCConsentCopy.referralCopyJSON().flatMap(ReferralCopy.decode(fromJSON:))
     @State private var checkedOrganization = false
     @State private var checkingOrganization = false
     @State private var automaticallyStarting = false
@@ -636,6 +638,9 @@ struct JoinScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     nearAICard
+                    if JoinScreenLayout.showsNearAIAction(runner.state), let words = referralWords {
+                        nearAIReferralField(words)
+                    }
                     if runner.state.holdsEnrolment {
                         PayoutLinkView()
                     }
@@ -808,6 +813,28 @@ struct JoinScreen: View {
                 .disabled(runner.isCommitting || !JoinScreenLayout.canToggleNearAI(runner.state))
             }
         }
+    }
+
+    /// The optional referral code under NEAR AI's Sign in (referral spec
+    /// section 6): sent with the NEAR AI enrolment, never on its own. Its
+    /// label and placeholder are the core's drafts (`ReferralCopy`, for owner
+    /// review); nil words draw no field. A malformed code is said under the
+    /// field, and one that does not apply never stops the sign-in.
+    private func nearAIReferralField(_ words: ReferralCopy) -> some View {
+        let problem = ReferralSurface(copy: words)
+            .fieldProblem(runner.referralCode, display: TCConsentCopy.referralCodeDisplay)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            GlassTextField(words.signUpLabel, text: $runner.referralCode,
+                           prompt: words.fieldPlaceholder, invalid: problem != nil)
+                .disabled(runner.isCommitting)
+            if let problem {
+                Text(problem)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassStatus.outside.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 18)
     }
 
     /// An account card: its title and line on the left, the action on the
