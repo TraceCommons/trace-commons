@@ -182,6 +182,11 @@ struct InsightsView: View {
             patternsModel.reload()
         }
         .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
+        // Snapshots saved while the app was in the background; a changed
+        // list reloads Overview and Breakdown through the onChange above.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.reloadSnapshots()
+        }
         .onDisappear {
             model.close(); overviewModel.close(); patternsModel.close(); comparisonsModel.clear()
         }

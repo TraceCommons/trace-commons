@@ -99,6 +99,27 @@ final class InsightsModelTests: XCTestCase {
         XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
         model.close()
     }
+
+    /// Reading the snapshots again lists only, once the copy is in hand,
+    /// and picks up a snapshot saved since.
+    @MainActor
+    func testReloadSnapshotsListsAgainWithoutTheCopy() async {
+        let recorder = Recorder()
+        let model = InsightsModel(service: { request in try await recorder.call(request) })
+        model.open()
+        await model.loading?.value
+        await recorder.add("snap-2")
+        model.reloadSnapshots()
+        await model.loading?.value
+        let operations = await recorder.operations
+        XCTAssertEqual(operations, ["copy", "list", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1", "snap-2"])
+        model.close()
+        model.reloadSnapshots()
+        XCTAssertNil(model.loading, "a closed screen reads nothing")
+        let after = await recorder.operations
+        XCTAssertEqual(after.count, 3)
+    }
 }
 
 private actor FailOnce {
@@ -121,15 +142,15 @@ private actor ResponseGate {
 }
 private actor Recorder {
     var operations: [String] = []
+    private var ids = ["snap-1"]
+    func add(_ id: String) { ids.append(id) }
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
         if request.operation.type == "copy" {
             let json = "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
             return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
         }
-        let list: [String: Any] = ["type": "list", "insights": [
-            InsightsSessionsTests.snapshotJSON("snap-1"),
-        ]]
+        let list: [String: Any] = ["type": "list", "insights": ids.map { InsightsSessionsTests.snapshotJSON($0) }]
         return try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: list))
     }
 }
