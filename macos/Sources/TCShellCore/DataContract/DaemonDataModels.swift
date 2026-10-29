@@ -2318,13 +2318,18 @@ extension DaemonData {
         public let byTask: [InsightsCreditGroup]?
         public let byTool: [InsightsCreditGroup]?
         public let byFolder: [InsightsCreditGroup]?
+        /// By the model that served each call, lowercased as the ledger
+        /// names it; a trace that used two models is in both. `nil` from a
+        /// daemon that predates it.
+        public let byModel: [InsightsCreditGroup]?
 
         public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
                     calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil, byTask: [InsightsCreditGroup]? = nil,
-                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil) {
+                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil,
+                    byModel: [InsightsCreditGroup]? = nil) {
             self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
             self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
-            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder
+            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder; self.byModel = byModel
         }
 
         public enum CodingKeys: String, CodingKey {
@@ -2338,11 +2343,13 @@ extension DaemonData {
             case byTask = "by_task"
             case byTool = "by_tool"
             case byFolder = "by_folder"
+            case byModel = "by_model"
         }
     }
 
     /// One group of a week's charge. `key` is the inferred task, the tool
-    /// (`claude_code`, `codex`) or the folder's local label; `nil` is the
+    /// (`claude_code`, `codex`), the folder's local label or the served
+    /// model; `nil` is the
     /// unknown group. Largest known charge first, unknown ones after.
     public struct InsightsCreditGroup: Codable, Equatable, Sendable {
         public let key: String?

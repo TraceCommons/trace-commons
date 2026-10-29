@@ -102,6 +102,44 @@ final class InsightsWorkTests: XCTestCase {
         }
     }
 
+    /// Breakdown's By model lists NEAR AI's models beside Claude's and
+    /// Codex's (product owner, 2026-10-29): NEAR AI's figure is the ledger's
+    /// charge by served model, "at least" while partly known, the unknown
+    /// model in the core's word; and the view is offered with NEAR AI alone.
+    func testByModelAddsNearAiModelsAtTheLedgersCharge() throws {
+        let copy = try words()
+        var object = try InsightsSessionRouteTests.recorded()
+        object["work"] = nil
+        let nearAiOnly = try InsightsSessionRouteTests.decode(object)
+        XCTAssertNil(nearAiOnly.work)
+        XCTAssertTrue(InsightsCreditWords.showsModels(nearAiOnly))
+        XCTAssertEqual(InsightsCreditWords.modelLines(nearAiOnly, copy: copy).map(\.label), ["zai-org/glm-4.6"])
+
+        var credit = try XCTUnwrap(object["near_ai_credit"] as? [String: Any])
+        var week = try XCTUnwrap(credit["week"] as? [String: Any])
+        var groups = try XCTUnwrap(week["by_model"] as? [[String: Any]])
+        groups.append(["key": NSNull(), "usd_micros": NSNull(), "sessions": 1, "calls": 2,
+                       "calls_without_charge": 1, "tokens": 50, "usd_micros_known": 300_000,
+                       "usd_partial": true, "tokens_known": 50, "tokens_partial": false])
+        week["by_model"] = groups
+        credit["week"] = week
+        object["near_ai_credit"] = credit
+        let empty: [String: Any] = ["key": NSNull(), "sessions": 0, "priced_sessions": 0, "unpriced_sessions": 0,
+                                    "usd_micros_known": 0, "usd_partial": false, "cache_savings_usd_micros_known": 0,
+                                    "lines_added_known": 0, "lines_removed_known": 0, "lines_partial": false,
+                                    "edits_known": 0, "edits_undone_known": 0, "edits_denied_known": 0,
+                                    "edits_partial": false]
+        object["work"] = ["basis": "api_list", "week": empty, "by_tool": [Any](), "by_folder": [Any](),
+                          "by_day": [Any](),
+                          "by_model": [["key": "claude-opus-4-7", "tool": "claude_code", "sessions": 1,
+                                        "tokens": 1_000, "usd_micros_known": 2_000_000, "usd_partial": false]]]
+        let lines = InsightsCreditWords.modelLines(try InsightsSessionRouteTests.decode(object), copy: copy)
+        XCTAssertEqual(lines.map(\.label), ["claude-opus-4-7", "zai-org/glm-4.6", copy["analytics_unknown_label"]])
+        XCTAssertEqual(lines.map(\.tool), ["Claude", "NEAR AI", "NEAR AI"])
+        XCTAssertEqual(lines.map(\.amount), ["$2.00", "$0.0125", "at least $0.30"])
+        XCTAssertEqual(Set(lines.map(\.id)).count, 3)
+    }
+
     /// Breakdown's By project carries Claude and Codex spend at API prices
     /// and lines accepted, and the largest spend leads.
     func testByProjectAddsSpendAndLinesFromWork() throws {
