@@ -1662,17 +1662,17 @@ struct HomeAccountTiles: View {
         let signIn = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
+                // Received and pending side by side (owner, 2026-10-29), both
                 // History's figures (owner, 2026-10-28: Home said 0 while
-                // History said 50.3): its Final once any credit is decided
-                // (#1703), with what is still pending under it; until then
-                // its pending figure, marked Pending, under D6.
-                let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal,
-                                                       pending: freshRollup?.creditPending,
-                                                       accepted: freshRollup?.allTime?.accepted,
-                                                       credit: freshCredit)
-                HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
-                             detail: signIn ?? creditTile.detail,
-                             systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                // History said 50.3): received is its Final, pending its
+                // pending figure under D6.
+                let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal,
+                                                   pending: freshRollup?.creditPending,
+                                                   credit: freshCredit)
+                HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
+                             detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
+                             action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
@@ -1930,6 +1930,22 @@ enum HomeFormat {
 
     /// Home's pending-credit tile and status-card link, in the core's words.
     static var creditPendingWord: String { MonitorWords.table?.creditPending ?? "" }
+
+    /// Home's received and pending tiles' labels; an older core's words
+    /// ("Credit", "Pending") when it predates them.
+    static var creditReceivedWord: String { MonitorWords.table?.creditReceived ?? creditPendingWord }
+    static var creditPendingTitleWord: String { MonitorWords.table?.creditPendingTitle ?? MonitorWords.pending }
+
+    /// Home's two credit tiles (owner, 2026-10-29: show both received and
+    /// pending credit). Received is History's Final, 0 once History has
+    /// answered with nothing decided; pending is its pending figure, only
+    /// with the commons' statement of what it waits on (D6), a dash
+    /// otherwise.
+    static func creditTiles(final: Double?, pending: Double?, credit: DaemonData.CommonsCreditSummary?)
+        -> (received: String, pending: String) {
+        let received = final ?? (pending == nil ? nil : 0)
+        return (points(received), pendingFigure(pending, credit: credit))
+    }
 
     static var openTracesWord: String { MonitorWords.table?.openTraces ?? "" }
 
