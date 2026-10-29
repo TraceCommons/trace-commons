@@ -280,7 +280,9 @@ extension InsightsSectionTitle where Trailing == EmptyView {
 extension View {
     /// A headline figure: the number step, tabular.
     func insightsFigure() -> some View {
-        glassType(GlassTokens.TypeScale.number).foregroundStyle(GlassColor.textPrimary)
+        // Home's stat figure (`GlassStatCard.valueType`, 17pt bold), so a
+        // figure reads the same size across the app (owner, 2026-10-29).
+        glassType(GlassTokens.TypeScale.heading.weight(.bold)).foregroundStyle(GlassColor.textPrimary)
     }
 
     /// The name over a figure.
