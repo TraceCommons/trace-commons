@@ -5136,7 +5136,7 @@ pub fn rescrub_trace_envelope_with(
     // It never mutates - anything it finds has already survived
     // redaction, which is what makes it *residual* and why it forces
     // High rather than Medium.
-    let residual = residual_envelope_scan(redactor, envelope);
+    let residual = residual_envelope_scan_by_event(redactor, envelope);
 
     // Derive the server-pass risk from what the pass actually found,
     // before `report` is drained into the envelope below. Previously
@@ -5927,7 +5927,15 @@ fn insert_without_collision(map: &mut BTreeMap<String, String>, key: String, val
 /// in - relying on that limit implicitly was itself one of the findings
 /// this budget closes.
 const RESIDUAL_SCAN_MAX_DEPTH: usize = 64;
-const RESIDUAL_SCAN_MAX_NODES: usize = 100_000;
+/// Derived from the envelope cap, not a second magic number: one node per 8
+/// serialized bytes. Real envelopes run about one node (a key or a string
+/// leaf) per 150-300 bytes, so no envelope under the cap with a realistic
+/// shape reaches this, while a hostile one made of empty strings and keys
+/// (2-4 bytes a node) still exceeds it and is forced High. It was a fixed
+/// 100,000 when the cap was 16 MB, about one node per 160 bytes, which a
+/// tool-heavy session at that size could already exceed.
+const RESIDUAL_SCAN_MAX_NODES: usize = MAX_TRACE_ENVELOPE_BYTES / 8;
+const _: () = assert!(RESIDUAL_SCAN_MAX_NODES >= 100_000);
 
 /// Why a residual scan could not cover an envelope.
 ///
@@ -5992,6 +6000,66 @@ fn log_residual_secret_locations(residual: &RedactionReport) {
     feature = "self-hosted-privacy-filter"
 )))]
 fn log_residual_secret_locations(_residual: &RedactionReport) {}
+
+/// [`residual_envelope_scan`] with the same result -- the same findings, the
+/// same paths, the same node and depth budgets -- that never holds a JSON tree
+/// of more than one event at a time.
+///
+/// The one-shot scan converts the whole envelope to a `serde_json::Value`
+/// first, a tree larger than the envelope itself. Here the events are lifted
+/// out for the duration, the rest of the envelope is converted and scanned
+/// with an empty `events` array in its place (so the `events` key is still
+/// counted and scanned, as it is there), and then each event is converted and
+/// scanned at the depth and path the one-shot scan reaches it with
+/// (`envelope.events[]`, depth 2). The events are put back before this
+/// returns, whatever the outcome.
+fn residual_envelope_scan_by_event(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<RedactionReport, ResidualScanError> {
+    let events = std::mem::take(&mut envelope.events);
+    let result = (|| {
+        let mut report = RedactionReport::default();
+        let mut nodes = 0usize;
+        let shell =
+            serde_json::to_value(&*envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
+        let Value::Object(entries) = &shell else {
+            return Err(ResidualScanError::SerializationFailed);
+        };
+        // `scan_json_leaves`'s object arm, unrolled for the root so the events
+        // are visited in the same position among the other keys -- findings
+        // are appended in visit order, so the order is part of the result.
+        for (key, item) in entries {
+            nodes += 1;
+            if nodes > RESIDUAL_SCAN_MAX_NODES {
+                return Err(ResidualScanError::BudgetExceeded);
+            }
+            let child_path = format!("envelope.{}", schema_shaped_key(key));
+            let (_, child_report) = redactor.redact_text(key);
+            note_residual_secret_location(&mut report, &child_report, &format!("{child_path}#key"));
+            report.merge(child_report);
+            if key == "events" {
+                for event in &events {
+                    let event = serde_json::to_value(event)
+                        .map_err(|_| ResidualScanError::SerializationFailed)?;
+                    scan_json_leaves(
+                        redactor,
+                        &event,
+                        &mut report,
+                        2,
+                        &mut nodes,
+                        "envelope.events[]",
+                    )?;
+                }
+            } else {
+                scan_json_leaves(redactor, item, &mut report, 1, &mut nodes, &child_path)?;
+            }
+        }
+        Ok(report)
+    })();
+    envelope.events = events;
+    result
+}
 
 fn residual_envelope_scan(
     redactor: &DeterministicTraceRedactor,
@@ -11246,6 +11314,59 @@ mod tests {
         value
     }
 
+    /// The per-event scan the server rescrub runs returns exactly what the
+    /// one-shot scan does -- findings, their paths, and their order -- for
+    /// secrets in event text, in payload values and keys, and outside the
+    /// events, and leaves the envelope as it found it.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[test]
+    fn residual_scan_by_event_matches_the_one_shot_scan() {
+        let redactor = DeterministicTraceRedactor::default();
+        let secret = "ghp_ZmNkZTEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY";
+        let mut env = sample_envelope_with_event_content(&format!("token {secret} here"));
+        let template = env.events[0].clone();
+        for index in 0..4 {
+            let mut event = template.clone();
+            event.event_id = uuid::Uuid::from_u128(index + 1);
+            event.redacted_content = Some(format!("plain text {index}"));
+            event.structured_payload = serde_json::json!({
+                "output": format!("key {secret}"),
+                secret: "a key that is the secret",
+                "nested": {"list": ["a", format!("again {secret}")]},
+            });
+            env.events.push(event);
+        }
+        env.outcome.human_correction = Some(format!("correction with {secret}"));
+        env.replay
+            .expected_assertions
+            .push(serde_json::json!({"note": secret}));
+        let before = serde_json::to_vec(&env).unwrap();
+
+        let one_shot = residual_envelope_scan(&redactor, &env).expect("one-shot scan runs");
+        let by_event = residual_envelope_scan_by_event(&redactor, &mut env).expect("scan runs");
+        assert!(
+            one_shot.blocked_secret_detected,
+            "the fixture must contain findings, or equality proves nothing"
+        );
+        assert_eq!(by_event, one_shot);
+        assert_eq!(serde_json::to_vec(&env).unwrap(), before, "events restored");
+
+        // And both fail closed on the same depth overrun.
+        env.replay
+            .expected_assertions
+            .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
+        let mut events_deep = env.clone();
+        events_deep.replay.expected_assertions.pop();
+        events_deep.events[1].structured_payload = deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8);
+        for envelope in [&mut env, &mut events_deep] {
+            assert_eq!(
+                residual_envelope_scan_by_event(&redactor, envelope),
+                residual_envelope_scan(&redactor, envelope)
+            );
+            assert!(residual_envelope_scan(&redactor, envelope).is_err());
+        }
+    }
+
     /// Test 7 (required test list): when the residual scan itself cannot
     /// complete - here, a depth budget overrun rather than a literal
     /// serialization error, since `serde_json::to_value` silently maps
@@ -13509,7 +13630,13 @@ mod tests {
         let adapter = CommandPrivacyFilterAdapter::new(
             "/nonexistent/trace-commons-privacy-filter-does-not-exist",
         );
-        let at_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES);
+        // The default guard admits a whole envelope's worth of one field...
+        assert!(adapter.max_input_bytes >= MAX_TRACE_ENVELOPE_BYTES);
+        // ...and a field exactly at the guard is admitted. Checked at a small
+        // guard rather than by materializing the 512 MiB cap in a test.
+        let limit = 64 * 1024;
+        let adapter = adapter.with_input_limit(limit);
+        let at_cap = "x".repeat(limit);
         let error = adapter
             .redact_text(&at_cap)
             .await
@@ -13535,7 +13662,14 @@ mod tests {
         let adapter = CommandPrivacyFilterAdapter::new(
             "/nonexistent/trace-commons-privacy-filter-does-not-exist",
         );
-        let over_cap = "x".repeat(MAX_TRACE_ENVELOPE_BYTES + 1);
+        assert_eq!(
+            adapter.max_input_bytes, MAX_TRACE_ENVELOPE_BYTES,
+            "the default guard is the envelope cap"
+        );
+        // One byte over the guard, at a small guard (see above).
+        let limit = 64 * 1024;
+        let adapter = adapter.with_input_limit(limit);
+        let over_cap = "x".repeat(limit + 1);
         let error = adapter
             .redact_text(&over_cap)
             .await
