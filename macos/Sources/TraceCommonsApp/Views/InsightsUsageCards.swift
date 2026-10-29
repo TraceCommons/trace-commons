@@ -241,11 +241,10 @@ enum InsightsUsageWords {
     /// daemon that predates it.
     static func days(_ credit: DaemonData.InsightsNearAiCredit, copy: [String: String]) -> [Day] {
         (credit.byDay ?? []).enumerated().map { index, window in
-            // A partly known day draws its known part, read out as "at
-            // least" (owner, 2026-10-28).
+            // A partly known day draws and reads its known part (owner,
+            // 2026-10-28; no "at least", 2026-10-29).
             Day(id: window.date ?? String(index), label: weekday(window.date, fallback: index),
-                amount: InsightsCreditWords.spend(window.usdMicros, known: window.usdMicrosKnown,
-                                                  partial: window.usdPartial, copy: copy),
+                amount: InsightsCreditWords.spend(window.usdMicros, known: window.usdMicrosKnown, copy: copy),
                 value: (window.usdMicros ?? (window.usdPartial == true ? window.usdMicrosKnown : nil))
                     .map { Double($0) / 1_000_000 })
         }
