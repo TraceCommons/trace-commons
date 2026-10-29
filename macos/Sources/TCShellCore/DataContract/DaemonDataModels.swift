@@ -2315,16 +2315,14 @@ extension DaemonData {
         public var usdPartial: Bool? = nil
         public var tokensKnown: Int64? = nil
         public var tokensPartial: Bool? = nil
-        public let byTask: [InsightsCreditGroup]?
-        public let byTool: [InsightsCreditGroup]?
         public let byFolder: [InsightsCreditGroup]?
 
         public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
-                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil, byTask: [InsightsCreditGroup]? = nil,
-                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil) {
+                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil,
+                    byFolder: [InsightsCreditGroup]? = nil) {
             self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
             self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
-            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder
+            self.byFolder = byFolder
         }
 
         public enum CodingKeys: String, CodingKey {
@@ -2335,15 +2333,12 @@ extension DaemonData {
             case tokensKnown = "tokens_known"
             case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
-            case byTask = "by_task"
-            case byTool = "by_tool"
             case byFolder = "by_folder"
         }
     }
 
-    /// One group of a week's charge. `key` is the inferred task, the tool
-    /// (`claude_code`, `codex`) or the folder's local label; `nil` is the
-    /// unknown group. Largest known charge first, unknown ones after.
+    /// One group of a week's charge. `key` is the folder's local label;
+    /// `nil` is the unknown group. Largest known charge first, unknown ones after.
     public struct InsightsCreditGroup: Codable, Equatable, Sendable {
         public let key: String?
         public let usdMicros: Int64?

@@ -1957,16 +1957,7 @@ impl CounterPass {
                     && LEDGER_MONEY_IN_INSIGHTS
                     && store.key_fingerprint == key_fingerprint(key) =>
             {
-                let labels = self.readable_labels(&store.key_fingerprint);
-                near_ai_credit_value(
-                    store,
-                    key,
-                    never_project_keys,
-                    (folders, &labels),
-                    week_start,
-                    tz,
-                    now,
-                )
+                near_ai_credit_value(store, key, never_project_keys, folders, week_start, tz, now)
             }
             _ => serde_json::Value::Null,
         };
@@ -4107,23 +4098,21 @@ fn charge_map(
 
 /// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
 /// (product owner, 2026-10-28), from every route tally's charge
-/// (`insights_credit`). `week` is the selected local week, by task, tool
-/// and folder; `today`, `by_day` (the last 7 local days, oldest first) and
+/// (`insights_credit`). `week` is the selected local week, by folder;
+/// `today`, `by_day` (the last 7 local days, oldest first) and
 /// `last_31_days` (today and the 30 local days before it) are sums only,
 /// and do not move with the selected week.
 ///
-/// A tally is grouped by the stored row of its session, matched by the
-/// keyed harness-session digest: its task is the person's own label when
-/// set (`insights_session_label`), else the inferred one (Kristi,
-/// 2026-10-28, as the Sessions list shows it); a tally with no row (a session the pass
-/// has not read, or whose row aged out) is in the sums and in each unknown
-/// group. A row in a Never folder is not read for its labels; its tally is
+/// A tally is grouped by the folder of its session's stored row, matched
+/// by the keyed harness-session digest; a tally with no row (a session the
+/// pass has not read, or whose row aged out) is in the sums and in the
+/// unknown folder. A row in a Never folder is not read; its tally is
 /// already gone (`NeverSessions`).
 fn near_ai_credit_value(
     store: &CounterStore,
     key: &DigestKey,
     never_project_keys: &NeverFolders,
-    (folders, user_labels): (&[(String, String)], &BTreeMap<KeyedDigest, SessionLabel>),
+    folders: &[(String, String)],
     week_start: NaiveDate,
     tz: FixedOffset,
     now: DateTime<Utc>,
@@ -4131,28 +4120,11 @@ fn near_ai_credit_value(
     use super::insights_credit::{CreditSession, window_value};
     let never = never_digests(key, never_project_keys);
     let labels = folder_labels_by_digest(key, folders);
-    let by_session: BTreeMap<KeyedDigest, (&KeyedDigest, &CounterRow)> = store
+    let by_session: BTreeMap<KeyedDigest, &CounterRow> = store
         .rows
-        .iter()
-        .filter(|(_, row)| !never.contains(&row.project))
-        .filter_map(|(reference, row)| Some((row.harness_session?, (reference, row))))
-        .collect();
-    let tasks: BTreeMap<KeyedDigest, Option<&'static str>> = by_session
-        .iter()
-        .map(|(digest, (reference, row))| {
-            let own = user_labels
-                .get(*reference)
-                .and_then(|label| label.task)
-                .map(labelled_task_key);
-            (
-                *digest,
-                own.or_else(|| row.inferred_task().map(inferred_task_key)),
-            )
-        })
-        .collect();
-    let by_session: BTreeMap<KeyedDigest, &CounterRow> = by_session
-        .into_iter()
-        .map(|(digest, (_, row))| (digest, row))
+        .values()
+        .filter(|row| !never.contains(&row.project))
+        .filter_map(|row| Some((row.harness_session?, row)))
         .collect();
     let mut sessions: Vec<CreditSession<'_>> = store
         .routing
@@ -4163,8 +4135,6 @@ fn near_ai_credit_value(
             Some(CreditSession {
                 charge,
                 last_call_at: tally.last_call_at,
-                task: tasks.get(digest).copied().flatten(),
-                tool: row.map(|row| row_tool(row)),
                 folder: row.and_then(|row| labels.get(&row.project).copied()),
                 counts_session: true,
             })
@@ -4176,8 +4146,6 @@ fn near_ai_credit_value(
         sessions.push(CreditSession {
             charge: loose,
             last_call_at: now,
-            task: None,
-            tool: None,
             folder: None,
             counts_session: false,
         });
@@ -4268,44 +4236,6 @@ fn usage_by_day_value(
         })
         .collect();
     serde_json::Value::Array(days)
-}
-
-/// The wire word for the person's own task label.
-fn labelled_task_key(task: LabelledTask) -> &'static str {
-    match task {
-        LabelledTask::BugFix => "bug_fix",
-        LabelledTask::Refactor => "refactor",
-        LabelledTask::Tests => "tests",
-        LabelledTask::Docs => "docs",
-        LabelledTask::Other => "other",
-    }
-}
-
-/// The wire word for an inferred task, as `inferred_task` spells it, with
-/// `no_edits` grouped under `other`, as the shared label
-/// (`InferredTask::task_category`) and the Sessions task words group it.
-fn inferred_task_key(task: InferredTask) -> &'static str {
-    match task {
-        InferredTask::BugFix => "bug_fix",
-        InferredTask::Refactor => "refactor",
-        InferredTask::Tests => "tests",
-        InferredTask::Docs => "docs",
-        InferredTask::Other | InferredTask::NoEdits => "other",
-    }
-}
-
-/// The tool a stored row was read from, as the rollup's `source` spells
-/// it (`claude_code`, `codex`).
-fn row_tool(row: &CounterRow) -> &'static str {
-    let source = match &row.body {
-        RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
-        RowBody::Codex { .. } => AnalyticsSource::Codex,
-        RowBody::Unknown { source, .. } => *source,
-    };
-    match source {
-        AnalyticsSource::ClaudeCode => "claude_code",
-        AnalyticsSource::Codex => "codex",
-    }
 }
 
 /// `insights_week`.
@@ -6193,7 +6123,7 @@ mod tests {
         assert_eq!(credit["basis"], "near_ai_ledger");
         assert_eq!(credit["today"]["usd_micros"], 250_000);
         assert_eq!(credit["last_31_days"]["usd_micros"], 250_000);
-        assert!(credit["today"].get("by_task").is_none());
+        assert!(credit["today"].get("by_folder").is_none());
         let days = credit["by_day"].as_array().unwrap();
         assert_eq!(days.len(), 7);
         assert_eq!(days[6]["date"], "2026-09-14", "today last");
@@ -6206,10 +6136,10 @@ mod tests {
         let this = &credit["week"];
         assert_eq!(this["usd_micros"], 250_000);
         assert_eq!(this["sessions"], 1);
-        assert_eq!(this["by_tool"][0]["key"], "codex");
+        assert!(this.get("by_tool").is_none(), "by tool was removed");
+        assert!(this.get("by_task").is_none(), "by task was removed");
         assert_eq!(this["by_folder"][0]["key"], "app");
         assert_eq!(this["by_folder"][0]["usd_micros"], 250_000);
-        assert_eq!(this["by_task"].as_array().unwrap().len(), 1);
 
         // Another call with no charge: unknown, never zero.
         assert_eq!(
@@ -6253,39 +6183,6 @@ mod tests {
         }] {
             assert_eq!(week(options)["near_ai_credit"], serde_json::Value::Null);
         }
-    }
-
-    /// Kristi, 2026-10-28: a trace's credit is grouped under the person's
-    /// own task label when they set one, else under the inferred task.
-    #[test]
-    fn credit_by_task_prefers_the_persons_own_label() {
-        let f = Fixture::new();
-        let codex = f.write("codex.jsonl", &codex_bytes_for("SESSION-SECRET"));
-        f.run(&[candidate(SOURCE_CODEX, &codex)]);
-        let mut charged = ledger_call(1, 30, "SESSION-SECRET");
-        charged.cost_usd = Some(0.25);
-        fold_with(&f.pass, true, vec![charged]).unwrap();
-        let task = |value: &serde_json::Value| {
-            value["near_ai_credit"]["week"]["by_task"][0]["key"].clone()
-        };
-        let inferred = task(&f.week_routed());
-        assert_ne!(
-            inferred, "docs",
-            "not vacuous: the inferred task is another"
-        );
-        let page = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 20);
-        let reference = page["sessions"][0]["session_ref"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let (reference, change) = super::super::insights_sessions::label_params(
-            &serde_json::json!({"session_ref": reference, "task": "docs"}),
-        )
-        .unwrap();
-        f.pass
-            .label_value(true, &reference, change, &NeverFolders::NONE, &[])
-            .unwrap();
-        assert_eq!(task(&f.week_routed()), "docs");
     }
 
     /// A week row carries its Sessions row's short name; the Sessions

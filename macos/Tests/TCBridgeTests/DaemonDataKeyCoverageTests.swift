@@ -190,7 +190,7 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         let credit = try XCTUnwrap(recorded["near_ai_credit"] as? [String: Any])
         assertDeclared(DaemonData.InsightsNearAiCredit.self, credit, method: "insights_week.near_ai_credit")
         let paths = KeyRecorder.keyPaths(in: credit)
-        for path in ["week.by_task[].key", "week.by_folder[].usd_micros", "last_31_days.calls_without_charge"] {
+        for path in ["week.by_folder[].key", "week.by_folder[].usd_micros", "last_31_days.calls_without_charge"] {
             XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
         }
     }

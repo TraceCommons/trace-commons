@@ -6,18 +6,12 @@ import TCShellCore
 /// project folder, with Claude Code and Codex usage (traces and tokens,
 /// from the counter pass's rows) beside NEAR AI spend (the NEAR AI
 /// ledger's own charge, from `near_ai_credit`, never a list price); and
-/// NEAR AI spend by task or by tool. Folder names come from this Mac's own
-/// folder list and stay on it (owner decision 2026-10-28, over D7 for this
-/// view). An unknown figure is the core's dash, never zero.
+/// Claude and Codex spend by model. By task and By tool were removed
+/// (owner, 2026-10-29). Folder names come from this Mac's own folder list
+/// and stay on it (owner decision 2026-10-28, over D7 for this view). An
+/// unknown figure is the core's dash, never zero.
 enum InsightsCreditWords {
-    enum Dimension: Hashable { case folder, task, tool, model }
-
-    struct Line: Equatable, Identifiable {
-        let id: String
-        let label: String
-        let amount: String
-        let traces: String
-    }
+    enum Dimension: Hashable { case folder, model }
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
@@ -72,34 +66,16 @@ enum InsightsCreditWords {
             + tokens(window.tokens, known: window.tokensKnown, partial: window.tokensPartial, copy: copy)
     }
 
-    /// A group's name: the task's word, the tool's, or the folder's own
-    /// label; the unknown group in the words each list already uses.
+    /// A group's name: the folder's own label, or the model's; the unknown
+    /// group in the words each list already uses.
     static func label(_ key: String?, dimension: Dimension, copy: [String: String]) -> String {
         switch dimension {
-        case .task:
-            guard let key else { return text("analytics_unknown_label", copy) }
-            return text("analytics_task_" + key, copy)
-        case .tool:
-            guard let key else { return text("analytics_unknown_label", copy) }
-            return text("analytics_credit_tool_" + key, copy)
         case .folder:
             return key ?? text("analytics_folder_unknown", copy)
         case .model:
             return key ?? text("analytics_unknown_label", copy)
         }
     }
-
-    static func lines(_ groups: [DaemonData.InsightsCreditGroup], dimension: Dimension,
-                      copy: [String: String]) -> [Line] {
-        groups.map { group in
-            Line(id: group.key ?? "\u{0}unknown", label: label(group.key, dimension: dimension, copy: copy),
-                 amount: spend(group.usdMicros, known: group.usdMicrosKnown, partial: group.usdPartial, copy: copy),
-                 traces: String(group.sessions))
-        }
-    }
-
-    /// No NEAR AI call in the window: a sentence, never a list of zeros.
-    static func isEmpty(_ window: DaemonData.InsightsCreditWindow) -> Bool { window.calls == 0 }
 }
 
 /// By project: one row per folder, Claude Code and Codex usage beside
@@ -205,7 +181,7 @@ enum InsightsProjectRows {
 }
 
 /// Details' drill-down: By project (the default, and what each Overview
-/// usage card's "By project" opens), By task and By tool.
+/// usage card's "By project" opens) and By model.
 struct InsightsDetailsTable: View {
     let week: DaemonData.InsightsWeek
     let copy: [String: String]
@@ -219,14 +195,11 @@ struct InsightsDetailsTable: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 GlassSegmentedTabs(text("analytics_credit_title"), selection: $dimension, segments: [
                     GlassSegment(text("analytics_card_by_project"), value: InsightsCreditWords.Dimension.folder),
-                    GlassSegment(text("analytics_credit_by_task"), value: InsightsCreditWords.Dimension.task),
-                    GlassSegment(text("analytics_card_by_tool"), value: InsightsCreditWords.Dimension.tool),
                 ] + (week.work == nil ? [] : [
                     GlassSegment(text("analytics_card_by_model"), value: InsightsCreditWords.Dimension.model),
                 ]))
                 switch dimension {
                 case .folder: projects
-                case .task, .tool: nearAi
                 case .model: models
                 }
             }
@@ -313,36 +286,6 @@ struct InsightsDetailsTable: View {
                                  ]))
             }
         } else {
-            Text(text("analytics_unavailable")).insightsNote()
-        }
-    }
-
-    /// NEAR AI spend by task or by tool, with the traces it came from.
-    @ViewBuilder private var nearAi: some View {
-        if let credit = week.nearAiCredit, !InsightsCreditWords.isEmpty(credit.week) {
-            let groups = (dimension == .task ? credit.week.byTask : credit.week.byTool) ?? []
-            HStack {
-                Spacer(minLength: GlassTokens.Space.s4)
-                Text(text("analytics_credit_spent")).insightsCaption()
-                Text(text("analytics_credit_traces")).insightsCaption()
-                    .frame(minWidth: 48, alignment: .trailing)
-            }
-            VStack(spacing: 0) {
-                ForEach(Array(InsightsCreditWords.lines(groups, dimension: dimension, copy: copy).enumerated()),
-                        id: \.element.id) { index, line in
-                    GlassTableRow(first: index == 0) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(line.label)
-                            Spacer(minLength: GlassTokens.Space.s4)
-                            Text(line.amount).insightsMono()
-                            Text(line.traces).insightsMono().frame(minWidth: 48, alignment: .trailing)
-                        }
-                        .accessibilityElement(children: .combine)
-                    }
-                }
-            }
-        } else {
-            // No NEAR AI call this week: the dash, as an empty By project.
             Text(text("analytics_unavailable")).insightsNote()
         }
     }

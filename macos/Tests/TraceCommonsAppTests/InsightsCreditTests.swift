@@ -4,15 +4,13 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// AI usage this week and its drill-down (product owner, 2026-10-28): the
-/// usage cards that lead Overview, and Details' By project, By task and By
-/// tool views, from `insights_week`. A call with no charge is the dash,
+/// usage cards that lead Overview, and Details' By project and By model
+/// views, from `insights_week`. A call with no charge is the dash,
 /// never `$0.00`.
 final class InsightsCreditTests: XCTestCase {
-    private typealias Group = DaemonData.InsightsCreditGroup
     private typealias Window = DaemonData.InsightsCreditWindow
     private let copy = [
-        "analytics_unavailable": "—", "analytics_task_bug_fix": "Bug fix", "analytics_task_docs": "Docs",
-        "analytics_task_other": "Other", "analytics_unknown_label": "Unknown",
+        "analytics_unavailable": "—", "analytics_unknown_label": "Unknown",
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
         "analytics_credit_tool_claude_code": "Claude",
         "analytics_projects_traces": "{n} traces", "analytics_projects_traces_one": "{n} trace",
@@ -25,18 +23,17 @@ final class InsightsCreditTests: XCTestCase {
         .init(week: week, today: empty(), byDay: byDay, last31Days: last31 ?? week)
     }
 
-    func testGroupsNameEachKeyWithItsAmountAndDashForUnknown() {
-        let lines = InsightsCreditWords.lines([
-            Group(key: "bug_fix", usdMicros: 1_250_000),
-            Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1),
-            Group(key: nil, usdMicros: 500),
-        ], dimension: .task, copy: copy)
-        XCTAssertEqual(lines.map(\.label), ["Bug fix", "Docs", "Unknown"])
-        XCTAssertEqual(lines[0].amount, "$1.25")
-        XCTAssertEqual(lines[1].amount, "—", "unknown is the dash, never $0.00")
-        let tools = InsightsCreditWords.lines([Group(key: "codex", usdMicros: 10), Group(key: "claude_code", usdMicros: 5)],
-                                              dimension: .tool, copy: copy)
-        XCTAssertEqual(tools.map(\.label), ["Codex", "Claude"])
+    /// By task and By tool are removed (owner, 2026-10-29): the drill-down
+    /// is By project and By model, and nothing opens the removed views.
+    func testTheDrillDownIsByProjectAndByModelOnly() throws {
+        XCTAssertEqual(InsightsCreditWords.label(nil, dimension: .folder, copy: copy), "Unknown folder")
+        XCTAssertEqual(InsightsCreditWords.label("app", dimension: .folder, copy: copy), "app")
+        XCTAssertEqual(InsightsCreditWords.label(nil, dimension: .model, copy: copy), "Unknown")
+        let table = try GlassSurfaceRulesTests.text("Views/InsightsCreditViews.swift")
+        XCTAssertFalse(table.contains("analytics_credit_by_task"))
+        XCTAssertFalse(table.contains("Dimension.tool"))
+        XCTAssertTrue(table.contains("GlassSegment(text(\"analytics_card_by_project\"), value: InsightsCreditWords.Dimension.folder)"))
+        XCTAssertTrue(table.contains("GlassSegment(text(\"analytics_card_by_model\"), value: InsightsCreditWords.Dimension.model)"))
     }
 
     /// The NEAR AI card shows only while there was NEAR AI spend in the
@@ -88,10 +85,7 @@ final class InsightsCreditTests: XCTestCase {
         nothing.usdPartial = false
         XCTAssertEqual(InsightsCreditWords.spend(nil, known: nil, partial: false, copy: copy), "—")
         XCTAssertEqual(InsightsCreditWords.spendAndTokens(nothing, copy: copy), "— · —")
-        var group = Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1)
-        group.usdMicrosKnown = 50
-        group.usdPartial = true
-        XCTAssertEqual(InsightsCreditWords.lines([group], dimension: .task, copy: copy)[0].amount, "at least $0.00005")
+        XCTAssertEqual(InsightsCreditWords.spend(nil, known: 50, partial: true, copy: copy), "at least $0.00005")
         // A partly known day draws its known part.
         var day = Window(date: "2026-10-26", usdMicros: nil, sessions: 0, calls: 2, callsWithoutCharge: 1)
         day.usdMicrosKnown = 250_000
