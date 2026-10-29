@@ -10,7 +10,7 @@ import TCShellCore
 /// folder list and stay on it (owner decision 2026-10-28, over D7 for this
 /// view). An unknown figure is the core's dash, never zero.
 enum InsightsCreditWords {
-    enum Dimension: Hashable { case folder, task, tool }
+    enum Dimension: Hashable { case folder, task, tool, model }
 
     struct Line: Equatable, Identifiable {
         let id: String
@@ -84,6 +84,8 @@ enum InsightsCreditWords {
             return text("analytics_credit_tool_" + key, copy)
         case .folder:
             return key ?? text("analytics_folder_unknown", copy)
+        case .model:
+            return key ?? text("analytics_unknown_label", copy)
         }
     }
 
@@ -123,6 +125,11 @@ enum InsightsProjectRows {
         let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
+        /// Claude and Codex at API prices, and lines accepted (product
+        /// owner, 2026-10-29); `nil` from a daemon that predates `work`.
+        var spend: String? = nil
+        var lines: String? = nil
+        var spendMicros: Int64 = 0
     }
 
     /// Every folder with a trace counted this week or NEAR AI spend this
@@ -146,10 +153,13 @@ enum InsightsProjectRows {
         }
         let spend = Dictionary((week.nearAiCredit?.week.byFolder ?? []).map { ($0.key, $0) },
                                uniquingKeysWith: { first, _ in first })
-        let folders = Set(usage.keys).union(spend.keys)
+        let work = Dictionary((week.work?.byFolder ?? []).map { ($0.key, $0) },
+                              uniquingKeysWith: { first, _ in first })
+        let folders = Set(usage.keys).union(spend.keys).union(work.keys)
         let unknown = copy["analytics_unavailable"] ?? ""
         let rows = folders.map { folder -> Row in
             let group = spend[folder]
+            let totals = work[folder]
             return Row(id: folder ?? "\u{0}unknown",
                        label: InsightsCreditWords.label(folder, dimension: .folder, copy: copy),
                        claude: usage[folder]?.claude, codex: usage[folder]?.codex,
@@ -161,12 +171,17 @@ enum InsightsProjectRows {
                            InsightsCreditWords.tokens($0.tokens, known: $0.tokensKnown, partial: $0.tokensPartial,
                                                       copy: copy)
                        },
-                       nearAiMicros: group.flatMap { $0.usdMicros ?? $0.usdMicrosKnown })
+                       nearAiMicros: group.flatMap { $0.usdMicros ?? $0.usdMicrosKnown },
+                       spend: week.work.map { _ in InsightsWorkWords.spend(totals, copy: copy) },
+                       lines: week.work.map { _ in InsightsWorkWords.lines(totals, copy: copy) },
+                       spendMicros: totals?.usdMicrosKnown ?? 0)
         }
         func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
         return rows.sorted { a, b in
             let (aUnknown, bUnknown) = (a.id.hasPrefix("\u{0}"), b.id.hasPrefix("\u{0}"))
             if aUnknown != bUnknown { return bUnknown }
+            let (aSpend, bSpend) = (a.spendMicros + (a.nearAiMicros ?? 0), b.spendMicros + (b.nearAiMicros ?? 0))
+            if aSpend != bSpend { return aSpend > bSpend }
             if (a.nearAiMicros ?? -1) != (b.nearAiMicros ?? -1) { return (a.nearAiMicros ?? -1) > (b.nearAiMicros ?? -1) }
             if tokens(a) != tokens(b) { return tokens(a) > tokens(b) }
             return a.label < b.label
@@ -206,10 +221,13 @@ struct InsightsDetailsTable: View {
                     GlassSegment(text("analytics_card_by_project"), value: InsightsCreditWords.Dimension.folder),
                     GlassSegment(text("analytics_credit_by_task"), value: InsightsCreditWords.Dimension.task),
                     GlassSegment(text("analytics_card_by_tool"), value: InsightsCreditWords.Dimension.tool),
-                ])
+                ] + (week.work == nil ? [] : [
+                    GlassSegment(text("analytics_card_by_model"), value: InsightsCreditWords.Dimension.model),
+                ]))
                 switch dimension {
                 case .folder: projects
                 case .task, .tool: nearAi
+                case .model: models
                 }
             }
             .insightsCardBody()
@@ -228,6 +246,10 @@ struct InsightsDetailsTable: View {
             Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s4, verticalSpacing: GlassTokens.Space.s3) {
                 GridRow {
                     Text(text("analytics_projects_project")).insightsCaption()
+                    if week.work != nil {
+                        Text(text("analytics_column_spend")).insightsCaption().gridColumnAlignment(.trailing)
+                        Text(text("analytics_column_lines")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
                     Text(text("analytics_credit_tool_claude_code")).insightsCaption().gridColumnAlignment(.trailing)
                     Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
                     Text(text("analytics_usage_near_ai")).insightsCaption().gridColumnAlignment(.trailing)
@@ -236,6 +258,10 @@ struct InsightsDetailsTable: View {
                 ForEach(rows) { row in
                     GridRow(alignment: .firstTextBaseline) {
                         Text(row.label).lineLimit(2)
+                        if let spend = row.spend, let lines = row.lines {
+                            Text(spend).insightsMono()
+                            Text(lines).insightsMono()
+                        }
                         usage(row.claude)
                         usage(row.codex)
                         VStack(alignment: .trailing, spacing: 0) {
@@ -255,6 +281,39 @@ struct InsightsDetailsTable: View {
             if let traces = InsightsProjectRows.traces(usage, copy: copy) {
                 Text(traces).insightsCaption()
             }
+        }
+    }
+
+    /// Claude and Codex spend by model at API prices, with its tokens.
+    @ViewBuilder private var models: some View {
+        if let work = week.work, !work.byModel.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(Array(work.byModel.enumerated()), id: \.offset) { index, model in
+                    GlassTableRow(first: index == 0) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(model.key)
+                                Text(InsightsWorkWords.toolName(model.tool, copy: copy)).insightsCaption()
+                            }
+                            Spacer(minLength: GlassTokens.Space.s4)
+                            Text(InsightsCreditWords.tokens(model.tokens, copy: copy)).insightsCaption()
+                            Text(InsightsCreditWords.spend(model.usdPartial ? nil : model.usdMicrosKnown,
+                                                           known: model.usdMicrosKnown, partial: model.usdPartial,
+                                                           copy: copy))
+                                .insightsMono().frame(minWidth: 72, alignment: .trailing)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+            if work.week.cacheSavingsUsdMicrosKnown > 0 {
+                InsightsUsageRow(label: text("analytics_cache_savings"),
+                                 value: InsightsOverviewWords.fill(text("analytics_cache_savings_value"), [
+                                     "x": InsightsCreditWords.amount(work.week.cacheSavingsUsdMicrosKnown, copy: copy),
+                                 ]))
+            }
+        } else {
+            Text(text("analytics_unavailable")).insightsNote()
         }
     }
 

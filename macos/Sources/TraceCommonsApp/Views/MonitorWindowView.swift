@@ -288,7 +288,7 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
-                                 inspector: insightsInspector,
+                                 inspector: insightsInspector, home: home,
                                  payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient))
                 }
             } footer: {

@@ -318,6 +318,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
+    public func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks {
+        try await call("insights_benchmarks", params: ["weeks": weeks], as: DaemonData.InsightsBenchmarks.self)
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
         return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
     }

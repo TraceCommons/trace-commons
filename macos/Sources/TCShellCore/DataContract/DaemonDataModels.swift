@@ -2221,6 +2221,10 @@ extension DaemonData {
         /// first (product owner, 2026-10-28); `nil` from a daemon that
         /// predates it.
         public let usageByDay: [InsightsUsageDay]?
+        /// Claude and Codex spend at API list prices, lines, edits and
+        /// cache savings (product owner, 2026-10-29); `nil` from a daemon
+        /// that predates it.
+        public var work: InsightsWork? = nil
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -2241,6 +2245,7 @@ extension DaemonData {
             case routingUnavailable = "routing_unavailable"
             case nearAiCredit = "near_ai_credit"
             case usageByDay = "usage_by_day"
+            case work
         }
     }
 

@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn insights_week_still_carries_no_price() {
+    fn insights_week_carries_list_prices_only_in_work() {
         let f = Fixture::new();
         f.run();
         let week = f.pass.week_value(
@@ -820,8 +820,14 @@ mod tests {
             &NeverFolders::NONE,
             super::super::insights_week::WeekOptions::default(),
         );
+        // List-price figures cross in `work` only (product owner,
+        // 2026-10-29); NEAR AI money in `near_ai_credit`, null here.
+        assert_eq!(week["work"]["basis"], "api_list");
+        assert_eq!(week["near_ai_credit"], serde_json::Value::Null);
+        let mut rest = week.clone();
+        rest.as_object_mut().unwrap().remove("work");
         let mut all = Vec::new();
-        words(&week, &mut all);
+        words(&rest, &mut all);
         for word in all {
             for banned in ["usd", "price", "cost"] {
                 assert!(!word.contains(banned), "{banned} in {word}");

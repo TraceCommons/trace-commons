@@ -51,7 +51,7 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
 
         let tabs: [(String, CGFloat, AnyView)] = [
             ("overview", 1860, AnyView(InsightsOverviewTab(
-                model: overview, comparisons: comparisons, copy: copy, snapshots: [], patterns: pattern))),
+                model: overview, comparisons: comparisons, copy: copy, snapshots: []))),
             ("patterns", 1900, AnyView(InsightsPatternsTab(model: patterns, comparisons: comparisons, copy: copy))),
             ("sessions", 1000, AnyView(InsightsSessionsTab(model: sessions, snapshots: [], copy: copy))),
         ]

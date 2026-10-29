@@ -27,7 +27,7 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("daemon: home.client,"))
         XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel,"))
-        XCTAssertTrue(window.contains("inspector: insightsInspector,\n"))
+        XCTAssertTrue(window.contains("inspector: insightsInspector, home: home,\n"))
         XCTAssertTrue(window.contains("payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient))"))
         XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
