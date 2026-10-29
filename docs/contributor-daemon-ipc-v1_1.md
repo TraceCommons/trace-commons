@@ -614,7 +614,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (on by default; product owner, 2026-10-29); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
@@ -4571,8 +4571,8 @@ read-only: it reads the daemon's own counter store, never a session file,
 never the Insights service, and makes no network call, so it answers under
 the developer dry run too.
 
-**The pass.** Gated on the `insights_counter_pass` setting (owner decision
-D4, open; off by default). While it is on, each full watcher poll hands the
+**The pass.** Gated on the `insights_counter_pass` setting (on by default;
+product owner, 2026-10-29, settling owner decision D4). While it is on, each full watcher poll hands the
 Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
@@ -6739,9 +6739,13 @@ decision is open.
 #### `insights_counter_pass`
 
 Additive; a daemon that predates it refuses it as `settings-unknown-field`,
-and `get_settings` from it omits it. Takes a boolean and defaults to `false`
-(owner decision D4, open), and a settings file written before the key existed
-loads it as `false`. It is the one gate on the Insights counter pass (feed T):
+and `get_settings` from it omits it. Takes a boolean and defaults to `true`
+(product owner, 2026-10-29: counting is on by default and always on, which
+settles owner decision D4). A settings file written before that change -- one
+without `insights_counter_pass_defaulted_on: true` -- is turned on once when
+loaded, whatever it held, and the marker is saved with it; after that a saved
+`false` stays off. A settings file written before the key existed loads it as
+`true`. The macOS shell no longer draws a switch for it. It is the one gate on the Insights counter pass (feed T):
 while it is `false` the watcher runs no pass, nothing is read for Insights,
 and `insights_week` answers `enabled: false` without opening the store or its
 key. Turning it off does not remove rows already stored; `unenroll` does,

@@ -844,8 +844,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_not_set", "Not set"),
     ("analytics_setting_recap_card", "Weekly summary"),
     ("analytics_setting_lever", "Higher-than-usual card"),
-    // The `insights_counter_pass` switch (owner decision D4: off by
-    // default; Ron's #1287 review).
+    // The `insights_counter_pass` switch (Ron's #1287 review). Counting is
+    // on by default and always on since 2026-10-29 (product owner), so the
+    // macOS Settings card no longer draws it.
     (
         "analytics_setting_counter_pass",
         "Count tokens in watched folders",
