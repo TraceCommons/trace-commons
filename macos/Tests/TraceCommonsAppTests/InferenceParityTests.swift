@@ -287,17 +287,19 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot and the map's Private AI segment take
-    /// #1146's rule: on while working, outside (red) for every other tone,
-    /// never grey. The inspector's Status row is the menu bar's word and
-    /// dot instead (`PrivateInferenceMenuBarTests`).
+    /// Every Private AI dot takes one rule (owner, 2026-10-29): the tab,
+    /// the map, the heading and the menu bar paint one state one colour.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
             "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
-        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
-        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        let expected: [(PrivateInferenceTone, GlassStatus)] = [
+            (.clear, .on), (.attention, .ask), (.refused, .outside), (.neutral, .off), (.held, .off),
+        ]
+        for (tone, status) in expected {
+            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), status, "\(tone)")
+            XCTAssertEqual(PrivateInferenceIndicator.status(tone), status, "\(tone)")
+            XCTAssertEqual(MenuPanelStatus.privateAIDot(tone), status, "\(tone)")
         }
         let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inspector.contains(

@@ -22,25 +22,27 @@ enum PrivateInferenceIndicator {
         PrivateInferenceSurface.tone(state, calls: calls).readsAsWorking
     }
 
-    /// The tone onto a glass status, as the window's Inference dot maps
-    /// it (`MonitorWindowView.inferenceDot`): only clear is on; held,
-    /// attention and refused all ask; neutral is off. A glass status is a dot,
-    /// so whoever draws it draws the core's sentence beside it.
+    /// The tone onto a glass status: the one rule for every Private AI dot
+    /// (owner, 2026-10-29: "the rules should be consistent"). Green only
+    /// while clear, amber for attention (on, with something to look at),
+    /// red for refused (not working), grey for neutral and held. The tab,
+    /// the map, the heading, the menu bar and the credential and balance
+    /// rows all draw it, so one state is one colour everywhere. A glass
+    /// status is a dot, so whoever draws it draws the core's sentence
+    /// beside it.
     static func status(_ tone: PrivateInferenceTone) -> GlassStatus {
         switch tone {
         case .clear: return .on
-        case .held, .attention, .refused: return .ask
-        case .neutral: return .off
+        case .attention: return .ask
+        case .refused: return .outside
+        case .neutral, .held: return .off
         }
     }
 
-    /// The Private AI dot (#1146 `flow-map.tsx` and `inference-inspector.tsx`):
-    /// on while the core's tone is clear, outside (red) for every other
-    /// tone, an unread one included. Drawn on the Inference tab, the map's
-    /// Private AI segment and the inspector's Status row, always beside or
-    /// behind the core's sentence for the same state.
+    /// The window's Inference tab dot and the map's Private AI segment:
+    /// the same rule as `status`.
     static func dotStatus(_ tone: PrivateInferenceTone) -> GlassStatus {
-        tone.readsAsWorking ? .on : .outside
+        status(tone)
     }
 }
 
