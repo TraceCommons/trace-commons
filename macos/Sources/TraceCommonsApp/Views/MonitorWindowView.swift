@@ -270,7 +270,15 @@ struct MonitorWindowView: View {
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
-                                 subscriptions: model.subscriptionUsageModel, home: home)
+                                 subscriptions: model.subscriptionUsageModel, home: home,
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 },
+                                 openSettings: {
+                                     navigation.requestSettings(at: .projects)
+                                     openWindow(id: WindowID.settings)
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).

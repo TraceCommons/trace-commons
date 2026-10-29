@@ -67,9 +67,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "folder",
     // The weekday picked on "Tokens by day".
     "day",
-    // Overview and Benchmarks (product owner, 2026-10-29): lines added,
-    // a limit window's name, and the two models a tip compares.
-    "a",
+    // Overview and Benchmarks (product owner, 2026-10-29): a limit
+    // window's name, and the two models a tip compares.
     "window",
     "first",
     "second",
@@ -860,7 +859,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // `{x}` hole, always at API list prices for Claude and Codex.
     ("analytics_tab_benchmarks", "Benchmarks"),
     ("analytics_tile_spend", "AI spend"),
-    ("analytics_tile_lines", "Lines accepted"),
     ("analytics_tile_top_model", "Top model"),
     ("analytics_tile_credits", "Credits earned"),
     (
@@ -878,21 +876,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "On pace: lasts until reset",
     ),
     ("analytics_by_model_title", "Spend by model"),
-    ("analytics_lines_title", "Lines of code accepted"),
-    ("analytics_lines_detail", "+{a} added · −{r} removed"),
-    ("analytics_edits_accepted", "Edits accepted"),
-    ("analytics_edits_accepted_value", "{p}% · {k} of {n}"),
-    (
-        "analytics_lines_note",
-        "Lines added by edits that were applied, including any later undone.",
-    ),
     ("analytics_trends_title", "Trends"),
     ("analytics_trends_spend_per_day", "Spend per day"),
     ("analytics_trends_week_before", "Week before"),
     ("analytics_cache_savings", "Cache savings"),
     ("analytics_cache_savings_value", "about {x} saved"),
     ("analytics_column_spend", "Spend"),
-    ("analytics_column_lines", "Lines accepted"),
     ("analytics_column_edits", "Edits accepted"),
     ("analytics_bench_intro", "From {n} of your own traces"),
     ("analytics_bench_quality", "Quality"),
@@ -943,4 +932,44 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{k} of your {n} traces re-read the same files.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
+    // 26. DRAFT, NEEDS APPROVAL: the get-started card and the sample data
+    // under it (product owner, 2026-10-29), on Overview, Breakdown and
+    // Benchmarks while Insights has no trace of the person's own. The
+    // steps name the app's own screens: Traces' folder list and its rules
+    // (Ask / Automatic, `project_copy`), and Settings. `{first}` and
+    // `{second}` are the two folders the app watches; "30 minutes" is the
+    // daemon's default quiet time before a finished trace is sent.
+    (
+        "analytics_start_title",
+        "Your Insights fill in from your own traces",
+    ),
+    (
+        "analytics_start_why",
+        "Keep working as you do now. Once your traces come in, this page shows where your AI spend goes, which models you lean on, and how they compare on your kind of work.",
+    ),
+    ("analytics_start_step_use", "Use Claude or Codex as usual"),
+    (
+        "analytics_start_step_use_detail",
+        "The app watches {first} and {second} on this Mac.",
+    ),
+    ("analytics_start_step_share", "Choose a folder to share"),
+    (
+        "analytics_start_step_share_detail",
+        "In Traces, pick a folder and set its rule to Automatic to send traces on their own, or Ask to review each one first.",
+    ),
+    ("analytics_start_open_traces", "Open Traces"),
+    ("analytics_start_open_settings", "Open Settings"),
+    ("analytics_start_step_fill", "Watch your Insights fill in"),
+    (
+        "analytics_start_step_fill_detail",
+        "Traces are counted here as they come in. In an Automatic folder, a finished trace is sent after about 30 minutes without activity.",
+    ),
+    // The API-price note when only one tool was used this week.
+    ("analytics_tile_api_prices_claude", "Claude at API prices"),
+    ("analytics_tile_api_prices_codex", "Codex at API prices"),
+    ("analytics_sample_banner", "Sample data — not yours"),
+    (
+        "analytics_sample_banner_detail",
+        "This is what Insights shows once your traces come in.",
+    ),
 ];
