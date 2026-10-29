@@ -309,6 +309,13 @@ pub fn production_pricing_catalog() -> PricingCatalog {
         .unwrap_or(PricingCatalog { tables: Vec::new() })
 }
 
+/// The shipped catalog, parsed once per process: the daemon prices every
+/// `insights_week` and `insights_benchmarks` request against it.
+pub fn shared_pricing_catalog() -> &'static PricingCatalog {
+    static CATALOG: std::sync::OnceLock<PricingCatalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(production_pricing_catalog)
+}
+
 /// The table was fetched too long before the observation to price it.
 fn is_stale(table: &PricingTable, input: &PricingUsageInput) -> bool {
     table

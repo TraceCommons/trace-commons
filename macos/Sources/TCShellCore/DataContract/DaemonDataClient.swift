@@ -264,6 +264,11 @@ public protocol DaemonDataClient: Sendable {
     /// `unknown_method`. Either way, and on any failed read, no card is
     /// drawn.
     func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
+    /// `insights_benchmarks`: per kind of work, which of the person's
+    /// models is best on quality, value and speed over the last `weeks`
+    /// (4 or 13), from the counter pass. An older daemon refuses it as
+    /// `unknown_method`, and Benchmarks shows nothing.
+    func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks
 
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
@@ -357,6 +362,11 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    /// Clients that predate Benchmarks have none to read.
+    public func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks {
+        throw DaemonDataError.notAvailableYet(method: "insights_benchmarks")
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {
         try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: nil)
     }

@@ -74,6 +74,13 @@ struct InsightsUsageCards: View {
             Spacer(minLength: GlassTokens.Space.s2)
             refreshButton(row)
         }, rows: {
+            // One headline leads the card (product owner, 2026-10-29):
+            // whether the limit lasts until it resets.
+            if let headline = row.headline {
+                Text(headline).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .foregroundStyle(row.paceWarns ? GlassStatus.outside.textColor : GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let session = row.session {
                 InsightsUsageRow(label: text("analytics_limits_session_left"), value: session)
             }
@@ -86,7 +93,9 @@ struct InsightsUsageCards: View {
             if let reset = row.weeklyReset {
                 InsightsUsageRow(label: text("analytics_usage_weekly_resets"), value: reset)
             }
-            InsightsUsageRow(label: text("analytics_limits_pace"), value: row.pace, warns: row.paceWarns)
+            if row.headline == nil {
+                InsightsUsageRow(label: text("analytics_limits_pace"), value: row.pace, warns: row.paceWarns)
+            }
             if let banked = row.banked {
                 InsightsUsageRow(label: text("analytics_subscriptions_banked"), value: banked)
             }
@@ -284,6 +293,9 @@ enum InsightsLimitsRows {
         /// Whether a window was measured; an unmeasured login's figures are
         /// all the dash.
         var measured = true
+        /// "Weekly limit runs out in 4d 21h, before it resets" or "On
+        /// pace: lasts until reset"; `nil` when the pace is unknown.
+        var headline: String? = nil
     }
 
     enum Pace: Equatable {
@@ -330,6 +342,15 @@ enum InsightsLimitsRows {
                 }
                 let warns: Bool
                 if case .runsOut = paced { warns = true } else { warns = false }
+                let paceWindow = text(weekly != nil ? "analytics_subscriptions_weekly" : "analytics_subscriptions_session")
+                let headline: String?
+                switch paced {
+                case .onPace: headline = text("analytics_limits_headline_on_pace")
+                case .runsOut(let date):
+                    headline = InsightsOverviewWords.fill(text("analytics_limits_headline_runs_out"),
+                                                          ["window": paceWindow, "time": duration(from: now, to: date)])
+                case nil: headline = nil
+                }
                 let hasSession = reports(isSession), hasWeekly = reports(isWeekly)
                 return Row(id: provider.provider + ":" + login.id, provider: provider.provider, loginId: login.id,
                            loginLabel: words.label, account: account,
@@ -339,7 +360,7 @@ enum InsightsLimitsRows {
                            weeklyReset: hasWeekly ? resets(weekly) : nil,
                            pace: paceWords, paceWarns: warns,
                            banked: login.bankedResets.map(String.init),
-                           freshness: words.freshness, measured: measured)
+                           freshness: words.freshness, measured: measured, headline: headline)
             }
         }
     }

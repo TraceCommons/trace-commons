@@ -21,14 +21,14 @@ fail() {
 }
 
 # The default destination is Insights, which opens on its Overview tab.
-# Require the page's own tab switcher on one line (Overview, Details,
+# Require the page's own tab switcher on one line (Overview, Breakdown,
 # Sessions, Analyze) -- an interactive control on the Insights page, not the
 # sidebar's "Insights" entry -- and the Overview's "Tokens by day" card
-# heading, which shows its body rendered. Tesseract has read "Details" as
-# "Deta", so only its first letters are required. The capture loop below
+# heading, which shows its body rendered. Tesseract has misread tab names
+# before ("Details" as "Deta"), so only Breakdown's first letters are required. The capture loop below
 # retries while the body loads.
 insights_frame() {
-  grep -qiE 'Overview[[:space:]]+Det[[:alpha:]]*[[:space:]]+Sessions[[:space:]]+Analyze' <<< "$1" &&
+  grep -qiE 'Overview[[:space:]]+Br[[:alpha:]]*[[:space:]]+Sessions[[:space:]]+Analyze' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
