@@ -812,7 +812,16 @@ final class AppModel: ObservableObject {
             guard self.client === client,
                   notificationEpoch == self.credentialSignInNotificationEpoch else { return }
             let wasPending = self.credentialSignInPending
+            let previous = self.credentialStatus
             self.publishIfChanged(\.credentialStatus, status)
+            // The key came or went, by whichever path (the browser poll, the
+            // Sign in button's own flow, Forget, an expiry): Private AI's
+            // state is read again now, and every Private AI dot with it
+            // (owner, 2026-10-29: "the color should update if I login to
+            // near.ai"). The windows' stores follow this read.
+            if Self.credentialPresenceMoved(from: previous, to: status) {
+                self.refreshSettings()
+            }
             // The attempt is let go the moment the shared table stops
             // offering a cancel for it. Holding a finished attempt's id
             // would keep polling a ceremony nobody is waiting on.
@@ -850,6 +859,14 @@ final class AppModel: ObservableObject {
             }
         }
         refreshNearAiBalance()
+    }
+
+    /// Whether a credential read says the NEAR AI key came or went. Only
+    /// between two answered reads: the first answer after launch is not a
+    /// sign-in, and the launch already reads settings.
+    nonisolated static func credentialPresenceMoved(from previous: CredentialStatus, to current: CredentialStatus) -> Bool {
+        guard !previous.state.isEmpty, !current.state.isEmpty else { return false }
+        return (previous.state == CredentialSurface.statePresent) != (current.state == CredentialSurface.statePresent)
     }
 
     /// Re-read whenever the key is, because it is the key the balance is
@@ -1751,6 +1768,10 @@ final class AppModel: ObservableObject {
             queueChangeRefreshes.request()
         case .statusChanged:
             refreshStatus()
+            // The daemon says Private AI's listener state moves under this
+            // too (the proxy learning NEAR AI's sign-in on its tick): the
+            // menu bar's dot and the windows' stores follow the settings read.
+            refreshSettings()
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()

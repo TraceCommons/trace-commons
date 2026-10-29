@@ -846,12 +846,7 @@ enum MenuPanelStatus {
     }
 
     static func privateAIDot(_ tone: PrivateInferenceTone) -> GlassStatus {
-        switch tone {
-        case .clear: .on
-        case .attention: .ask
-        case .refused: .outside
-        case .neutral, .held: .off
-        }
+        PrivateInferenceIndicator.status(tone)
     }
 
     /// The row's full sentence for a tooltip and the accessibility hint:

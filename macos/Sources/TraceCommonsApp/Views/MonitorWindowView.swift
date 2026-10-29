@@ -204,6 +204,14 @@ struct MonitorWindowView: View {
     /// again (`MonitorNotices`).
     @State private var closedNotices: Set<String> = []
 
+    /// The Private AI state every dot in this window draws: the tab, the
+    /// map's Private AI segment and the Private AI heading all read the
+    /// window's `InferenceStore`, so one state is one colour here (owner,
+    /// 2026-10-29). Nil until the store has read it: no dot, not a guess.
+    private var privateAIState: PrivateInferenceState? {
+        inference.privateAI.map { InferenceAccountSection.surfaceState($0.state) }
+    }
+
     var body: some View {
         GlassThreePane(
             showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, mapWidth: $mapWidth,
@@ -212,11 +220,8 @@ struct MonitorWindowView: View {
         ) {
             MonitorMainPane(
                 tab: $tab,
-                inferenceDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
-                                                calls: model.privateInferenceCalls),
-                inferenceDescription: Self.inferenceDotDescription(
-                    model.daemonSettings?.privateInferenceState?.surfaceState,
-                    calls: model.privateInferenceCalls),
+                inferenceDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
+                inferenceDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
                 tracesDescription: Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
@@ -332,10 +337,8 @@ struct MonitorWindowView: View {
         } map: {
             MonitorMapPane(
                 mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
-                privateAIDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
-                                                calls: model.privateInferenceCalls),
-                privateAIDescription: Self.inferenceDotDescription(
-                    model.daemonSettings?.privateInferenceState?.surfaceState, calls: model.privateInferenceCalls),
+                privateAIDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
+                privateAIDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 traces: traces, history: home.history, historyFailure: home.failures["list_history"], inference: inference,
                 focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 selectedTool: selectedTool?.rawValue,
@@ -427,6 +430,13 @@ struct MonitorWindowView: View {
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
             if let view = Self.mapTab(for: picked) { mapTab = view }
+        }
+        // The app's own settings read saw Private AI move (a NEAR AI sign-in
+        // or sign-out landed, a status change, a switch write): this
+        // window's store reads it again now, not on its next event, so the
+        // tab, the map and the heading follow the menu bar together.
+        .onChange(of: model.daemonSettings?.privateInferenceState) { _, _ in
+            Task { await inference.reloadPrivateAI() }
         }
         // The app's live client, re-attached whenever the daemon restarts
         // or start-up ends; with none, each store draws the core as down,
@@ -724,13 +734,15 @@ struct MonitorWindowView: View {
 
     /// Inference's dot: what the listener is doing, from the daemon's own
     /// report, never the switch. The switch says what was asked for; a
-    /// switch that is on over a listener that refused to start, or is held,
-    /// is drawn as not working, never as on. Only the core's "clear" tone
-    /// is on; every other is #1146's outside (red). No report, or an
+    /// switch that is on over a listener that refused to start is drawn as
+    /// not working, never as on. The heading's Status row's dot, from the
+    /// same table (`PrivateInferenceIndicator.dot`): green only while
+    /// clear, amber for an On with something to look at (signed out of
+    /// NEAR AI), red for not working, grey otherwise. No report, or an
     /// unreported state, is no dot: unknown is neither on nor off.
     nonisolated static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))
+        return PrivateInferenceIndicator.dot(state, calls: calls)
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
