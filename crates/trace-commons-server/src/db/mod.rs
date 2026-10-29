@@ -17,6 +17,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 pub mod postgres;
 pub mod postgres_inference_connection;
 mod postgres_payout;
+mod postgres_referral;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
@@ -4066,6 +4067,230 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Option<PayoutPassLock>, DatabaseError>;
+}
+
+// -- referral codes and attributions (V142) ---------------------------------
+//
+// docs/superpowers/specs/2026-10-29-referral-rewards-design.md, sections 2
+// and 3. Implemented for PostgreSQL in `postgres_referral`.
+
+/// Refused applies an account may make in [`REFERRAL_REFUSAL_WINDOW_HOURS`]
+/// before every further attempt is `referral_rate_limited`, counted from its
+/// own `referral_refused` audit rows.
+pub const REFERRAL_REFUSAL_LIMIT: i64 = 10;
+pub const REFERRAL_REFUSAL_WINDOW_HOURS: i64 = 24;
+
+/// A new code row: its index, its sealed text and the refs it was sealed
+/// under (`referral_code::seal_referral_code`). `Debug` prints the id only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeWrite {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+}
+
+impl std::fmt::Debug for ReferralCodeWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeWrite")
+            .field("code_id", &self.code_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The outcome of [`ReferralStore::create_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeCreate {
+    Created {
+        created_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The account already has the most live codes it may.
+    LimitReached,
+    /// Some code, in any tenant, already has this index: draw another code.
+    /// Nothing was written.
+    IndexTaken,
+    /// No open account row.
+    AccountIneligible,
+}
+
+/// One of an account's codes, with what it brought in.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeRow {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Referees of this code whose referral is not voided.
+    pub referee_count: u64,
+    /// The sum of `bonus_units` of the bonus rows of this code's referees on
+    /// the `near_ai` rail. Signed: reversals and voids are negative.
+    pub bonus_owed: i128,
+}
+
+impl std::fmt::Debug for ReferralCodeRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeRow")
+            .field("code_id", &self.code_id)
+            .field("created_at", &self.created_at)
+            .field("referee_count", &self.referee_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeRow {
+    /// Live while none of disabled, suspended and voided is set.
+    pub fn is_live(&self) -> bool {
+        self.disabled_at.is_none() && self.suspended_at.is_none() && self.voided_at.is_none()
+    }
+}
+
+/// An account's codes and its referral totals on the `near_ai` rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralCodesView {
+    /// Oldest first.
+    pub codes: Vec<ReferralCodeRow>,
+    /// The sum of `bonus_units` of every bonus row of the account. Signed.
+    pub bonus_owed: i128,
+    /// The sum of `delta` over the account's `confirmed` lines on the
+    /// referral stream.
+    pub bonus_sent: u128,
+}
+
+/// The outcome of [`ReferralStore::disable_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeDisable {
+    Disabled,
+    /// It was already disabled; nothing changed.
+    AlreadyDisabled,
+    NotFound,
+}
+
+/// What an apply is checked against: the program window and how late an
+/// account may apply (`referral_config::ReferralConfig::apply_policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralApplyPolicy {
+    /// `None`: the program has not started.
+    pub program_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub program_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub late_days: u32,
+}
+
+/// Why an apply was refused (spec section 3), in the order the checks run.
+/// Recorded only on the referee's `referral_refused` audit row; the client
+/// is answered `referral_not_applied` whatever this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralRefusal {
+    Unavailable,
+    RateLimited,
+    CodeUnknown,
+    AlreadyReferred,
+    AccountTooOld,
+    SelfReferral,
+}
+
+impl ReferralRefusal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "referral_unavailable",
+            Self::RateLimited => "referral_rate_limited",
+            Self::CodeUnknown => "referral_code_unknown",
+            Self::AlreadyReferred => "referral_already_referred",
+            Self::AccountTooOld => "referral_account_too_old",
+            Self::SelfReferral => "referral_self",
+        }
+    }
+}
+
+/// The outcome of [`ReferralStore::apply_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralApply {
+    Applied {
+        applied_at: chrono::DateTime<chrono::Utc>,
+        referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    },
+    Refused(ReferralRefusal),
+}
+
+/// An account's own referral, as its referee sees it: never whose code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAttribution {
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    pub applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+    pub voided: bool,
+}
+
+/// What `GET /v1/account/referral` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAccountStatus {
+    pub attribution: Option<ReferralAttribution>,
+    /// `None` without an account row.
+    pub account_created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The referral code store. Every call is scoped to the auth-derived tenant
+/// and account; the one cross-tenant read (which tenant owns a code index)
+/// happens inside [`ReferralStore::apply_referral_code`] under the narrow
+/// `trace_referral_resolver` role and is not offered on its own.
+#[async_trait]
+pub trait ReferralStore: Send + Sync {
+    /// Writes a code for `account`, under an advisory lock on the account
+    /// so two concurrent creates cannot both pass the live-code limit, with
+    /// a `code_created` audit row.
+    async fn create_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code: &ReferralCodeWrite,
+    ) -> Result<ReferralCodeCreate, DatabaseError>;
+
+    /// The account's codes, oldest first, with referee counts and bonus
+    /// totals.
+    async fn referral_codes(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralCodesView, DatabaseError>;
+
+    /// Turns one of the account's codes off, with a `code_disabled` audit
+    /// row. Existing referrals keep earning.
+    async fn disable_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_id: Uuid,
+    ) -> Result<ReferralCodeDisable, DatabaseError>;
+
+    /// Applies the code whose index is `code_index` (`None`: the input was
+    /// not a code) to `account`, running the checks of spec section 3 in
+    /// order. A refusal writes one `referral_refused` row in the referee's
+    /// tenant with the precise label. Success writes, in one transaction,
+    /// the attribution and a `referral_applied` row under the referee's
+    /// tenant, and the referee mirror and a `referral_applied` row under the
+    /// referrer's.
+    async fn apply_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_index: Option<&str>,
+        applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+        policy: &ReferralApplyPolicy,
+    ) -> Result<ReferralApply, DatabaseError>;
+
+    /// The account's own referral, if any, and its creation time.
+    async fn referral_status(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralAccountStatus, DatabaseError>;
 }
 
 #[cfg(test)]

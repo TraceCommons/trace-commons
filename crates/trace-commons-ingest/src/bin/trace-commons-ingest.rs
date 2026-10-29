@@ -39,6 +39,8 @@ mod payout_link_routes;
 mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/referral.rs"]
+mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
@@ -1770,6 +1772,14 @@ struct AppState {
     /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
     /// when unset: those routes then refuse every caller. Never the token.
     payout_control_token_hash: Option<String>,
+    /// The referral code store (referral spec sections 2 and 3): the
+    /// database mirror's PostgreSQL backend, or `None` without one. The
+    /// referral routes then answer `referral_unavailable`, and a sign-up
+    /// code is not applied.
+    referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
+    /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
+    /// validated at boot. Unset means the program has not started.
+    referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -5052,6 +5062,15 @@ impl AppState {
         // switch would be unreachable.
         let payout_control_token_hash =
             payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
+        // Referral codes (referral spec section 3): the settings refuse boot
+        // when malformed, naming the setting, never its value.
+        let referral_config = Arc::new(
+            trace_commons_server::referral_config::ReferralConfig::from_env()
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?,
+        );
+        let referral_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
+        });
         // A finalized pipeline credit batch wakes every enabled rail.
         if let Some(service) = pipeline_service.as_ref() {
             service.attach_payout_notifier(payout_rails.notifier());
@@ -5253,6 +5272,8 @@ impl AppState {
             payout_rails,
             payout_store,
             payout_control_token_hash,
+            referral_store,
+            referral_config,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -8674,6 +8695,9 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // status on the signed-in account session; no passkey (owner,
         // 2026-10-23).
         .merge(payout_link_routes::routes())
+        // Referral codes and applying one (referral spec section 6), on the
+        // signed-in account session as the payout links are.
+        .merge(referral_routes::routes())
         // The devices linked to the account: list, rename, revoke.
         .merge(account_devices_routes::routes())
         // One-time codes that link a headless device: mint and status.

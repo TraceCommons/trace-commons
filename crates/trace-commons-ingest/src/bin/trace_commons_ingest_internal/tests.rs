@@ -30,6 +30,8 @@ mod payout_rails_tests;
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
 mod public_run_tests;
+#[path = "tests/referral_tests.rs"]
+mod referral_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
 #[path = "tests/step_up_page_tests.rs"]
@@ -6842,6 +6844,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
         payout_store: None,
         payout_control_token_hash: None,
+        referral_store: None,
+        referral_config: Default::default(),
         first_run_estimate: Default::default(),
         root,
         near_provisioning_enabled: false,
@@ -30995,6 +30999,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
         payout_store: None,
         payout_control_token_hash: None,
+        referral_store: None,
+        referral_config: Default::default(),
         first_run_estimate: Default::default(),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
