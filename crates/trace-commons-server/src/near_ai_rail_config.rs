@@ -170,16 +170,19 @@ impl NearAiRailConfig {
 
 // ---------------------------------------------------------------------------
 // The referral stream (referral rewards spec section 5): a second program on
-// each `near_ai` link, sent from a dedicated #1271 credential whose
-// `max_total_amount` is the program's lifetime budget.
+// each `near_ai` link. It sends with the payout credential unless a
+// dedicated #1271 credential is configured (owner decision, 2026-10-29).
+// Shared, both streams draw on one `max_total_amount` and one send window;
+// dedicated, the referral credential's `max_total_amount` is its own budget.
 // ---------------------------------------------------------------------------
 
 /// `disabled` (default), `dry_run` or `live`.
 pub const NEAR_AI_REFERRAL_MODE_ENV: &str = "TRACE_COMMONS_NEAR_AI_REFERRAL_MODE";
-/// The referral credential: `oc_` plus 64 hex, never the payout credential.
-/// Secret.
+/// The referral credential: `oc_` plus 64 hex. Optional: unset (with its id
+/// unset too), a `live` stream sends with the payout credential. Secret.
 pub const NEAR_AI_REFERRAL_CREDENTIAL_ENV: &str = "TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL";
-/// The referral credential's `id` (a UUID). Not secret; log hash only.
+/// The referral credential's `id` (a UUID), set with the credential or not
+/// at all. Not secret; log hash only.
 pub const NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV: &str = "TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID";
 /// The most referral credit one referrer is sent across every link, in
 /// nano-USD, above zero. Default [`REFERRAL_ACCOUNT_CEILING_NANO_DEFAULT`].
@@ -232,6 +235,10 @@ impl NearAiReferralConfigError {
 pub struct NearAiReferralSettings {
     pub mode: PayoutMode,
     pub credentials: Option<NearAiTransferCredentials>,
+    /// `credentials` are the payout rail's own: the two streams share one
+    /// lifetime budget and one send window, and the pass spends one send
+    /// budget across both.
+    pub shares_payout_credential: bool,
     pub account_ceiling: AtomicUnits,
 }
 
@@ -265,10 +272,11 @@ impl NearAiReferralConfig {
     ///
     /// - unset or `disabled` needs nothing;
     /// - `dry_run` or `live` needs the rail itself enabled;
-    /// - `live` needs the rail `live` and the referral credential and its
-    ///   id, and the credential must not be the payout credential (its
-    ///   `max_total_amount` is the referral budget, so sharing one would
-    ///   spend the earned budget on referrals);
+    /// - `live` needs the rail `live`. With neither the referral credential
+    ///   nor its id set it sends with the payout credential and its id;
+    ///   naming the payout pair explicitly is the same. A distinct pair is
+    ///   a dedicated referral credential. One of the pair without the
+    ///   other, or half of the payout pair beside half of another, refuses;
     /// - a configured credential or ceiling must be well formed in any mode.
     ///
     /// Every refusal is `near_ai_referral_config_missing` naming the setting.
@@ -300,26 +308,35 @@ impl NearAiReferralConfig {
 
         let token = read(NEAR_AI_REFERRAL_CREDENTIAL_ENV)?;
         let credential_id = read(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)?;
-        let credentials = match (token, credential_id) {
-            (None, None) if mode == PayoutMode::DryRun => None,
-            (None, _) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV)),
+        let payout = &rail_settings.credentials;
+        let (credentials, shares_payout_credential) = match (token, credential_id) {
+            (None, None) if mode == PayoutMode::DryRun => (None, false),
+            (None, None) => (Some(payout.clone()), true),
+            (None, Some(_)) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV)),
             (Some(_), None) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)),
             (Some(token), Some(credential_id)) => {
                 use secrecy::ExposeSecret;
-                if !is_near_ai_org_credential(&token)
-                    || token == rail_settings.credentials.token.expose_secret()
-                {
+                if !is_near_ai_org_credential(&token) {
                     return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV));
                 }
                 let credential_id = parse_uuid(&credential_id)
-                    .filter(|id| *id != rail_settings.credentials.credential_id)
                     .ok_or(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV))?;
-                Some(NearAiTransferCredentials {
-                    token: SecretString::from(token),
-                    credential_id,
-                    sender_org: rail_settings.credentials.sender_org,
-                    source: rail_settings.credentials.source,
-                })
+                let same_token = token == payout.token.expose_secret();
+                let same_id = credential_id == payout.credential_id;
+                match (same_token, same_id) {
+                    (true, true) => (Some(payout.clone()), true),
+                    (true, false) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)),
+                    (false, true) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV)),
+                    (false, false) => (
+                        Some(NearAiTransferCredentials {
+                            token: SecretString::from(token),
+                            credential_id,
+                            sender_org: payout.sender_org,
+                            source: payout.source,
+                        }),
+                        false,
+                    ),
+                }
             }
         };
         let account_ceiling = match read(REFERRAL_ACCOUNT_CEILING_NANO_ENV)? {
@@ -331,6 +348,7 @@ impl NearAiReferralConfig {
         Ok(Self::Enabled(NearAiReferralSettings {
             mode,
             credentials,
+            shares_payout_credential,
             account_ceiling,
         }))
     }
@@ -609,13 +627,14 @@ mod tests {
     }
 
     #[test]
-    fn referral_live_needs_the_rail_live_and_its_own_credential() {
+    fn referral_live_needs_the_rail_live_and_uses_its_own_or_the_payout_credential() {
         let NearAiReferralConfig::Enabled(settings) =
             parse_referral(&referral("live"), &rail("live")).unwrap()
         else {
             panic!("live is enabled");
         };
         assert_eq!(settings.mode, PayoutMode::Live);
+        assert!(!settings.shares_payout_credential);
         let credentials = settings.credentials.expect("live has a credential");
         assert_eq!(credentials.token.expose_secret(), REFERRAL_TOKEN);
         assert_eq!(credentials.credential_id, Uuid::from_u128(3));
@@ -645,7 +664,8 @@ mod tests {
             }
         );
 
-        // Live without the credential, or its id, refuses with its name.
+        // Live with one of the pair set and not the other refuses, naming
+        // the one that is missing.
         for setting in [
             NEAR_AI_REFERRAL_CREDENTIAL_ENV,
             NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV,
@@ -657,25 +677,47 @@ mod tests {
             assert_eq!(error.setting(), setting);
         }
 
-        // Never the payout credential, or its id: the referral budget is a
-        // credential of its own.
-        let mut shared = referral("live");
-        shared.insert(NEAR_AI_REFERRAL_CREDENTIAL_ENV, TOKEN.to_string());
+        // Live with neither set sends with the payout credential and its id
+        // (owner decision, 2026-10-29), as does live naming them both.
+        let unset = HashMap::from([(NEAR_AI_REFERRAL_MODE_ENV, "live".to_string())]);
+        let mut same = referral("live");
+        same.insert(NEAR_AI_REFERRAL_CREDENTIAL_ENV, TOKEN.to_string());
+        same.insert(
+            NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV,
+            Uuid::from_u128(2).to_string(),
+        );
+        for vars in [unset, same] {
+            let NearAiReferralConfig::Enabled(settings) =
+                parse_referral(&vars, &rail("live")).unwrap()
+            else {
+                panic!("live is enabled");
+            };
+            assert!(settings.shares_payout_credential);
+            let credentials = settings.credentials.expect("live has a credential");
+            assert_eq!(credentials.token.expose_secret(), TOKEN);
+            assert_eq!(credentials.credential_id, Uuid::from_u128(2));
+            assert_eq!(credentials.sender_org, Uuid::from_u128(1));
+        }
+
+        // Half of the payout pair beside half of another is a mistake, not
+        // a choice: refused, naming the half that does not match.
+        let mut token_only = referral("live");
+        token_only.insert(NEAR_AI_REFERRAL_CREDENTIAL_ENV, TOKEN.to_string());
         assert_eq!(
-            parse_referral(&shared, &rail("live")).unwrap_err(),
+            parse_referral(&token_only, &rail("live")).unwrap_err(),
             NearAiReferralConfigError::Missing {
-                setting: NEAR_AI_REFERRAL_CREDENTIAL_ENV
+                setting: NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV
             }
         );
-        let mut shared_id = referral("live");
-        shared_id.insert(
+        let mut id_only = referral("live");
+        id_only.insert(
             NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV,
             Uuid::from_u128(2).to_string(),
         );
         assert_eq!(
-            parse_referral(&shared_id, &rail("live")).unwrap_err(),
+            parse_referral(&id_only, &rail("live")).unwrap_err(),
             NearAiReferralConfigError::Missing {
-                setting: NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV
+                setting: NEAR_AI_REFERRAL_CREDENTIAL_ENV
             }
         );
     }

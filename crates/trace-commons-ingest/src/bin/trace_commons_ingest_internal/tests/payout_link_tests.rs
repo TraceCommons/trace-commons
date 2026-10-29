@@ -1038,6 +1038,7 @@ async fn status_splits_own_and_referral_credit_once_the_referral_stream_runs() {
         &NearAiReferralConfig::Enabled(NearAiReferralSettings {
             mode: PayoutMode::DryRun,
             credentials: None,
+            shares_payout_credential: false,
             account_ceiling: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(1_000_000),
         }),
         "http://127.0.0.1:9",

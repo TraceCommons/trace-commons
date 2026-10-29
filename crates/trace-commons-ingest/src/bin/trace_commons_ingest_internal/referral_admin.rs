@@ -6,8 +6,9 @@
 //!
 //! Boot reads the bonus settings fail-closed
 //! ([`ReferralBonusSettings::from_env`]: a malformed setting, an earning
-//! period under 92 days, or `live` without the referral credential refuses
-//! the start) and, outside `disabled`, attaches the bonus work to the
+//! period under 92 days, or `live` with only one of the referral
+//! credential and its id refuses the start; with neither, `live` sends with
+//! the payout credential) and, outside `disabled`, attaches the bonus work to the
 //! `near_ai` pass. Outside `disabled`, no database refuses the start
 //! (`referral_store_unavailable`). In `live` the payout pass's referral
 //! stream sends what is owed; `dry_run` sends nothing. While referrals are

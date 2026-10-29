@@ -949,3 +949,84 @@ async fn only_a_login_granted_the_resolver_can_assume_it() {
         .expect("grant the resolver");
     assert!(probe.referral_resolver_assumable().await.unwrap());
 }
+
+/// Writes one attribution as the runtime, with the session in `zone`, and
+/// rolls it back: whether the schema accepts `earn_until` for `created`.
+async fn attribution_in_zone(
+    fixture: &Fixture,
+    zone: &str,
+    created: chrono::DateTime<chrono::Utc>,
+    earn_until: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, tokio_postgres::Error> {
+    let (tenant, account) = tenant_with_account(&fixture.owner).await;
+    let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute(&format!("SET LOCAL TimeZone = '{zone}'"))
+        .await
+        .unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let result = tx
+        .execute(
+            "INSERT INTO trace_referral_attributions
+               (tenant_id, account_id, code_index, referrer_tenant_id, referrer_account_id,
+                referee_ref_hash, referee_account_created_at, applied_via, earn_until)
+             VALUES (trace_current_tenant_id(), $1, $2, 'nearai-referral-elsewhere', $3, $4,
+                     $5, 'later', $6)",
+            &[
+                &account,
+                &sha(&format!("code:{}", Uuid::new_v4())),
+                &Uuid::new_v4(),
+                &sha(&format!("referee:{tenant}")),
+                &created,
+                &earn_until,
+            ],
+        )
+        .await;
+    tx.rollback().await.unwrap();
+    result
+}
+
+/// The promised 92 days are 92 x 24 hours, as the store computes them, in
+/// any session time zone. `+ interval '92 days'` is calendar days in the
+/// session's zone: across a daylight-saving change it is an hour longer
+/// (refusing the store's own earn_until) or shorter (accepting one under
+/// the promise).
+#[tokio::test]
+async fn the_earning_promise_is_92_days_of_hours_in_any_session_time_zone() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let at = |text: &str| {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let promise = chrono::Duration::days(92);
+    // Before the November fall-back and before the March spring-forward,
+    // both in the past (applied_at, now, is after creation).
+    for created in [at("2025-10-20T17:00:00Z"), at("2026-02-01T17:00:00Z")] {
+        for zone in ["UTC", "America/Los_Angeles", "Europe/Berlin"] {
+            attribution_in_zone(&fixture, zone, created, created + promise)
+                .await
+                .unwrap_or_else(|error| panic!("{zone} {created}: the promise is kept: {error}"));
+            let short = attribution_in_zone(
+                &fixture,
+                zone,
+                created,
+                created + promise - chrono::Duration::minutes(30),
+            )
+            .await
+            .expect_err("half an hour under the promise is refused");
+            assert_eq!(
+                code_of(&short),
+                Some(&SqlState::CHECK_VIOLATION),
+                "{zone} {created}"
+            );
+        }
+    }
+}
