@@ -16,11 +16,20 @@ final class HomeTracesHeroTests: XCTestCase {
             words.tracesHeroBody,
             "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.")
         XCTAssertEqual(words.tracesHeroAction, "Start earning")
+        XCTAssertEqual(words.tracesHeroStepContribute, "Contribute traces")
+        XCTAssertEqual(words.tracesHeroStepContributeDetail, "Share the sessions from your AI coding tools")
+        XCTAssertEqual(words.tracesHeroStepEarn, "Earn credit")
+        XCTAssertEqual(words.tracesHeroStepEarnDetail, "Each accepted trace earns you credit")
+        XCTAssertEqual(words.tracesHeroStepUse, "Use Private AI")
+        XCTAssertEqual(words.tracesHeroStepUseDetail, "Spend your credit on Private AI")
         let home = try String(
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/HomeViews.swift"), encoding: .utf8)
         let hero = try XCTUnwrap(home.range(of: "private var tracesHero: some View {"))
-        let body = home[hero.upperBound...].prefix(600)
+        let body = home[hero.upperBound...].prefix(1400)
         XCTAssertTrue(body.contains("GlassHeroCard("))
         XCTAssertTrue(body.contains("actionTitle: words.tracesHeroAction, action: openTraces"))
+        // The three steps run across the whole card, under the graphic.
+        XCTAssertTrue(body.contains("contentSpansGraphic: true"))
+        XCTAssertTrue(body.contains("HomeHeroSteps(steps: ["))
     }
 }

@@ -381,7 +381,9 @@ private struct HomeOverview: View {
 
     /// Home's Traces hero (owner, 2026-10-28): the first and largest card,
     /// saying what contributing is and that it earns credit, with the way
-    /// into Traces, where the person shares. Drawn once the core's words
+    /// into Traces, where the person shares. Under its line, three steps
+    /// across the whole card, contribute, earn, use Private AI (owner,
+    /// 2026-10-29, from the owner's mock-up). Drawn once the core's words
     /// have loaded.
     @ViewBuilder
     private var tracesHero: some View {
@@ -389,11 +391,19 @@ private struct HomeOverview: View {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroMissions,
                 title: words.tracesHeroTitle, subtitle: words.tracesHeroBody,
-                actionTitle: words.tracesHeroAction, action: openTraces
+                actionTitle: words.tracesHeroAction, action: openTraces,
+                contentSpansGraphic: true
             ) {
-                GlassHeroSymbol(HomeStatIcons.credit)
+                HomeHeroRing()
             } content: {
-                EmptyView()
+                HomeHeroSteps(steps: [
+                    .init(number: 1, systemImage: "apple.terminal",
+                          title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail),
+                    .init(number: 2, systemImage: "cylinder.split.1x2",
+                          title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
+                    .init(number: 3, systemImage: "sparkles",
+                          title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),
+                ])
             }
         }
     }
@@ -1698,6 +1708,92 @@ struct HomeAccountTiles: View {
 /// One of Home's and History's three counts (Ron's `StatCard`): a full
 /// card, 10 by 12 inside, its eyebrow word over an 18pt-class bold tabular
 /// figure. The word wraps at a space, never inside a word.
+/// The Traces hero's three steps (owner, 2026-10-29): side by side, an
+/// arrow between each, each a translucent panel on the hero's ground with
+/// a numbered disc, an icon, a title and one line. All in heroInk, as
+/// every word on a hero is; the discs and icons are heroAccent, the
+/// owner's mock-up's blue. The panels are as tall as the tallest. Part of the hero's one button, so VoiceOver reads
+/// the steps with the card.
+struct HomeHeroSteps: View {
+    struct Step: Identifiable {
+        let number: Int
+        let systemImage: String
+        let title: String
+        let detail: String
+        var id: Int { number }
+    }
+
+    let steps: [Step]
+
+    static var disc: CGFloat { 30 }
+    static var icon: CGFloat { 28 }
+
+    var body: some View {
+        let ink = GlassTokens.Color.heroInk.color
+        HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
+            ForEach(steps) { step in
+                if step.number > 1 {
+                    Image(systemName: "arrow.right")
+                        .glassGlyph(14, weight: .semibold)
+                        .foregroundStyle(ink.opacity(0.6))
+                        .accessibilityHidden(true)
+                }
+                panel(step, ink: ink)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.top, GlassTokens.Space.s2)
+    }
+
+    private func panel(_ step: Step, ink: Color) -> some View {
+        let shape = RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous)
+        return HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+            Text("\(step.number)")
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(ink)
+                .frame(width: Self.disc, height: Self.disc)
+                .background(Circle().fill(GlassTokens.Color.heroAccent.color))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Image(systemName: step.systemImage)
+                    .glassGlyph(Self.icon, weight: .regular)
+                    .foregroundStyle(GlassTokens.Color.heroAccent.color)
+                    // One height for every icon, so the titles line up.
+                    .frame(height: Self.icon + 6, alignment: .leading)
+                    .accessibilityHidden(true)
+                    .padding(.bottom, GlassTokens.Space.s1)
+                Text(step.title)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(ink)
+                Text(step.detail)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(ink.opacity(0.8))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(GlassTokens.Space.s3)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(shape.fill(ink.opacity(0.08)))
+        .overlay(shape.strokeBorder(ink.opacity(0.18), lineWidth: 1))
+    }
+}
+
+/// The Traces hero's graphic (owner, 2026-10-29, from the owner's
+/// mock-up): one faint ring past the card's trailing edge, behind the
+/// steps, where a symbol would sit on the third step's words.
+struct HomeHeroRing: View {
+    static var side: CGFloat { 300 }
+    static var stroke: CGFloat { 36 }
+
+    var body: some View {
+        Circle()
+            .strokeBorder(GlassTokens.Color.heroInk.color.opacity(0.14), lineWidth: Self.stroke)
+            .frame(width: Self.side, height: Self.side)
+            .offset(x: 90, y: -30)
+    }
+}
+
 private struct HomeStatTile: View {
     let label: String
     let value: String

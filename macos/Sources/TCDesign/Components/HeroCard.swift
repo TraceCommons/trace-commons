@@ -21,6 +21,10 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let action: (() -> Void)?
     private let closeLabel: String?
     private let onClose: (() -> Void)?
+    /// The caller's content runs the card's full width, under the graphic,
+    /// while the title and line still stop short of it (owner, 2026-10-29:
+    /// Home's Traces hero draws its three steps across the whole card).
+    private let contentSpansGraphic: Bool
     private let graphic: Graphic
     private let content: Content
     @State private var hovering = false
@@ -30,6 +34,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         gradient: GlassGradient, title: String, subtitle: String? = nil,
         actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
+        contentSpansGraphic: Bool = false,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -39,6 +44,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.action = action
         self.closeLabel = closeLabel
         self.onClose = onClose
+        self.contentSpansGraphic = contentSpansGraphic
         self.graphic = graphic()
         self.content = content()
     }
@@ -80,7 +86,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private var card: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         return words
-            .padding(.trailing, Self.graphicReserve)
+            .padding(.trailing, contentSpansGraphic ? 0 : Self.graphicReserve)
             .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
             .background(alignment: .trailing) {
                 // Behind the words, sized to the card, past its edges.
@@ -122,6 +128,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(.trailing, contentSpansGraphic ? Self.graphicReserve : 0)
             content
             if let actionTitle {
                 Text(actionTitle)
