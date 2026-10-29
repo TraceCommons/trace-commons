@@ -2672,6 +2672,19 @@ char*       tc_inference_connection_copy_json(void);
  */
 char*       tc_payout_link_copy_json(void);
 
+/* The referral words (referral_copy::referral_copy): the Settings Referrals
+ * section, the code field on the NEAR AI sign-in step and the Insights
+ * credit split, every one a draft for owner review. Templates carry {code},
+ * {n}, {date} or {amount}. NULL only on a caught panic.
+ */
+char*       tc_referral_copy_json(void);
+
+/* A typed referral code as it is shown, TC-XXXXX-XXXXX, read the way the
+ * daemon reads it before sending one. NULL for text that is not a code, a
+ * NULL or non-UTF-8 typed, and on a caught panic.
+ */
+char*       tc_referral_code_display(const char* typed);
+
 /* The Devices section's words (consent_copy::account_devices_copy), every
  * one a draft for owner review. Templates carry {device}, {code} or {when}.
  * NULL only on a caught panic.
