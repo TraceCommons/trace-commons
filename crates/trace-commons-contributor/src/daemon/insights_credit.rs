@@ -39,6 +39,9 @@ pub(crate) struct CreditSession<'a> {
     pub tool: Option<&'a str>,
     /// The Sessions list's folder label.
     pub folder: Option<&'a str>,
+    /// Whether it is a trace, counted in `sessions`; `false` for the spend
+    /// no session could be named for.
+    pub counts_session: bool,
 }
 
 /// The sum of the sessions in one window or group.
@@ -49,9 +52,9 @@ struct Sum {
 }
 
 impl Sum {
-    fn add(&mut self, charge: &HourCharge) {
+    fn add(&mut self, charge: &HourCharge, counts_session: bool) {
         self.charge.absorb(charge);
-        self.sessions = self.sessions.saturating_add(1);
+        self.sessions = self.sessions.saturating_add(u64::from(counts_session));
     }
 
     fn value(&self) -> serde_json::Value {
@@ -87,10 +90,20 @@ pub(crate) fn window_value(
         let Some(charge) = session.charge.within(session.last_call_at, from, to) else {
             continue;
         };
-        total.add(&charge);
-        by_task.entry(session.task).or_default().add(&charge);
-        by_tool.entry(session.tool).or_default().add(&charge);
-        by_folder.entry(session.folder).or_default().add(&charge);
+        let counts = session.counts_session;
+        total.add(&charge, counts);
+        by_task
+            .entry(session.task)
+            .or_default()
+            .add(&charge, counts);
+        by_tool
+            .entry(session.tool)
+            .or_default()
+            .add(&charge, counts);
+        by_folder
+            .entry(session.folder)
+            .or_default()
+            .add(&charge, counts);
     }
     let mut value = total.value();
     value["from"] = serde_json::json!(from.to_rfc3339());
@@ -174,6 +187,7 @@ mod tests {
             task,
             tool,
             folder,
+            counts_session: true,
         }
     }
 

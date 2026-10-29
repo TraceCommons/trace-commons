@@ -574,8 +574,15 @@ pub(crate) fn fold_plan_refs<'a>(
 ///
 /// `ledger_money` is `LEDGER_MONEY_IN_INSIGHTS` (owner decision D5): held,
 /// no charge is taken, so no money and no served model reach the store.
+///
+/// A skipped call's NEAR AI charge is not lost: it goes to `loose`, the
+/// spend no session can be named for (an opencode session through a
+/// managed route, a call with no session ID), which `insights_week`'s
+/// `near_ai_credit` counts in every sum and in each unknown group
+/// (product owner, 2026-10-28: the money is spent whoever spent it).
 pub(crate) fn fold_into(
     routing: &mut BTreeMap<KeyedDigest, RouteTally>,
+    loose: &mut Option<NearAiCharge>,
     key: &DigestKey,
     plan: &FoldPlan<'_>,
     speakers: &Speakers,
@@ -583,15 +590,11 @@ pub(crate) fn fold_into(
 ) -> FoldSummary {
     let mut summary = FoldSummary::default();
     for row in &plan.rows {
-        let Some(session) = session_of(row) else {
+        let Some((session, tool)) = named(row, speakers) else {
+            add_loose(loose, row, ledger_money);
             summary.skipped += 1;
             continue;
         };
-        let tool = attribute(row, speakers);
-        if tool != SOURCE_CLAUDE_CODE && tool != SOURCE_CODEX {
-            summary.skipped += 1;
-            continue;
-        }
         let digest = harness_session_digest(key, tool, session);
         let tally = routing.entry(digest).or_insert_with(|| RouteTally {
             calls: RouteBuckets::default(),
@@ -612,10 +615,10 @@ pub(crate) fn fold_into(
                 *bucket = bucket.saturating_add(1);
             }
         }
-        if ledger_money && through_near_ai(row.proof) {
+        if ledger_money && charged_by_near_ai(row) {
             let last_call_at = tally.last_call_at;
             tally.charge.get_or_insert_with(NearAiCharge::default).add(
-                row.cost_usd,
+                call_charge(row),
                 served_label(row),
                 row.started_at,
                 last_call_at,
@@ -671,6 +674,62 @@ fn through_near_ai(proof: Option<ProofStatus>) -> bool {
 }
 
 /// The session id a row carries; an empty one is none.
+/// The session and tool a call is folded under, or `None` when it is
+/// skipped: no session ID, or no tool feed T counts can be named for it.
+/// The tool is never guessed.
+fn named<'r>(row: &'r RoutedExchange, speakers: &Speakers) -> Option<(&'r str, &'static str)> {
+    let session = session_of(row)?;
+    let tool = attribute(row, speakers);
+    (tool == SOURCE_CLAUDE_CODE || tool == SOURCE_CODEX).then_some((session, tool))
+}
+
+/// Add a skipped call's NEAR AI charge to `loose`.
+fn add_loose(loose: &mut Option<NearAiCharge>, row: &RoutedExchange, ledger_money: bool) {
+    if !ledger_money || !charged_by_near_ai(row) {
+        return;
+    }
+    let charge = loose.get_or_insert_with(NearAiCharge::default);
+    // `hours` is all a loose charge is read by, so the last call's time
+    // is only a fallback for an empty charge, never used once a call is in.
+    charge.add(call_charge(row), None, row.started_at, row.started_at);
+}
+
+/// [`fold_into`]'s `loose` only, for rows a fold made before skipped
+/// calls' charges were kept (`CounterStore::loose_epoch`): the rows it
+/// would skip add their charge; the rows it would fold add nothing, since
+/// they were folded then.
+pub(crate) fn fold_loose_only(
+    loose: &mut Option<NearAiCharge>,
+    rows: &[&RoutedExchange],
+    speakers: &Speakers,
+    ledger_money: bool,
+) {
+    for row in rows {
+        if named(row, speakers).is_none() {
+            add_loose(loose, row, ledger_money);
+        }
+    }
+}
+
+/// Whether a call's charge is NEAR AI's: through the NEAR AI route by its
+/// proof label, or, with no label recorded, on the `nearai` backend (a
+/// managed route's ledger names it so). `outside` never is.
+fn charged_by_near_ai(row: &RoutedExchange) -> bool {
+    through_near_ai(row.proof) || (row.proof.is_none() && row.backend == "nearai")
+}
+
+/// The amount a call adds. A call the provider refused (an HTTP 4xx or
+/// 5xx status) with no recorded charge was not billed, and adds a known
+/// $0 (owner question, 2026-10-28). Any other call with no charge (a
+/// completed one, or one with no status) is unknown, never zero.
+fn call_charge(row: &RoutedExchange) -> Option<f64> {
+    match row.cost_usd {
+        Some(usd) => Some(usd),
+        None if (400..600).contains(&row.status) => Some(0.0),
+        None => None,
+    }
+}
+
 fn session_of(row: &RoutedExchange) -> Option<&str> {
     row.client_session_id
         .as_deref()
@@ -724,7 +783,7 @@ mod tests {
         window: &[RoutedExchange],
     ) -> FoldSummary {
         let plan = fold_plan(window, *cursor);
-        let summary = fold_into(routing, &key(), &plan, &Vec::new(), true);
+        let summary = fold_into(routing, &mut None, &key(), &plan, &Vec::new(), true);
         *cursor = plan.next;
         summary
     }
@@ -848,6 +907,7 @@ mod tests {
         let mut routing = BTreeMap::new();
         let summary = fold_into(
             &mut routing,
+            &mut None,
             &key(),
             &plan,
             &vec![(SOURCE_CODEX, "openai")],
@@ -1076,8 +1136,8 @@ mod tests {
         let plan = fold_plan(&window, FoldCursor::default());
         let mut held = BTreeMap::new();
         let mut shown = BTreeMap::new();
-        fold_into(&mut held, &key(), &plan, &Vec::new(), false);
-        fold_into(&mut shown, &key(), &plan, &Vec::new(), true);
+        fold_into(&mut held, &mut None, &key(), &plan, &Vec::new(), false);
+        fold_into(&mut shown, &mut None, &key(), &plan, &Vec::new(), true);
         assert!(only(&shown).charge.is_some());
         assert_eq!(only(&held).charge, None);
         assert_eq!(session_charge(only(&held)), None);

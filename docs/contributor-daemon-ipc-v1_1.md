@@ -4734,6 +4734,17 @@ the whole of each is folded, not 24 hours of it. A route that is gone loses
 its cursor; while the routes cannot be read, the cursors are kept as they
 are.
 
+A call skipped for its session or tool (no session ID, or a tool feed T
+does not count, such as opencode through a managed route) adds no tally,
+but its NEAR AI charge is kept apart, by hour, as the store's
+`loose_charge` (product owner, 2026-10-28: money spent is counted whoever
+spent it). A call's charge is NEAR AI's when its proof label is through the
+NEAR AI route, or when it carries no label and its backend is `nearai`. A
+call the provider refused (HTTP 4xx or 5xx) with no `cost_usd` adds a known
+$0; any other call with no `cost_usd` makes its figures unknown. A store
+written before `loose_charge` (`loose_epoch` below 1) takes the calls its
+folds already passed once more, for the charge of those they skipped only.
+
 The tally also keeps the session's **NEAR AI charge** (owner decision D5,
 settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
 charge is taken as the call is folded or not at all. For each call through
@@ -4965,7 +4976,8 @@ sessions on disk. Otherwise:
   to local midnight. Each window is `{from, to, usd_micros,
   sessions, calls, calls_without_charge}`: the calls through the NEAR AI
   route started in it (by clock hour), their sum in integer USD micros, the
-  sessions they came from, and the calls with no charge. `usd_micros` is
+  sessions they came from (the `loose_charge` counts in every sum and in each
+  unknown group, as no session), and the calls with no charge. `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
   zero; a window with no call is a true 0. `week` also carries `by_task[]`,
   `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,

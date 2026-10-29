@@ -643,6 +643,18 @@ struct CounterStore {
     /// written before managed routes were folded, and left out while empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     managed_folded: BTreeMap<String, StoredCursor>,
+    /// The NEAR AI charge of calls no session could be named for (an
+    /// opencode session through a managed route, a call with no session
+    /// ID), by the hour they started in: counted in `near_ai_credit`'s sums
+    /// and its unknown groups (product owner, 2026-10-28). Aged out by the
+    /// hour with the tallies. Left out of the file while there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loose_charge: Option<super::insights_route_tally::NearAiCharge>,
+    /// Which fold rules `loose_charge` was kept under: below
+    /// [`LOOSE_EPOCH`], the calls folds passed over before skipped calls'
+    /// charges were kept are taken once more, for their charge only.
+    #[serde(default, skip_serializing_if = "is_zero_epoch")]
+    loose_epoch: u32,
     /// Sessions the caps evicted, by the same keyed session digest as
     /// `rows`, with the observation their row was made from. A candidate
     /// with no row whose last write is no later than the newest of these is
@@ -661,6 +673,14 @@ struct CounterStore {
     /// written before it.
     #[serde(default)]
     generation: u32,
+}
+
+/// The fold rules `loose_charge` is kept under (`CounterStore::loose_epoch`).
+const LOOSE_EPOCH: u32 = 1;
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_epoch(epoch: &u32) -> bool {
+    *epoch == 0
 }
 
 /// A [`FoldCursor`] as the store keeps it.
@@ -729,6 +749,8 @@ impl CounterStore {
             ledger_folded_through: None,
             ledger_folded_started: None,
             managed_folded: BTreeMap::new(),
+            loose_charge: None,
+            loose_epoch: LOOSE_EPOCH,
             evicted: BTreeMap::new(),
             generation: new_generation(),
         }
@@ -2691,11 +2713,12 @@ impl CounterPass {
         // and the tools need reading.
         let peek = self.load_cached()?;
         let empty = CounterStore::empty(KeyedDigest([0; 32]));
-        let plans = FoldPlans::new(&window, managed, peek.as_deref().unwrap_or(&empty));
-        if plans.is_idle() {
+        let peeked = peek.as_deref().unwrap_or(&empty);
+        let plans = FoldPlans::new(&window, managed, peeked);
+        if plans.is_idle() && !loose_upgrade_due(peeked, managed) {
             return Ok(FoldSummary::default());
         }
-        let speakers = if plans.needs_speakers() {
+        let speakers = if plans.needs_speakers() || loose_upgrade_due(peeked, managed) {
             speakers()
         } else {
             Vec::new()
@@ -2718,13 +2741,49 @@ impl CounterPass {
         };
         // Planned again under the lock, from the cursors as they now stand.
         let plans = FoldPlans::new(&window, managed, &store);
-        if plans.is_idle() {
+        let upgrade = loose_upgrade_due(&store, managed);
+        if plans.is_idle() && !upgrade {
             return Ok(FoldSummary::default());
+        }
+        if upgrade {
+            // Calls folded before skipped calls' charges were kept: those
+            // a fold skipped then add their charge now, once. The calls it
+            // folded then add nothing again.
+            let taken = |plan: &super::insights_route_tally::FoldPlan<'_>| -> BTreeSet<i64> {
+                plan.rows.iter().filter_map(|row| row.id).collect()
+            };
+            let shared_taken = taken(&plans.shared);
+            let before: Vec<&crate::routing::RoutedExchange> = window
+                .iter()
+                .filter(|row| row.id.is_some_and(|id| !shared_taken.contains(&id)))
+                .collect();
+            super::insights_route_tally::fold_loose_only(
+                &mut store.loose_charge,
+                &before,
+                &speakers,
+                LEDGER_MONEY_IN_INSIGHTS,
+            );
+            for (home, rows) in managed.into_iter().flatten() {
+                let done = plans.managed.get(home).map(taken).unwrap_or_default();
+                let before: Vec<&crate::routing::RoutedExchange> = rows
+                    .iter()
+                    .copied()
+                    .filter(|row| row.id.is_some_and(|id| !done.contains(&id)))
+                    .collect();
+                super::insights_route_tally::fold_loose_only(
+                    &mut store.loose_charge,
+                    &before,
+                    &speakers,
+                    LEDGER_MONEY_IN_INSIGHTS,
+                );
+            }
+            store.loose_epoch = LOOSE_EPOCH;
         }
         let mut summary = FoldSummary::default();
         for plan in std::iter::once(&plans.shared).chain(plans.managed.values()) {
             let folded = fold_into(
                 &mut store.routing,
+                &mut store.loose_charge,
                 &key,
                 plan,
                 &speakers,
@@ -2783,6 +2842,13 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
         AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
         AnalyticsSource::Codex => SourceFormat::Codex,
     }
+}
+
+/// Whether the calls folded before skipped calls' charges were kept are
+/// still to be taken once more for their charge (`CounterStore::loose_epoch`).
+/// Only once the managed routes could be read, so none is missed.
+fn loose_upgrade_due(store: &CounterStore, managed: Option<&ManagedRows<'_>>) -> bool {
+    managed.is_some() && store.loose_epoch < LOOSE_EPOCH
 }
 
 /// One fold's plans: the shared ledger's, and each managed route's by its
@@ -3484,6 +3550,15 @@ fn find_listed<'s>(
 
 /// Age out and cap the route tallies against the rows the store keeps.
 fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff: DateTime<Utc>) {
+    // The loose charge ages out by the hour, as a tally does by its last
+    // call; gone entirely once no hour is left.
+    if let Some(loose) = store.loose_charge.as_mut() {
+        let first = super::insights_route_tally::unix_hour(cutoff);
+        loose.by_hour.retain(|hour, _| *hour >= first);
+        if loose.by_hour.is_empty() {
+            store.loose_charge = None;
+        }
+    }
     let matched: BTreeSet<KeyedDigest> = store
         .rows
         .values()
@@ -4057,7 +4132,7 @@ fn near_ai_credit_value(
         .into_iter()
         .map(|(digest, (_, row))| (digest, row))
         .collect();
-    let sessions: Vec<CreditSession<'_>> = store
+    let mut sessions: Vec<CreditSession<'_>> = store
         .routing
         .iter()
         .filter_map(|(digest, tally)| {
@@ -4069,9 +4144,22 @@ fn near_ai_credit_value(
                 task: tasks.get(digest).copied().flatten(),
                 tool: row.map(|row| row_tool(row)),
                 folder: row.and_then(|row| labels.get(&row.project).copied()),
+                counts_session: true,
             })
         })
         .collect();
+    // Spend no session could be named for: in every sum and in each
+    // unknown group, as no trace.
+    if let Some(loose) = store.loose_charge.as_ref() {
+        sessions.push(CreditSession {
+            charge: loose,
+            last_call_at: now,
+            task: None,
+            tool: None,
+            folder: None,
+            counts_session: false,
+        });
+    }
     let midnight = |date: NaiveDate| {
         date.and_hms_opt(0, 0, 0)
             .and_then(|local| local.and_local_timezone(tz).single())
@@ -7191,6 +7279,124 @@ mod tests {
             .unwrap();
         assert_eq!(cursors(&f.pass), ["route-b"]);
         assert!(!f.rows_text().contains("SESSION-SECRET"));
+    }
+
+    /// The owner's staging data, 2026-10-28: managed routes on the
+    /// `nearai` backend with no proof label, called by a tool no session
+    /// is named for (opencode), two days before the week on screen, some
+    /// calls refused with no charge. Before the fix every call was skipped
+    /// and no NEAR AI card showed.
+    fn owner_route_call(id: i64, cost: Option<f64>, status: i64) -> crate::routing::RoutedExchange {
+        crate::routing::RoutedExchange {
+            id: Some(id),
+            started_at: now() - Duration::days(2) + Duration::minutes(id),
+            client_session_id: Some("OPENCODE-SESSION".to_string()),
+            facade: "openai".to_string(),
+            path: Some("/v1/chat/completions".to_string()),
+            backend: "nearai".to_string(),
+            cost_usd: cost,
+            status,
+            proof: None,
+            ..Default::default()
+        }
+    }
+
+    fn credit_now(f: &Fixture) -> serde_json::Value {
+        f.pass.week_value_with_folders(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            (routed(), &[]),
+        )["near_ai_credit"]
+            .clone()
+    }
+
+    #[test]
+    fn spend_no_session_is_named_for_still_counts_in_the_sums() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let a = [owner_route_call(1, Some(0.058), 200)];
+        let b = [
+            owner_route_call(1, Some(4.72), 200),
+            // Refused, not billed: a known $0.
+            owner_route_call(2, None, 429),
+            owner_route_call(3, None, 500),
+        ];
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), a.iter().collect());
+        homes.insert("route-b".to_string(), b.iter().collect());
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let summary = f
+            .pass
+            .fold_ledgers(&|| true, &none, Some(&homes), &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(summary.skipped, 4, "no session is named for these calls");
+        assert_eq!(tallies(&f.pass).len(), 0);
+
+        let credit = credit_now(&f);
+        // Nothing this week: a true zero.
+        assert_eq!(credit["week"]["usd_micros"], 0);
+        assert_eq!(credit["week"]["calls"], 0);
+        let month = &credit["last_31_days"];
+        assert_eq!(month["usd_micros"], 4_778_000);
+        assert_eq!(month["calls"], 4);
+        assert_eq!(month["calls_without_charge"], 0);
+        assert_eq!(month["sessions"], 0, "no trace is counted for them");
+        assert_eq!(credit["by_day"][4]["usd_micros"], 4_778_000);
+        assert_eq!(credit["by_day"][4]["date"], "2026-09-12");
+
+        // A completed call with no charge makes the sum unknown.
+        let c = [owner_route_call(1, None, 200)];
+        homes.insert("route-c".to_string(), c.iter().collect());
+        f.pass
+            .fold_ledgers(&|| true, &none, Some(&homes), &mut Vec::new, now())
+            .unwrap();
+        let month = &credit_now(&f)["last_31_days"];
+        assert_eq!(month["usd_micros"], serde_json::Value::Null);
+        assert_eq!(month["calls_without_charge"], 1);
+    }
+
+    /// A store a build before this one folded (its cursors past the calls
+    /// it skipped) takes those calls once more, for their charge only, and
+    /// never counts a folded call twice.
+    #[test]
+    fn calls_skipped_before_the_loose_charge_are_taken_once_more() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let rows = [
+            owner_route_call(1, Some(0.25), 200),
+            owner_route_call(2, Some(0.5), 200),
+        ];
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), rows.iter().collect());
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let fold = |homes: &ManagedRows<'_>| {
+            f.pass
+                .fold_ledgers(&|| true, &none, Some(homes), &mut Vec::new, now())
+                .unwrap()
+        };
+        fold(&homes);
+        // As the earlier build left it: cursor moved, no loose charge.
+        {
+            let mut cached = f.pass.cached.lock().unwrap();
+            let mut store = (*f.pass.load_into(&mut cached).unwrap().unwrap()).clone();
+            assert_eq!(store.loose_epoch, LOOSE_EPOCH);
+            store.loose_charge = None;
+            store.loose_epoch = 0;
+            f.pass.stage_into(&mut cached, store);
+        }
+        f.pass.flush().unwrap();
+        assert_eq!(credit_now(&f)["last_31_days"]["calls"], 0);
+        fold(&homes);
+        assert_eq!(credit_now(&f)["last_31_days"]["usd_micros"], 750_000);
+        fold(&homes);
+        assert_eq!(
+            credit_now(&f)["last_31_days"]["usd_micros"],
+            750_000,
+            "once"
+        );
     }
 
     /// A session in a Never folder has no row (it is never read), so the
