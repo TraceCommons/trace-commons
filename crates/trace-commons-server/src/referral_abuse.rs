@@ -55,7 +55,11 @@ pub const REFERRAL_SIGNAL_LABELS: [&str; 7] = [
 ];
 
 /// Referral-stream holds on the referrer's account (spec section 4).
+/// The referee's live payout link has the referrer's `recipient_index`.
+/// Also written on the referee's mirror row as operator evidence, never
+/// scored, so the hold opens once per referee.
 pub const REFERRAL_SAME_PAYOUT_ORG: &str = "referral_same_payout_org";
+/// The same for `subject_index`.
 pub const REFERRAL_SAME_PAYOUT_SUBJECT: &str = "referral_same_payout_subject";
 /// The referee's and the referrer's traces share a near-duplicate cluster.
 pub const REFERRAL_SAME_TRACES: &str = "referral_same_traces";
@@ -82,7 +86,11 @@ pub const REFERRAL_HOLD_LABELS: [&str; 7] = [
 /// Mirror-row labels that are evidence for an operator only: written with
 /// the signal labels, shown in the dry-run report, and never counted by
 /// [`score_rows`], so they can never suspend a code or a referrer.
-pub const REFERRAL_EVIDENCE_LABELS: [&str; 1] = [REFERRAL_SAME_NETWORK];
+pub const REFERRAL_EVIDENCE_LABELS: [&str; 3] = [
+    REFERRAL_SAME_PAYOUT_ORG,
+    REFERRAL_SAME_PAYOUT_SUBJECT,
+    REFERRAL_SAME_NETWORK,
+];
 
 /// The label recorded when too many codes were suspended at once and the
 /// referral stream switched itself to `dry_run`; readiness reports it.
@@ -817,16 +825,19 @@ mod tests {
         }
     }
 
-    /// Owner decision 2026-10-29: a shared network holds the referral
-    /// stream, but colleagues on one office network are the main
-    /// legitimate case, so it never trips a code or a referrer, however
-    /// many referees carry it.
+    /// Owner decision 2026-10-29: a shared network (or payout org or
+    /// subject with the referrer) holds the referral stream, but colleagues
+    /// on one office network are the main legitimate case, so evidence
+    /// labels never trip a code or a referrer, however many referees carry
+    /// them.
     #[test]
-    fn a_shared_network_never_trips_a_code_or_a_referrer() {
-        let rows: Vec<RefereeMirror> = (0..10).map(|n| row(n, &[REFERRAL_SAME_NETWORK])).collect();
+    fn evidence_labels_never_trip_a_code_or_a_referrer() {
+        let rows: Vec<RefereeMirror> = (0..10).map(|n| row(n, &REFERRAL_EVIDENCE_LABELS)).collect();
         let code = score_code("sha256:code", &rows, &settings(), &BTreeSet::new());
         assert!(!code.is_tripped(), "{code:?}");
-        assert!(!code.counts.contains_key(REFERRAL_SAME_NETWORK));
+        for label in REFERRAL_EVIDENCE_LABELS {
+            assert!(!code.counts.contains_key(label), "{label}");
+        }
         assert!(!score_referrer(&rows, &settings()).is_tripped());
         for label in REFERRAL_EVIDENCE_LABELS {
             assert!(!REFERRAL_SIGNAL_LABELS.contains(&label), "{label}");

@@ -721,6 +721,14 @@ async fn sharing_a_payout_org_or_subject_holds_only_the_referral_stream() {
             "referral_same_payout_subject".to_owned()
         ]
     );
+    // The matches are evidence on the referee's mirror row.
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &referee).await,
+        vec![
+            "referral_same_payout_org".to_owned(),
+            "referral_same_payout_subject".to_owned()
+        ]
+    );
     // The referee's mirror row carries their link's indexes.
     let row = &runtime_query(
         &fixture,
@@ -1537,4 +1545,94 @@ async fn network_marks_stay_in_their_tenant_and_program_and_expire() {
             .unwrap(),
         0
     );
+}
+
+/// The payout org and subject holds open once per referee, as the trace and
+/// network holds do: an operator's clear stands on the next pass, and only a
+/// new referee with the same payout org opens the hold again.
+#[tokio::test]
+async fn a_cleared_payout_org_hold_stays_cleared_until_a_new_referee_matches() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let first = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let org = format!("org:{}", Uuid::new_v4());
+    link(
+        &fixture,
+        &referrer.tenant,
+        referrer.account,
+        &org,
+        &format!("subject:{}", Uuid::new_v4()),
+    )
+    .await;
+    link(
+        &fixture,
+        &first.tenant,
+        first.account,
+        &org,
+        &format!("subject:{}", Uuid::new_v4()),
+    )
+    .await;
+    let hook = hook(&fixture, settings());
+    let report = hook.run_tenant(&first.tenant, &near_ai()).await;
+    assert_eq!(report.held["referral_same_payout_org"], 1, "{report:?}");
+    assert_eq!(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await,
+        vec!["referral_same_payout_org".to_owned()]
+    );
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &first).await,
+        vec!["referral_same_payout_org".to_owned()]
+    );
+
+    fixture
+        .runtime
+        .clear_payout_hold(
+            &referrer.tenant,
+            referrer.account,
+            &near_ai(),
+            "referral_same_payout_org",
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    let report = hook.run_tenant(&first.tenant, &near_ai()).await;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert!(
+        open_holds(&fixture, &referrer.tenant, referrer.account)
+            .await
+            .is_empty(),
+        "the operator's clear stands"
+    );
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &first).await,
+        vec!["referral_same_payout_org".to_owned()],
+        "the evidence stays on the mirror"
+    );
+
+    // A new referee on the same payout org opens it again.
+    let second = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    link(
+        &fixture,
+        &second.tenant,
+        second.account,
+        &org,
+        &format!("subject:{}", Uuid::new_v4()),
+    )
+    .await;
+    let report = hook.run_tenant(&second.tenant, &near_ai()).await;
+    assert_eq!(report.held["referral_same_payout_org"], 1, "{report:?}");
+    assert_eq!(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await,
+        vec!["referral_same_payout_org".to_owned()]
+    );
+    // Evidence only: the code is not suspended for it.
+    let codes = fixture
+        .runtime
+        .referral_codes(&referrer.tenant)
+        .await
+        .unwrap();
+    assert!(codes[0].suspended_at.is_none());
 }
