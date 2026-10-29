@@ -469,6 +469,8 @@ fn pending_line(link: &PayoutLinkWrite, target: u128, delta: u128) -> PayoutLine
         target_total: AtomicUnits::from_raw(target),
         delta: AtomicUnits::from_raw(delta),
         owed_through_accrual_count: 1,
+        stream: trace_commons_server::db::PayoutStream::Earned,
+        referral_program: None,
     }
 }
 

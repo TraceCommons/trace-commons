@@ -56,7 +56,7 @@ use trace_commons_server::db::{
     PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_account_id_hash,
     payout_link_id_hash,
 };
-use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
+use trace_commons_server::near_ai_rail_config::{NearAiRailConfig, NearAiReferralConfig};
 use trace_commons_server::payout_pass::{PayoutRecipientOpener, UnconfiguredRecipientOpener};
 use trace_commons_server::payout_rate::{
     NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot, near_ai_rate_version_in_force,
@@ -91,7 +91,17 @@ pub(crate) async fn payout_rails_from_env(
         Ok(None) => {}
         Err(error) => anyhow::bail!("near_ai payout refused to start: {}", error.label()),
     }
-    let rails = PayoutRails::from_config(&near_ai)
+    // The referral stream (referral rewards spec section 5): `disabled`
+    // unless set, and refused at boot when `live` without the rail `live`
+    // and its own credential (`near_ai_referral_config_missing`).
+    let referral = NearAiReferralConfig::from_env(&near_ai).map_err(|error| {
+        anyhow::anyhow!(
+            "near_ai referral payout refused to start: {} ({})",
+            error.label(),
+            error.setting()
+        )
+    })?;
+    let rails = PayoutRails::from_configs(&near_ai, &referral)
         .map_err(|error| anyhow::anyhow!("near_ai payout refused to start: {}", error.label()))?;
     // The version of the rate in force now, from the rate source this boot
     // recorded, for readiness and for the pass. Never the latest stored
@@ -115,6 +125,7 @@ pub(crate) async fn payout_rails_from_env(
         tracing::info!(
             rail = %entry.rail_id(),
             mode = entry.mode().as_label(),
+            referral_mode = entry.referral_mode().as_label(),
             qualified = entry.qualified(),
             "payout rail configured"
         );

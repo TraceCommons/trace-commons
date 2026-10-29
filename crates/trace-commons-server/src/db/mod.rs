@@ -3100,6 +3100,47 @@ impl PayoutLinkState {
     }
 }
 
+/// Which program of a link a line pays (V142; referral rewards spec
+/// section 5). `Earned` is the account's own credit on the link's program
+/// and every line written before V142; `Referral` is referral bonus on the
+/// link's referral program. A link has at most one pending line per stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub enum PayoutStream {
+    #[default]
+    Earned,
+    Referral,
+}
+
+impl PayoutStream {
+    pub const ALL: [Self; 2] = [Self::Earned, Self::Referral];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Earned => "earned",
+            Self::Referral => "referral",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "earned" => Self::Earned,
+            "referral" => Self::Referral,
+            _ => return None,
+        })
+    }
+}
+
+/// What a referrer is owed on a rail from referral bonus: the signed sum of
+/// `bonus_units` over its `trace_referral_bonus_accruals` rows (bonus,
+/// reversal and void), and how many rows that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutReferralOwed {
+    /// `None` when the rows sum below zero, which bonus rows that take back
+    /// only what they gave cannot produce: the pass holds rather than guess.
+    pub net: Option<u128>,
+    pub bonus_count: i64,
+}
+
 /// A payout line's state. `Pending` until its outcome is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PayoutLineState {
@@ -3353,6 +3394,9 @@ pub enum PayoutLinkClose {
     /// The named successor is not a `waiting` link of the same account and
     /// rail.
     SuccessorNotWaiting,
+    /// A referral total was given for a link with no referral program, or
+    /// none for a link that has one.
+    ReferralTotalMismatch,
 }
 
 /// A stored link. `Debug` redacts the recipient and the program.
@@ -3366,6 +3410,12 @@ pub struct PayoutLink {
     pub recipient: SealedRecipient,
     pub program: String,
     pub final_paid: Option<AtomicUnits>,
+    /// The link's referral program, set when its first referral line is
+    /// written; `None` on a link that never carried referral credit.
+    pub referral_program: Option<String>,
+    /// The referral program's total, recorded when a link that has one
+    /// closes.
+    pub final_paid_referral: Option<AtomicUnits>,
     pub unlink_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     pub recipient_unavailable_at: Option<chrono::DateTime<chrono::Utc>>,
     pub version: i64,
@@ -3392,17 +3442,28 @@ pub struct PayoutLineWrite {
     pub rail_id: RailId,
     pub target_total: AtomicUnits,
     pub delta: AtomicUnits,
+    /// For an earned line, the account's accrual count; for a referral
+    /// line, its bonus row count.
     pub owed_through_accrual_count: i64,
+    pub stream: PayoutStream,
+    /// A referral line's program: the link's referral program, which the
+    /// insert sets on the link when it has none yet. Required for a
+    /// referral line and refused on an earned one.
+    pub referral_program: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingPayoutLineInsert {
     Inserted,
-    /// The link already has an unresolved line, which recovery handles first.
+    /// The link already has an unresolved line on this stream, which
+    /// recovery handles first.
     LinkHasPendingLine,
     /// The link is not `active` (or is not this account's on this rail): a
     /// line is never written to a waiting, closing or closed link.
     LinkNotActive,
+    /// A referral line names a program other than the referral program the
+    /// link already carries; nothing changed.
+    ReferralProgramMismatch,
 }
 
 /// A stored line. `Debug` redacts the account.
@@ -3418,6 +3479,7 @@ pub struct PayoutLine {
     pub receipt_hash: Option<String>,
     pub attempts: i32,
     pub last_error_label: Option<String>,
+    pub stream: PayoutStream,
 }
 
 /// How a pending line is resolved. `Retry` keeps it pending and counts the
@@ -3595,6 +3657,7 @@ impl std::fmt::Debug for PayoutLineWrite {
         formatter
             .debug_struct("PayoutLineWrite")
             .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
             .finish_non_exhaustive()
     }
 }
@@ -3604,6 +3667,7 @@ impl std::fmt::Debug for PayoutLine {
         formatter
             .debug_struct("PayoutLine")
             .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
             .field("state", &self.state)
             .field("attempts", &self.attempts)
             .field("last_error_label", &self.last_error_label)
@@ -3838,12 +3902,46 @@ pub trait PayoutStore: Send + Sync {
     /// link has a `pending` line. Concurrent writers are excluded by the
     /// rail pass's single-flight lock; the V132 link trigger refuses a close
     /// over a pending line as a backstop.
+    ///
+    /// The earned stream only: a link that carries a referral program closes
+    /// through [`Self::close_payout_link_streams`], or V142's shape check
+    /// refuses it.
     #[allow(clippy::too_many_arguments)]
     async fn close_payout_link(
         &self,
         tenant: &str,
         link_id: Uuid,
         final_paid: AtomicUnits,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError> {
+        self.close_payout_link_streams(
+            tenant,
+            link_id,
+            final_paid,
+            None,
+            successor,
+            actor_ref_hash,
+            label,
+        )
+        .await
+    }
+
+    /// [`Self::close_payout_link`], recording each stream's final total:
+    /// `final_paid` for the earned program and, for a link with a referral
+    /// program, `final_paid_referral` (referral rewards spec section 5,
+    /// "Closing a link reads both programs"). A link with a referral program
+    /// and no `final_paid_referral`, or the reverse, is refused by the
+    /// V142 shape check and changes nothing. Refuses while a line of either
+    /// stream is pending.
+    #[allow(clippy::too_many_arguments)]
+    async fn close_payout_link_streams(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        final_paid_referral: Option<AtomicUnits>,
         successor: Option<Uuid>,
         actor_ref_hash: &str,
         label: Option<&str>,
@@ -3857,10 +3955,22 @@ pub trait PayoutStore: Send + Sync {
         line: &PayoutLineWrite,
     ) -> Result<PendingPayoutLineInsert, DatabaseError>;
 
+    /// The link's pending earned line.
     async fn pending_payout_line_for_link(
         &self,
         tenant: &str,
         link_id: Uuid,
+    ) -> Result<Option<PayoutLine>, DatabaseError> {
+        self.pending_payout_line_for_stream(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The link's pending line on `stream`; at most one exists.
+    async fn pending_payout_line_for_stream(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
     ) -> Result<Option<PayoutLine>, DatabaseError>;
 
     async fn resolve_payout_line(
@@ -4048,12 +4158,53 @@ pub trait PayoutStore: Send + Sync {
         account: Uuid,
     ) -> Result<PayoutAccountStanding, DatabaseError>;
 
-    /// The sum of `delta` over the link's `confirmed` lines: what the
+    /// The sum of `delta` over the link's `confirmed` earned lines: what the
     /// commons has confirmed landing on the link's program.
     async fn payout_link_confirmed_total(
         &self,
         tenant: &str,
         link_id: Uuid,
+    ) -> Result<u128, DatabaseError> {
+        self.payout_link_stream_confirmed_total(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The sum of `delta` over the link's `confirmed` lines on `stream`:
+    /// what has landed on that stream's program of the link.
+    async fn payout_link_stream_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// The sum of `delta` over every `confirmed` line on `stream` of the
+    /// account on `rail`, across all its links: the status route's `sent`.
+    async fn payout_account_stream_sent(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// What `account` is owed on `rail` from referral bonus: the signed sum
+    /// of `bonus_units` over its `trace_referral_bonus_accruals` rows.
+    /// Refuses a sum whose magnitude exceeds `u128::MAX` rather than wrap.
+    async fn payout_referral_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutReferralOwed, DatabaseError>;
+
+    /// The sum of `final_paid_referral` over the account's closed links on
+    /// `rail`.
+    async fn payout_closed_links_final_paid_referral(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
     ) -> Result<u128, DatabaseError>;
 
     /// Takes the rail's single-flight pass lock (spec section 4, "One pass,
@@ -4153,6 +4304,8 @@ mod payout_debug_tests {
                 target_total: AtomicUnits::from_raw(1),
                 delta: AtomicUnits::from_raw(1),
                 owed_through_accrual_count: 1,
+                stream: PayoutStream::Referral,
+                referral_program: Some(PROGRAM.into()),
             }
         ));
         assert_redacted(format!(
@@ -4168,6 +4321,7 @@ mod payout_debug_tests {
                 receipt_hash: None,
                 attempts: 0,
                 last_error_label: None,
+                stream: PayoutStream::Referral,
             }
         ));
         assert_redacted(format!(
