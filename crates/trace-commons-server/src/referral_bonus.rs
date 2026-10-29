@@ -65,6 +65,7 @@ use crate::db::{
     PayoutAccrualKind, PayoutStore, ReferralAttributionRecord, ReferralBonusKind,
     ReferralBonusRecord, ReferralBonusStore, ReferralBonusWrite, ReferralRefereeAccrual,
 };
+use crate::payout_pass::is_referral_stream_hold;
 use crate::payout_rate::PayoutMode;
 use crate::referral_abuse::{
     REFERRAL_CODE_SUSPENDED, REFERRAL_DUPLICATE_TRACES, REFERRAL_OVER_CEILING,
@@ -674,9 +675,24 @@ impl ReferralBonusHook {
             return Ok(());
         }
 
-        // Price.
+        // Price: planned here, written last (below), once every hold this
+        // referee's evidence opens is in place, so a store fault between
+        // never leaves new bonus payable without its hold.
         let referee = attribution.account_id;
         let standing = store(self.payouts.payout_account_standing(tenant, referee).await)?;
+        // An open hold on the referee's own earned stream on the rail (a
+        // rail hold such as `payout_reversal_unpriced`) pauses their bonus
+        // the same way: nothing is planned from their accruals while it is
+        // open, and they are priced once it clears. A referral-stream hold
+        // on the referee (as someone's referrer) is not about these
+        // accruals and pauses nothing.
+        let earned_held = store(
+            self.payouts
+                .open_payout_hold_labels(tenant, referee, &self.rail)
+                .await,
+        )?
+        .iter()
+        .any(|label| !is_referral_stream_hold(label));
         let accruals = store(
             self.store
                 .referral_referee_accruals(tenant, &self.rail, referee)
@@ -694,26 +710,12 @@ impl ReferralBonusHook {
                     attribution.earn_until,
                     self.settings.earn_days,
                 ),
-                referee_held: standing.hold_label().is_some(),
+                referee_held: standing.hold_label().is_some() || earned_held,
                 mirror_voided,
             },
         );
         for (label, count) in &plan.skipped {
             *report.skipped.entry(label).or_default() += count;
-        }
-        if !plan.writes.is_empty() {
-            store(
-                self.store
-                    .insert_referral_bonus_rows(referrer_tenant, &plan.writes)
-                    .await,
-            )?;
-            for write in &plan.writes {
-                match write.kind {
-                    ReferralBonusKind::Bonus => report.bonus_rows += 1,
-                    ReferralBonusKind::Reversal => report.reversal_rows += 1,
-                    ReferralBonusKind::Void => {}
-                }
-            }
         }
 
         // Signals.
@@ -834,6 +836,38 @@ impl ReferralBonusHook {
             report,
         )
         .await?;
+
+        // The bonus rows, after every hold above. The ceiling hold opens
+        // first too when the planned bonus would take the referrer over it;
+        // `check_ceiling` then settles it against what was written.
+        if !plan.writes.is_empty() {
+            let planned = plan
+                .writes
+                .iter()
+                .filter(|write| write.kind == ReferralBonusKind::Bonus)
+                .fold(0u128, |sum, write| sum.saturating_add(write.bonus_units));
+            let owed = store(
+                self.store
+                    .referral_bonus_owed(referrer_tenant, referrer, &self.rail)
+                    .await,
+            )?;
+            if owed.owed.saturating_add(planned) > self.settings.account_ceiling {
+                self.hold(referrer_tenant, referrer, REFERRAL_OVER_CEILING, report)
+                    .await?;
+            }
+            store(
+                self.store
+                    .insert_referral_bonus_rows(referrer_tenant, &plan.writes)
+                    .await,
+            )?;
+            for write in &plan.writes {
+                match write.kind {
+                    ReferralBonusKind::Bonus => report.bonus_rows += 1,
+                    ReferralBonusKind::Reversal => report.reversal_rows += 1,
+                    ReferralBonusKind::Void => {}
+                }
+            }
+        }
         self.check_ceiling(referrer_tenant, referrer, report).await
     }
 

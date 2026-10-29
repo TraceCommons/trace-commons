@@ -693,6 +693,148 @@ async fn a_held_referee_earns_no_new_bonus_until_the_hold_clears() {
     assert_eq!(report.bonus_rows, 1, "{report:?}");
 }
 
+/// A rail hold on the referee's own earned stream (here
+/// `payout_reversal_unpriced`) pauses the referrer's bonus from that
+/// referee: nothing is planned while it is open, and the accruals are
+/// priced once it clears. A referral-stream hold on the referee (as some
+/// other code's referrer) pauses nothing.
+#[tokio::test]
+async fn an_earned_stream_hold_on_the_referee_pauses_their_bonus_until_it_clears() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let held = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let referral_held = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    for referee in [&held, &referral_held] {
+        credit(
+            &fixture,
+            &referee.tenant,
+            referee.account,
+            1_000,
+            Utc::now() - Duration::days(2),
+        )
+        .await;
+    }
+    assert!(
+        fixture
+            .runtime
+            .open_payout_hold(
+                &held.tenant,
+                held.account,
+                &near_ai(),
+                "payout_reversal_unpriced",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .runtime
+            .open_payout_hold(
+                &referral_held.tenant,
+                referral_held.account,
+                &near_ai(),
+                "referral_over_ceiling",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+    let hook = hook(&fixture, settings());
+
+    let report = hook.run_tenant(&held.tenant, &near_ai()).await;
+    assert_eq!(report.bonus_rows, 0, "{report:?}");
+    assert_eq!(report.skipped["referral_referee_held"], 1, "{report:?}");
+    assert!(bonus_rows(&fixture, &referrer, &held).await.is_empty());
+
+    let report = hook.run_tenant(&referral_held.tenant, &near_ai()).await;
+    assert_eq!(report.bonus_rows, 1, "{report:?}");
+
+    assert!(
+        fixture
+            .runtime
+            .clear_payout_hold(
+                &held.tenant,
+                held.account,
+                &near_ai(),
+                "payout_reversal_unpriced",
+                ACTOR
+            )
+            .await
+            .unwrap()
+    );
+    let report = hook.run_tenant(&held.tenant, &near_ai()).await;
+    assert_eq!(report.bonus_rows, 1, "the paused accrual is priced: {report:?}");
+    assert_eq!(
+        bonus_rows(&fixture, &referrer, &held).await,
+        vec![("bonus".into(), 1000, "1000".into(), "100".into())]
+    );
+}
+
+/// The bonus rows are written after the holds the referee's evidence
+/// opens, so a store fault that stops the hold also stops the rows: new
+/// bonus is never payable without its hold. Here the runtime briefly may
+/// not insert holds.
+#[tokio::test]
+async fn bonus_rows_wait_for_the_hold_the_referees_evidence_opens() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let referee = referee(&fixture, &referrer, &referrer.code_index.clone(), 10, 1).await;
+    let org = format!("org:{}", Uuid::new_v4());
+    let subject = format!("subject:{}", Uuid::new_v4());
+    link(&fixture, &referrer.tenant, referrer.account, &org, &subject).await;
+    link(&fixture, &referee.tenant, referee.account, &org, &subject).await;
+    credit(
+        &fixture,
+        &referee.tenant,
+        referee.account,
+        1_000,
+        Utc::now() - Duration::days(2),
+    )
+    .await;
+    let hook = hook(&fixture, settings());
+
+    owner_exec(
+        &fixture,
+        &referrer.tenant,
+        "REVOKE INSERT ON trace_payout_holds FROM trace_ingest_runtime",
+        &[],
+    )
+    .await;
+    let faulted = hook.run_tenant(&referee.tenant, &near_ai()).await;
+    let rows_after_fault = bonus_rows(&fixture, &referrer, &referee).await;
+    // V132's grant, restored before any assertion can fail.
+    owner_exec(
+        &fixture,
+        &referrer.tenant,
+        "GRANT INSERT ON trace_payout_holds TO trace_ingest_runtime",
+        &[],
+    )
+    .await;
+    assert_eq!(faulted.bonus_rows, 0, "{faulted:?}");
+    assert!(rows_after_fault.is_empty(), "{rows_after_fault:?}");
+    assert!(
+        open_holds(&fixture, &referrer.tenant, referrer.account)
+            .await
+            .is_empty()
+    );
+
+    // The next pass opens the hold and then writes the rows.
+    let report = hook.run_tenant(&referee.tenant, &near_ai()).await;
+    assert_eq!(report.held["referral_same_payout_org"], 1, "{report:?}");
+    assert_eq!(report.bonus_rows, 1, "{report:?}");
+    assert!(
+        open_holds(&fixture, &referrer.tenant, referrer.account)
+            .await
+            .contains(&"referral_same_payout_org".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn a_missing_referrer_voids_the_attribution() {
     let Some(fixture) = fixture().await else {

@@ -203,7 +203,18 @@ holding only the referral stream:
   `payout_account_closed`) apply to the referral stream as well.
 
 A hold on the referee's own account (credit hold, closed) stops new bonus
-rows from that referee until it clears.
+rows from that referee until it clears. So does any open hold on the
+referee's own earned stream on the rail (a rail hold such as
+`payout_reversal_unpriced`): while one is open no bonus is planned from the
+referee's accruals; they wait, are not dropped, and are priced once it
+clears. A referral-stream hold on the referee (as someone's referrer) does
+not pause it.
+
+Each referee's step writes its bonus rows last, after the holds its
+evidence opens (payout org, subject, traces, network, the referrer-level
+hold, a code suspension, and the ceiling when the planned bonus would cross
+it). A store fault before then writes no rows, and the next pass retries
+the whole step, so new bonus is never payable without its hold.
 
 `referral_same_payout_org`, `referral_same_payout_subject`,
 `referral_same_traces` and `referral_same_network` open when a referee
