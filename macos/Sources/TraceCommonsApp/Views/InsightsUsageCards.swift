@@ -55,9 +55,7 @@ struct InsightsUsageCards: View {
                     if let failure = subscriptions?.failureKey {
                         Text(text(failure)).insightsError()
                     }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: GlassTokens.Space.cardGap,
-                                                 alignment: .top)],
-                              alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InsightsCardFlow(minimum: 220, maximum: 560) {
                         ForEach(logins) { row in loginCard(row) }
                         if let credit = nearAiShown { nearAiCard(credit) }
                     }
@@ -159,9 +157,16 @@ struct InsightsUsageCard<Header: View, Rows: View>: View {
                     .accessibilityAddTraits(.isHeader)
                 header()
             }
+            // Every card's header is as tall as one with a Refresh button,
+            // so the rows under it line up across the row of cards.
+            .frame(minHeight: GlassTokens.Size.controlLarge, alignment: .leading)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { rows() }
             Spacer(minLength: 0)
-            InsightsUsageBars(days: bars, caption: text("analytics_usage_last_7_days"))
+            // No bars from a daemon that sends no days, rather than an
+            // empty plot.
+            if !bars.isEmpty {
+                InsightsUsageBars(days: bars, caption: text("analytics_usage_last_7_days"))
+            }
             Button(text("analytics_usage_by_project")) { showProjects() }
                 .buttonStyle(GlassButtonStyle(.link))
                 .accessibilityLabel(InsightsOverviewWords.fill(text("analytics_usage_by_project_a11y"), ["label": title]))

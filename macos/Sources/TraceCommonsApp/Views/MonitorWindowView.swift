@@ -285,7 +285,11 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel, home: home,
-                                 payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient))
+                                 payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
