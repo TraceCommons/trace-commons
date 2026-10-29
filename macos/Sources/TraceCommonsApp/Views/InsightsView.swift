@@ -28,6 +28,10 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
+    /// The NEAR AI payout rail's streams, for the NEAR AI card's own-traces
+    /// and referrals rows (referral spec section 6); `nil` without a daemon.
+    private let payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)?
+    @State private var earnings: [NearAiEarningsSplit.Row] = []
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -35,7 +39,8 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
-                    inspector: InsightsInspector? = nil) {
+                    inspector: InsightsInspector? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -96,7 +101,8 @@ struct InsightsView: View {
                   turnOffRecapCard: turnOff,
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
-                  inspector: inspector)
+                  inspector: inspector,
+                  payoutStreams: payoutStreams)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -113,7 +119,8 @@ struct InsightsView: View {
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
-                    inspector: InsightsInspector? = nil) {
+                    inspector: InsightsInspector? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -128,6 +135,18 @@ struct InsightsView: View {
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
         self.inspector = inspector
+        self.payoutStreams = payoutStreams
+    }
+
+    /// The NEAR AI card's split, read each time Overview opens. A failed or
+    /// absent read draws no rows: the split adds to the card and is never
+    /// in place of it.
+    private func loadEarnings() async {
+        guard let payoutStreams,
+              let copy = TCConsentCopy.referralCopyJSON().flatMap(ReferralCopy.decode(fromJSON:))
+        else { return }
+        let streams = await payoutStreams()
+        earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
     }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
@@ -179,6 +198,7 @@ struct InsightsView: View {
                     subscriptions: subscriptionModel,
                     nearAiCredit: model.counterWeek?.nearAiCredit,
                     usageByDay: model.counterWeek?.usageByDay,
+                    earnings: earnings,
                     showProjects: { detailsView = .folder; tab = .patterns },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
@@ -188,6 +208,7 @@ struct InsightsView: View {
                     showReads: { tab = .patterns },
                     showPatterns: { tab = .patterns })
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
+                .task { await loadEarnings() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek,
