@@ -350,8 +350,8 @@ public sealed class InsightsAnalyticsTests
         Assert.Equal(JsonValueKind.Null, request.GetProperty("week_start").ValueKind);
         var overview = model.Overview;
         Assert.False(overview.Failed);
-        Assert.Equal(Fill("analytics_coverage_line", ("k", "1"), ("n", "2"), ("p", "1"), ("u", "0")), overview.CoverageLine);
-        Assert.Equal(new[] { W("analytics_feed_saved"), W("analytics_feed_comparisons_need_counter_pass") }, overview.Notes);
+        Assert.Equal(Fill("analytics_coverage_line", ("n", "2")), overview.CoverageLine);
+        Assert.Equal(new[] { Fill("analytics_coverage_info_known", ("k", "1")) + " " + Fill("analytics_coverage_info_partial", ("p", "1")), W("analytics_feed_saved"), W("analytics_feed_comparisons_need_counter_pass") }, overview.Notes);
         // One line per harness, never a total.
         Assert.Equal(2, overview.TokenLines.Count);
         Assert.Equal(N(37235), overview.TokenLines[0].Figure);
@@ -466,7 +466,8 @@ public sealed class InsightsAnalyticsTests
         Assert.Equal(W("analytics_reread_after_shrink"), patterns.RereadHeader!.AfterShrink);
         Assert.Equal("", patterns.RereadEmpty);
         Assert.Equal(new[] { W("analytics_patterns_intro"), W("analytics_patterns_overlap"),
-            Fill("analytics_coverage_line", ("k", "1"), ("n", "2"), ("p", "1"), ("u", "0")),
+            Fill("analytics_coverage_line", ("n", "2")),
+            Fill("analytics_coverage_info_known", ("k", "1")) + " " + Fill("analytics_coverage_info_partial", ("p", "1")),
             W("analytics_feed_saved"), W("analytics_feed_comparisons_need_counter_pass") }, patterns.Notes);
         await patterns.ToggleSessionsAsync("repeated_reads");
         Assert.Equal("repeated_reads", service.Last("pattern_sessions").GetProperty("pattern").GetString());
@@ -540,7 +541,7 @@ public sealed class InsightsAnalyticsTests
         Assert.False(model.Overview.Failed);
         Assert.Empty(model.Overview.TokenLines);
         Assert.Equal(W("analytics_unavailable"), model.Overview.TokensEmpty);
-        Assert.Equal(Fill("analytics_coverage_line", ("k", "0"), ("n", "0"), ("p", "0"), ("u", "0")), model.Overview.CoverageLine);
+        Assert.Equal(Fill("analytics_coverage_line", ("n", "0")), model.Overview.CoverageLine);
         await model.SelectTabAsync(InsightsViewModel.PatternsTab);
         Assert.False(model.Patterns.Failed);
         Assert.All(model.Patterns.Cards, card => Assert.Equal(W("analytics_unavailable"), card.Headline));
