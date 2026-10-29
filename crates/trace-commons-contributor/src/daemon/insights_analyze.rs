@@ -57,9 +57,9 @@ pub const ERR_SESSION_TOO_LARGE: &str = "insights-session-too-large";
 /// `session_meta`), which the analysis refuses.
 pub const ERR_SESSION_NOT_ONE_SESSION: &str = "insights-session-not-one-session";
 
-/// A session only the counter pass reads (a compressed Codex rollout, or
-/// one in a NEAR AI managed profile), which Analyze & save does not find
-/// among the watched sessions.
+/// A session Analyze & save does not find or read: one in a NEAR AI
+/// managed profile (never among the watched sessions), or a compressed
+/// Codex rollout (the whole-file analysis reads plain files).
 pub const ERR_SESSION_INSIGHTS_ONLY: &str = "insights-session-insights-only";
 
 /// The answer for a file the analysis refuses, by why.

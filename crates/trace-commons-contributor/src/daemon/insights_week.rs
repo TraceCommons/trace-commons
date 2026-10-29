@@ -419,9 +419,8 @@ pub(crate) enum NotAnalyzable {
     TooLarge,
     /// A Codex file that does not record exactly one `session_meta`.
     NotOneSession,
-    /// A file only the counter pass reads, which Analyze & save does not
-    /// find: a compressed Codex rollout, or a session in a NEAR AI managed
-    /// profile.
+    /// A file Analyze & save does not find or read: a session in a NEAR
+    /// AI managed profile, or a compressed Codex rollout.
     InsightsOnly,
 }
 
@@ -1190,6 +1189,9 @@ fn row_address<'p>(source: &str, path: &'p Path) -> &'p str {
     let Some(text) = path.to_str() else {
         return "";
     };
+    // The adapter's own rule (`source::compressed::address_of`); discovery
+    // already hands the address, so this only matters for a path named
+    // some other way.
     if source == SOURCE_CODEX && crate::source::compressed::is_compressed(path) {
         text.strip_suffix(crate::source::compressed::COMPRESSED_SUFFIX)
             .unwrap_or(text)
@@ -1207,14 +1209,28 @@ pub(crate) fn row_key(key: &DigestKey, source: &str, path: &Path) -> KeyedDigest
     }
 }
 
-/// Whether the candidate is read by this pass alone, never offered or
-/// found by Analyze & save.
+/// Whether Analyze & save cannot find or read the candidate's file: a
+/// managed profile's session (never among the watched sessions), or a
+/// compressed Codex rollout (the whole-file analysis reads plain files).
 fn insights_only(candidate: &CounterCandidate) -> bool {
-    candidate.role == CandidateRole::ManagedProfile || is_compressed_codex(candidate)
+    candidate.role == CandidateRole::ManagedProfile || compressed_file(candidate).is_some()
 }
 
+/// Whether the candidate's path names a compressed Codex rollout itself
+/// (`<name>.jsonl.zst`) rather than its address.
 fn is_compressed_codex(candidate: &CounterCandidate) -> bool {
     candidate.source == SOURCE_CODEX && crate::source::compressed::is_compressed(&candidate.path)
+}
+
+/// The compressed file behind a Codex candidate's address, when that is
+/// what is on disk (`source::compressed::on_disk`): the adapter addresses a
+/// compressed rollout by the plain path it replaced.
+fn compressed_file(candidate: &CounterCandidate) -> Option<PathBuf> {
+    if candidate.source != SOURCE_CODEX {
+        return None;
+    }
+    crate::source::compressed::on_disk(&candidate.path)
+        .filter(|file| crate::source::compressed::is_compressed(file))
 }
 
 /// What reading the candidate costs the per-poll budget: its file's size,
@@ -1222,8 +1238,8 @@ fn is_compressed_codex(candidate: &CounterCandidate) -> bool {
 /// transcripts are counted in `size_bytes` but never read, so are not
 /// charged.
 fn read_cost(candidate: &CounterCandidate) -> u64 {
-    if is_compressed_codex(candidate) {
-        crate::source::compressed::estimated_decompressed_bytes(&candidate.path)
+    if let Some(file) = compressed_file(candidate) {
+        crate::source::compressed::estimated_decompressed_bytes(&file)
             .unwrap_or(candidate.size_bytes)
     } else {
         std::fs::metadata(&candidate.path)
@@ -3216,10 +3232,10 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
     let insights_only = insights_only(candidate);
     let mut compressed_failure = None;
-    let (bytes, scanned) = if is_compressed_codex(candidate) {
+    let (bytes, scanned) = if let Some(file) = compressed_file(candidate) {
         // Streamed through the bounded decoder, never to memory whole or a
         // temp file; the line cap below applies to decompressed lines.
-        match crate::source::compressed::BoundedDecoder::open(&candidate.path) {
+        match crate::source::compressed::BoundedDecoder::open(&file) {
             Ok(mut decoder) => {
                 let scanned = scan_session(
                     source,

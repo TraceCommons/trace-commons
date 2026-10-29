@@ -278,14 +278,13 @@ fn tick_over(
 /// later, on the pass's thread, and only for a session about to be read or
 /// one that may hold a Never folder's route tally.
 ///
-/// Beside the tick's own listing, the job takes sessions only this pass
-/// reads, which are never offered, queued or uploaded:
-/// - each Codex source's compressed rollouts (`.jsonl.zst`, which Codex
-///   leaves in place of older rollouts; `TraceSource::discover_insights_only`);
-/// - every NEAR AI managed profile's Claude Code `projects/` and Codex
-///   `sessions/` (`NativeProfiles::existing_roots`), read by sources this
-///   job owns. A managed session is counted from its profile only; a
-///   watched copy of it is passed over (`insights_week::CandidateRole`).
+/// Beside the tick's own listing (which includes Codex's compressed
+/// rollouts, under the plain addresses they replaced), the job takes every
+/// NEAR AI managed profile's Claude Code `projects/` and Codex `sessions/`
+/// (`NativeProfiles::existing_roots`), read by sources this job owns and
+/// never offered, queued or uploaded. A managed session is counted from its
+/// profile only; a watched copy of it is passed over
+/// (`insights_week::CandidateRole`).
 ///
 /// A Never folder is left out whichever root a session lives in: its
 /// folder is resolved from the session's own cwd, as for any session.
@@ -315,11 +314,6 @@ fn counter_pass_job(
         // `source_index` is which of the tick's own sources this is, so the
         // job can own it.
         job.add(source_index, refs, CandidateRole::Watched, false);
-        // Compressed rollouts: an error lists none, and leaves the tick's
-        // own listing as it is.
-        if let Ok(compressed) = source.discover_insights_only() {
-            job.add(source_index, &compressed, CandidateRole::Watched, true);
-        }
     }
     let mut extra_sources: Vec<Box<dyn TraceSource>> = Vec::new();
     for root in crate::managed::profiles::NativeProfiles::new(&shared.store).existing_roots() {
@@ -334,9 +328,6 @@ fn counter_pass_job(
         for source in profile {
             let index = tick_sources + extra_sources.len();
             if let Ok(refs) = source.discover() {
-                job.add(index, &refs, CandidateRole::ManagedProfile, true);
-            }
-            if let Ok(refs) = source.discover_insights_only() {
                 job.add(index, &refs, CandidateRole::ManagedProfile, true);
             }
             extra_sources.push(source);
@@ -364,8 +355,8 @@ struct CounterOrigin {
     source_index: usize,
     session_ref: SessionRef,
     observation: Observation,
-    /// Read by the counter pass alone (a compressed rollout, or a managed
-    /// profile's session): its folder is resolved without the watcher's
+    /// Read by the counter pass alone (a managed profile's session): its
+    /// folder is resolved without the watcher's
     /// cwd cache, which counts the sessions the watcher offers per folder.
     insights_only: bool,
 }
@@ -445,14 +436,11 @@ impl CounterJobDraft {
                 let origin = &origins[candidate.origin];
                 let source = sources[origin.source_index].as_ref();
                 let cwd = if origin.insights_only {
-                    // Discovery peeked it; else the adapter's own load, which
-                    // reads no compressed rollout.
-                    let compressed =
-                        crate::source::compressed::is_compressed(&origin.session_ref.path);
+                    // Discovery peeked it; else the adapter's own load.
                     origin.session_ref.cwd.clone().or_else(|| {
-                        (!compressed)
-                            .then(|| source.load(&origin.session_ref).ok())
-                            .flatten()
+                        source
+                            .load(&origin.session_ref)
+                            .ok()
                             .and_then(|transcript| transcript.cwd)
                     })
                 } else {
@@ -2991,13 +2979,13 @@ mod tests {
         assert_eq!(stored(&f), 2, "read again once the override is cleared");
     }
 
-    /// The counter pass also reads Codex's compressed rollouts and every
-    /// NEAR AI managed profile's sessions, which nothing offers, queues or
-    /// uploads. A managed session copied into a watched folder is counted
-    /// once, from its profile; a Never folder is left out wherever the
-    /// session file lives.
+    /// The counter pass reads Codex's compressed rollouts, and every NEAR AI
+    /// managed profile's sessions, which nothing offers, queues or uploads.
+    /// A managed session copied into a watched folder is counted once, from
+    /// its profile; a Never folder is left out wherever the session file
+    /// lives.
     #[tokio::test]
-    async fn the_counter_pass_reads_compressed_rollouts_and_managed_profiles_only_for_insights() {
+    async fn the_counter_pass_reads_compressed_rollouts_and_managed_profiles() {
         let f = WatcherFixture::new();
         f.write_session("home", "11111111-1111-1111-1111-111111111111", 0);
         let claude_body = |project: &str, id: &str| {
@@ -3071,7 +3059,8 @@ mod tests {
         tick(&f.shared, later).await.unwrap();
         // home, the managed Claude session once, and two compressed rollouts.
         assert_eq!(stored(&f), 4);
-        // Nothing only the counter pass reads was offered.
+        // No managed-profile session was offered, and a compressed rollout
+        // is offered under its plain address.
         for entry in f.shared.queue.lock().unwrap().all() {
             let path = entry.path.to_string_lossy().to_string();
             assert!(!path.contains("managed-profiles"), "{path}");
@@ -3092,6 +3081,128 @@ mod tests {
         f.set_mode("managed", ProjectMode::Ignore);
         tick(&f.shared, later).await.unwrap();
         assert_eq!(stored(&f), 2);
+    }
+
+    /// A Codex rollout in the fixture's watched Codex folder, addressed by
+    /// its plain path: written plain, or compressed as Codex leaves it.
+    fn write_rollout(f: &WatcherFixture, project: &str, id: &str, compressed: bool) -> PathBuf {
+        let day = f._dir.path().join("codex-sessions/2026/08/08");
+        std::fs::create_dir_all(&day).unwrap();
+        let address = day.join(format!("rollout-2026-08-08T10-00-00-{id}.jsonl"));
+        let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+        let bytes = format!(
+            "{{\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\",\"cli_version\":\"0.150.0\"}}}}\n\
+             {{\"timestamp\":\"2026-08-08T10:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-08-08T10:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"hi\"}}]}}}}\n"
+        );
+        std::fs::write(&address, bytes).unwrap();
+        if compressed {
+            compress_in_place(&address);
+        }
+        address
+    }
+
+    /// What Codex does to an older rollout: the plain file replaced by
+    /// `<name>.zst`, its last write kept.
+    fn compress_in_place(address: &std::path::Path) {
+        let bytes = std::fs::read(address).unwrap();
+        let written = std::fs::metadata(address).unwrap().modified().unwrap();
+        let mut compressed = address.as_os_str().to_os_string();
+        compressed.push(".zst");
+        std::fs::write(&compressed, zstd::bulk::compress(&bytes, 3).unwrap()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&compressed)
+            .unwrap()
+            .set_modified(written)
+            .unwrap();
+        std::fs::remove_file(address).unwrap();
+    }
+
+    fn codex_entries(f: &WatcherFixture) -> Vec<QueueEntry> {
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .filter(|entry| entry.source == crate::source::SOURCE_CODEX)
+            .cloned()
+            .collect()
+    }
+
+    /// Owner decision 2026-10-29: a compressed Codex rollout is offered for
+    /// contribution like a plain one, under the plain path it replaced.
+    #[tokio::test]
+    async fn a_compressed_rollout_is_discovered_and_offered() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "33333333-3333-4333-8333-333333333333", true);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entries = codex_entries(&f);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].state, QueueState::Pending);
+        assert_eq!(entries[0].path, address);
+    }
+
+    /// A rollout offered as a plain file and compressed afterwards is the
+    /// same offer: not offered again, not superseded, its observation as
+    /// it was.
+    #[tokio::test]
+    async fn a_rollout_compressed_after_it_was_offered_is_not_offered_twice() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "44444444-4444-4444-8444-444444444444", false);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let before = codex_entries(&f);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].state, QueueState::Pending);
+
+        compress_in_place(&address);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let after = codex_entries(&f);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].entry_id, before[0].entry_id);
+        assert_eq!(after[0].state, QueueState::Pending);
+        assert_eq!(after[0].size_bytes, before[0].size_bytes);
+        assert_eq!(
+            after[0].observed_modified_at,
+            before[0].observed_modified_at
+        );
+    }
+
+    /// A session already sent and then compressed is not sent again.
+    #[tokio::test]
+    async fn an_uploaded_rollout_compressed_afterwards_is_not_re_sent() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "55555555-5555-4555-8555-555555555555", false);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let id = codex_entries(&f)[0].entry_id;
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .set_state(id, QueueState::Uploaded, None);
+
+        compress_in_place(&address);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let after = codex_entries(&f);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].state, QueueState::Uploaded);
+    }
+
+    /// A Never folder leaves a compressed rollout out, as any session.
+    #[tokio::test]
+    async fn a_never_folder_excludes_a_compressed_rollout() {
+        let f = WatcherFixture::new();
+        f.set_mode("zipped", ProjectMode::Ignore);
+        write_rollout(&f, "zipped", "66666666-6666-4666-8666-666666666666", true);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entries = codex_entries(&f);
+        assert!(
+            entries
+                .iter()
+                .all(|e| !matches!(e.state, QueueState::Pending | QueueState::Approved)),
+            "{entries:?}"
+        );
     }
 
     /// A session still being written is not read by the counter pass.

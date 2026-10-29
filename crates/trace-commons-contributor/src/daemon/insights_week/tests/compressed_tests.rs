@@ -105,6 +105,39 @@ fn a_rollout_compressed_after_it_was_counted_replaces_its_row() {
     assert_eq!(f.run(&[candidate(SOURCE_CODEX, &compressed)]).read, 0);
 }
 
+/// As the watcher hands it: the adapter addresses a compressed rollout by
+/// the plain path it replaced, with the size it decompresses to and the
+/// last write Codex kept. A row read from the plain file is not read again
+/// when Codex compresses it, and a later change reads the compressed file.
+#[test]
+fn a_compressed_rollout_under_its_address_is_unchanged_and_read_through_the_decoder() {
+    let f = Fixture::new();
+    let address = f.write(&rollout_name(), &codex_bytes_for(CODEX_ID));
+    let plain = candidate(SOURCE_CODEX, &address);
+    assert_eq!(f.run(std::slice::from_ref(&plain)).read, 1);
+    assert_eq!(only_row(&f).not_analyzable, None);
+
+    std::fs::remove_file(&address).unwrap();
+    f.write(
+        &format!("{}.zst", rollout_name()),
+        &zst(&codex_bytes_for(CODEX_ID)),
+    );
+    assert_eq!(f.run(std::slice::from_ref(&plain)).read, 0, "unchanged");
+
+    let mut changed = plain.clone();
+    changed.modified_at = written() + Duration::minutes(1);
+    assert_eq!(f.run(&[changed]).read, 1);
+    assert_eq!(
+        codex_tokens(&f.week(&[])),
+        80 + 30,
+        "read through the decoder"
+    );
+    assert_eq!(
+        only_row(&f).not_analyzable,
+        Some(NotAnalyzable::InsightsOnly)
+    );
+}
+
 #[test]
 fn only_codex_rollouts_drop_the_compressed_suffix_from_their_key() {
     let key = DigestKey::from_bytes([3; 32]);

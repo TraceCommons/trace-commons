@@ -2,9 +2,11 @@
 //!
 //! Codex compresses a rollout in place once it is a few days old: the
 //! `.jsonl` is replaced by a `.jsonl.zst` of the same name with the same
-//! last-write time. Only the Insights counter pass reads these
-//! ([`super::TraceSource::discover_insights_only`]); nothing here is
-//! offered for contribution or uploaded.
+//! last-write time. The Codex adapter addresses a compressed rollout by the
+//! plain path it replaced ([`on_disk`] finds the file behind an address),
+//! so it is the same session to the queue, the offers and the Insights
+//! counter pass before and after Codex compresses it (owner decision
+//! 2026-10-29: compressed sessions are offered for contribution too).
 //!
 //! The reader streams: it never decompresses to memory whole or to a temp
 //! file, and it refuses a frame whose window would make the decoder itself
@@ -51,6 +53,62 @@ pub const WINDOW_LOG_MAX: u32 = 24;
 /// size is estimated as this many times the file's own (4.3 was the mean
 /// measured), for budgeting reads only.
 pub const ESTIMATED_RATIO: u64 = 5;
+
+/// The file behind a session address: the address itself when it exists,
+/// else its compressed twin (`<address>.zst`) when that does. `None` when
+/// neither is there.
+pub fn on_disk(address: &Path) -> Option<std::path::PathBuf> {
+    if std::fs::symlink_metadata(address).is_ok() {
+        return Some(address.to_path_buf());
+    }
+    let mut compressed = address.as_os_str().to_os_string();
+    compressed.push(COMPRESSED_SUFFIX);
+    let compressed = std::path::PathBuf::from(compressed);
+    std::fs::symlink_metadata(&compressed)
+        .is_ok()
+        .then_some(compressed)
+}
+
+/// The address of a compressed rollout: its path without `.zst`. Any
+/// other path is its own address.
+pub fn address_of(path: &Path) -> std::path::PathBuf {
+    match path.to_str() {
+        Some(text) if is_compressed(path) => text
+            .strip_suffix(COMPRESSED_SUFFIX)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// What a compressed file decompresses to, exactly: the size its frame
+/// header records, else counted by decompressing it (bounded). `None` when
+/// it cannot be read or passes a bound.
+pub fn decompressed_bytes(path: &Path) -> Option<u64> {
+    if let Some(declared) = declared_bytes(path) {
+        return Some(declared);
+    }
+    let mut decoder = BoundedDecoder::open(path).ok()?;
+    io::copy(&mut decoder, &mut io::sink()).ok()
+}
+
+/// The decompressed size the first frame's header records, if it does.
+pub fn declared_bytes(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    // A frame header is at most 18 bytes.
+    let mut header = [0u8; 18];
+    let mut filled = 0;
+    while filled < header.len() {
+        match file.read(&mut header[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => break,
+        }
+    }
+    zstd::zstd_safe::get_frame_content_size(&header[..filled])
+        .ok()
+        .flatten()
+}
 
 /// Whether `path` names a compressed rollout by its suffix.
 pub fn is_compressed(path: &Path) -> bool {
@@ -168,30 +226,18 @@ impl Read for BoundedDecoder {
 /// header without decompressing; else [`ESTIMATED_RATIO`] times the file's
 /// own size. For budgeting reads, never for bounding them.
 pub fn estimated_decompressed_bytes(path: &Path) -> Option<u64> {
-    let mut file = File::open(path).ok()?;
-    let compressed = file.metadata().ok()?.len();
-    // A frame header is at most 18 bytes.
-    let mut header = [0u8; 18];
-    let mut filled = 0;
-    while filled < header.len() {
-        match file.read(&mut header[filled..]) {
-            Ok(0) => break,
-            Ok(read) => filled += read,
-            Err(_) => break,
-        }
-    }
-    let declared = zstd::zstd_safe::get_frame_content_size(&header[..filled])
-        .ok()
-        .flatten();
-    Some(declared.unwrap_or_else(|| compressed.saturating_mul(ESTIMATED_RATIO)))
+    let compressed = std::fs::metadata(path).ok()?.len();
+    Some(declared_bytes(path).unwrap_or_else(|| compressed.saturating_mul(ESTIMATED_RATIO)))
 }
 
-/// A session file's lines, decompressed when it is a compressed rollout.
-pub fn open_lines(path: &Path) -> io::Result<Box<dyn BufRead>> {
-    if is_compressed(path) {
-        Ok(Box::new(BufReader::new(BoundedDecoder::open(path)?)))
+/// The lines of the session file at `address` ([`on_disk`]), decompressed
+/// when it is a compressed rollout.
+pub fn open_lines(address: &Path) -> io::Result<Box<dyn BufRead>> {
+    let path = on_disk(address).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    if is_compressed(&path) {
+        Ok(Box::new(BufReader::new(BoundedDecoder::open(&path)?)))
     } else {
-        Ok(Box::new(BufReader::new(File::open(path)?)))
+        Ok(Box::new(BufReader::new(File::open(&path)?)))
     }
 }
 
@@ -278,6 +324,31 @@ mod tests {
         assert_eq!(decoder.failure(), Some(CompressedFailure::TooLarge));
         // Stopped within one read of the floor.
         assert!(decoder.produced() <= RATIO_FLOOR_BYTES + sink.len() as u64);
+    }
+
+    #[test]
+    fn an_address_finds_its_plain_file_first_then_its_compressed_twin() {
+        let dir = tempfile::tempdir().unwrap();
+        let address = dir.path().join("rollout-f.jsonl");
+        assert_eq!(on_disk(&address), None);
+        let compressed = write(
+            dir.path(),
+            "rollout-f.jsonl.zst",
+            &zstd::encode_all(&b"one\n"[..], 3).unwrap(),
+        );
+        assert_eq!(on_disk(&address), Some(compressed.clone()));
+        assert_eq!(address_of(&compressed), address);
+        assert_eq!(address_of(&address), address);
+        // A streamed frame records no size: counted exactly.
+        assert_eq!(decompressed_bytes(&compressed), Some(4));
+        let lines: Vec<String> = open_lines(&address)
+            .unwrap()
+            .lines()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(lines, ["one"]);
+        write(dir.path(), "rollout-f.jsonl", b"plain\n");
+        assert_eq!(on_disk(&address), Some(address.clone()));
     }
 
     #[test]

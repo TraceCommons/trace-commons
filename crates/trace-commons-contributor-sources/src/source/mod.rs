@@ -469,15 +469,6 @@ pub trait TraceSource: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Sessions only the Insights counter pass reads: never offered for
-    /// contribution, queued or uploaded, and never named by
-    /// `session_for_path` or `session_at`. Codex's compressed rollouts
-    /// (`rollout-<...>.jsonl.zst`, see [`compressed`]) are the one kind
-    /// today. The default is none.
-    fn discover_insights_only(&self) -> anyhow::Result<Vec<SessionRef>> {
-        Ok(Vec::new())
-    }
-
     /// Which session, if any, a changed filesystem path belongs to.
     ///
     /// Event-driven watching learns that *a path* moved and has to turn
