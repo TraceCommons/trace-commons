@@ -55,6 +55,8 @@ pub mod payout_recipient_proof;
 pub mod payout_recipient_seal;
 pub mod payout_worker;
 pub mod redaction_witness;
+pub mod referral_code;
+pub mod referral_config;
 pub mod register_stats;
 pub mod rescore_distribution;
 pub mod reward_participant;
