@@ -16,7 +16,7 @@ final class InsightsCreditTests: XCTestCase {
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
         "analytics_credit_tool_claude_code": "Claude",
         "analytics_projects_traces": "{n} traces", "analytics_projects_traces_one": "{n} trace",
-        "analytics_usage_tokens": "{t} tokens",
+        "analytics_usage_tokens": "{t} tokens", "analytics_usage_at_least": "at least {x}",
     ]
 
     private func empty() -> Window { Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0) }
@@ -72,6 +72,32 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertEqual(codex[0].amount, "—")
         XCTAssertEqual(codex[1].amount, "2M")
         XCTAssertTrue(InsightsUsageWords.tokenBars(nil, tool: "codex", copy: copy).isEmpty)
+    }
+
+    /// Owner, 2026-10-28: some calls with no charge show the known sum as
+    /// a minimum, "at least $5.21"; the dash only when nothing is known.
+    func testAPartlyKnownFigureReadsAtLeastItsKnownSum() {
+        var owner = Window(usdMicros: nil, sessions: 0, calls: 421, callsWithoutCharge: 1, tokens: nil)
+        owner.usdMicrosKnown = 5_210_000
+        owner.usdPartial = true
+        owner.tokensKnown = 2_000_000
+        owner.tokensPartial = true
+        XCTAssertEqual(InsightsCreditWords.spendAndTokens(owner, copy: copy), "at least $5.21 · at least 2M tokens")
+        var nothing = Window(usdMicros: nil, sessions: 0, calls: 1, callsWithoutCharge: 1, tokens: nil)
+        nothing.usdPartial = false
+        XCTAssertEqual(InsightsCreditWords.spend(nil, known: nil, partial: false, copy: copy), "—")
+        XCTAssertEqual(InsightsCreditWords.spendAndTokens(nothing, copy: copy), "— · —")
+        var group = Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1)
+        group.usdMicrosKnown = 50
+        group.usdPartial = true
+        XCTAssertEqual(InsightsCreditWords.lines([group], dimension: .task, copy: copy)[0].amount, "at least $0.00005")
+        // A partly known day draws its known part.
+        var day = Window(date: "2026-10-26", usdMicros: nil, sessions: 0, calls: 2, callsWithoutCharge: 1)
+        day.usdMicrosKnown = 250_000
+        day.usdPartial = true
+        let bars = InsightsUsageWords.days(.init(week: owner, today: owner, byDay: [day], last31Days: owner), copy: copy)
+        XCTAssertEqual(bars[0].value, 0.25)
+        XCTAssertEqual(bars[0].amount, "at least $0.25")
     }
 
     /// Owner, 2026-10-28: the NEAR AI card shows spend and tokens together.

@@ -162,6 +162,24 @@ pub(crate) struct HourCharge {
     /// unknown, and for an hour kept before tokens were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// The tokens of the calls whose counters are known, and how many such
+    /// calls there were (product owner, 2026-10-28: a figure with some
+    /// unknown calls shows its known part as a minimum). Absent from an
+    /// hour kept before them, which reads its `tokens`, if any, as all of
+    /// its calls'.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tokens_known: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub calls_with_tokens: u64,
+}
+
+/// A figure as far as it is known: the sum of the calls that carried one,
+/// and whether some calls did not (the sum is then a minimum). `None` when
+/// no call carried one, or the sum overflowed: unknown, never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KnownPart {
+    pub sum: u64,
+    pub partial: bool,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -172,6 +190,9 @@ fn is_zero(value: &u64) -> bool {
 impl HourCharge {
     /// Add `other` into this one; an overflow makes the sum unknown.
     pub(crate) fn absorb(&mut self, other: &HourCharge) {
+        let (mine, theirs) = (self.token_parts(), other.token_parts());
+        self.tokens_known = mine.0.saturating_add(theirs.0);
+        self.calls_with_tokens = mine.1.saturating_add(theirs.1);
         self.tokens = if self.calls == 0 {
             other.tokens
         } else {
@@ -195,6 +216,42 @@ impl HourCharge {
     #[must_use]
     pub(crate) fn known(&self) -> Option<u64> {
         (self.calls_without_charge == 0 && !self.overflowed).then_some(self.usd_micros)
+    }
+
+    /// The charge as far as it is known: the charged calls' sum, partial
+    /// when some calls carried none. `None` when none did.
+    #[must_use]
+    pub(crate) fn known_part(&self) -> Option<KnownPart> {
+        let charged = self.calls.saturating_sub(self.calls_without_charge);
+        if self.overflowed || (self.calls > 0 && charged == 0) {
+            return None;
+        }
+        Some(KnownPart {
+            sum: self.usd_micros,
+            partial: self.calls_without_charge > 0,
+        })
+    }
+
+    /// The tokens as far as they are known, as [`Self::known_part`].
+    #[must_use]
+    pub(crate) fn tokens_part(&self) -> Option<KnownPart> {
+        let (sum, with) = self.token_parts();
+        if self.calls > 0 && with == 0 {
+            return None;
+        }
+        Some(KnownPart {
+            sum,
+            partial: with < self.calls,
+        })
+    }
+
+    /// The known tokens and the calls they came from; an hour kept before
+    /// these were counted reads a complete `tokens` as all of its calls'.
+    fn token_parts(&self) -> (u64, u64) {
+        match (self.calls_with_tokens, self.tokens) {
+            (0, Some(tokens)) => (tokens, self.calls),
+            _ => (self.tokens_known, self.calls_with_tokens),
+        }
     }
 }
 
@@ -224,6 +281,8 @@ impl NearAiCharge {
                 calls_without_charge: self.calls_without_charge,
                 overflowed: self.overflowed,
                 tokens: None,
+                tokens_known: 0,
+                calls_with_tokens: 0,
             },
         )])
     }
@@ -278,6 +337,8 @@ impl NearAiCharge {
             calls_without_charge: u64::from(micros.is_none()),
             overflowed: false,
             tokens,
+            tokens_known: tokens.unwrap_or(0),
+            calls_with_tokens: u64::from(tokens.is_some()),
         });
         match micros {
             Some(micros) => {
@@ -1099,6 +1160,8 @@ mod tests {
                         calls: 1,
                         usd_micros: 12_500,
                         tokens: Some(110),
+                        tokens_known: 110,
+                        calls_with_tokens: 1,
                         ..HourCharge::default()
                     }
                 )]),

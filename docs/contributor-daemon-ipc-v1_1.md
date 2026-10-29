@@ -4976,14 +4976,20 @@ sessions on disk. Otherwise:
   `YYYY-MM-DD`) and `last_31_days` today and the 30 local days before it
   (none of these moves with the week on screen), each from local midnight
   to local midnight. Each window is `{from, to, usd_micros,
-  sessions, calls, calls_without_charge, tokens}`: the calls through the NEAR AI
+  sessions, calls, calls_without_charge, tokens, usd_micros_known,
+  usd_partial, tokens_known, tokens_partial}`: the calls through the NEAR AI
   route started in it (by clock hour), their sum in integer USD micros, the
   sessions they came from (the `loose_charge` counts in every sum and in each
   unknown group, as no session), the calls with no charge, and the calls'
   tokens (uncached input, cache reads, cache writes and output, as feed L
   counts them; `null` once any call's counters are unknown, and for hours
   kept before tokens were; a call refused with HTTP 4xx or 5xx and no
-  counters adds 0). `usd_micros` is
+  counters adds 0). `usd_micros_known` and `tokens_known` (additive,
+  product owner 2026-10-28) are the same sums as far as they are known: the
+  calls that carried one, with `usd_partial` or `tokens_partial` true when
+  some calls did not, so the figure is a minimum ("at least"). They are
+  `null` (and the flag false) only when no call carried one; a window with
+  no call is a true 0. Groups carry the same four fields. `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
   zero; a window with no call is a true 0. `week` also carries `by_task[]`,
   `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,

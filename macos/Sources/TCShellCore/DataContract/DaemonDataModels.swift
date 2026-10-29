@@ -2303,6 +2303,13 @@ extension DaemonData {
         /// The calls' tokens; `nil` when any call's are unknown, and from a
         /// daemon that predates them.
         public let tokens: Int64?
+        /// The charge and tokens as far as they are known (product owner,
+        /// 2026-10-28): a minimum while the matching `*Partial` is true;
+        /// `nil` when nothing is known, and from a daemon that predates them.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
         public let byTask: [InsightsCreditGroup]?
         public let byTool: [InsightsCreditGroup]?
         public let byFolder: [InsightsCreditGroup]?
@@ -2318,6 +2325,10 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case from, to, date, sessions, calls, tokens
             case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
             case byTask = "by_task"
             case byTool = "by_tool"
@@ -2336,6 +2347,11 @@ extension DaemonData {
         public let callsWithoutCharge: Int
         /// The group's tokens; `nil` when unknown.
         public let tokens: Int64?
+        /// As far as known, as on a window.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
 
         public init(key: String?, usdMicros: Int64?, sessions: Int = 1, calls: Int = 1, callsWithoutCharge: Int = 0,
                     tokens: Int64? = nil) {
@@ -2346,6 +2362,10 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case key, sessions, calls, tokens
             case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
         }
     }

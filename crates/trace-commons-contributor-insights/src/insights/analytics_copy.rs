@@ -230,6 +230,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_usage_weekly_resets", "Weekly resets"),
     // NEAR AI tokens beside its spend, and under its spend on By project.
     ("analytics_usage_tokens", "{t} tokens"),
+    // A NEAR AI figure some of whose calls carried no charge: the known
+    // sum as a minimum (owner-approved wording, 2026-10-28). `{x}` is the
+    // amount or the token figure.
+    ("analytics_usage_at_least", "at least {x}"),
     ("analytics_usage_near_ai", "NEAR AI"),
     ("analytics_usage_last_31_days", "Last 31 days"),
     ("analytics_usage_last_7_days", "Last 7 days"),

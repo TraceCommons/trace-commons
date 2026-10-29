@@ -46,9 +46,30 @@ enum InsightsCreditWords {
                                           ["t": InsightsOverviewWords.figure(UInt64(tokens), copy: copy)])
     }
 
+    /// A figure some of whose calls carried none (product owner,
+    /// 2026-10-28): the exact one when known; else the known part as a
+    /// minimum, "at least $5.21"; the dash only when nothing is known.
+    static func atLeast(exact: Int64?, known: Int64?, partial: Bool?, copy: [String: String],
+                        format: (Int64?) -> String) -> String {
+        if let exact { return format(exact) }
+        guard let known, partial == true else { return text("analytics_unavailable", copy) }
+        return InsightsOverviewWords.fill(text("analytics_usage_at_least", copy), ["x": format(known)])
+    }
+
+    /// A window's or group's spend, "at least" when partly known.
+    static func spend(_ exact: Int64?, known: Int64?, partial: Bool?, copy: [String: String]) -> String {
+        atLeast(exact: exact, known: known, partial: partial, copy: copy) { amount($0, copy: copy) }
+    }
+
+    /// A window's or group's tokens, "at least" when partly known.
+    static func tokens(_ exact: Int64?, known: Int64?, partial: Bool?, copy: [String: String]) -> String {
+        atLeast(exact: exact, known: known, partial: partial, copy: copy) { tokens($0, copy: copy) }
+    }
+
     /// A NEAR AI window's spend and tokens together, "$4.12 · 1.2M tokens".
     static func spendAndTokens(_ window: DaemonData.InsightsCreditWindow, copy: [String: String]) -> String {
-        amount(window.usdMicros, copy: copy) + " · " + tokens(window.tokens, copy: copy)
+        spend(window.usdMicros, known: window.usdMicrosKnown, partial: window.usdPartial, copy: copy) + " · "
+            + tokens(window.tokens, known: window.tokensKnown, partial: window.tokensPartial, copy: copy)
     }
 
     /// A group's name: the task's word, the tool's, or the folder's own
@@ -70,7 +91,8 @@ enum InsightsCreditWords {
                       copy: [String: String]) -> [Line] {
         groups.map { group in
             Line(id: group.key ?? "\u{0}unknown", label: label(group.key, dimension: dimension, copy: copy),
-                 amount: amount(group.usdMicros, copy: copy), traces: String(group.sessions))
+                 amount: spend(group.usdMicros, known: group.usdMicrosKnown, partial: group.usdPartial, copy: copy),
+                 traces: String(group.sessions))
         }
     }
 
@@ -131,9 +153,15 @@ enum InsightsProjectRows {
             return Row(id: folder ?? "\u{0}unknown",
                        label: InsightsCreditWords.label(folder, dimension: .folder, copy: copy),
                        claude: usage[folder]?.claude, codex: usage[folder]?.codex,
-                       nearAi: group.map { InsightsCreditWords.amount($0.usdMicros, copy: copy) } ?? unknown,
-                       nearAiTokens: group.map { InsightsCreditWords.tokens($0.tokens, copy: copy) },
-                       nearAiMicros: group?.usdMicros)
+                       nearAi: group.map {
+                           InsightsCreditWords.spend($0.usdMicros, known: $0.usdMicrosKnown, partial: $0.usdPartial,
+                                                     copy: copy)
+                       } ?? unknown,
+                       nearAiTokens: group.map {
+                           InsightsCreditWords.tokens($0.tokens, known: $0.tokensKnown, partial: $0.tokensPartial,
+                                                      copy: copy)
+                       },
+                       nearAiMicros: group.flatMap { $0.usdMicros ?? $0.usdMicrosKnown })
         }
         func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
         return rows.sorted { a, b in

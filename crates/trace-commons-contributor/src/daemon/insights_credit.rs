@@ -66,6 +66,13 @@ impl Sum {
             // The calls' tokens; `null` once any call's are unknown. No call
             // is a true 0.
             "tokens": if self.charge.calls == 0 { Some(0) } else { self.charge.tokens },
+            // As far as known (product owner, 2026-10-28): the sum of the
+            // calls that carried one, a minimum when `*_partial`; `null`
+            // only when no call carried one.
+            "usd_micros_known": self.charge.known_part().map(|part| part.sum),
+            "usd_partial": self.charge.known_part().is_some_and(|part| part.partial),
+            "tokens_known": self.charge.tokens_part().map(|part| part.sum),
+            "tokens_partial": self.charge.tokens_part().is_some_and(|part| part.partial),
         })
     }
 }
@@ -167,6 +174,8 @@ mod tests {
                 calls_without_charge: u64::from(micros.is_none()),
                 overflowed: false,
                 tokens: Some(1_000),
+                tokens_known: 1_000,
+                calls_with_tokens: 1,
             });
             match micros {
                 Some(m) => {
@@ -238,6 +247,17 @@ mod tests {
         assert_eq!(tasks[1]["key"], "docs");
         assert_eq!(tasks[1]["usd_micros"], serde_json::Value::Null);
         assert_eq!(tasks[1]["calls_without_charge"], 1);
+        // Owner, 2026-10-28: the known part as a minimum, partial; unknown
+        // only when no call carried a charge.
+        assert_eq!(tasks[1]["usd_micros_known"], 50);
+        assert_eq!(tasks[1]["usd_partial"], true);
+        assert_eq!(tasks[0]["usd_partial"], false);
+        assert_eq!(week["usd_micros_known"], 350);
+        assert_eq!(week["usd_partial"], true);
+        let none = charge(&[(1, None)]);
+        let only_unknown = window_value(&[session(&none, None, None, None)], at(0), at(24), false);
+        assert_eq!(only_unknown["usd_micros_known"], serde_json::Value::Null);
+        assert_eq!(only_unknown["usd_partial"], false);
     }
 
     #[test]

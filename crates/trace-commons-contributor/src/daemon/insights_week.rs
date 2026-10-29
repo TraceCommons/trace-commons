@@ -7369,7 +7369,7 @@ mod tests {
             owner_route_call(1, Some(4.72), 200),
             // Refused, not billed: a known $0.
             owner_route_call(2, None, 429),
-            owner_route_call(3, None, 500),
+            owner_route_call(3, None, 503),
         ];
         let mut homes = ManagedRows::new();
         homes.insert("route-a".to_string(), a.iter().collect());
@@ -7403,6 +7403,10 @@ mod tests {
         let month = &credit_now(&f)["last_31_days"];
         assert_eq!(month["usd_micros"], serde_json::Value::Null);
         assert_eq!(month["calls_without_charge"], 1);
+        // Owner, 2026-10-28: the owner's data (refused calls, one completed
+        // call with no charge) reads "at least" the known sum.
+        assert_eq!(month["usd_micros_known"], 4_778_000);
+        assert_eq!(month["usd_partial"], true);
     }
 
     /// A store a build before this one folded (its cursors past the calls
