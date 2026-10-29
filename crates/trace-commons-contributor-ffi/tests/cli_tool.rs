@@ -2,7 +2,9 @@
 //! path, state and privileged scripts from the core (`cli_tool::probe`).
 //!
 //! Reads `/usr/local/bin` on the test machine (never writes it), so a test
-//! asserts only what holds whatever is there.
+//! asserts only what holds whatever is there. POSIX paths: macOS only in
+//! use, run on every Unix.
+#![cfg(unix)]
 
 use std::ffi::{CStr, CString, c_char};
 
@@ -41,7 +43,6 @@ fn no_bundle_is_unavailable_and_offers_nothing() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_bundle_with_its_cli_gets_a_state_and_a_quoted_script() {
     use std::os::unix::fs::PermissionsExt;
@@ -84,7 +85,7 @@ fn a_bundle_with_its_cli_gets_a_state_and_a_quoted_script() {
         assert!(script.starts_with("do shell script \""));
         assert!(script.ends_with("\" with administrator privileges"));
         assert!(
-            script.contains(&format!("/bin/ln -sfn '{}'", cli.display())),
+            script.contains(&format!(" '{}' ", cli.display())),
             "{script}"
         );
     } else {

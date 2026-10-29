@@ -20,11 +20,14 @@
 //!   file, a directory, or a symlink anywhere other than a Near.ai bundle's
 //!   CLI is [`LinkState::Foreign`], and no script is offered for it.
 //! - The privileged script is fixed text plus single-quoted paths. Its only
-//!   writes are `mkdir` of [`LINK_DIR`] when missing, `ln -sfn` and `rm` of
-//!   the link path. Before writing it re-checks, as root, the state the
+//!   writes are `mkdir` of [`LINK_DIR`] when missing, `ln` and `rm` of the
+//!   link path. Before writing it re-checks, as root, the state the
 //!   unprivileged probe saw (nothing there, or a symlink whose target is
-//!   exactly the one read), and exits [`CHANGED_EXIT`] otherwise, so a
-//!   file put there in between is never replaced.
+//!   exactly the one read), and exits [`CHANGED_EXIT`] otherwise. A fresh
+//!   install then links with `ln -sn`, without `-f`, so the kernel refuses
+//!   anything that appeared after the re-check; only repointing our own
+//!   link uses `ln -sfn`, where the re-check is the guard and a window
+//!   between it and the write remains.
 //! - The shell quoting is wrapped in an AppleScript string literal escaped
 //!   separately, so no path becomes script code at either layer.
 
@@ -273,9 +276,16 @@ pub fn install_script(link: &Path, target: &Path, existing: &Existing) -> Option
     let quoted_link = quoted_path(link)?;
     let quoted_target = quoted_path(target)?;
     let check = precondition(&quoted_link, existing)?;
+    // Nothing there: no `-f`, so anything that appeared since the re-check
+    // fails the link instead of being replaced. Our stale link: `-f` to
+    // replace it, guarded by the re-check of its exact target.
+    let flags = match existing {
+        Existing::Absent => "-sn",
+        _ => "-sfn",
+    };
     Some(format!(
         "/bin/mkdir -p -m 755 {dir} || exit {changed}; {check}; \
-         /bin/ln -sfn {quoted_target} {quoted_link}",
+         /bin/ln {flags} {quoted_target} {quoted_link}",
         changed = CHANGED_EXIT,
     ))
 }
@@ -361,7 +371,9 @@ fn probe_named(name: Option<&'static str>, bundle: &Path, link_dir: &Path) -> Cl
     }
 }
 
-#[cfg(test)]
+// The paths and scripts are POSIX: `/Applications/...` is not absolute on
+// Windows, where this module is never used.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -498,7 +510,7 @@ mod tests {
             "/bin/mkdir -p -m 755 '/usr/local/bin' || exit 17; \
              if [ -e '/usr/local/bin/near-ai-staging' ] || [ -L '/usr/local/bin/near-ai-staging' ]; \
              then exit 17; fi; \
-             /bin/ln -sfn '/Applications/Near.ai Staging.app/Contents/MacOS/near-ai' \
+             /bin/ln -sn '/Applications/Near.ai Staging.app/Contents/MacOS/near-ai' \
              '/usr/local/bin/near-ai-staging'"
         );
         assert_eq!(
@@ -506,7 +518,7 @@ mod tests {
             "do shell script \"/bin/mkdir -p -m 755 '/usr/local/bin' || exit 17; \
              if [ -e '/usr/local/bin/near-ai-staging' ] || [ -L '/usr/local/bin/near-ai-staging' ]; \
              then exit 17; fi; \
-             /bin/ln -sfn '/Applications/Near.ai Staging.app/Contents/MacOS/near-ai' \
+             /bin/ln -sn '/Applications/Near.ai Staging.app/Contents/MacOS/near-ai' \
              '/usr/local/bin/near-ai-staging'\" with administrator privileges"
         );
     }
@@ -559,7 +571,7 @@ mod tests {
         let target = p("/Users/o'neil/My \"Apps\"/Near.ai.app/Contents/MacOS/near-ai");
         let script = install_script(&p(LINK), &target, &Existing::Absent).unwrap();
         assert!(script.ends_with(
-            r#"/bin/ln -sfn '/Users/o'\''neil/My "Apps"/Near.ai.app/Contents/MacOS/near-ai' '/usr/local/bin/near-ai-staging'"#
+            r#"/bin/ln -sn '/Users/o'\''neil/My "Apps"/Near.ai.app/Contents/MacOS/near-ai' '/usr/local/bin/near-ai-staging'"#
         ));
         let applescript = privileged_applescript(&script);
         let body = applescript
@@ -618,6 +630,7 @@ mod tests {
                         "then",
                         "fi",
                         "/bin/ln",
+                        "-sn",
                         "-sfn",
                         "/bin/rm",
                         "/usr/bin/readlink",
@@ -638,7 +651,24 @@ mod tests {
         assert_eq!(uninstall_script(&p(LINK), &p(TARGET), &bad_old), None);
     }
 
-    #[cfg(unix)]
+    /// AppleScript itself reads the escaped literal back as the exact shell
+    /// script, for a path with a space, both quotes and a backslash. Runs
+    /// `osascript -e 'return "..."'`: no shell, no privileges.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_decodes_the_literal_to_the_exact_script() {
+        let target = p("/Users/o'neil/My \"Apps\" \\x/Near.ai.app/Contents/MacOS/near-ai");
+        let script = install_script(&p(LINK), &target, &Existing::Absent).unwrap();
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(format!("return \"{}\"", applescript_literal(&script)))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let decoded = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(decoded.strip_suffix('\n').unwrap(), script);
+    }
+
     mod on_disk {
         use super::super::*;
         use std::os::unix::fs::{PermissionsExt, symlink};
