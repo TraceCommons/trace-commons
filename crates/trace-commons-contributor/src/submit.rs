@@ -2740,7 +2740,7 @@ pub(crate) const UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC: u64 = 125_000;
 ///
 /// The operator client's default is a flat 30 s, which is right for the
 /// small calls that share [`build_ingest_client`] and wrong for an envelope
-/// that can now be 512 MiB (about 140 Mbit/s to send in 30 s). Only the
+/// that can now be 256 MiB (about 72 Mbit/s to send in 30 s). Only the
 /// upload uses this.
 pub(crate) fn upload_timeout(body_len: u64) -> StdDuration {
     UPLOAD_TIMEOUT_FLOOR.saturating_add(StdDuration::from_secs(
@@ -3030,7 +3030,7 @@ mod tests {
             upload_timeout(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC + 1),
             UPLOAD_TIMEOUT_FLOOR + StdDuration::from_secs(2)
         );
-        // A body at the envelope limit: 512 MiB at 1 Mbit/s is 4295 s on
+        // A body at the envelope limit: 256 MiB at 1 Mbit/s is 2148 s on
         // top of the floor, far past the operator client's 30 s default.
         let at_limit = upload_timeout(MAX_ENVELOPE_BYTES as u64);
         assert_eq!(

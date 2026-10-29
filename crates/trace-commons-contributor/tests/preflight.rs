@@ -673,7 +673,7 @@ fn unenrolled_real_submit_still_requires_login() {
 }
 
 // `refusal_reports_session_and_size_and_only_fails_real_submit` drove the
-// CLI with a trajectory over `MAX_ENVELOPE_BYTES`. At 512 MiB no trajectory
+// CLI with a trajectory over `MAX_ENVELOPE_BYTES`. At 256 MiB no trajectory
 // can be (the adapter refuses past its read budget first, as
 // `parse-failed`), so its parts moved to unit tests in `submit.rs`:
 // `refused_for_size_names_the_session_the_size_and_the_limit` for the

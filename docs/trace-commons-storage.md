@@ -710,7 +710,7 @@ Object keys must not reveal raw user ids, local paths, prompt content, or secret
 ### Envelope Size and Ingest Memory
 
 The largest envelope is `MAX_TRACE_ENVELOPE_BYTES` in
-`crates/trace-commons-protocol` (512 MiB since 2026-10-29; 16,000,000 bytes
+`crates/trace-commons-protocol` (256 MiB since 2026-10-29; 16,000,000 bytes
 before). Ingest derives its request-body ceiling from it (`+ 4 MiB` of
 framing) and the contributor refuses a larger envelope locally as
 `envelope-too-large`.

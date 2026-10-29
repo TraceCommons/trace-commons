@@ -103,19 +103,22 @@ pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1"
 /// bought nothing. Everything downstream is now derived from this value with
 /// explicit headroom, and tests assert the ordering holds.
 ///
-/// 512 MiB, the same number as the contributor's per-session read limit
-/// (`source::MAX_SESSION_BYTES`), owner decision 2026-10-29. Real sessions
-/// shrink about 3.4:1 (median) on the way to an envelope, so a session the
-/// contributor will read almost always builds an envelope under this. Binary
-/// units on purpose, to match the session limit; the value was 16,000,000
-/// (decimal) before.
+/// 256 MiB, owner decision 2026-10-29 (option B of PR #1746): half the
+/// contributor's per-session read limit (`source::MAX_SESSION_BYTES`,
+/// 512 MiB). Real sessions shrink about 3.4:1 (median) on the way to an
+/// envelope, so a session the contributor will read almost always builds an
+/// envelope under this. Binary units, like the session limit; the value was
+/// 16,000,000 (decimal) before.
 ///
-/// Scoring cost does not scale with it -- the gate chunk cap bounds how much
-/// of a trace is ever scored. Memory does: ingest buffers the whole body and
-/// makes copies of it, so the large-body byte budget in ingest
-/// (`LARGE_BODY_GLOBAL_BYTES`) is what keeps a few concurrent uploads at this
-/// size from exhausting the server.
-pub const MAX_TRACE_ENVELOPE_BYTES: usize = 512 * 1024 * 1024;
+/// Sized from ingest memory rather than from sessions: ingest buffers the
+/// whole body and holds about 7-12 copies of it while it is processed
+/// (measured in `large_envelope_tests`), mostly because the encrypted artifact
+/// format is one-shot and base64-in-JSON. A streaming artifact format is the
+/// follow-up that would let this rise. The large-body byte budget in ingest
+/// (`LARGE_BODY_GLOBAL_BYTES`) keeps concurrent uploads at this size from
+/// exhausting the server. Scoring cost does not scale with it -- the gate
+/// chunk cap bounds how much of a trace is ever scored.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 256 * 1024 * 1024;
 /// Largest single field text an external privacy filter will accept.
 ///
 /// Tied to the envelope cap, because any one event could in principle carry
@@ -13641,7 +13644,7 @@ mod tests {
         // The default guard admits a whole envelope's worth of one field...
         assert!(adapter.max_input_bytes >= MAX_TRACE_ENVELOPE_BYTES);
         // ...and a field exactly at the guard is admitted. Checked at a small
-        // guard rather than by materializing the 512 MiB cap in a test.
+        // guard rather than by materializing the 256 MiB cap in a test.
         let limit = 64 * 1024;
         let adapter = adapter.with_input_limit(limit);
         let at_cap = "x".repeat(limit);

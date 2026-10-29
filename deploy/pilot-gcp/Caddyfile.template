@@ -51,24 +51,24 @@
 		timeouts {
 			# Bounds slow request bodies before they can hold an ingest slot.
 			# This is one deadline for the whole body, and it is global, so it
-			# must fit the largest upload: a 512 MiB envelope plus the 4 MiB
-			# slack ingest accepts (541,065,216 bytes). 4500s needs ~0.96
-			# Mbit/s of upstream, matching the contributor's upload timeout
-			# (1 Mbit/s plus a minute). A slow upload holds its share of
+			# must fit the largest upload: a 256 MiB envelope plus the 4 MiB
+			# slack ingest accepts (272,629,760 bytes). 2300s needs ~0.95
+			# Mbit/s of upstream, just above the contributor's upload timeout
+			# for that body (1 Mbit/s plus a minute, 2242s). A slow upload holds its share of
 			# ingest's upload byte budget for as long as it takes.
-			read_body 4500s
+			read_body 2300s
 		}
 	}
 }
 
 ingest.${TC_PUBLIC_HOST} {
 	encode gzip
-	# Edge ceiling just above ingest's largest accepted body (a 512 MiB
-	# envelope plus 4 MiB of framing, 541,065,216 bytes; Caddy's MB is
+	# Edge ceiling just above ingest's largest accepted body (a 256 MiB
+	# envelope plus 4 MiB of framing, 272,629,760 bytes; Caddy's MB is
 	# decimal), so an oversized upload is refused here before it reaches
 	# ingest at all.
 	request_body {
-		max_size 542MB
+		max_size 273MB
 	}
 	reverse_proxy 127.0.0.1:3907 {
 		header_up Host {host}

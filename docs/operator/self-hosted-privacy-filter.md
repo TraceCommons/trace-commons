@@ -232,7 +232,7 @@ it explicitly; nothing else in tuning moved the number.
 
 One request carries a whole field, so the 30-second adapter default is far too
 low and the `MAX_INPUT_BYTES` default (the envelope cap: 16 MB until
-2026-10-29, 512 MiB since) is far too high -- a 16 MB field at this rate is
+2026-10-29, 256 MiB since) is far too high -- a 16 MB field at this rate is
 roughly 78 hours. Both must be set:
 
 ```sh

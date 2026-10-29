@@ -1602,7 +1602,7 @@ assumes `would_send_bytes < raw_session_bytes`; assert nothing about the
 direction, only that `would_send_bytes` is the number that governs consent.
 
 `reason_label` is present only when `would_send_bytes` is over the upload
-limit (`MAX_TRACE_ENVELOPE_BYTES`, 512 MiB), and its value is then always
+limit (`MAX_TRACE_ENVELOPE_BYTES`, 256 MiB), and its value is then always
 `envelope-too-large` -- the word `approve` refuses the entry under (see
 `approve`'s `skipped[].reason_label`). The preview says it up front so a
 contributor is not told only once they approve. It is a warning about the
