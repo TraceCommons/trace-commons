@@ -498,6 +498,14 @@ pub trait PayoutRail: Send + Sync {
     /// so a new link (a changed recipient) starts a new program.
     fn program_for_link(&self, link_id: Uuid) -> String;
 
+    /// The second program a link carries for referral credit (referral
+    /// rewards spec section 5), derived from the link id alone and never
+    /// equal to [`PayoutRail::program_for_link`]. `None` by default: a rail
+    /// without one carries no referral stream, and the pass sends none.
+    fn referral_program_for_link(&self, _link_id: Uuid) -> Option<String> {
+        None
+    }
+
     /// Whether sending is enabled, the per-send maximum, and the sends left
     /// in the current window.
     async fn preflight(&self) -> Result<RailCapacity, RailRefusal>;

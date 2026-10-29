@@ -121,6 +121,17 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
             "/v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm",
             Refused,
         ),
+        // Refused: referral codes and applying one. An unbound account binds
+        // first; its referral is paid on the NEAR AI rail it has no link to.
+        ("GET", "/v1/account/referral-codes", Refused),
+        ("POST", "/v1/account/referral-codes", Refused),
+        (
+            "POST",
+            "/v1/account/referral-codes/{code_id}/disable",
+            Refused,
+        ),
+        ("GET", "/v1/account/referral", Refused),
+        ("POST", "/v1/account/referral", Refused),
         // Refused: traces, sessions of traces and credit (empty anyway).
         ("GET", "/v1/account/traces", Refused),
         ("POST", "/v1/account/source-sessions/status", Refused),

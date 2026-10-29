@@ -458,6 +458,11 @@ pub const METHODS: &[&str] = &[
     "payout_link_start",
     "payout_link_confirm",
     "payout_link_unlink",
+    "referral_codes_list",
+    "referral_codes_create",
+    "referral_codes_disable",
+    "referral_apply",
+    "referral_status",
     "inference_calls",
     "inference_activity",
     "insights_glance",
@@ -3840,6 +3845,11 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("payout_link_start", "payout-link-requires-async"),
     ("payout_link_confirm", "payout-link-requires-async"),
     ("payout_link_unlink", "payout-link-requires-async"),
+    ("referral_codes_list", "referral-requires-async"),
+    ("referral_codes_create", "referral-requires-async"),
+    ("referral_codes_disable", "referral-requires-async"),
+    ("referral_apply", "referral-requires-async"),
+    ("referral_status", "referral-requires-async"),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
     ("skill_evaluate", "skill-evaluation-requires-async"),
@@ -6964,6 +6974,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "payout_link_start" => super::payout_link::handle_start(shared, req).await,
         "payout_link_confirm" => super::payout_link::handle_confirm(shared, req).await,
         "payout_link_unlink" => super::payout_link::handle_unlink(shared, req).await,
+        "referral_codes_list" => super::referral::handle_list(shared, req).await,
+        "referral_codes_create" => super::referral::handle_create(shared, req).await,
+        "referral_codes_disable" => super::referral::handle_disable(shared, req).await,
+        "referral_apply" => super::referral::handle_apply(shared, req).await,
+        "referral_status" => super::referral::handle_status(shared, req).await,
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         // Reads a whole transcript: off the runtime's worker, as the skill
         // installs are.
@@ -18347,7 +18362,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 78);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 83);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -18835,7 +18850,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 105, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 86, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 91, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

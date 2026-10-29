@@ -108,7 +108,8 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let near = try Self.week(.nearAi)
         XCTAssertEqual(InsightsProjectRows.columns(near, rows: InsightsProjectRows.rows(near, copy: copy)),
                        .init(spend: true, claude: true, codex: true, nearAi: true))
-        XCTAssertEqual(InsightsDetailsTable.dimensions(near), [.folder, .task, .tool, .model])
+        XCTAssertEqual(InsightsDetailsTable.dimensions(near), [.folder, .model],
+                       "By task and By tool are removed (owner, 2026-10-29)")
     }
 
     func testTilesAndCardsWithNothingKnownAreLeftOut() throws {

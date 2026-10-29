@@ -31,14 +31,6 @@ final class InsightsGlassConventionsTests: XCTestCase {
         }
     }
 
-    func test_seeSessionsIsAGlassLink() throws {
-        let source = try Self.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(source.contains(
-            "if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }\n"
-                + "                }\n"
-                + "                .buttonStyle(GlassButtonStyle(.link))"))
-    }
-
     /// A tab that cannot be used is hidden, not drawn greyed (Ron's #1287
     /// review): no Spend tab and no "Later" chip (owner decision D5, no
     /// money in Insights).
@@ -74,8 +66,8 @@ final class InsightsGlassConventionsTests: XCTestCase {
         }
         // Tokens by day moved from Overview to its own view on Details,
         // and every usage card draws the same bars (owner, 2026-10-28).
-        for file in ["Views/InsightsTokensByDay.swift", "Views/InsightsUsageCards.swift",
-                     "Views/InsightsPatternsTab.swift"] {
+        // Breakdown's pattern cards, and their bars, are gone (owner, 2026-10-29).
+        for file in ["Views/InsightsTokensByDay.swift", "Views/InsightsUsageCards.swift"] {
             let source = try Self.text(file)
             XCTAssertTrue(source.contains(".insightsPlot()"), "\(file) plots straight on glass")
             XCTAssertFalse(source.contains("accentText.opacity("), "\(file) dims accentText for a series")

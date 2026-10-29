@@ -29,6 +29,26 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The referral words (Settings Referrals, the code field on the NEAR AI
+    /// sign-in step, the Insights credit split), as a JSON object, or nil on
+    /// a caught panic. Every string is a draft awaiting owner approval.
+    /// Decoded by `TCShellCore.ReferralCopy`.
+    public static func referralCopyJSON() -> String? {
+        guard let raw = tc_referral_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// A typed referral code as it is shown, `TC-XXXXX-XXXXX`, read the way
+    /// the daemon reads it before sending one; nil for text that is not a
+    /// code. The reading is the core's, so the field's check and the daemon
+    /// never disagree.
+    public static func referralCodeDisplay(_ typed: String) -> String? {
+        guard let raw = typed.withCString({ tc_referral_code_display($0) }) else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The Devices section's sentences, as a JSON object, or nil on a caught
     /// panic. Every string is a draft awaiting owner approval. Decoded by
     /// `TCShellCore.AccountDevicesCopy`.

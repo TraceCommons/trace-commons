@@ -23,6 +23,13 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
+    /// The NEAR AI payout rail's streams, for the NEAR AI card's own-traces
+    /// and referrals rows (referral spec section 6); `nil` without a daemon.
+    private let payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)?
+    @State private var earnings: [NearAiEarningsSplit.Row] = []
+    /// The Monitor window's inspector, which shows Breakdown's details
+    /// while Breakdown is on screen (owner, 2026-10-29).
+    private let inspector: InsightsBreakdownInspector
     /// The get-started card's one action: Traces, on its folder list.
     /// `nil` draws no link.
     private let openTraces: (() -> Void)?
@@ -42,8 +49,10 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
+                    inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     historyLabels: PublicRunCopy? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
                     openHistory: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
@@ -86,7 +95,9 @@ struct InsightsView: View {
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   submitted: InsightsSubmittedStore(reader: submitted),
-                  home: home, historyLabels: historyLabels, openTraces: openTraces,
+                  inspector: inspector,
+                  home: home, historyLabels: historyLabels,
+                  payoutStreams: payoutStreams, openTraces: openTraces,
                   openHistory: openHistory)
     }
 
@@ -102,10 +113,13 @@ struct InsightsView: View {
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
                     submitted: InsightsSubmittedStore? = nil,
+                    inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     historyLabels: PublicRunCopy? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
                     openHistory: (() -> Void)? = nil) {
+        self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
         self.openHistory = openHistory
         self.historyLabels = historyLabels ?? PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? "")
@@ -121,6 +135,18 @@ struct InsightsView: View {
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
+        self.payoutStreams = payoutStreams
+    }
+
+    /// The NEAR AI card's split, read each time Overview opens. A failed or
+    /// absent read draws no rows: the split adds to the card and is never
+    /// in place of it.
+    private func loadEarnings() async {
+        guard let payoutStreams,
+              let copy = TCConsentCopy.referralCopyJSON().flatMap(ReferralCopy.decode(fromJSON:))
+        else { return }
+        let streams = await payoutStreams()
+        earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
     }
 
     /// The tabs on the bar, in order: Overview, Breakdown, Submitted
@@ -191,7 +217,7 @@ struct InsightsView: View {
         // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
             // Overview, Breakdown and Submitted (product owner,
-            // 2026-10-29). A picked day shows its sessions in place.
+            // 2026-10-29). Breakdown's details are the inspector's.
             GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
@@ -212,7 +238,8 @@ struct InsightsView: View {
             case .patterns where showsSample:
                 if let sample {
                     InsightsPatternsTab(model: sample.patterns, comparisons: sample.comparisons, copy: model.copy,
-                                        week: sample.week, overview: sample.overview, getStarted: getStarted)
+                                        week: sample.week, overview: sample.overview, inspector: inspector,
+                                        getStarted: getStarted)
                 }
             case .submitted where showsSample:
                 if let sample {
@@ -227,6 +254,7 @@ struct InsightsView: View {
                     subscriptions: subscriptionModel,
                     nearAiCredit: model.counterWeek?.nearAiCredit,
                     usageByDay: model.counterWeek?.usageByDay,
+                    earnings: earnings,
                     showProjects: { detailsView = .folder; tab = .patterns },
                     work: model.counterWeek?.work,
                     weekChanges: model.counterWeek?.changeVsLastWeek,
@@ -238,11 +266,12 @@ struct InsightsView: View {
                         { Task { try? await turnOff(); await model.loadWeek() } }
                     })
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
+                .task { await loadEarnings() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek,
                                     week: model.counterWeek, detailsView: $detailsView,
-                                    overview: overviewModel, snapshots: model.snapshots)
+                                    overview: overviewModel, inspector: inspector)
             case .submitted:
                 InsightsSubmittedTab(store: submittedStore, copy: model.copy, labels: historyLabels,
                                      openHistory: openHistory)
@@ -252,11 +281,15 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
+        // Breakdown's details are the inspector's while Breakdown is shown.
+        .onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }
         // The sample is built only when it is first needed, and while it
         // shows, Insights asks again each minute, so the card and the
         // sample go as soon as the first trace is counted.
         .onChange(of: showsSample, initial: true) { _, shows in
             if shows, sample == nil { sample = InsightsSampleModels() }
+            // The inspector reads the sample's days while the sample shows.
+            showBreakdownDetail(tab)
         }
         .task(id: showsSample) {
             guard showsSample else { return }
@@ -280,6 +313,20 @@ struct InsightsView: View {
         }
         .onDisappear {
             model.close(); overviewModel.close(); patternsModel.close(); comparisonsModel.clear()
+            inspector.clear()
+        }
+    }
+
+    /// Hands the inspector Breakdown's details while Breakdown is `shown`,
+    /// and takes them back on any other tab.
+    private func showBreakdownDetail(_ shown: InsightsTab) {
+        guard shown == .patterns else { inspector.clear(); return }
+        // The sample's Breakdown picks its own days, read from its own
+        // Overview model, never the person's.
+        let sampled = showsSample ? sample : nil
+        inspector.show { [inspector, overviewModel, model] in
+            InsightsBreakdownDetail(inspector: inspector, overview: sampled?.overview ?? overviewModel,
+                                    copy: model.copy, snapshots: sampled == nil ? model.snapshots : [])
         }
     }
 

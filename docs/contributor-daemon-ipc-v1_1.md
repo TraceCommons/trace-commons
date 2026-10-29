@@ -638,6 +638,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
+| `referral_codes_list` | — | `codes[]` of `{code_id, code, state, created_at, referee_count, bonus_owed_nano_usd}`, `max_live_codes`, `live_codes`, `can_create`, `people_joined`, `bonus_owed_nano_usd`, `bonus_sent_nano_usd`, `bonus_waiting_nano_usd` | asynchronous only; account session (`account-session-required` without one). `code` is `TC-XXXXX-XXXXX`, or `null` when the commons cannot open it; `state` is `live`, `disabled`, `suspended` or `voided`. Amounts are whole nano-USD, never below zero. Referral spec section 6 |
+| `referral_codes_create` | — | `code_id`, `code`, `created_at` | asynchronous only; account session. Refusals keep the commons label: `referral_unavailable` (the program is not open), `referral_code_limit_reached`, `referral_account_ineligible`. Writes the label-only audit row `referral-code-created` |
+| `referral_codes_disable` | `code_id` (**required**, a UUID the list answered) | `code_id`, `state` | asynchronous only; account session. People who joined with the code keep earning its owner a bonus. `referral_code_not_found` for a code this account does not hold. Audit row `referral-code-disabled` |
+| `referral_apply` | `code` (**required**, as typed) | `outcome: "applied"`, `applied_at`, `earn_until` | asynchronous only; account session. Text that is not a code is refused here with `referral-code-invalid` and never sent; a code is sent only in canonical form. Every refusal by the commons is the one label `referral_not_applied`, whatever the reason. Audit row `referral-applied` |
+| `referral_status` | — | `applied`, `applied_at`, `applied_via` (`signup` or `later`), `earn_until`, `apply_until`, `can_apply` | asynchronous only; account session. The referee sees that a code is applied, never whose. `can_apply` is true while none is applied and `apply_until` has not passed |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -4995,20 +5000,22 @@ sessions on disk. Otherwise:
   `null` (and the flag false) only when no call carried one; a window with
   no call is a true 0. Groups carry the same four fields. `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
-  zero; a window with no call is a true 0. `week` also carries `by_task[]`,
-  `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
-  calls_without_charge}`, grouped by the session's stored row: `key` is the
-  task, the person's own label (`insights_session_label`) when set, else the
-  inferred one (`bug_fix`, `refactor`, `tests`, `docs` or `other`, which
-  takes `no_edits` too, as the task words do), the tool (`claude_code`, `codex`) or the folder's label as
-  `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
+  zero; a window with no call is a true 0. `week` also carries
+  `by_folder[]` and `by_model[]`, each `{key, usd_micros, sessions, calls,
+  calls_without_charge}`. `by_model[]`'s `key` is the served model, as the
+  ledger names it, lowercased, and a session is in each model group it had
+  a call in. `by_folder[]` is grouped by the session's stored row: `key` is the
+  folder's label as `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
   this view: a folder name is answered over this socket and shown on this
   Mac only, never sent anywhere), and `null` when unknown (a session with
   no row, no facts, or no folder the daemon knows, an Analyze snapshot
   included). A group's `usd_micros` is `null` when any call in it had no
   charge. Groups are ordered by known charge, largest first, then the
-  unknown ones; ties by key, `null` last. A daemon that predates it omits
-  it; a shell reads that as no credit figure, never as zero.
+  unknown ones; ties by key, `null` last. `week`'s `by_task[]` and
+  `by_tool[]` were removed (owner, 2026-10-29) with macOS Insights' By task
+  and By tool views, their only reader. A daemon that predates
+  `near_ai_credit` omits it; a shell reads that as no credit figure, never
+  as zero.
 - `usage_by_day[]` (additive, product owner 2026-10-28) is Claude Code and
   Codex tokens on each of the last 7 local days, oldest first, today last,
   each `{date, claude_code, codex}`; it does not move with the week on

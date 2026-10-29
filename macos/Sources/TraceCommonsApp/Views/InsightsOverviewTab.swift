@@ -33,6 +33,8 @@ struct InsightsOverviewTab: View {
     /// Claude and Codex tokens on each of the last 7 days, for the usage
     /// cards' bars.
     var usageByDay: [DaemonData.InsightsUsageDay]?
+    /// The NEAR AI card's own-traces and referrals rows; empty draws none.
+    var earnings: [NearAiEarningsSplit.Row] = []
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
     /// Spend at API prices and trends (product owner,
@@ -71,7 +73,7 @@ struct InsightsOverviewTab: View {
             }
             InsightsWeekTiles(work: work, credit: creditTile, copy: copy)
             InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
-                               copy: copy, showProjects: showProjects)
+                               copy: copy, showProjects: showProjects, earnings: earnings)
             // Without `work` (feed S, or a daemon that predates it) the
             // harness cards keep the week's tokens on screen.
             // Only a harness with a trace this week has a card: a Claude
@@ -380,7 +382,7 @@ struct InsightsCounterSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }
@@ -482,7 +484,7 @@ struct InsightsCardInputsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }

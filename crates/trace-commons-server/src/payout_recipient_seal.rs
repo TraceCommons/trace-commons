@@ -175,6 +175,8 @@ mod tests {
             recipient,
             program: "tc1-0".into(),
             final_paid: None,
+            referral_program: None,
+            final_paid_referral: None,
             unlink_requested_at: None,
             recipient_unavailable_at: None,
             version: 1,

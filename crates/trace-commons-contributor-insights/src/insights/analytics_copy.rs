@@ -236,10 +236,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_usage_weekly_resets", "Weekly resets"),
     // NEAR AI tokens beside its spend, and under its spend on By project.
     ("analytics_usage_tokens", "{t} tokens"),
-    // A NEAR AI figure some of whose calls carried no charge: the known
-    // sum as a minimum (owner-approved wording, 2026-10-28). `{x}` is the
-    // amount or the token figure.
-    ("analytics_usage_at_least", "at least {x}"),
     ("analytics_usage_near_ai", "NEAR AI"),
     ("analytics_usage_last_31_days", "Last 31 days"),
     ("analytics_usage_last_7_days", "Last 7 days"),
@@ -251,19 +247,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_usage_by_project_a11y", "{label} by project"),
     // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): Details'
     // drill-down, by project (Claude Code and Codex tokens beside NEAR AI
-    // spend), by task or by tool (NEAR AI spend). By tool and By project
-    // reuse the breakdown card's words.
+    // spend) or by model. By task and By tool were removed (owner,
+    // 2026-10-29). By project reuses the breakdown card's words.
     ("analytics_credit_title", "Where usage went"),
-    (
-        "analytics_credit_scope",
-        "This week, from this Mac. By task and By tool show NEAR AI spend.",
-    ),
+    // DRAFT, NEEDS APPROVAL (owner, 2026-10-29): the views it named are gone.
+    ("analytics_credit_scope", "This week, from this Mac."),
     ("analytics_projects_project", "Project"),
     ("analytics_projects_traces", "{n} traces"),
     ("analytics_projects_traces_one", "{n} trace"),
-    ("analytics_credit_by_task", "By task"),
-    ("analytics_credit_spent", "Spent"),
-    ("analytics_credit_traces", "Traces"),
     // "Claude" everywhere, never "Claude Code" (owner, 2026-10-28).
     ("analytics_credit_tool_claude_code", "Claude"),
     ("analytics_credit_tool_codex", "Codex"),

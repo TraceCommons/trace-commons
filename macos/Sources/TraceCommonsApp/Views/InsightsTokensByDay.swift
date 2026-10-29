@@ -3,52 +3,33 @@ import SwiftUI
 import TCBridge
 import TCDesign
 
-/// Tokens by day, with the sessions of a picked day under it (#1695): on
-/// Details beside the By project drill-down since the product owner's
-/// 2026-10-28 review, which took it off Overview. Claude's days, stacked;
-/// hovering a day reads it out, clicking it shows that day's sessions,
-/// clicking it again puts the week back.
+/// Tokens by day (#1695): on Breakdown beside the By project drill-down
+/// since the product owner's 2026-10-28 review, which took it off Overview.
+/// Claude's days, stacked; hovering a day reads it out, clicking it shows
+/// that day's sessions in the window's inspector
+/// (`InsightsBreakdownInspector`, owner 2026-10-29), clicking it again puts
+/// the week back.
 struct InsightsTokensByDay: View {
     let model: InsightsOverviewModel
     let copy: [String: String]
-    /// Saved snapshots, so a drill-down row reads as its session's label.
-    let snapshots: [LocalInsight]
+    /// The day clicked on the by-day chart, by its date; `nil` is the whole
+    /// week. The inspector then shows that day's sessions.
+    var pickedDay: String?
+    /// Picks a day, or `nil` for the week again.
+    var pick: (String?) -> Void = { _ in }
     /// The day the by-day chart is reading, by its label; `nil` reads the week.
     @State private var readDay: String?
-    /// The day clicked on the by-day chart, by its date; `nil` is the whole
-    /// week. The Sessions breakdown then shows that day's sessions.
-    @State private var pickedDay: String?
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
 
     var body: some View {
         if let overview = model.shown, let days = overview.by_day {
-            VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                byDay(days)
-                    .insightsCardBody()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .insightsSection()
-                if pickedDay != nil { sessionsBreakdown(overview) }
-            }
-            .onChange(of: overview.week_start) { _, _ in pickedDay = nil }
-        }
-    }
-
-    /// The Sessions figure's breakdown, always shown right under it (owner,
-    /// 2026-10-22: it opened from a chevron on the card, and drew below the
-    /// harnesses): the daemon's rows under feed T, the core's under feed S.
-    /// A week with no rows draws none, never an empty card. A day picked on
-    /// the by-day chart narrows it to that day's sessions.
-    @ViewBuilder
-    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {
-        let day = InsightsDayPick.pick(pickedDay, days: overview.by_day)
-        if let sessions = model.counterSessions {
-            if !sessions.rows.isEmpty {
-                InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day) { pickedDay = nil }
-            }
-        } else if let inputs = model.sessionsInputs, !inputs.sessions.isEmpty {
-            InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy, day: day) { pickedDay = nil }
+            byDay(days)
+                .insightsCardBody()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .insightsSection()
+                .onChange(of: overview.week_start) { _, _ in if pickedDay != nil { pick(nil) } }
         }
     }
 
@@ -125,7 +106,7 @@ struct InsightsTokensByDay: View {
             // A click lands on the day the pointer reads.
             .simultaneousGesture(TapGesture().onEnded {
                 guard let day = days.first(where: { $0.name == readDay }) else { return }
-                pickedDay = pickedDay == day.id ? nil : day.id
+                pick(pickedDay == day.id ? nil : day.id)
             })
             // The days in their own order, always. Without it the hover
             // wash, drawn first, made the hovered day the first category,
@@ -159,25 +140,25 @@ struct InsightsTokensByDay: View {
             .focusable()
             .onMoveCommand { direction in
                 switch direction {
-                case .left: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
-                case .right: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                case .left: pick(Self.step(days.map(\.id), from: pickedDay, by: -1))
+                case .right: pick(Self.step(days.map(\.id), from: pickedDay, by: 1))
                 default: break
                 }
             }
-            .onExitCommand { pickedDay = nil }
+            .onExitCommand { if pickedDay != nil { pick(nil) } }
             .accessibilityElement()
             .accessibilityLabel(text("analytics_card_tokens_by_day"))
             .accessibilityValue(picked?.label ?? "")
             .accessibilityAdjustableAction { direction in
                 switch direction {
-                case .decrement: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
-                case .increment: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
+                case .decrement: pick(Self.step(days.map(\.id), from: pickedDay, by: -1))
+                case .increment: pick(Self.step(days.map(\.id), from: pickedDay, by: 1))
                 @unknown default: break
                 }
             }
             .accessibilityActions {
                 ForEach(days) { day in
-                    Button(day.label) { pickedDay = pickedDay == day.id ? nil : day.id }
+                    Button(day.label) { pick(pickedDay == day.id ? nil : day.id) }
                 }
             }
         }
