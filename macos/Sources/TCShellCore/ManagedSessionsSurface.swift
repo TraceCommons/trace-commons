@@ -446,14 +446,18 @@ public extension ManagedSnapshot {
 
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
     /// AI sign-in in `cwd`; nil unless the card offers that tool's Start
-    /// button. It names no model: the session's proxy pins one.
-    func signInLaunchParams(tool: String, cwd: String, requestID: String) -> [String: Any]? {
+    /// button. It names no model: the session's proxy pins one. A nil `cwd`
+    /// names no folder, and the daemon starts the session in the person's
+    /// home folder (owner, 2026-10-29).
+    func signInLaunchParams(tool: String, cwd: String?, requestID: String) -> [String: Any]? {
         guard signInStartTools.contains(tool), let entry = signInEntry(tool) else { return nil }
-        return [
+        var params: [String: Any] = [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
-            "connection": entry.connection, "account_id": entry.id, "cwd": cwd,
+            "connection": entry.connection, "account_id": entry.id,
             "expected_generation": generations[entry.tool] ?? 0, "save_default": false,
         ]
+        if let cwd { params["cwd"] = cwd }
+        return params
     }
 }
 

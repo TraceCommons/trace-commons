@@ -133,6 +133,26 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertNil(snapshot.signInLaunchParams(tool: "claude", cwd: "/tmp", requestID: "r"))
     }
 
+    /// Owner, 2026-10-29: no folder is needed. The request names none, so the
+    /// daemon starts the session in the person's home folder; a shell never
+    /// guesses a path.
+    func testALaunchWithNoFolderNamesNoCwd() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(Self.signedIn.utf8))
+        let params = try XCTUnwrap(snapshot.signInLaunchParams(tool: "claude", cwd: nil, requestID: "r"))
+        XCTAssertNil(params["cwd"])
+        XCTAssertEqual(params["account_id"] as? String, "c")
+        XCTAssertEqual(params["expected_generation"] as? UInt64, 4)
+    }
+
+    func testTheHomeDraftIsReadyWithoutAFolder() {
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: nil, cliOptions: "")
+        XCTAssertTrue(draft.matches(tool: "claude", cwd: nil))
+        XCTAssertFalse(draft.matches(tool: "claude", cwd: "/tmp"))
+        draft.useDefaults(tool: "claude", cwd: "/tmp", cliOptions: "")
+        XCTAssertFalse(draft.matches(tool: "claude", cwd: nil))
+    }
+
     func testTheSignInEntriesLaunchWithNoSavedAccount() throws {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(Self.signedIn.utf8))
         XCTAssertTrue(snapshot.nearAiSignedIn)
@@ -157,11 +177,11 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     func testTheSignInSurfacePicksCoreKeys() {
-        let line = "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
+        let line = "Uses your NEAR AI sign-in. Runs in {destination}, in your home folder or one you pick."
         XCTAssertEqual(ManagedSurface.signInScope(line, destination: "Terminal", fallback: "your terminal"),
-                       "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.")
+                       "Uses your NEAR AI sign-in. Runs in Terminal, in your home folder or one you pick.")
         XCTAssertEqual(ManagedSurface.signInScope(line, destination: nil, fallback: "your terminal"),
-                       "Uses your NEAR AI sign-in. Runs in your terminal, in the folder you choose.")
+                       "Uses your NEAR AI sign-in. Runs in your terminal, in your home folder or one you pick.")
         XCTAssertEqual(ManagedSurface.startKey("claude"), "start_claude")
         XCTAssertEqual(ManagedSurface.startKey("codex"), "start_codex")
         XCTAssertEqual(ManagedSurface.startKey("opencode"), "start_opencode")
@@ -190,11 +210,11 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     func testTheFolderExplainerLineFillsToolAndDestination() {
-        let line = "Choose a folder for {tool} to work in. It opens in {destination}."
+        let line = "{tool} opens in {destination}, in your home folder unless you pick one."
         XCTAssertEqual(ManagedSurface.folderChoiceLine(line, tool: "Claude Code", destination: "Terminal", fallback: "your terminal"),
-                       "Choose a folder for Claude Code to work in. It opens in Terminal.")
+                       "Claude Code opens in Terminal, in your home folder unless you pick one.")
         XCTAssertEqual(ManagedSurface.folderChoiceLine(line, tool: "Codex", destination: nil, fallback: "your terminal"),
-                       "Choose a folder for Codex to work in. It opens in your terminal.")
+                       "Codex opens in your terminal, in your home folder unless you pick one.")
     }
 
     // MARK: #1407 row actions

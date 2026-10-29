@@ -96,7 +96,7 @@ final class ManagedSessionsRenderTests: XCTestCase {
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
         XCTAssertEqual(model.managedSnapshot?.explainsFolderChoice, true)
         XCTAssertEqual(ManagedFolderExplainerSheet.line(tool: "codex", model: model),
-                       "Choose a folder for Codex to work in. It opens in Terminal.")
+                       "Codex opens in Terminal, in your home folder unless you pick one.")
         XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "claude", model: model), "Open Claude Code")
         XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "codex", model: model), "Open Codex")
         XCTAssertTrue(ManagedFolderHandoff.startsAtRest(reduceMotion: true))

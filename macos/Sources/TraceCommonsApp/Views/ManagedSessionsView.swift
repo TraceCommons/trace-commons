@@ -159,14 +159,15 @@ struct ManagedSessionsSection: View {
         }
     }
 
-    /// A tool's launch dialog: its folder, then Open.
+    /// A tool's launch dialog: an optional folder, then Open.
     private func start(_ tool: String) {
         guard !model.managedBusy else { return }
         launching = ManagedFolderChoice(tool: tool)
     }
 
-    /// The launch, in the folder chosen in the dialog.
-    private func launch(_ tool: String, in path: String, settings: ManagedFolderDraft? = nil) {
+    /// The launch, in the folder chosen in the dialog; with none, the daemon
+    /// starts it in the person's home folder.
+    private func launch(_ tool: String, in path: String?, settings: ManagedFolderDraft? = nil) {
         guard !model.managedBusy,
               var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }

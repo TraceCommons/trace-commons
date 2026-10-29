@@ -59,14 +59,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Read or reset one folder/agent profile without choosing an account.
-    func managedFolderSettings(tool: String, cwd: String, reset: Bool = false,
+    /// A nil `cwd` is the home folder, which the daemon resolves.
+    func managedFolderSettings(tool: String, cwd: String?, reset: Bool = false,
                                done: @escaping @MainActor (ManagedFolderSettings?) -> Void) {
         guard let client else { return done(nil) }
+        var params: [String: Any] = ["tool": tool]
+        if let cwd { params["cwd"] = cwd }
+        let sent = params
         Task.detached(priority: .userInitiated) {
             let settings = try? { () throws -> ManagedFolderSettings in
                 let response = try client.managedAction(
                     reset ? "managed_folder_settings_reset" : "managed_folder_settings_get",
-                    params: ["tool": tool, "cwd": cwd])
+                    params: sent)
                 return try JSONDecoder().decode(ManagedFolderSettings.self,
                     from: JSONSerialization.data(withJSONObject: response))
             }()
