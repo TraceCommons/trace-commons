@@ -313,7 +313,7 @@ fn counter_pass_job(
         }
         // `source_index` is which of the tick's own sources this is, so the
         // job can own it.
-        job.add(source_index, refs, CandidateRole::Watched, false);
+        job.add(source_index, refs, CandidateRole::Watched, false, now);
     }
     let mut extra_sources: Vec<Box<dyn TraceSource>> = Vec::new();
     for root in crate::managed::profiles::NativeProfiles::new(&shared.store).existing_roots() {
@@ -328,19 +328,21 @@ fn counter_pass_job(
         for source in profile {
             let index = tick_sources + extra_sources.len();
             if let Ok(refs) = source.discover() {
-                job.add(index, &refs, CandidateRole::ManagedProfile, true);
+                job.add(index, &refs, CandidateRole::ManagedProfile, true, now);
             }
             extra_sources.push(source);
         }
     }
     let CounterCandidates {
         candidates,
+        spawned,
         origins,
     } = job;
     let never_project_keys =
         super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
     Some(CounterJobDraft {
         candidates,
+        spawned,
         origins,
         extra_sources,
         never_project_keys,
@@ -365,6 +367,11 @@ struct CounterOrigin {
 #[derive(Default)]
 struct CounterCandidates {
     candidates: Vec<super::insights_week::CounterCandidate>,
+    /// The Claude sub-agent transcripts each Claude Code candidate spawned
+    /// (`claude_code::spawned_transcripts_for`), workflow ones included:
+    /// Insights only, never offered, queued or uploaded, and the upload
+    /// group (`SessionRef::group_member_count`) is not changed by them.
+    spawned: Vec<super::insights_week::SpawnedCandidate>,
     origins: Vec<CounterOrigin>,
 }
 
@@ -375,6 +382,7 @@ impl CounterCandidates {
         refs: &[SessionRef],
         role: super::insights_week::CandidateRole,
         insights_only: bool,
+        now: DateTime<Utc>,
     ) {
         for session_ref in refs {
             let modified_at = match session_ref.group_modified_at {
@@ -384,17 +392,53 @@ impl CounterCandidates {
                     Err(_) => continue,
                 },
             };
+            let origin = self.origins.len();
+            let parent = self.candidates.len();
+            // Sessions the pass would not read (older than the kept weeks)
+            // are not listed: their sub-agents are no newer.
+            let spawned = if session_ref.source == crate::source::SOURCE_CLAUDE_CODE
+                && modified_at
+                    >= now
+                        - chrono::Duration::weeks(
+                            crate::insights::analytics_constants::COUNTER_STORE_KEEP_WEEKS,
+                        ) {
+                crate::source::claude_code::spawned_transcripts_for(&session_ref.path)
+            } else {
+                Vec::new()
+            };
+            let spawned_count = u32::try_from(spawned.len()).unwrap_or(u32::MAX);
             self.candidates
                 .push(super::insights_week::CounterCandidate {
-                    origin: self.origins.len(),
+                    origin,
                     source: session_ref.source,
                     path: session_ref.path.clone(),
                     size_bytes: session_ref.size_bytes,
                     modified_at,
                     started_at: session_ref.started_at,
-                    group_member_count: session_ref.group_member_count,
+                    // Workflow sub-agents are not upload-group members, but
+                    // the session delegated to them all the same.
+                    group_member_count: session_ref.group_member_count.max(spawned_count),
                     role,
                 });
+            for transcript in spawned {
+                let Some(at) = transcript.modified_at else {
+                    continue;
+                };
+                self.spawned.push(super::insights_week::SpawnedCandidate {
+                    parent,
+                    kind: transcript.kind.into(),
+                    candidate: super::insights_week::CounterCandidate {
+                        origin,
+                        source: crate::source::SOURCE_CLAUDE_CODE,
+                        path: transcript.path,
+                        size_bytes: transcript.size_bytes,
+                        modified_at: at,
+                        started_at: None,
+                        group_member_count: 0,
+                        role,
+                    },
+                });
+            }
             self.origins.push(CounterOrigin {
                 source_index,
                 session_ref: session_ref.clone(),
@@ -412,6 +456,7 @@ impl CounterCandidates {
 /// A counter-pass job before the tick's sources move into it.
 struct CounterJobDraft {
     candidates: Vec<super::insights_week::CounterCandidate>,
+    spawned: Vec<super::insights_week::SpawnedCandidate>,
     /// Per candidate (`CounterCandidate::origin`).
     origins: Vec<CounterOrigin>,
     /// Sources only this job reads (managed profiles), after the tick's.
@@ -457,6 +502,7 @@ impl CounterJobDraft {
             };
         super::insights_week::CounterJob {
             candidates: self.candidates,
+            spawned: self.spawned,
             never_project_keys: self.never_project_keys,
             now: self.now,
             quiescence_secs: self.quiescence_secs,
@@ -2454,6 +2500,69 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A Claude session's sub-agent transcripts, workflow ones included,
+    /// become the job's spawned candidates under the session's own origin
+    /// (its folder and Never rule), and mark it as having delegated. The
+    /// `SessionRef` the offers and uploads use is not changed.
+    #[test]
+    fn a_claude_sessions_sub_agents_join_the_counter_job_beside_it() {
+        let session = "44444444-4444-4444-8444-444444444444";
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("{{\"type\":\"user\",\"sessionId\":\"{session}\"}}\n");
+        let parent = dir.path().join(format!("{session}.jsonl"));
+        std::fs::write(&parent, &line).unwrap();
+        let workflow = dir.path().join(session).join("subagents/workflows/run-1");
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(workflow.join("agent-w.jsonl"), &line).unwrap();
+        std::fs::write(workflow.join("journal.jsonl"), "{}\n").unwrap();
+        let session_ref = SessionRef {
+            source: crate::source::SOURCE_CLAUDE_CODE,
+            declared_source: None,
+            path: parent.clone(),
+            project: None,
+            cwd: None,
+            started_at: None,
+            size_bytes: line.len() as u64,
+            group_modified_at: Some(Utc::now()),
+            group_member_count: 0,
+        };
+        let mut job = CounterCandidates::default();
+        job.add(
+            3,
+            std::slice::from_ref(&session_ref),
+            super::super::insights_week::CandidateRole::Watched,
+            false,
+            Utc::now(),
+        );
+        assert_eq!(job.candidates.len(), 1);
+        assert_eq!(job.candidates[0].group_member_count, 1);
+        assert_eq!(job.spawned.len(), 1, "the journal is not a transcript");
+        let spawned = &job.spawned[0];
+        assert_eq!(spawned.parent, 0);
+        assert_eq!(
+            spawned.kind,
+            super::super::insights_week::SpawnedBy::Workflow
+        );
+        assert_eq!(spawned.candidate.origin, job.candidates[0].origin);
+        assert_eq!(job.origins.len(), 1, "no origin of its own");
+        assert_eq!(job.origins[0].session_ref.group_member_count, 0);
+
+        // A Codex session lists none.
+        let mut job = CounterCandidates::default();
+        let codex = SessionRef {
+            source: crate::source::SOURCE_CODEX,
+            ..session_ref
+        };
+        job.add(
+            0,
+            &[codex],
+            super::super::insights_week::CandidateRole::Watched,
+            false,
+            Utc::now(),
+        );
+        assert!(job.spawned.is_empty());
+    }
 
     #[test]
     fn session_observation_accepts_virtual_paths_and_preserves_file_fallback() {

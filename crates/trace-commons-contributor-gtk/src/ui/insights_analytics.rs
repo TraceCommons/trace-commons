@@ -1442,10 +1442,7 @@ mod tests {
         let week = overview("week_overview.json");
         assert_eq!(
             coverage_line(&week.coverage),
-            fill(
-                &words("analytics_coverage_line"),
-                &[("n", "2")]
-            )
+            fill(&words("analytics_coverage_line"), &[("n", "2")])
         );
         // The breakdown names only the counts that are not 0.
         assert_eq!(
@@ -1536,10 +1533,7 @@ mod tests {
         assert!(week.sources.is_empty());
         assert_eq!(
             coverage_line(&week.coverage),
-            fill(
-                &words("analytics_coverage_line"),
-                &[("n", "0")]
-            )
+            fill(&words("analytics_coverage_line"), &[("n", "0")])
         );
         assert_eq!(coverage_info(&week.coverage), None);
         let empty = patterns("patterns_empty.json");

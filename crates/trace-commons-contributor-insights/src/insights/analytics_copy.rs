@@ -912,6 +912,16 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_bench_tip_fewer_undos",
         "{first} had {x}× fewer edits undone than {second}.",
     ),
+    // Benchmarks' population picker (product owner, 2026-10-29): the
+    // person's own traces, or Claude's sub-agent transcripts as their own
+    // population. Pending the owner's approval of these words.
+    ("analytics_bench_population", "Traces"),
+    ("analytics_bench_population_own", "Your traces"),
+    ("analytics_bench_population_spawned", "Sub-agents"),
+    (
+        "analytics_bench_intro_spawned",
+        "Compared on {n} Claude sub-agent traces",
+    ),
     // DRAFT, NEEDS APPROVAL (product owner, 2026-10-29: Benchmarks shows
     // your own figures from the first trace, one model or many).
     ("analytics_bench_not_enough", "Waiting for more data"),

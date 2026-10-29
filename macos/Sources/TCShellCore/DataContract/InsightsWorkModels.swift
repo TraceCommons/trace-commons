@@ -130,18 +130,26 @@ extension DaemonData {
         public let enabled: Bool
         public let readable: Bool?
         public let weeks: Int?
+        /// `own` (the person's traces) or `spawned` (Claude's sub-agent
+        /// transcripts); absent from a daemon that answers its own only.
+        public let population: String?
         public let sessions: Int?
         public let minSessions: Int?
         public let categories: [InsightsBenchmarkCategory]?
+        /// Traces counted that handed work to sub-agents: counted on their
+        /// own work only.
+        public let delegated: Int?
 
-        public init(enabled: Bool = true, readable: Bool? = true, weeks: Int? = 4, sessions: Int? = nil,
-                    minSessions: Int? = 5, categories: [InsightsBenchmarkCategory]?) {
-            self.enabled = enabled; self.readable = readable; self.weeks = weeks; self.sessions = sessions
-            self.minSessions = minSessions; self.categories = categories
+        public init(enabled: Bool = true, readable: Bool? = true, weeks: Int? = 4, population: String? = nil,
+                    sessions: Int? = nil, minSessions: Int? = 5, categories: [InsightsBenchmarkCategory]?,
+                    delegated: Int? = nil) {
+            self.enabled = enabled; self.readable = readable; self.weeks = weeks; self.population = population
+            self.sessions = sessions; self.minSessions = minSessions; self.categories = categories
+            self.delegated = delegated
         }
 
         public enum CodingKeys: String, CodingKey {
-            case enabled, readable, weeks, sessions, categories
+            case enabled, readable, weeks, population, sessions, categories, delegated
             case minSessions = "min_sessions"
         }
     }

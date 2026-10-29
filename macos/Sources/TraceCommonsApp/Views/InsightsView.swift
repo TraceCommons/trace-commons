@@ -73,7 +73,7 @@ struct InsightsView: View {
         }
         #endif
         var benchmarks: InsightsBenchmarksModel.Reader? = daemon.map { client in
-            { @Sendable weeks in try await client.insightsBenchmarks(weeks: weeks) }
+            { @Sendable weeks, population in try await client.insightsBenchmarks(weeks: weeks, population: population) }
         }
         #if DEBUG
         if InsightsSampleWeek.enabled { benchmarks = nil }

@@ -42,6 +42,12 @@
 //!   `None` with fewer than two qualifying models. Kept is better higher,
 //!   cost and time lower; ties go to more sessions, then label byte order.
 //! - The tip is the first kind, in [`Tip`] order, whose evidence holds.
+//! - A Claude session that delegated to sub-agents is counted on its own
+//!   work (its turns, edits and model) and counted in `delegated`, since its
+//!   figures are partial; nothing of the sub-agents' is added to it.
+//! - The same rules answer over Claude's sub-agent transcripts, read as
+//!   their own population: the caller passes those rows instead of the
+//!   person's sessions, and figures are computed within them only.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,6 +122,28 @@ impl BenchTool {
         match wire {
             "claude_code" => Some(BenchTool::ClaudeCode),
             "codex" => Some(BenchTool::Codex),
+            _ => None,
+        }
+    }
+}
+
+/// Which sessions an answer is over (product owner, 2026-10-29): the
+/// person's own, or the transcripts Claude's sub-agents wrote, read as a
+/// population of their own. Never both in one answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchPopulation {
+    #[default]
+    Own,
+    Spawned,
+}
+
+impl BenchPopulation {
+    /// The population for its wire word.
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        match wire {
+            "own" => Some(BenchPopulation::Own),
+            "spawned" => Some(BenchPopulation::Spawned),
             _ => None,
         }
     }
@@ -236,8 +264,6 @@ pub struct BenchLeftOut {
     pub routed: u32,
     /// The scan hit a cap.
     pub capped: u32,
-    /// Delegated to members that were not read.
-    pub delegated: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -250,6 +276,10 @@ pub struct Benchmarks {
     /// Always eight, in [`BenchCategory::ALL`] order.
     pub categories: Vec<BenchCategoryRow>,
     pub left_out: BenchLeftOut,
+    /// Sessions on a category that delegated to sub-agents (Claude): each
+    /// is counted on its own turns, edits and model only, so its figures
+    /// are partial. The sub-agents' work is never added to them.
+    pub delegated: u32,
     pub pricing_tables: Vec<PricingTableRef>,
 }
 
@@ -265,6 +295,8 @@ struct Entry {
     tables: Vec<PricingTableRef>,
     active_secs: Option<u32>,
     test_first: bool,
+    /// Delegated to sub-agents whose work is not in these figures.
+    delegated: bool,
 }
 
 fn bump(count: &mut u32) {
@@ -399,10 +431,10 @@ fn entries(
             bump(&mut left_out.capped);
             continue;
         }
-        if facts.delegated_unread {
-            bump(&mut left_out.delegated);
-            continue;
-        }
+        // A session that delegated is counted on its own work: its own
+        // turns price it, its own edits and model place it. The sub-agents'
+        // transcripts are not in its facts, so it is marked partial
+        // (`delegated`), never left out.
         let own = own_counts(&facts.models, model_labels, &model);
         let priced = route.priced_at_list() && price.total_usd_micros.is_some();
         out.push(Entry {
@@ -416,6 +448,7 @@ fn entries(
             tables: if priced { price.tables } else { Vec::new() },
             active_secs: facts.active_secs,
             test_first: facts.shape.failed_before_first_edit_then_passed > 0,
+            delegated: facts.delegated_unread,
         });
     }
     (out, left_out, counted)
@@ -700,6 +733,7 @@ pub fn benchmarks(
         min_sessions: BENCHMARK_MIN_SESSIONS,
         categories,
         left_out,
+        delegated: len_u32(entries.iter().filter(|entry| entry.delegated).count()),
         pricing_tables: tables.into_iter().collect(),
     }
 }

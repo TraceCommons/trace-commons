@@ -87,6 +87,53 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertNil(InsightsBenchmarkWords.tip(.init(kind: "from_a_newer_daemon"), copy: copy))
     }
 
+    /// Benchmarks' population picker (product owner, 2026-10-29): the
+    /// person's own traces, or Claude's sub-agent transcripts, in the core's
+    /// words; the intro names which.
+    func testBenchmarkPopulationsReadInTheCoresWords() throws {
+        let copy = try words()
+        XCTAssertEqual(InsightsBenchmarkWords.populations, ["own", "spawned"])
+        XCTAssertEqual(InsightsBenchmarkWords.population("own", copy: copy), "Your traces")
+        XCTAssertEqual(InsightsBenchmarkWords.population("spawned", copy: copy), "Sub-agents")
+        XCTAssertEqual(InsightsBenchmarkWords.intro(12, population: "own", copy: copy), "Compared on 12 of your traces")
+        XCTAssertEqual(InsightsBenchmarkWords.intro(40, population: "spawned", copy: copy),
+                       "Compared on 40 Claude sub-agent traces")
+    }
+
+    func testBenchmarksDecodeTheirPopulationAndDelegatedCount() throws {
+        let json = #"""
+        {"enabled":true,"readable":true,"weeks":4,"population":"spawned","sessions":3,"min_sessions":5,
+         "categories":[],"delegated":0}
+        """#
+        let answer = try JSONDecoder().decode(DaemonData.InsightsBenchmarks.self, from: Data(json.utf8))
+        XCTAssertEqual(answer.population, "spawned")
+        XCTAssertEqual(answer.delegated, 0)
+        let older = try JSONDecoder().decode(DaemonData.InsightsBenchmarks.self,
+                                             from: Data(#"{"enabled":true,"categories":[]}"#.utf8))
+        XCTAssertNil(older.population, "an older daemon answers the person's own only")
+    }
+
+    /// The model asks for the population chosen, and a sample model (the
+    /// get-started card's) has no reader to ask.
+    func testTheBenchmarksModelAsksForTheChosenPopulation() async throws {
+        let asked = AskedLog()
+        let model = InsightsBenchmarksModel(reader: { weeks, population in
+            await asked.add("\(weeks) \(population)")
+            return DaemonData.InsightsBenchmarks(categories: [])
+        })
+        XCTAssertEqual(model.population, "own", "the person's own by default")
+        await model.load()
+        model.population = "spawned"
+        model.weeks = 13
+        await model.load()
+        let log = await asked.items
+        XCTAssertEqual(log, ["4 own", "13 spawned"])
+        let sample = InsightsBenchmarksModel(sample: DaemonData.InsightsBenchmarks(categories: []))
+        sample.population = "spawned"
+        await sample.load()
+        XCTAssertNotNil(sample.answer, "the sample stays drawn")
+    }
+
     /// One model is enough (product owner, 2026-10-29): its own figures on
     /// each kind of work, and the share of its traces that went to each.
     func testOneModelShowsItsOwnFiguresAndWorkMix() throws {
@@ -229,4 +276,9 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(table.first?.label, "site", "the largest spend leads")
         XCTAssertEqual(table.first?.spend, "$2.00")
     }
+}
+
+private actor AskedLog {
+    private(set) var items: [String] = []
+    func add(_ item: String) { items.append(item) }
 }

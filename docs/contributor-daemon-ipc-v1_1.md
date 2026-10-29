@@ -620,7 +620,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
 | `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
-| `insights_benchmarks` | `weeks` (optional: `4` or `13`, default `4`), `tool` (optional: `claude_code`, `codex`, or `null` for both) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `weeks`, `tool`, `pricing` (`{basis, tables[]}`), `sessions`, `min_sessions`, `categories[]` (eight, one per kind of work), `left_out` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; list-price figures owner-approved 2026-10-29; see "`insights_benchmarks`" below |
+| `insights_benchmarks` | `weeks` (optional: `4` or `13`, default `4`), `tool` (optional: `claude_code`, `codex`, or `null` for both), `population` (optional: `own`, the default, or `spawned` for Claude's sub-agent transcripts) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `weeks`, `tool`, `population`, `pricing` (`{basis, tables[]}`), `sessions`, `min_sessions`, `categories[]` (eight, one per kind of work), `left_out`, `delegated` | additive, except `left_out.delegated`, removed 2026-10-29 (now the top-level `delegated`); read-only, no network, dry-run local; gated on `insights_counter_pass`; list-price figures owner-approved 2026-10-29; see "`insights_benchmarks`" below |
 | `insights_submitted` | `weeks` (optional: `4`, `13`, or `null`/absent for all time), `tz` (optional UTC offset in seconds) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `weeks`, `window_start`, `window_end`, `pricing`, `totals`, `by_model`, `by_model_left_out`, `by_task`, `by_task_unknown`, `code`, `by_week`, `by_project`, `left_out`, `traces_total`, `traces[]` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; every submitted trace joined to its counter row through the upload queue (product owner, 2026-10-29); see "`insights_submitted`" below |
 | `subscription_usage` | `refresh` (optional bool), `interactive` (optional bool; needs refresh), `provider` (optional `codex`/`claude`), `login` (optional local login ID; required for Claude Refresh) | versioned provider/login snapshots with current windows and banked reset inventory | display only; off answers without reading credentials. Explicit Refresh schedules bounded selected-login work and returns immediately; background ticks never acquire credentials. Each provider's `enabled` follows its setting: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`, both on by default. See “Subscription usage” below. |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -4636,8 +4636,15 @@ per-turn series beside it, which the Sessions list and drill read (owner
 decision D11, settled 2026-10-20). Each row also stores the session's facts
 (per-model counts and fixed labels, never a path, text or price) for the
 Models answers; a row made before them is read once more. A Claude
-Code session with delegated transcripts is counted from its main file and
-marked `truncated` (partial coverage), never as complete. Each file is read
+Code session with delegated transcripts (its sub-agents', workflow ones
+included) is counted from its main file and marked `truncated` (partial
+coverage), never as complete. Its sub-agents' transcripts are read, after
+the person's own sessions and within the same per-poll budget, into rows of
+their own kept apart from the person's (at most 2,048, and 131,072 turns
+and tool calls, oldest evicted first), which only `insights_benchmarks`'
+`spawned` population reads. The main file holds only its own model calls
+(each sub-agent's calls are in its own transcript), so nothing is counted
+twice; a week's totals and spend stay the person's main files alone. Each file is read
 line by line, never held whole, so no file is skipped for its size, and
 what a read keeps is bounded by the per-session series caps, not the file
 (owner decision D4, settled 2026-10-20 for streaming and the per-poll
@@ -5672,10 +5679,11 @@ on 2026-10-29). The store holds no list price.
 
 ### `insights_benchmarks`
 
-Takes `weeks` (`4` or `13`, default `4`) and `tool` (`claude_code`,
-`codex`, or `null` for both, the default); absent and `null` read as the
-default, and any other value is refused with `bad_params` and the label
-`weeks_invalid` or `tool_invalid`. For each kind of work, how each model the
+Takes `weeks` (`4` or `13`, default `4`), `tool` (`claude_code`,
+`codex`, or `null` for both, the default) and `population` (`own`, the
+default, or `spawned`); absent and `null` read as the default, and any other
+value is refused with `bad_params` and the label `weeks_invalid`,
+`tool_invalid` or `population_invalid`. For each kind of work, how each model the
 person used did on their own sessions: Quality (share of its edits kept),
 Value (cost per session at API list prices) and Speed (active time per
 session), the two leading models on each, and one tip with evidence behind
@@ -5689,9 +5697,21 @@ figures here are approved by the product owner (2026-10-29), as a
 comparison between models, not a bill.
 
 While enabled and readable the answer is `{enabled, feed, readable,
-updated_at, window_start, window_end, weeks, tool, pricing, sessions,
-min_sessions, categories, left_out}`:
+updated_at, window_start, window_end, weeks, tool, population, pricing,
+sessions, min_sessions, categories, left_out, delegated}`:
 
+- `population`: the rows asked for, never both (product owner,
+  2026-10-29). `own` is the person's own sessions. `spawned` is the
+  transcripts Claude's sub-agents wrote (`<session>/subagents/*.jsonl`, and
+  `<session>/subagents/workflows/<run>/agent-*.jsonl` for a workflow's),
+  which the counter pass reads as rows of their own, apart from the
+  person's: they are in no other answer (no week total, spend, Sessions row,
+  Models answer, pattern or goal). The categories, qualification rules and
+  tips are the same, computed within the population only. A sub-agent has
+  no label of its own, and takes its parent session's route tally (the
+  proxy ledger names a call by the session ID, which a sub-agent shares).
+  Codex's spawned threads are not in it yet; they stay automated
+  (`left_out.automated`) in `own`.
 - `window_start`, `window_end`: RFC 3339, the `weeks` ending now. A session
   is in the window by its latest dated turn, as in `insights_model_answers`.
 - `tool`: the filter asked for, or `null`. With a tool, sessions of the
@@ -5749,13 +5769,19 @@ min_sessions, categories, left_out}`:
       with `min_sessions` known kept counts and at least 30 edits, the
       highest undone rate is at least twice the lowest nonzero one.
 - `left_out`: `{automated, no_facts, no_model, reviewer, unknown_task,
-  mixed_models, routed, capped, delegated}`, each a count of sessions,
-  counted under the first that holds: started by a tool; stored without
-  facts; which model served it is unknown; the Codex reviewer's; read as no
-  edits while a model's edits could not be seen; no model served a strict
-  majority of the turns; sent through a route whose label may not name the
-  served model (only with the ledger feed on and a ledger declared); the
-  scan hit a cap; delegated to members that were not read.
+  mixed_models, routed, capped}`, each a count of sessions, counted under
+  the first that holds: started by a tool; stored without facts; which
+  model served it is unknown; the Codex reviewer's; read as no edits while
+  a model's edits could not be seen; no model served a strict majority of
+  the turns; sent through a route whose label may not name the served model
+  (only with the ledger feed on and a ledger declared); the scan hit a cap.
+  (`delegated` was a reason here until 2026-10-29; it is now the count
+  below.)
+- `delegated`: of the sessions on a category, those that delegated to
+  Claude sub-agents. Each is counted on its own work (its own turns, edits,
+  model, cost and time), so its figures are partial; nothing of its
+  sub-agents' is added to them (they are the `spawned` population). Always
+  `0` for `spawned`.
 
 No session reference, path, folder name or backend crosses; the one digest
 is a price table's `table_id`. No NEAR AI charge is read.
