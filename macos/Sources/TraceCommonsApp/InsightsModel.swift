@@ -708,9 +708,9 @@ extension DaemonData.InsightsWeek {
     var coreHistory: [InsightsWeekFigures]? { core(history, as: [InsightsWeekFigures].self) }
 }
 
-/// Goals, the lever of the week and the weekly summary card (feed T only).
-/// The core marks the goals it stores against the daemon's weekly figures,
-/// which this model passes through unchanged; nothing is compared here.
+/// The lever of the week and the weekly summary card (feed T only). The
+/// core reads the daemon's weekly figures, which this model passes through
+/// unchanged; nothing is compared here.
 @Observable @MainActor
 final class InsightsComparisonsModel {
     private let service: InsightsModel.Service
@@ -744,9 +744,6 @@ final class InsightsComparisonsModel {
         run(.init("comparisons", weekStart: weekStart, tz: InsightsOverviewModel.offset,
                   counterWeeks: counterWeeks, recapCardEnabled: recapCardEnabled))
     }
-
-    func addGoal(_ goal: InsightsGoal) { write(.init("goal_set", goal: goal)) }
-    func deleteGoal(_ id: String) { write(.init("goal_delete", id: id)) }
 
     /// "Not useful" on the lever shown, for the week shown.
     func notUseful() {
@@ -804,75 +801,65 @@ final class InsightsComparisonsModel {
     }
 }
 
-/// The core's goal, lever and summary-card words, filled with the core's
+/// Goals: the goals set with `/goal` in Claude and Codex, as the daemon's
+/// week answers them (product owner, 2026-10-29), in the core's words. Only
+/// status, tokens, time and the folder: a goal's text never reaches the app.
+enum InsightsGoalsWords {
+    private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
+
+    /// One set of words for both tools (owner, 2026-10-29: "normalize the
+    /// language between claude and codex"): each status the daemon sends,
+    /// Claude's or Codex's, to its shared word. Any other reads "Status
+    /// unavailable".
+    static let statusWords = [
+        "met": "analytics_goal_met", "complete": "analytics_goal_met",
+        "open": "analytics_goal_in_progress", "not_met": "analytics_goal_in_progress",
+        "active": "analytics_goal_in_progress",
+        "paused": "analytics_goal_paused", "blocked": "analytics_goal_blocked",
+        "usage_limited": "analytics_goal_limit_reached", "budget_limited": "analytics_goal_limit_reached",
+    ]
+    static var statuses: [String] { Array(statusWords.keys) }
+
+    /// "Goals met {n} of {m}".
+    static func metOf(_ goals: DaemonData.InsightsWeekGoals, copy: [String: String]) -> String {
+        InsightsOverviewWords.fill(text("analytics_goals_met_of", copy), [
+            "n": String(goals.met), "m": String(goals.total),
+        ])
+    }
+
+    /// "Claude" or "Codex".
+    static func tool(_ tool: String, copy: [String: String]) -> String {
+        let words = text("analytics_credit_tool_" + tool, copy)
+        return words.isEmpty ? dash(copy) : words
+    }
+
+    /// The tool's status in the shared words.
+    static func status(_ status: String, copy: [String: String]) -> String {
+        text(statusWords[status] ?? "analytics_goal_status_unknown", copy)
+    }
+
+    /// "{t} tokens · {span}"; an unknown figure is the dash, never 0.
+    static func line(_ goal: DaemonData.InsightsWeekGoal, copy: [String: String]) -> String {
+        InsightsOverviewWords.fill(text("analytics_goal_line", copy), [
+            "t": InsightsOverviewWords.figure(goal.tokens.map { UInt64(clamping: $0) }, copy: copy),
+            "span": span(goal.timeSecs, copy: copy),
+        ])
+    }
+
+    /// Hours and minutes the tool reported; the dash when it reported none.
+    static func span(_ seconds: Int64?, copy: [String: String]) -> String {
+        guard let seconds else { return dash(copy) }
+        return Duration.seconds(max(seconds, 0)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+    }
+}
+
+/// The core's lever and summary-card words, filled with the core's
 /// figures. Nothing here composes a sentence or compares a figure.
 enum InsightsComparisonsWords {
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
     private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
     private static let fill = InsightsOverviewWords.fill
-
-    /// The goal kinds, in the core's order, and their words.
-    static let goalKinds = ["cache_share_at_least", "weekly_tokens_under"]
-    private static let goalKeys = [
-        "cache_share_at_least": "analytics_goal_cache_share",
-        "weekly_tokens_under": "analytics_goal_weekly_tokens",
-    ]
-
-    /// Whether a kind names one harness.
-    static func goalNeedsSource(_ kind: String) -> Bool {
-        kind == "cache_share_at_least" || kind == "weekly_tokens_under"
-    }
-
-    /// The goal's line, its harness first when it names one.
-    static func goal(_ goal: InsightsGoal, copy: [String: String]) -> String {
-        let line = fill(text(goalKeys[goal.kind] ?? "", copy), [
-            "p": goal.permille.map(InsightsOverviewWords.percent) ?? dash(copy),
-            "t": InsightsOverviewWords.figure(goal.tokens, copy: copy),
-        ])
-        guard let source = goal.source else { return line }
-        return InsightsOverviewWords.harness(source, copy: copy) + " \u{b7} " + line
-    }
-
-    /// A goal from what the user typed: a whole percent for a share, a token
-    /// count otherwise. `nil` when the number is not one.
-    static func newGoal(kind: String, source: String, number: String) -> InsightsGoal? {
-        guard let value = UInt64(number.trimmingCharacters(in: .whitespaces)), value > 0 else { return nil }
-        let harness = goalNeedsSource(kind) ? source : nil
-        if kind == "cache_share_at_least" {
-            guard value <= 100 else { return nil }
-            return InsightsGoal(kind: kind, source: harness, permille: value * 10)
-        }
-        return InsightsGoal(kind: kind, source: harness, tokens: value)
-    }
-
-    /// One weekly mark: met, not met, or the dash for a week with no figure.
-    static func mark(_ wire: String, copy: [String: String]) -> String {
-        switch wire {
-        case "met": return text("analytics_goal_met", copy)
-        case "not_met": return text("analytics_goal_not_met", copy)
-        default: return dash(copy)
-        }
-    }
-
-    /// The figure the goal is judged on, in its own unit.
-    static func goalFigure(_ view: InsightsGoalView, copy: [String: String]) -> String {
-        guard let figure = view.figure else { return dash(copy) }
-        return view.goal.kind == "cache_share_at_least"
-            ? InsightsOverviewWords.percent(figure) + "%" : InsightsOverviewWords.figure(figure, copy: copy)
-    }
-
-    /// "Down from {x} last week." / "Up from {x} last week."; `nil` when the
-    /// same, or when either week is not comparable.
-    static func goalChange(_ view: InsightsGoalView, copy: [String: String]) -> String? {
-        guard let change = view.marks?.change else { return nil }
-        let from = view.goal.kind == "cache_share_at_least"
-            ? InsightsOverviewWords.percent(change.from) + "%" : InsightsOverviewWords.figure(change.from, copy: copy)
-        switch change.direction {
-        case "down": return fill(text("analytics_goal_down_from", copy), ["x": from])
-        case "up": return fill(text("analytics_goal_up_from", copy), ["x": from])
-        default: return nil
-        }
-    }
 
     /// The lever's observation: its card's name and figure. No advice (owner
     /// decision D2, open).
@@ -904,10 +891,6 @@ enum InsightsComparisonsWords {
             return fill(text("analytics_recap_best_cache", copy), [
                 "p": InsightsOverviewWords.percent(now), "q": InsightsOverviewWords.percent(before),
             ])
-        case "goal":
-            guard let goal = item.goal, let met = item.met else { return nil }
-            return fill(text(met ? "analytics_recap_goal_met" : "analytics_recap_goal_not_met", copy),
-                        ["goal": Self.goal(goal, copy: copy)])
         // No pattern is shown on macOS any more (owner, 2026-10-29: Retried
         // tool calls, the last, removed), so `pattern_up` says nothing.
         default:

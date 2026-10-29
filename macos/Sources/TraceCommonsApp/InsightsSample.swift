@@ -140,7 +140,28 @@ enum InsightsSample {
             "change_vs_last_week": [["source": "claude_code", "permille": -120], ["source": "codex", "permille": 40]],
             "rollup": rollup, "overview": overview, "patterns": InsightsSampleWeek.patterns,
             "history": [[String: Any]](), "recap_card_enabled": false, "routing_available": false,
-            "usage_by_day": usage,
+            "usage_by_day": usage, "goals": goals,
+        ]
+    }
+
+    /// Goals set with `/goal` in the sample week, as `insights_week` sends
+    /// them: status, tokens, time and folder only, never a goal's text.
+    /// No threshold goals: those left Insights (product owner, 2026-10-29).
+    static var goals: [String: Any] {
+        func goal(_ tool: String, _ status: String, met: Bool, tokens: Int, secs: Int,
+                  _ folder: String, _ at: String) -> [String: Any] {
+            ["tool": tool, "status": status, "met": met, "tokens": tokens, "time_secs": secs,
+             "iterations": NSNull(), "folder": folder, "session_ref": "sample", "updated_at": at]
+        }
+        return [
+            "goals": [
+                goal(claude, "met", met: true, tokens: 182_000, secs: 2_460, "infra", "2026-10-11T16:50:00Z"),
+                goal(codexTool, "complete", met: true, tokens: 640_000, secs: 2_700, "website",
+                     "2026-10-09T18:20:00Z"),
+                goal(claude, "not_met", met: false, tokens: 96_000, secs: 1_380, "scripts", "2026-10-09T15:05:00Z"),
+            ],
+            "met": 2, "total": 3,
+            "by_tool": [claude: ["met": 1, "total": 2], codexTool: ["met": 1, "total": 1]],
         ]
     }
 

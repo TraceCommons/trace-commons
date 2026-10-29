@@ -12,8 +12,8 @@ import TCShellCore
 /// variable.
 ///
 /// The week is shaped as the core sends it: a watched-folder week (feed T)
-/// with goals, the lever and the weekly summary, and the week's counted
-/// sessions behind Overview's Sessions breakdown, split by day. No saved
+/// with the lever and the weekly summary, and the week's counted sessions
+/// behind Overview's Sessions breakdown, split by day. No saved
 /// traces. Sample figures, never a pilot's. Every word is still the core's
 /// copy: the answers are sampled, only the core's copy and two Overview
 /// reads go to the real store, and a write is answered here and kept
@@ -64,8 +64,8 @@ enum InsightsSampleWeek {
         case "comparisons": body = ["type": type, "comparisons": comparisons]
         // No saved traces: Overview's rows are the counted sessions.
         case "list": body = ["type": type, "insights": [Any]()]
-        case "goal_set", "goal_delete", "lever_feedback", "recap_opened":
-            body = ["type": type, "state": ["goals": [Any](), "lever_card_off": false]]
+        case "lever_feedback", "recap_opened":
+            body = ["type": type, "state": ["lever_card_off": false]]
         default: return nil
         }
         return try TCInsights.decode(JSONSerialization.data(withJSONObject: body), for: operation)
@@ -213,21 +213,9 @@ enum InsightsSampleWeek {
         ]
     }
 
-    private static var cacheGoal: [String: Any] {
-        ["kind": "cache_share_at_least", "source": "claude_code", "permille": 850]
-    }
-
-    private static func marks(_ marks: [String], _ direction: String, from: Int) -> [String: Any] {
-        ["marks": marks, "change": ["direction": direction, "from": from]]
-    }
-
     static var comparisons: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05",
-            "goals": [
-                ["id": "g1", "goal": cacheGoal, "figure": 872,
-                 "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
-            ],
             // No pattern is shown any more (owner, 2026-10-29), so the
             // sample's lever picks none.
             "lever": ["pick": NSNull(), "disabled": [String](), "card_enabled": true],
@@ -237,7 +225,6 @@ enum InsightsSampleWeek {
                             ["source": "codex", "tokens": 6_200_000, "change_permille": 40]],
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
-                    ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
                 ],
             ],
         ]
