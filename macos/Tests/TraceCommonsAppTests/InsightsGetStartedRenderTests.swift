@@ -291,8 +291,18 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                     return pick
                 }
                 let quality = only(category.quality), value = only(category.value), speed = only(category.speed)
+                let sessions = claude ? category.sessions * 3 / 4 : max(2, category.sessions / 4)
+                // Each model's own figures, shown from the first trace.
+                let models: [DaemonData.InsightsBenchmarkModel] = claude
+                    ? [.init(label: "claude-opus-5-5", tool: "claude_code", sessions: sessions - sessions / 3,
+                             keptPermille: 910, usdMicrosMedian: 1_840_000, activeSecsMedian: 1_500),
+                       .init(label: "claude-sonnet-5-5", tool: "claude_code", sessions: sessions / 3,
+                             keptPermille: 880, usdMicrosMedian: 520_000, activeSecsMedian: 1_100)]
+                    : [.init(label: "gpt-5-codex", tool: "codex", sessions: sessions,
+                             keptPermille: 870 + sessions * 5, usdMicrosMedian: 300_000 + Int64(sessions) * 40_000,
+                             activeSecsMedian: 600 + Int64(sessions) * 90)]
                 return DaemonData.InsightsBenchmarkCategory(
-                    key: category.key, sessions: claude ? category.sessions * 3 / 4 : max(2, category.sessions / 4),
+                    key: category.key, sessions: sessions, models: models,
                     quality: quality, value: value, speed: speed,
                     tip: quality == nil ? nil : category.tip)
             }

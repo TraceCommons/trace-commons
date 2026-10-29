@@ -211,6 +211,17 @@ fn persist_scope_choice(
         cfg.consent_scopes_chosen.map(|_| false)
     };
     let body = serde_json::to_vec_pretty(&candidate).map_err(|_| "config-write-failed")?;
+    // The contributor's own choice of data uses carries every standing
+    // grant with it, so Automatic stays on (`adopt_chosen_scopes`). Recorded
+    // before the config is written: the grants only gain scopes, so a sweep
+    // between the two writes still finds them covering the config.
+    {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let chosen = scopes.iter().cloned().collect();
+        if policy.adopt_chosen_scopes(&chosen) && policy.save(&shared.store).is_err() {
+            return Err("config-write-failed");
+        }
+    }
     let mut audit_failed = false;
     super::commons_credentials::with_current_config(&shared.store, cfg, || {
         if let Err(error) = audit::append(
@@ -901,6 +912,49 @@ mod tests {
                 .unwrap()
                 .consent_scopes_chosen,
             Some(false)
+        );
+    }
+
+    /// Allowing Train coding models, the use credit needs, keeps an
+    /// Automatic folder Automatic (product owner, 2026-10-29). Before, the
+    /// next sweep turned it back to Ask as `scopes-widened`.
+    #[test]
+    fn choosing_a_new_data_use_keeps_an_automatic_folder_automatic() {
+        use crate::daemon::grant_terms::GrantTerms;
+        use crate::daemon::policy::ProjectMode;
+        let s = enrolled_shared();
+        let key = "/w/api";
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            assert!(policy.record_grant_terms(key, GrantTerms::in_force(&s).unwrap()));
+        }
+        let r = handle_set_consent_scopes(
+            &s,
+            &req(
+                "set_consent_scopes",
+                json!({"scopes": ["debugging_evaluation", "model_training"]}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let current = GrantTerms::in_force(&s).unwrap();
+        assert!(current.consent_scopes.contains("model_training"));
+        let mut policy = s.policy.lock().unwrap();
+        let sweep = policy.sweep_grants(&current, Utc::now());
+        assert!(sweep.voided.is_empty(), "{:?}", sweep.voided);
+        assert_eq!(policy.resolve(key), ProjectMode::AutoUpload);
+        // Persisted, so a restarted daemon agrees.
+        let saved = crate::daemon::policy::ProjectPolicy::load(&s.store).unwrap();
+        assert!(
+            saved.projects[key]
+                .armed_under
+                .as_ref()
+                .unwrap()
+                .consent_scopes
+                .contains("model_training")
         );
     }
 

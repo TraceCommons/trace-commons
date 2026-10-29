@@ -1,14 +1,14 @@
 # Staging tester guide
 
-This guide is for people testing the Near.ai Staging app. Staging is a test
-environment. It is not the released app, and it is not the real service.
+This guide is for people testing the Near.ai Staging app, or the staging
+command-line contributor on a Linux server. Staging is a test environment. It is not the released app, and it is not the real service.
 
 Read "What works and what does not yet" before you start. Some parts are not
 built yet.
 
 ## What you need
 
-- A Mac.
+- A Mac, or a Linux server on x86_64 or arm64 (see "Linux servers" below).
 - A NEAR AI staging account (see below).
 - The staging build. Ask the owner for the link, or find it on the
   [releases page](https://github.com/TraceCommons/trace-commons/releases).
@@ -161,6 +161,90 @@ while the 10-minute retry wait holds.
 
 Do not send a trace body, a key, an organization id or a screenshot of a real
 session.
+
+## Linux servers
+
+Each staging pre-release also carries the staging command-line contributor
+for Linux, built for x86_64 and arm64 (aarch64) servers:
+`trace-commons-contributor-staging-x86_64-unknown-linux-gnu` and
+`trace-commons-contributor-staging-aarch64-unknown-linux-gnu`, each with a
+`.sha256`. It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 9 or
+later).
+
+### Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
+sh install.sh --staging
+```
+
+The installer finds the newest staging pre-release with a build for your
+server, checks its SHA-256, and installs `near-ai-staging` (and
+`trace-commons-contributor-staging`) in `~/.local/bin`. To install one build,
+pass its tag: `sh install.sh --staging --version staging-<date>-<commit>-<run>`.
+
+It installs beside the released `near-ai` CLI and shares nothing with it:
+not the state folder (`~/.config/trace-commons-staging`, or
+`$TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR`), not the credential entries, and
+not the background service. It talks only to the staging server and NEAR AI
+staging, and refuses production hosts and invites.
+
+The staging CLI does not update itself. Run the installer again to get a
+newer build.
+
+### Sign in on a server
+
+A server usually has no browser. Pick one:
+
+- **Link it to your account.** On a computer already signed in to staging,
+  run `devices add` (or use "Link a server" in the Near.ai Staging app). On
+  the server, run `near-ai-staging login --code <code>` within 10 minutes.
+  The server joins your account and renews its session by itself.
+- **An invite link.** If you were handed a staging invite
+  (`https://issuer.staging.tracecommons.ai/onboard#...`), run
+  `near-ai-staging login --invite <url>`. The code is used up when it
+  enrolls, so run it once. As of 2026-10-29 the staging issuer has no invite
+  registry turned on (sign-up is open), so staging has no invite links to
+  hand out yet; use one of the other two.
+- **Your own NEAR AI staging sign-in.** `near-ai-staging login --no-browser`
+  prints a link. NEAR AI only redirects to the machine that started the
+  sign-in, so open it through an SSH port forward, or use one of the two
+  above instead.
+
+### Add more people
+
+Each person makes their own NEAR AI staging account (see the top of this
+guide) and signs in from their own computer or server. Sign-up is open, so
+nobody needs an invite. Once an operator turns on the staging invite
+registry and mints invites (`docs/operator/pilot-allowlist.md`), an invite
+link works with `login --invite` above. A device code only links another
+machine to the account that made it, so do not give your code to someone
+else: whoever uses it joins your account.
+
+### Run it in the background
+
+```bash
+near-ai-staging daemon install
+systemctl --user enable --now trace-commons-contributor-staging.service
+```
+
+The staging service has its own unit name, so it can run beside a production
+one. To keep it running after you log out, run `loginctl enable-linger` once.
+
+The contributor keeps its device key in the Linux Secret Service. A server
+without a desktop session needs one running, for example
+`gnome-keyring-daemon` inside the same D-Bus session as the contributor.
+
+### Remove it
+
+```bash
+systemctl --user disable --now trace-commons-contributor-staging.service
+near-ai-staging daemon uninstall
+rm ~/.local/bin/near-ai-staging ~/.local/bin/trace-commons-contributor-staging
+rm -rf ~/.config/trace-commons-staging
+```
+
+None of this touches a released CLI on the same server.
 
 ## Privacy
 

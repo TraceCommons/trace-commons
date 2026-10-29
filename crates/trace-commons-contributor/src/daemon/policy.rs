@@ -1376,6 +1376,45 @@ impl ProjectPolicy {
         }
     }
 
+    /// The contributor chose these data uses themselves: every standing
+    /// grant (each armed folder, the Flow 1 grant and an "Automatic"
+    /// override) now covers them, so the next sweep does not void it as
+    /// `scopes-widened` (product owner, 2026-10-29). Before this, allowing
+    /// Train coding models, the use credit needs, turned Automatic off
+    /// everywhere.
+    ///
+    /// Only the scopes term moves, and only by the contributor's own
+    /// choice: a new destination, identity, filter or witness still voids.
+    /// The scopes are added to what each grant held, never replaced, so a
+    /// sweep that reads the config before or after the caller writes it
+    /// finds the grant covering it either way. Returns whether any grant
+    /// changed.
+    pub fn adopt_chosen_scopes(&mut self, scopes: &BTreeSet<String>) -> bool {
+        fn widen(terms: &mut super::grant_terms::GrantTerms, scopes: &BTreeSet<String>) -> bool {
+            let before = terms.consent_scopes.len();
+            terms.consent_scopes.extend(scopes.iter().cloned());
+            terms.consent_scopes.len() != before
+        }
+        let mut changed = false;
+        for entry in self.projects.values_mut() {
+            if entry.mode == ProjectMode::AutoUpload
+                && let Some(terms) = entry.armed_under.as_mut()
+            {
+                changed |= widen(terms, scopes);
+            }
+        }
+        if let Some(grant) = self.automatic_grant.as_mut() {
+            changed |= widen(&mut grant.granted_under, scopes);
+        }
+        if let Some(o) = self.contribution_override.as_mut()
+            && o.mode == ProjectMode::AutoUpload
+            && let Some(terms) = o.granted_under.as_mut()
+        {
+            changed |= widen(terms, scopes);
+        }
+        changed
+    }
+
     /// Void every armed project whose grant no longer covers the terms in
     /// force, and record terms for any armed project that has none.
     ///
@@ -2787,6 +2826,64 @@ mod tests {
         p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
         assert!(p.record_grant_terms("/w/api", grant_terms_with(ingest)));
         p
+    }
+
+    /// The contributor's own choice of data uses carries every grant with
+    /// it: allowing Train coding models no longer turns Automatic off
+    /// (product owner, 2026-10-29). Without the adoption the same sweep
+    /// voids both grants as `scopes-widened`.
+    #[test]
+    fn chosen_scopes_keep_automatic_on() {
+        let ingest = "https://ingest.invalid";
+        let mut widened = grant_terms_with(ingest);
+        widened.consent_scopes.insert("model_training".to_string());
+        let at = t("2026-09-25T04:00:00Z");
+
+        let mut p = armed_and_granted(ingest);
+        let sweep = p.sweep_grants(&widened, at);
+        assert_eq!(
+            sweep.voided.len(),
+            1,
+            "without adoption, the folder is voided"
+        );
+        assert!(sweep.automatic_grant_voided.is_some());
+
+        let mut p = armed_and_granted(ingest);
+        assert!(p.adopt_chosen_scopes(&widened.consent_scopes));
+        assert!(
+            !p.adopt_chosen_scopes(&widened.consent_scopes),
+            "already covered, nothing changes"
+        );
+        let sweep = p.sweep_grants(&widened, at);
+        assert!(sweep.voided.is_empty(), "{:?}", sweep.voided);
+        assert!(sweep.automatic_grant_voided.is_none());
+        assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload);
+        assert!(p.automatic_grant.is_some());
+        assert!(p.grant_voids.is_empty());
+
+        // Only the scopes move: a new destination still voids.
+        let mut moved = grant_terms_with("https://elsewhere.invalid");
+        moved.consent_scopes = widened.consent_scopes.clone();
+        let sweep = p.sweep_grants(&moved, at);
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(sweep.voided[0].reasons, vec!["destination-changed"]);
+    }
+
+    /// Adopted scopes are added, never replaced: a sweep that still reads
+    /// the wider config written before a narrowing finds the grant covering
+    /// it, so the race between the two writes cannot void.
+    #[test]
+    fn adopting_narrower_scopes_keeps_what_the_grant_held() {
+        let ingest = "https://ingest.invalid";
+        let mut wide = grant_terms_with(ingest);
+        wide.consent_scopes.insert("model_training".to_string());
+        let mut p = armed_and_granted(ingest);
+        p.adopt_chosen_scopes(&wide.consent_scopes);
+
+        assert!(!p.adopt_chosen_scopes(&BTreeSet::new()));
+        let sweep = p.sweep_grants(&wide, t("2026-09-25T04:00:00Z"));
+        assert!(sweep.voided.is_empty());
+        assert!(sweep.automatic_grant_voided.is_none());
     }
 
     /// R6's ship condition, in the policy: every void leaves a notice for

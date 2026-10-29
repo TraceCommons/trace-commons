@@ -892,11 +892,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_bench_kept", "{p}% kept"),
     ("analytics_bench_per_trace", "{x} per trace"),
     ("analytics_bench_next", "Next: {label}, {x}"),
-    ("analytics_bench_not_enough", "Waiting for more data"),
-    (
-        "analytics_bench_not_enough_detail",
-        "Models are compared here once two have {n} traces each.",
-    ),
     ("analytics_bench_cat_bug_fix", "Fix a bug"),
     ("analytics_bench_cat_feature", "Build a feature"),
     ("analytics_bench_cat_refactor", "Refactor"),
@@ -926,6 +921,19 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_bench_intro_spawned",
         "Compared on {n} Claude sub-agent traces",
+    ),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-29: Benchmarks shows
+    // your own figures from the first trace, one model or many).
+    ("analytics_bench_not_enough", "Waiting for more data"),
+    ("analytics_bench_yours", "Your models on this work"),
+    ("analytics_bench_mix_title", "What each model worked on"),
+    ("analytics_bench_col_kept", "Edits kept"),
+    ("analytics_bench_col_cost", "Cost per trace"),
+    ("analytics_bench_col_time", "Time per trace"),
+    ("analytics_bench_mix_share", "{p}% · {n}"),
+    (
+        "analytics_bench_compare_later",
+        "Best-model picks appear once a second model has {n} traces here.",
     ),
     // 26. Approved by the product owner in these words (2026-10-29): the
     // get-started card and the sample data under it, on Overview, Breakdown

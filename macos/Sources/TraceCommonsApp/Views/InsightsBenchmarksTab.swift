@@ -76,6 +76,75 @@ enum InsightsBenchmarkWords {
         let next: String
     }
 
+    /// One model's own figures on a kind of work, shown from its first
+    /// trace (product owner, 2026-10-29); a figure the daemon could not
+    /// make is the dash.
+    struct ModelRow: Equatable, Identifiable {
+        let id: String
+        let model: String
+        let traces: String
+        let kept: String
+        let cost: String
+        let time: String
+    }
+
+    static func rows(_ category: DaemonData.InsightsBenchmarkCategory, copy: [String: String]) -> [ModelRow] {
+        let dash = text("analytics_unavailable", copy)
+        return category.models
+            .sorted { $0.sessions != $1.sessions ? $0.sessions > $1.sessions : $0.label < $1.label }
+            .map { model in
+                ModelRow(id: model.label + "/" + model.tool, model: model.label,
+                         traces: traces(model.sessions, copy: copy),
+                         kept: model.keptPermille.map { String(Int((Double($0) / 10).rounded())) + "%" } ?? dash,
+                         cost: model.usdMicrosMedian.map { InsightsCreditWords.amount($0, copy: copy) } ?? dash,
+                         time: model.activeSecsMedian.map { duration($0) } ?? dash)
+            }
+    }
+
+    /// One model's work mix: each kind of work it was used for, with its
+    /// share of that model's traces, most first (product owner, 2026-10-29:
+    /// with one model, show what share went to what task).
+    struct Mix: Equatable, Identifiable {
+        struct Share: Equatable, Identifiable {
+            let id: String
+            let task: String
+            let fraction: Double
+            let label: String
+        }
+        let id: String
+        let model: String
+        let traces: String
+        let shares: [Share]
+    }
+
+    static func mix(_ answer: DaemonData.InsightsBenchmarks, copy: [String: String]) -> [Mix] {
+        var byModel: [String: (label: String, tasks: [(key: String, sessions: Int)])] = [:]
+        for category in ordered(answer) {
+            for model in category.models where model.sessions > 0 {
+                let id = model.label + "/" + model.tool
+                byModel[id, default: (model.label, [])].tasks.append((category.key, model.sessions))
+            }
+        }
+        return byModel.sorted { lhs, rhs in
+            let l = lhs.value.tasks.reduce(0) { $0 + $1.sessions }, r = rhs.value.tasks.reduce(0) { $0 + $1.sessions }
+            return l != r ? l > r : lhs.value.label < rhs.value.label
+        }
+        .map { id, entry in
+            let total = entry.tasks.reduce(0) { $0 + $1.sessions }
+            let shares = entry.tasks
+                .sorted { $0.sessions != $1.sessions ? $0.sessions > $1.sessions : $0.key < $1.key }
+                .map { task -> Mix.Share in
+                    let fraction = Double(task.sessions) / Double(max(total, 1))
+                    return Mix.Share(id: task.key, task: name(task.key, copy: copy), fraction: fraction,
+                                     label: InsightsOverviewWords.fill(text("analytics_bench_mix_share", copy), [
+                                         "p": String(Int((fraction * 100).rounded())),
+                                         "n": traces(task.sessions, copy: copy),
+                                     ]))
+                }
+            return Mix(id: id, model: entry.label, traces: traces(total, copy: copy), shares: shares)
+        }
+    }
+
     static let categories = ["bug_fix", "feature", "refactor", "tests", "docs", "understand", "review", "setup"]
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
@@ -193,6 +262,7 @@ struct InsightsBenchmarksTab: View {
                 if categories.isEmpty {
                     Text(text("analytics_bench_not_enough")).insightsNote()
                 } else {
+                    mixCard(answer)
                     InsightsCardFlow(minimum: 420) {
                         ForEach(categories) { category in
                             card(category, minimum: answer.minSessions ?? 5)
@@ -239,13 +309,7 @@ struct InsightsBenchmarksTab: View {
                 Spacer(minLength: GlassTokens.Space.s3)
                 Text(InsightsBenchmarkWords.traces(category.sessions, copy: copy)).insightsCaption()
             }
-            if picks.isEmpty {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(text("analytics_bench_not_enough")).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    Text(InsightsOverviewWords.fill(text("analytics_bench_not_enough_detail"), ["n": String(minimum)]))
-                        .insightsCaption()
-                }
-            } else {
+            if !picks.isEmpty {
                 // One row per metric: its label and "i", the leading model
                 // (the runner-up under it), the figure on the right.
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
@@ -267,6 +331,11 @@ struct InsightsBenchmarksTab: View {
                     }
                 }
             }
+            ownFigures(category)
+            if picks.isEmpty {
+                Text(InsightsOverviewWords.fill(text("analytics_bench_compare_later"), ["n": String(minimum)]))
+                    .insightsCaption()
+            }
             if let tip = InsightsBenchmarkWords.tip(category.tip, copy: copy) {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
                     Image(systemName: "lightbulb").glassGlyph(12, weight: .semibold).accessibilityHidden(true)
@@ -276,5 +345,80 @@ struct InsightsBenchmarksTab: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .insightsSection()
+    }
+
+    /// What share of each model's traces went to each kind of work: the
+    /// one-model view (owner, 2026-10-29).
+    @ViewBuilder private func mixCard(_ answer: DaemonData.InsightsBenchmarks) -> some View {
+        let mixes = InsightsBenchmarkWords.mix(answer, copy: copy)
+        if !mixes.isEmpty {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                Text(text("analytics_bench_mix_title")).insightsHeading()
+                ForEach(mixes) { mix in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(mix.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                            Spacer(minLength: GlassTokens.Space.s3)
+                            Text(mix.traces).insightsCaption()
+                        }
+                        ForEach(mix.shares) { share in
+                            HStack(spacing: GlassTokens.Space.s3) {
+                                Text(share.task).insightsCaption()
+                                    .frame(width: 170, alignment: .leading)
+                                GeometryReader { proxy in
+                                    Capsule().fill(GlassTokens.Color.chartGrid.color)
+                                        .overlay(alignment: .leading) {
+                                            Capsule().fill(GlassTokens.Color.chartSeries1.color)
+                                                .frame(width: max(4, proxy.size.width * share.fraction))
+                                        }
+                                }
+                                .frame(height: 8)
+                                Text(share.label).insightsMono()
+                                    .frame(width: 110, alignment: .trailing)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSection()
+        }
+    }
+
+    /// Every model used on this kind of work, with its own figures: edits
+    /// kept, cost per trace and time per trace (typical, the median).
+    @ViewBuilder private func ownFigures(_ category: DaemonData.InsightsBenchmarkCategory) -> some View {
+        let rows = InsightsBenchmarkWords.rows(category, copy: copy)
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Text(text("analytics_bench_yours")).insightsEyebrow()
+                Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s4,
+                     verticalSpacing: GlassTokens.Space.s2) {
+                    GridRow {
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        ForEach(["kept", "cost", "time"], id: \.self) { column in
+                            Text(text("analytics_bench_col_" + column)).insightsCaption()
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .gridColumnAlignment(.trailing)
+                        }
+                    }
+                    ForEach(rows) { row in
+                        GridRow {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(row.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                                    .lineLimit(1).truncationMode(.middle)
+                                Text(row.traces).insightsCaption()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach([row.kept, row.cost, row.time], id: \.self) { figure in
+                                Text(figure).insightsMono().frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
     }
 }
