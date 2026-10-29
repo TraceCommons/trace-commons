@@ -69,7 +69,7 @@ use crate::db::{
 };
 use crate::payout_accrual::accrue_rail;
 use crate::payout_rate::PayoutMode;
-use crate::referral_bonus::ReferralBonusHook;
+use crate::referral_bonus::{ReferralBonusHook, near_ai_referral_control_rail};
 
 /// The most write calls (sends and zero reads) one pass makes on a rail,
 /// below `near_ai`'s per-minute quota (#1271 `max_sends_per_minute`),
@@ -684,14 +684,32 @@ impl PayoutPass {
         Ok(())
     }
 
-    /// The referral stream's state for this run. A `live` stream reads the
-    /// referral credential's own capacity once; a refusal there, or sending
-    /// off, stops the referral stream alone, never the earned one.
+    /// The referral stream's state for this run. A `live` stream reads its
+    /// self-trip control first (spec section 7): while the abuse check has
+    /// halted it, the stream runs as `dry_run`, and a control that cannot be
+    /// read stops it. It then reads the referral credential's own capacity
+    /// once; a refusal there, or sending off, stops the referral stream
+    /// alone, never the earned one.
     async fn referral_run(&self, report: &mut PayoutPassReport) -> ReferralRun {
         match self.referral_mode() {
             PayoutMode::Disabled => ReferralRun::Off,
             PayoutMode::DryRun => ReferralRun::DryRun,
             PayoutMode::Live => {
+                match self
+                    .payouts
+                    .payout_control(&near_ai_referral_control_rail())
+                    .await
+                {
+                    Ok(control) if control.halted => {
+                        report.referral_mode = PayoutMode::DryRun;
+                        return ReferralRun::DryRun;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        report.referral_stopped = Some(PAYOUT_STORE_FAILED);
+                        return ReferralRun::Stopped;
+                    }
+                }
                 let Some(on) = self.referral_rail() else {
                     report.referral_stopped = Some("referral_rail_unconfigured");
                     return ReferralRun::Stopped;
@@ -744,8 +762,14 @@ impl PayoutPass {
         }
         // Step 1b: the referral bonus, written in each referrer's tenant.
         // Its faults are its own: they never stop this tenant's sends.
-        if let Some(referral) = &self.referral_bonus {
-            referral.run_tenant(tenant, self.rail_id()).await;
+        if let Some(hook) = &self.referral_bonus {
+            hook.run_tenant(tenant, self.rail_id()).await;
+            // The bonus pass may have just tripped the referral stream to
+            // `dry_run`: no referral send after that, in this run either.
+            if hook.tripped() == Some(true) && matches!(referral, ReferralRun::Live(_)) {
+                *referral = ReferralRun::DryRun;
+                report.referral_mode = PayoutMode::DryRun;
+            }
         }
         let links = store(
             self.payouts

@@ -2061,7 +2061,9 @@ mod route_tests {
         /// values, never a real credential.
         spent: Arc<Mutex<Vec<String>>>,
         /// The `referral_code` each finish carried, in order: `None` for a
-        /// finish without the field.
+        /// finish without the field. Read only by the production-route
+        /// referral test; a staging build records it unread.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
         finish_codes: Arc<Mutex<Vec<Option<Value>>>>,
         server: tokio::task::JoinHandle<()>,
     }

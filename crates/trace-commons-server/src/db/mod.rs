@@ -4726,7 +4726,10 @@ pub trait ReferralBonusStore: Send + Sync {
     ) -> Result<ReferralReferrerView, DatabaseError>;
 
     /// Inserts each row once (`ON CONFLICT DO NOTHING` on the source or void
-    /// index); returns how many were new. Never re-prices a row.
+    /// index); returns how many were new. Never re-prices a row. Under the
+    /// referrer's account lock, drops every bonus and reversal row of a
+    /// referee whose referral was voided (mirror row or void row) after the
+    /// rows were planned.
     async fn insert_referral_bonus_rows(
         &self,
         tenant: &str,

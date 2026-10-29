@@ -455,8 +455,40 @@ impl ReferralBonusStore for PgBackend {
         for account in accounts {
             lock_account(&tx, tenant, account).await?;
         }
+        // The rows were planned from a view read in an earlier transaction.
+        // A void that committed since then took back only the bonus that
+        // existed at the time and stops every later plan, so a bonus or
+        // reversal planned before it must not land after it: recheck under
+        // the account lock the void takes, and drop those rows.
+        let mut voided: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let referees: BTreeSet<(&str, &str)> = rows
+            .iter()
+            .map(|row| (row.referee_ref_hash.as_str(), row.rail_id.as_str()))
+            .collect();
+        for (referee_ref_hash, rail) in referees {
+            let is_voided: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_referral_referees
+                                     WHERE tenant_id = $1 AND referee_ref_hash = $2
+                                       AND voided_at IS NOT NULL)
+                         OR EXISTS (SELECT 1 FROM trace_referral_bonus_accruals
+                                     WHERE tenant_id = $1 AND referee_ref_hash = $2
+                                       AND rail_id = $3 AND kind = 'void')",
+                    &[&tenant, &referee_ref_hash, &rail],
+                )
+                .await?
+                .get(0);
+            if is_voided {
+                voided.insert((referee_ref_hash, rail));
+            }
+        }
         let mut inserted = 0;
         for row in rows {
+            if row.kind != ReferralBonusKind::Void
+                && voided.contains(&(row.referee_ref_hash.as_str(), row.rail_id.as_str()))
+            {
+                continue;
+            }
             let sign = match row.kind {
                 ReferralBonusKind::Bonus => "",
                 ReferralBonusKind::Reversal | ReferralBonusKind::Void => "-",

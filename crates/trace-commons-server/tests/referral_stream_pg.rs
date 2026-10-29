@@ -55,6 +55,7 @@ use trace_commons_server::payout_pass::{
     REFERRAL_OVER_CEILING, ReferralStreamSettings,
 };
 use trace_commons_server::payout_rate::PayoutMode;
+use trace_commons_server::referral_bonus::near_ai_referral_control_rail;
 use trace_commons_server::trace_corpus_storage::{
     TraceCreditAccountSettlementLineItem, TraceCreditSettlementNearStatus,
 };
@@ -146,6 +147,15 @@ async fn fixture() -> Option<Fixture> {
     if runtime.payout_control(&near_ai()).await.unwrap().halted {
         runtime
             .set_payout_control(&near_ai(), false, Some("test_reset"), ACTOR)
+            .await
+            .unwrap();
+    }
+    // The referral stream's self-trip is deployment-wide too, and the bonus
+    // suite trips it.
+    let control = near_ai_referral_control_rail();
+    if runtime.payout_control(&control).await.unwrap().halted {
+        runtime
+            .set_payout_control(&control, false, Some("test_reset"), ACTOR)
             .await
             .unwrap();
     }
@@ -1181,6 +1191,66 @@ async fn referral_mode_disabled_sends_nothing_and_dry_run_only_counts() {
         .await
         .unwrap();
     assert!(rails.sent(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX).is_empty());
+}
+
+/// Spec section 7: once the abuse check has tripped the referral stream
+/// (the `near_ai.referral` control row halted), a `live` stream runs as a
+/// dry run: it counts, sends nothing and writes no referral line, while the
+/// earned stream pays as before. Cleared, it sends again.
+#[tokio::test]
+async fn a_tripped_referral_stream_sends_nothing_until_cleared() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let rails = Rails::start().await;
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    settle(&fixture, &tenant, accounts[0], 1_000).await;
+    let referee_ref = referee(&fixture, &tenant, accounts[0]).await;
+    bonus(&fixture, &tenant, accounts[0], &referee_ref, 300).await;
+    let org = recipient_org(70);
+    link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        rails.earned.as_ref(),
+        &opener,
+        org,
+        PayoutLinkState::Active,
+    )
+    .await;
+    let control = near_ai_referral_control_rail();
+    fixture
+        .runtime
+        .set_payout_control(&control, true, Some("referral_tripped"), ACTOR)
+        .await
+        .unwrap();
+
+    let report = rails.live(&fixture, &opener).run_once().await;
+    completed(&report);
+    assert_eq!(report.referral_mode, PayoutMode::DryRun, "{report:?}");
+    assert_eq!(report.referral_sent, 0, "{report:?}");
+    assert_eq!(report.referral_dry_run_accounts, 1, "{report:?}");
+    assert_eq!(report.referral_dry_run_units, 300, "{report:?}");
+    assert_eq!(rails.total(org, NEAR_AI_PROGRAM_PREFIX), 1_000);
+    assert!(rails.sent(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX).is_empty());
+    assert!(
+        lines(&fixture, &tenant)
+            .await
+            .iter()
+            .all(|r| r.stream == "earned"),
+        "no referral line is written while the stream is tripped"
+    );
+
+    fixture
+        .runtime
+        .set_payout_control(&control, false, Some("test_reset"), ACTOR)
+        .await
+        .unwrap();
+    let report = rails.live(&fixture, &opener).run_once().await;
+    completed(&report);
+    assert_eq!(report.referral_mode, PayoutMode::Live, "{report:?}");
+    assert_eq!(rails.total(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX), 300);
 }
 
 #[tokio::test]

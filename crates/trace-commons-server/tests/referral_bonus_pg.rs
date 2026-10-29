@@ -23,9 +23,13 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use trace_commons_gate_api::RailId;
+use trace_commons_gate_api::pipeline::InstrumentId;
 use trace_commons_server::{
     config::DatabaseConfig,
-    db::{Database, PayoutStore, ReferralBonusStore, postgres::PgBackend},
+    db::{
+        Database, PayoutStore, ReferralBonusKind, ReferralBonusStore, ReferralBonusWrite,
+        postgres::PgBackend,
+    },
     payout_rate::PayoutMode,
     referral_bonus::{ReferralBonusHook, near_ai_referral_control_rail},
     referral_config::ReferralBonusSettings,
@@ -1023,6 +1027,75 @@ async fn a_void_takes_back_only_unsent_bonus_and_stops_new_bonus() {
     assert_eq!(label, "referral_voided_by_operator");
     let again = hook.run_tenant(&first.tenant, &near_ai()).await;
     assert_eq!((again.voided, again.bonus_rows), (0, 0), "{again:?}");
+}
+
+/// A bonus row planned from a view read before an operator void commits
+/// is dropped when it reaches the store after it: the void took back only
+/// the bonus that existed, and nothing later takes back a row written
+/// behind it.
+#[tokio::test]
+async fn bonus_planned_before_a_void_is_not_written_after_it() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let referee = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let planned = |bonus_units: u128| ReferralBonusWrite {
+        rail_id: near_ai(),
+        account_id: referrer.account,
+        referee_ref_hash: referee.referee_ref.clone(),
+        kind: ReferralBonusKind::Bonus,
+        source_accrual_id: Some(Uuid::new_v4()),
+        bps: 1_000,
+        base_units: bonus_units * 10,
+        bonus_units,
+        rate_version: "v1".to_owned(),
+        instrument_id: InstrumentId::new("near_ai_usd").unwrap(),
+    };
+    // Before the void, a planned row lands.
+    assert_eq!(
+        fixture
+            .runtime
+            .insert_referral_bonus_rows(&referrer.tenant, &[planned(100)])
+            .await
+            .unwrap(),
+        1
+    );
+    let outcome = fixture
+        .runtime
+        .void_referral_referee(
+            &referrer.tenant,
+            &referee.referee_ref,
+            "operator_void",
+            &near_ai(),
+            ACTOR,
+        )
+        .await
+        .unwrap()
+        .expect("a live referee is voided");
+    assert_eq!(outcome.taken_back, 100);
+    // A row planned before the void, arriving after it, is dropped.
+    assert_eq!(
+        fixture
+            .runtime
+            .insert_referral_bonus_rows(&referrer.tenant, &[planned(500)])
+            .await
+            .unwrap(),
+        0
+    );
+    let kinds: Vec<String> = bonus_rows(&fixture, &referrer, &referee)
+        .await
+        .into_iter()
+        .map(|(kind, ..)| kind)
+        .collect();
+    assert_eq!(kinds, vec!["bonus".to_owned(), "void".to_owned()]);
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!(owed.unsent(), 0, "nothing is owed after the void");
 }
 
 #[tokio::test]
