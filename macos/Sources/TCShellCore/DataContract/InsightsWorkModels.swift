@@ -1,10 +1,10 @@
 import Foundation
 
 /// `insights_week`'s `work` and the `insights_benchmarks` method (product
-/// owner, 2026-10-29): Claude and Codex spend at API list prices, lines,
+/// owner, 2026-10-29): Claude and Codex spend at API list prices,
 /// edits and cache savings for the week, and which model does each kind of
 /// work best. Every figure is a sum as far as known with a `partial` flag:
-/// a minimum while partial, never a zero for unknown.
+/// the known part while partial, never a zero for unknown.
 extension DaemonData {
     /// `insights_week`'s `work`; `nil` from a daemon that predates it.
     public struct InsightsWork: Codable, Equatable, Sendable {
@@ -46,9 +46,6 @@ extension DaemonData {
         public let usdMicrosKnown: Int64
         public let usdPartial: Bool
         public let cacheSavingsUsdMicrosKnown: Int64
-        public let linesAddedKnown: Int64
-        public let linesRemovedKnown: Int64
-        public let linesPartial: Bool
         public let editsKnown: Int64
         public let editsUndoneKnown: Int64
         public let editsDeniedKnown: Int64
@@ -56,14 +53,12 @@ extension DaemonData {
 
         public init(key: String? = nil, sessions: Int, pricedSessions: Int? = nil, unpricedSessions: Int = 0,
                     usdMicrosKnown: Int64, usdPartial: Bool = false, cacheSavingsUsdMicrosKnown: Int64 = 0,
-                    linesAddedKnown: Int64 = 0, linesRemovedKnown: Int64 = 0, linesPartial: Bool = false,
                     editsKnown: Int64 = 0, editsUndoneKnown: Int64 = 0, editsDeniedKnown: Int64 = 0,
                     editsPartial: Bool = false) {
             self.key = key; self.sessions = sessions; self.pricedSessions = pricedSessions ?? sessions
             self.unpricedSessions = unpricedSessions; self.usdMicrosKnown = usdMicrosKnown
             self.usdPartial = usdPartial; self.cacheSavingsUsdMicrosKnown = cacheSavingsUsdMicrosKnown
-            self.linesAddedKnown = linesAddedKnown; self.linesRemovedKnown = linesRemovedKnown
-            self.linesPartial = linesPartial; self.editsKnown = editsKnown; self.editsUndoneKnown = editsUndoneKnown
+            self.editsKnown = editsKnown; self.editsUndoneKnown = editsUndoneKnown
             self.editsDeniedKnown = editsDeniedKnown; self.editsPartial = editsPartial
         }
 
@@ -77,9 +72,6 @@ extension DaemonData {
             case usdMicrosKnown = "usd_micros_known"
             case usdPartial = "usd_partial"
             case cacheSavingsUsdMicrosKnown = "cache_savings_usd_micros_known"
-            case linesAddedKnown = "lines_added_known"
-            case linesRemovedKnown = "lines_removed_known"
-            case linesPartial = "lines_partial"
             case editsKnown = "edits_known"
             case editsUndoneKnown = "edits_undone_known"
             case editsDeniedKnown = "edits_denied_known"

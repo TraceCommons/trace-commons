@@ -268,8 +268,7 @@ public struct InsightsThresholdCount: Codable, Sendable, Equatable {
 /// A goal: its kind and the user's threshold. `source` names the harness for
 /// the per-source kinds; Claude and Codex are never combined.
 public struct InsightsGoal: Codable, Sendable, Equatable, Hashable {
-    /// `cache_share_at_least`, `repeated_reads_under`, `long_context_under`
-    /// or `weekly_tokens_under`.
+    /// `cache_share_at_least` or `weekly_tokens_under`.
     public let kind: String
     public let source: String?
     public let permille: UInt64?

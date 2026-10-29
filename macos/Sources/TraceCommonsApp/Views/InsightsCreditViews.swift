@@ -125,10 +125,9 @@ enum InsightsProjectRows {
         let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
-        /// Claude and Codex at API prices, and lines accepted (product
-        /// owner, 2026-10-29); `nil` from a daemon that predates `work`.
+        /// Claude and Codex at API prices (product owner, 2026-10-29);
+        /// `nil` from a daemon that predates `work`.
         var spend: String? = nil
-        var lines: String? = nil
         var spendMicros: Int64 = 0
     }
 
@@ -173,7 +172,6 @@ enum InsightsProjectRows {
                        },
                        nearAiMicros: group.flatMap { $0.usdMicros ?? $0.usdMicrosKnown },
                        spend: week.work.map { _ in InsightsWorkWords.spend(totals, copy: copy) },
-                       lines: week.work.map { _ in InsightsWorkWords.lines(totals, copy: copy) },
                        spendMicros: totals?.usdMicrosKnown ?? 0)
         }
         func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
@@ -248,7 +246,6 @@ struct InsightsDetailsTable: View {
                     Text(text("analytics_projects_project")).insightsCaption()
                     if week.work != nil {
                         Text(text("analytics_column_spend")).insightsCaption().gridColumnAlignment(.trailing)
-                        Text(text("analytics_column_lines")).insightsCaption().gridColumnAlignment(.trailing)
                     }
                     Text(text("analytics_credit_tool_claude_code")).insightsCaption().gridColumnAlignment(.trailing)
                     Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
@@ -258,10 +255,7 @@ struct InsightsDetailsTable: View {
                 ForEach(rows) { row in
                     GridRow(alignment: .firstTextBaseline) {
                         Text(row.label).lineLimit(2)
-                        if let spend = row.spend, let lines = row.lines {
-                            Text(spend).insightsMono()
-                            Text(lines).insightsMono()
-                        }
+                        if let spend = row.spend { Text(spend).insightsMono() }
                         usage(row.claude)
                         usage(row.codex)
                         VStack(alignment: .trailing, spacing: 0) {
@@ -297,9 +291,7 @@ struct InsightsDetailsTable: View {
                             }
                             Spacer(minLength: GlassTokens.Space.s4)
                             Text(InsightsCreditWords.tokens(model.tokens, copy: copy)).insightsCaption()
-                            Text(InsightsCreditWords.spend(model.usdPartial ? nil : model.usdMicrosKnown,
-                                                           known: model.usdMicrosKnown, partial: model.usdPartial,
-                                                           copy: copy))
+                            Text(InsightsWorkWords.dollars(model.usdMicrosKnown))
                                 .insightsMono().frame(minWidth: 72, alignment: .trailing)
                         }
                         .accessibilityElement(children: .combine)

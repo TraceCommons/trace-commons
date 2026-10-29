@@ -1,5 +1,5 @@
 //! `insights_week`'s `work`: Claude Code and Codex spend at API list
-//! prices, lines and edits, for the week on screen and the week before
+//! prices and edits, for the week on screen and the week before
 //! (product owner, 2026-10-29: Claude and Codex spend shown at API list
 //! prices). NEAR AI money stays in `near_ai_credit`.
 //!
@@ -44,9 +44,6 @@ struct Totals {
     priced_sessions: u64,
     exact: u128,
     cache_savings_exact: u128,
-    lines_added: u64,
-    lines_removed: u64,
-    lines_partial: bool,
     edits: u64,
     edits_undone: u64,
     edits_denied: u64,
@@ -95,23 +92,11 @@ impl Totals {
             return;
         };
         let Some(facts) = facts else {
-            self.lines_partial = true;
             self.edits_count_partial = true;
             self.edits_undone_partial = true;
             self.edits_denied_partial = true;
             return;
         };
-        match (facts.shape.lines_added, facts.shape.lines_removed) {
-            (Some(added), Some(removed)) => {
-                self.lines_added += u64::from(added);
-                self.lines_removed += u64::from(removed);
-            }
-            (added, removed) => {
-                self.lines_added += u64::from(added.unwrap_or(0));
-                self.lines_removed += u64::from(removed.unwrap_or(0));
-                self.lines_partial = true;
-            }
-        }
         let sum = |known: &mut u64, partial: &mut bool, count: Option<u32>| match count {
             Some(count) => *known += u64::from(count),
             None => *partial = true,
@@ -140,9 +125,6 @@ impl Totals {
             "usd_micros_known": micros(self.exact),
             "usd_partial": unpriced > 0,
             "cache_savings_usd_micros_known": micros(self.cache_savings_exact),
-            "lines_added_known": self.lines_added,
-            "lines_removed_known": self.lines_removed,
-            "lines_partial": self.lines_partial,
             "edits_known": self.edits,
             "edits_undone_known": self.edits_undone,
             "edits_denied_known": self.edits_denied,
@@ -734,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_lines_and_edits_are_partial_never_zero() {
+    fn unknown_edits_are_partial_never_zero() {
         let value = work(
             &[
                 claude(
@@ -751,9 +733,6 @@ mod tests {
             &[],
         );
         let week = &value["week"];
-        assert_eq!(week["lines_added_known"], 40);
-        assert_eq!(week["lines_removed_known"], 20);
-        assert_eq!(week["lines_partial"], true);
         assert_eq!(week["edits_known"], 3);
         assert_eq!(week["edits_denied_known"], 2);
         assert_eq!(week["edits_undone_known"], 0);
@@ -768,12 +747,9 @@ mod tests {
             )],
             &[],
         );
-        assert_eq!(known["week"]["lines_partial"], false);
         assert_eq!(known["week"]["edits_partial"], false);
         // No facts at all: unknown, not none.
         let none = work(&[claude("t1", vec![claude_turn(0, at(26, 9))], None)], &[]);
-        assert_eq!(none["week"]["lines_added_known"], 0);
-        assert_eq!(none["week"]["lines_partial"], true);
         assert_eq!(none["week"]["edits_partial"], true);
     }
 
@@ -826,11 +802,9 @@ mod tests {
             &[],
         );
         assert_eq!(value["week"]["sessions"], 1);
-        assert_eq!(value["week"]["lines_added_known"], 10);
         let last = &value["last_week"];
         assert_eq!(last["sessions"], 1);
         assert_eq!(last["usd_micros_known"], 2 * HAIKU_TURN_MICROS);
-        assert_eq!(last["lines_added_known"], 30);
         assert_eq!(last["edits_known"], 2);
         let last_days = value["last_week_by_day"].as_array().unwrap();
         assert_eq!(last_days.len(), 7);
@@ -838,7 +812,7 @@ mod tests {
         assert_eq!(last_days[1]["usd_micros_known"], HAIKU_TURN_MICROS);
         assert_eq!(last_days[2]["usd_micros_known"], HAIKU_TURN_MICROS);
         // A session across the week boundary: its spend by its turns, its
-        // lines once, in the week it began.
+        // edits once, in the week it began.
         let across = work(
             &[claude(
                 "t1",
@@ -849,9 +823,6 @@ mod tests {
         );
         assert_eq!(across["week"]["usd_micros_known"], HAIKU_TURN_MICROS);
         assert_eq!(across["last_week"]["usd_micros_known"], HAIKU_TURN_MICROS);
-        assert_eq!(across["week"]["lines_added_known"], 0);
-        assert_eq!(across["week"]["lines_partial"], false);
-        assert_eq!(across["last_week"]["lines_added_known"], 8);
         // The oldest kept week has no week before it in the store.
         let folders = BTreeMap::new();
         let oldest = work_value(

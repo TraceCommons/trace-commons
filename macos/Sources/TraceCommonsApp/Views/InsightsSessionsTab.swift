@@ -432,8 +432,8 @@ struct InsightsSessionDetail: View {
                 chart(drill)
                 LazyVGrid(columns: InsightsLayout.columns, alignment: .leading,
                           spacing: GlassTokens.Space.cardGap) {
-                    ForEach(drill.markers) { marker in
-                        markerCard(marker, threshold: drill.long_context_threshold)
+                    ForEach(InsightsSessionsWords.shownMarkers(drill)) { marker in
+                        markerCard(marker)
                     }
                 }
             }
@@ -529,14 +529,14 @@ struct InsightsSessionDetail: View {
         }
     }
 
-    /// The top of the value axis: room above the tallest bar and the
-    /// threshold for the marker letters.
+    /// The top of the value axis: room above the tallest bar for the
+    /// marker letters.
     private func plotTop(_ drill: InsightsSessionDrill) -> Double {
         let tallest: UInt64 = (drill.series ?? []).compactMap { turn -> UInt64? in
             guard let read = turn.cache_read, let uncached = turn.uncached, let write = turn.cache_write else { return nil }
             return UInt64(read) + UInt64(uncached) + write
         }.max() ?? 0
-        return max(Double(max(tallest, drill.long_context_threshold)) * 1.18, 1)
+        return max(Double(tallest) * 1.18, 1)
     }
 
     /// The hovered turn as the chart's selection, held to the session's turns.
@@ -552,7 +552,6 @@ struct InsightsSessionDetail: View {
         return Chart {
             washMark
             barMarks(drill)
-            thresholdMark(drill)
             markerMarks(drill)
         }
         .chartForegroundStyleScale(domain: series.map { text($0.key) }, range: series.map { $0.color.color })
@@ -586,17 +585,8 @@ struct InsightsSessionDetail: View {
         }
     }
 
-    private func thresholdMark(_ drill: InsightsSessionDrill) -> some ChartContent {
-        RuleMark(y: .value(text("analytics_pattern_long_context"), drill.long_context_threshold))
-            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-            .foregroundStyle(GlassTokens.Color.statusAsk.color)
-            .annotation(position: .top, alignment: .trailing, spacing: GlassTokens.Space.s1) {
-                Text(figure(drill.long_context_threshold)).insightsTick(current: true)
-            }
-    }
-
     private func markerMarks(_ drill: InsightsSessionDrill) -> some ChartContent {
-        ForEach(drill.markers) { marker in
+        ForEach(InsightsSessionsWords.shownMarkers(drill)) { marker in
             let read = readTurn == Int(marker.turn_ordinal)
             RuleMark(x: .value(text("analytics_turn"), Double(marker.turn_ordinal)))
                 .lineStyle(StrokeStyle(lineWidth: 1))
@@ -627,8 +617,8 @@ struct InsightsSessionDetail: View {
     /// "i", and its turn, which reads that turn on the chart (a second
     /// press reads the session). The card itself is not a button, so the
     /// "i" is never a control inside a control.
-    private func markerCard(_ marker: InsightsDrillMarker, threshold: UInt64) -> some View {
-        var lines = InsightsSessionsWords.markerLines(marker, threshold: threshold, copy: copy)
+    private func markerCard(_ marker: InsightsDrillMarker) -> some View {
+        var lines = InsightsSessionsWords.markerLines(marker, copy: copy)
         let derivation = Self.derivationBases.contains(marker.basis) && lines.count > 1 ? lines.removeLast() : nil
         let turn = Int(marker.turn_ordinal)
         return HStack(alignment: .top, spacing: GlassTokens.Space.s5) {

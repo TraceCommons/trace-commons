@@ -3,9 +3,7 @@ use trace_commons_protocol::insights_pricing::{
     ModelPriceEntry, PRICING_TABLE_SCHEMA_VERSION, PricingCurrency, PricingTable,
     PricingTableProvenance, TokenRate,
 };
-use trace_commons_protocol::insights_usage_series::{
-    CacheWrite, KeyedDigest, ToolCallRecord, ToolKind, TurnRecord, UsageSeries,
-};
+use trace_commons_protocol::insights_usage_series::{CacheWrite, TurnRecord, UsageSeries};
 
 use super::*;
 use crate::insights::analytics_constants::CLASSIFIER_VERSION;
@@ -725,59 +723,6 @@ fn fewer_undos_when_one_model_undoes_twice_as_often() {
     assert_eq!(row(&answer, BenchCategory::BugFix).tip, None);
 }
 
-fn reading(id: &str, rereads: bool) -> SessionInput {
-    let mut f = facts(InferredTask::NoEdits, vec![mf(Some(0), Some(0), Some(0))]);
-    f.shape = shape(ExtensionClassCounts::default());
-    let mut s = session(id, "model-a", 2, Some(f));
-    let read = |turn: u32, path: u8| ToolCallRecord {
-        turn_ordinal: turn,
-        tool: ToolKind::Read,
-        args_key: KeyedDigest([path; 32]),
-        path_key: Some(KeyedDigest([path; 32])),
-        path_ext: Some("rs".to_owned()),
-        result_bytes: Some(100),
-        success: Some(true),
-        paired: true,
-    };
-    if let SessionBody::Claude { series, .. } = &mut s.body {
-        series.tool_calls = if rereads {
-            vec![read(0, 1), read(1, 1), read(1, 2)]
-        } else {
-            vec![read(0, 1), read(1, 2)]
-        };
-    }
-    s
-}
-
-#[test]
-fn rereads_when_half_the_reading_sessions_read_a_file_again() {
-    let mut sessions: Vec<SessionInput> =
-        (0..3).map(|ix| reading(&format!("r{ix}"), true)).collect();
-    sessions.extend((0..2).map(|ix| reading(&format!("n{ix}"), false)));
-    let answer = run(&sessions);
-    let understand = row(&answer, BenchCategory::Understand);
-    assert_eq!(understand.sessions, 5);
-    assert_eq!(
-        understand.tip,
-        Some(Tip::Rereads {
-            sessions_with: 3,
-            sessions: 5,
-            files: 1,
-        })
-    );
-
-    // Two of five: no tip.
-    let mut fewer: Vec<SessionInput> = (0..2).map(|ix| reading(&format!("r{ix}"), true)).collect();
-    fewer.extend((0..3).map(|ix| reading(&format!("n{ix}"), false)));
-    assert_eq!(row(&run(&fewer), BenchCategory::Understand).tip, None);
-
-    // Under five reading sessions: no tip.
-    assert_eq!(
-        row(&run(&sessions[..4]), BenchCategory::Understand).tip,
-        None
-    );
-}
-
 #[test]
 fn the_wire_shape_matches_the_contract() {
     let wire = serde_json::to_value(run(&pair(5, 5))).unwrap();
@@ -804,15 +749,15 @@ fn the_wire_shape_matches_the_contract() {
         }
     }
     assert!(fixes.get("tip").is_some());
-    let tip = serde_json::to_value(Tip::Rereads {
-        sessions_with: 1,
-        sessions: 2,
-        files: 3,
+    let tip = serde_json::to_value(Tip::FewerUndos {
+        better: "a".to_owned(),
+        worse: "b".to_owned(),
+        ratio_permille: 2000,
     })
     .unwrap();
     assert_eq!(
         tip,
-        serde_json::json!({"kind": "rereads", "sessions_with": 1, "sessions": 2, "files": 3})
+        serde_json::json!({"kind": "fewer_undos", "better": "a", "worse": "b", "ratio_permille": 2000})
     );
     assert_eq!(wire["categories"][6]["quality"], serde_json::Value::Null);
 }

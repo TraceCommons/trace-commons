@@ -51,7 +51,6 @@ use trace_commons_protocol::insights_pricing::PricingAccounting;
 
 use super::analytics_constants::{MODEL_ANSWER_MIN_EDITS, MODEL_ANSWER_MIN_SESSIONS};
 use super::model_answers::{ModelRoute, latest_at, median, own_counts, permille};
-use super::patterns::{merge_reread_files, session_patterns};
 use super::pricing_catalog::PricingCatalog;
 use super::session_facts::{InferredTask, SessionFacts, SessionShape};
 use super::session_labels::{LabelledTask, SessionLabel};
@@ -203,12 +202,6 @@ pub enum Tip {
         worse: String,
         ratio_permille: u32,
     },
-    /// `understand`: Claude Code sessions that read a file again.
-    Rereads {
-        sessions_with: u32,
-        sessions: u32,
-        files: u32,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -261,7 +254,7 @@ pub struct Benchmarks {
 }
 
 /// A session on a category, with its model's own figures.
-struct Entry<'s> {
+struct Entry {
     category: BenchCategory,
     tool: BenchTool,
     model: String,
@@ -272,7 +265,6 @@ struct Entry<'s> {
     tables: Vec<PricingTableRef>,
     active_secs: Option<u32>,
     test_first: bool,
-    session: &'s SessionInput,
 }
 
 fn bump(count: &mut u32) {
@@ -292,15 +284,15 @@ fn tool_of(body: &SessionBody) -> Option<BenchTool> {
 }
 
 /// The sessions' entries and the left-out counts, in `session_ref` order.
-fn entries<'s>(
-    sessions: &'s [SessionInput],
+fn entries(
+    sessions: &[SessionInput],
     routes: &BTreeMap<String, ModelRoute>,
     labels: &BTreeMap<String, SessionLabel>,
     catalog: &PricingCatalog,
     tool: Option<BenchTool>,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> (Vec<Entry<'s>>, BenchLeftOut, u32) {
+) -> (Vec<Entry>, BenchLeftOut, u32) {
     let mut ordered: Vec<&SessionInput> = sessions.iter().collect();
     ordered.sort_by(|a, b| {
         a.session_ref
@@ -416,7 +408,6 @@ fn entries<'s>(
             tables: if priced { price.tables } else { Vec::new() },
             active_secs: facts.active_secs,
             test_first: facts.shape.failed_before_first_edit_then_passed > 0,
-            session,
         });
     }
     (out, left_out, counted)
@@ -429,7 +420,7 @@ struct ModelSums {
     undone: u64,
 }
 
-fn model_figures(label: &str, tool: BenchTool, entries: &[&Entry<'_>]) -> ModelSums {
+fn model_figures(label: &str, tool: BenchTool, entries: &[&Entry]) -> ModelSums {
     let (mut edits, mut kept_losses, mut undone, mut kept_sessions) = (0u64, 0u64, 0u64, 0u32);
     let mut costs = Vec::new();
     let mut secs = Vec::new();
@@ -519,7 +510,7 @@ fn speed_figure(model: &BenchModel) -> (Option<u64>, u32) {
 }
 
 /// `bug_fix`: test-first sessions against the rest, by median active time.
-fn test_first_tip(entries: &[&Entry<'_>]) -> Option<Tip> {
+fn test_first_tip(entries: &[&Entry]) -> Option<Tip> {
     let mut with = Vec::new();
     let mut without = Vec::new();
     for entry in entries {
@@ -621,38 +612,12 @@ fn fewer_undos_tip(models: &[ModelSums], min: u32) -> Option<Tip> {
     })
 }
 
-/// `understand`: the Claude Code sessions that read a file again, when they
-/// are at least half of `min` or more such sessions.
-fn rereads_tip(entries: &[&Entry<'_>], min: u32) -> Option<Tip> {
-    let mut sessions = 0u32;
-    let mut with = Vec::new();
-    for entry in entries {
-        let SessionBody::Claude { series, .. } = &entry.session.body else {
-            continue;
-        };
-        bump(&mut sessions);
-        let found = session_patterns(series);
-        if !found.reread_files.is_empty() {
-            with.push(found);
-        }
-    }
-    let sessions_with = len_u32(with.len());
-    if sessions < min || sessions_with.saturating_mul(2) < sessions {
-        return None;
-    }
-    Some(Tip::Rereads {
-        sessions_with,
-        sessions,
-        files: len_u32(merge_reread_files(with.iter()).len()),
-    })
-}
-
 fn category_row(
     category: BenchCategory,
-    entries: &[&Entry<'_>],
+    entries: &[&Entry],
     min_sessions: u32,
 ) -> BenchCategoryRow {
-    let mut by_model: BTreeMap<(BenchTool, &str), Vec<&Entry<'_>>> = BTreeMap::new();
+    let mut by_model: BTreeMap<(BenchTool, &str), Vec<&Entry>> = BTreeMap::new();
     for entry in entries {
         by_model
             .entry((entry.tool, entry.model.as_str()))
@@ -678,11 +643,7 @@ fn category_row(
         _ => None,
     }
     .or_else(|| cheaper_same_quality_tip(&models, quality.as_ref(), min_sessions))
-    .or_else(|| fewer_undos_tip(&models, min_sessions))
-    .or_else(|| match category {
-        BenchCategory::Understand => rereads_tip(entries, min_sessions),
-        _ => None,
-    });
+    .or_else(|| fewer_undos_tip(&models, min_sessions));
     BenchCategoryRow {
         key: category,
         sessions: len_u32(entries.len()),
@@ -716,7 +677,7 @@ pub fn benchmarks(
     let categories = BenchCategory::ALL
         .into_iter()
         .map(|category| {
-            let of: Vec<&Entry<'_>> = entries
+            let of: Vec<&Entry> = entries
                 .iter()
                 .filter(|entry| entry.category == category)
                 .collect();
