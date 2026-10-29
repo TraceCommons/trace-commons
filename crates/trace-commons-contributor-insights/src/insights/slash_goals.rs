@@ -239,7 +239,7 @@ pub struct WeekGoals {
 
 impl WeekGoals {
     pub fn new(mut goals: Vec<WeekGoal>) -> Self {
-        goals.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        goals.sort_by_key(|goal| std::cmp::Reverse(goal.updated_at));
         let mut all = GoalCount::default();
         let mut by_tool = std::collections::BTreeMap::new();
         for goal in &goals {
