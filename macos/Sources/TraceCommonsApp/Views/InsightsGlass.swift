@@ -336,35 +336,26 @@ enum InsightsSeries: CaseIterable {
     static let stack: [InsightsSeries] = [.cacheRead, .cacheWrite, .uncached, .output]
 }
 
-/// The coverage line behind a status dot: green when every count is
-/// known, amber when any is partial or unknown, grey with no traces.
+/// The coverage line: the trace count, with what is known of them (full
+/// details, some missing, none) behind its "i" (owner, 2026-10-29). It
+/// carried a status dot until then; nothing else read it.
 struct InsightsCoverageLine: View {
     let coverage: InsightsWeekCoverage
     let copy: [String: String]
     /// What qualifies the counts (which feed, undated and overlapping
-    /// traces, a tab's own notes), behind the line's "i".
+    /// traces, a tab's own notes), behind the line's "i" after the
+    /// breakdown of what is known.
     var info: [String] = []
-
-    static func status(_ coverage: InsightsWeekCoverage) -> GlassStatus {
-        if coverage.sessions == 0 { return .off }
-        return coverage.partial + coverage.unknown == 0 ? .on : .ask
-    }
 
     /// The line's type step.
     static let style = GlassTokens.TypeScale.label.weight(.regular)
 
     var body: some View {
-        // Top-aligned, the dot centred on the first line: the words flow in
-        // a layout of their own (`InsightsTextWithInfo`), which has no
-        // first baseline to align on.
-        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-            GlassStatusDot(Self.status(coverage), size: GlassTokens.Size.dotLarge, halo: true)
-                .padding(.top, max(0, (Self.style.lineHeight - GlassTokens.Size.dotLarge) / 2))
-            InsightsTextWithInfo(InsightsOverviewWords.coverageLine(coverage, copy: copy),
-                                 style: Self.style,
-                                 infoTitle: copy["analytics_drill_coverage"] ?? "", info: info)
-                .foregroundStyle(GlassColor.textSecondary)
-        }
+        InsightsTextWithInfo(InsightsOverviewWords.coverageLine(coverage, copy: copy),
+                             style: Self.style,
+                             infoTitle: copy["analytics_drill_coverage"] ?? "",
+                             info: (InsightsOverviewWords.coverageInfo(coverage, copy: copy).map { [$0] } ?? []) + info)
+            .foregroundStyle(GlassColor.textSecondary)
     }
 }
 
