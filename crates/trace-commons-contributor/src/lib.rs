@@ -109,6 +109,8 @@ pub mod project_copy;
 pub mod quit_copy;
 pub mod redaction_labels;
 pub mod redaction_summary;
+pub mod referral;
+pub mod referral_copy;
 pub mod routing;
 pub mod routing_copy;
 pub mod shell_words_copy;
