@@ -98,7 +98,7 @@ fn build_rail_at(
 }
 
 /// One `near_ai` rail object over `credentials`: the rail's own, or the
-/// referral stream's dedicated one.
+/// referral stream's (a dedicated credential, or the rail's own again).
 fn near_ai_rail_from(
     credentials: &NearAiTransferCredentials,
     loopback: Option<&str>,
@@ -165,8 +165,9 @@ pub struct PayoutRailStatus {
 
 /// A rail's referral stream (referral rewards spec section 5).
 struct ReferralEntry {
-    /// The rail over the referral credential; `None` in a `dry_run` with
-    /// no credential configured.
+    /// The rail over the referral stream's credential (dedicated, or the
+    /// payout credential when shared); `None` in a `dry_run` with no
+    /// credential configured.
     rail: Option<Arc<dyn PayoutRail>>,
     settings: ReferralStreamSettings,
 }
@@ -367,6 +368,7 @@ impl PayoutRails {
                     settings: ReferralStreamSettings {
                         mode: settings.mode,
                         account_ceiling: settings.account_ceiling,
+                        shares_rail_credential: settings.shares_payout_credential,
                     },
                 })
             }
@@ -468,7 +470,8 @@ impl PayoutRails {
                 }
             };
             entry.update(|status| status.startup_probe_ok = ok);
-            // The referral credential's capacity, logged only: a refusal
+            // The referral stream's credential's capacity, logged only (the
+            // payout credential's again when shared): a refusal
             // stops the referral stream's sends pass by pass, never the
             // rail's, and readiness stays the rail's.
             if let Some(referral) = entry
@@ -832,6 +835,7 @@ mod tests {
                 sender_org: Uuid::from_u128(1),
                 source: NearAiCreditSource::Payment,
             }),
+            shares_payout_credential: false,
             account_ceiling: AtomicUnits::from_raw(500),
         })
     }

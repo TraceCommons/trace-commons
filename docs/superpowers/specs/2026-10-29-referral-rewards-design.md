@@ -50,8 +50,10 @@ needs approval (R6, CLAUDE.md "no new notices without explicit approval").
 - The bonus is on top. The referee's own accruals, lines and payouts are
   never read back or reduced.
 - Bonus is paid on a second cumulative program on the referrer's existing
-  `near_ai` link (stream `referral`), from a dedicated #1271 credential, so
-  own and referral credit stay separate end to end.
+  `near_ai` link (stream `referral`), so own and referral credit stay
+  separate end to end by program. It is sent with the payout credential
+  unless a dedicated #1271 credential is configured (owner decision,
+  2026-10-29).
 - Trace Credit is untouched (D6). The starter advance does not count toward
   the base, and referral bonus never absorbs an advance.
 
@@ -145,7 +147,8 @@ before `earn_until`, and whose referral is not voided:
 
 `earn_until = referee_account_created_at + TRACE_COMMONS_REFERRAL_EARN_DAYS
 days`, stamped on the attribution when the code is applied (V142 checks it
-is at least 92 days after creation). The period in force is the later of
+is at least 92 days after creation; V143 states that as 2208 hours, so the
+check does not move with the session time zone). The period in force is the later of
 the stamped end and the end under the current setting, so raising the
 setting extends every live referral without a data change, and lowering it
 affects only referrals applied afterwards: a promise already made is never
@@ -234,7 +237,7 @@ the referral admin routes (section 6).
 - `trace_payout_lines.stream` is `earned` (default; everything before V142)
   or `referral`. One pending line per `(link_id, stream)`.
 - `target_referral = owed_referral - sum(final_paid_referral of closed
-  links)`, capped per send by the referral credential's
+  links)`, capped per send by the sending credential's
   `max_amount_per_transfer`, where `owed_referral = sum(bonus_units)` of the
   account's bonus rows on the rail.
 - The pass prices a line from a read made before its rail call, and an
@@ -244,15 +247,36 @@ the referral admin routes (section 6).
   `owed_referral` less every confirmed or pending referral delta. Nothing
   is written, the pass counts `referral_owed_changed`, and the next pass
   prices from the new amount.
-- Sends use a dedicated credential, `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL`,
-  whose `max_total_amount` is the program's lifetime budget (default $2,500),
-  enforced by cloud-api.
+- Sends use the payout credential by default (owner decision, 2026-10-29:
+  "the live referral stream may use the same NEAR AI payout credential").
+  With `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` and its `_ID` both unset,
+  or both set to the payout pair, `live` sends with the payout credential. A
+  distinct pair is a dedicated referral credential, whose `max_total_amount`
+  is then the referral program's own lifetime budget, enforced by cloud-api.
+  One of the pair without the other, or half of the payout pair beside half
+  of another, refuses boot.
+- **The tradeoff of sharing.** One credential has one lifetime budget
+  (`max_total_amount`) and one send window for both streams: every referral
+  send draws down the contributor payout budget, and a cloud-api stop on the
+  credential (budget spent, rate limit, revoked) reaches both streams. The
+  pass keeps the shared case inside the one window: it reads the
+  credential's capacity once and the referral stream spends the earned
+  stream's send budget and per-send maximum, never a window of its own. The
+  two streams run one after the other in one pass under the rail's lock, and
+  each send is cumulative on its own program, so neither can spend or claim
+  the other's transfer. What stays per stream regardless of the credential:
+  the per-referrer ceiling (`TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO`,
+  read from our own rows), the referral holds, and the referral self-trip
+  control. A dedicated credential is the way to cap referrals on NEAR AI's
+  side apart from contributor payouts.
 - Mode `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` = `disabled` | `dry_run` |
-  `live`, default `disabled`. `live` needs the rail itself `live` and the
-  credential configured, or boot refuses (`near_ai_referral_config_missing`).
-  The rail's halt stops the referral stream too.
+  `live`, default `disabled`. `live` needs the rail itself `live`, or boot
+  refuses (`near_ai_referral_config_missing`). The rail's halt stops the
+  referral stream too.
 - Crash recovery, receipt lookup and the reconciliation drill run per stream,
-  filtering transfer history by that stream's program.
+  filtering transfer history by that stream's program, never by credential:
+  the sender org's history holds both streams' sends whichever credential
+  made them.
 - Closing a link reads both programs and records `final_paid` and, when the
   link has a referral program, `final_paid_referral`.
 - The starter advance's `max(owed, advance)` applies to the earned stream
@@ -423,7 +447,10 @@ expire. Nothing logs an address, a prefix, a mark or a cluster id.
 
 - R2: bonus on top, from the commons.
 - R3: the program starts at `TRACE_COMMONS_REFERRAL_PROGRAM_START`.
-- R4: $2,500 lifetime on the referral credential; $250 per referrer.
+- R4: $2,500 lifetime on the referral credential; $250 per referrer. With
+  the payout credential shared (2026-10-29), the $2,500 is not a separate
+  budget on NEAR AI's side: referral sends count against the payout
+  credential's own lifetime budget. The $250 per referrer still holds.
 - R5: a code may be applied up to 30 days after account creation, and earns
   only on batches created after it was applied.
 - R6: all app copy.

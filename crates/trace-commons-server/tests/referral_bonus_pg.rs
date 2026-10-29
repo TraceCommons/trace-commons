@@ -1409,6 +1409,58 @@ async fn a_void_takes_back_only_that_referees_unsent_bonus() {
     assert_eq!((owed.owed, owed.unsent()), (60, 0), "what was sent stays");
 }
 
+/// A referee whose bonus was sent in full has nothing left to take back,
+/// and voiding them leaves another referee's unsent bonus where it was.
+#[tokio::test]
+async fn voiding_a_fully_paid_referee_takes_nothing_from_another() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let hook = hook(&fixture, settings());
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let paid = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let unsent = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    credit(
+        &fixture,
+        &paid.tenant,
+        paid.account,
+        1_000,
+        Utc::now() - Duration::days(3),
+    )
+    .await;
+    hook.run_tenant(&paid.tenant, &near_ai()).await;
+    sent_on_referral_stream(&fixture, &referrer, 100).await;
+    credit(
+        &fixture,
+        &unsent.tenant,
+        unsent.account,
+        1_000,
+        Utc::now() - Duration::days(2),
+    )
+    .await;
+    hook.run_tenant(&unsent.tenant, &near_ai()).await;
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!((owed.owed, owed.sent, owed.unsent()), (200, 100, 100));
+
+    assert_eq!(void_one(&fixture, &referrer, &paid).await, 0);
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!(
+        (owed.owed, owed.unsent()),
+        (200, 100),
+        "the other referee's bonus is still owed"
+    );
+    assert_eq!(void_one(&fixture, &referrer, &unsent).await, 100);
+}
+
 /// A bonus row planned from a view read before an operator void commits
 /// is dropped when it reaches the store after it: the void took back only
 /// the bonus that existed, and nothing later takes back a row written

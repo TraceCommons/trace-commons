@@ -388,6 +388,7 @@ fn referral_settings(mode: PayoutMode) -> ReferralStreamSettings {
     ReferralStreamSettings {
         mode,
         account_ceiling: AtomicUnits::from_raw(REFERRAL_CEILING),
+        shares_rail_credential: false,
     }
 }
 
@@ -1186,6 +1187,7 @@ async fn a_referral_hold_stops_only_the_referral_stream() {
     let raised = ReferralStreamSettings {
         mode: PayoutMode::Live,
         account_ceiling: AtomicUnits::from_raw(REFERRAL_CEILING * 2),
+        shares_rail_credential: false,
     };
     completed(
         &rails
@@ -1638,4 +1640,157 @@ async fn the_store_keeps_streams_apart_and_closes_with_both_totals() {
         .await
         .unwrap();
     assert_eq!((owed.net, owed.bonus_count), (None, 2));
+}
+
+/// The referral stream on the payout credential itself (owner decision,
+/// 2026-10-29): one rail object, one credential, one send window. Both
+/// streams send in one pass; the referral stream spends the earned stream's
+/// window rather than reading its own; and recovery after a crash still
+/// attributes each transfer to its stream by program.
+#[tokio::test]
+async fn a_shared_credential_spends_one_window_and_recovery_keeps_streams_apart() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let rails = Rails {
+        mock,
+        earned: rail.clone(),
+        referral: rail,
+    };
+    let opener = Arc::new(TestOpener::default());
+    let shared = ReferralStreamSettings {
+        mode: PayoutMode::Live,
+        account_ceiling: AtomicUnits::from_raw(REFERRAL_CEILING),
+        shares_rail_credential: true,
+    };
+    let pass = || rails.pass(&fixture, &opener, PayoutMode::Live, Some(shared));
+
+    // A window of three writes holds one send (a read and a send) and one
+    // write more: the earned stream sends, and the referral stream, finding
+    // one write left in the shared window, waits. A stream that read the
+    // capacity for itself would believe it had three.
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    let account = accounts[0];
+    let org = recipient_org(40);
+    settle(&fixture, &tenant, account, 3_000).await;
+    let referee_ref = referee(&fixture, &tenant, account).await;
+    bonus(&fixture, &tenant, account, &referee_ref, 500).await;
+    link(
+        &fixture,
+        &tenant,
+        account,
+        rails.earned.as_ref(),
+        &opener,
+        org,
+        PayoutLinkState::Active,
+    )
+    .await;
+    rails.mock.set_sends_remaining(3);
+    let report = pass().run_once().await;
+    completed(&report);
+    assert_eq!((report.sent, report.referral_sent), (1, 0), "{report:?}");
+    assert_eq!(
+        report.skipped.get("payout_send_window_exhausted"),
+        Some(&1),
+        "{report:?}"
+    );
+    assert_eq!(rails.total(org, NEAR_AI_PROGRAM_PREFIX), 3_000);
+    assert_eq!(rails.total(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX), 0);
+
+    // With room in the window, both streams send in one pass on the one
+    // credential, each on its own program.
+    rails.mock.set_sends_remaining(60);
+    settle(&fixture, &tenant, account, 1_000).await;
+    let report = pass().run_once().await;
+    completed(&report);
+    assert_eq!((report.sent, report.referral_sent), (1, 1), "{report:?}");
+    assert_eq!(rails.total(org, NEAR_AI_PROGRAM_PREFIX), 4_000);
+    assert_eq!(rails.total(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX), 500);
+
+    // A crash: two accounts, each with a pending line on both streams. One
+    // account's referral send landed and its response was lost, the
+    // other's earned send. Recovery, on the one credential, finds each by
+    // its own program and sends only what never went out.
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 2).await;
+    let mut links = Vec::new();
+    for (n, account) in accounts.iter().enumerate() {
+        settle(&fixture, &tenant, *account, 3_000).await;
+        let referee_ref = referee(&fixture, &tenant, *account).await;
+        bonus(&fixture, &tenant, *account, &referee_ref, 400).await;
+        let linked = link(
+            &fixture,
+            &tenant,
+            *account,
+            rails.earned.as_ref(),
+            &opener,
+            recipient_org(41 + n as u128),
+            PayoutLinkState::Active,
+        )
+        .await;
+        for line in [
+            earned_line(&linked, 3_000, 3_000),
+            referral_line(&linked, 400, 400),
+        ] {
+            assert_eq!(
+                fixture
+                    .runtime
+                    .insert_pending_payout_line(&tenant, &line)
+                    .await
+                    .unwrap(),
+                PendingPayoutLineInsert::Inserted
+            );
+        }
+        links.push(linked);
+    }
+    let lost_referral = rails.mock.seed(
+        recipient_org(41),
+        &near_ai_referral_program_for_link(links[0].link_id),
+        400,
+    );
+    let lost_earned = rails.mock.seed(recipient_org(42), &links[1].program, 3_000);
+    let before = rails.mock.transfers().len();
+    let report = pass().run_once().await;
+    completed(&report);
+    assert_eq!(rails.mock.transfers().len(), before + 2, "{report:?}");
+    for org in [recipient_org(41), recipient_org(42)] {
+        assert_eq!(rails.sent(org, NEAR_AI_PROGRAM_PREFIX).len(), 1);
+        assert_eq!(rails.sent(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX).len(), 1);
+    }
+    let rows = lines(&fixture, &tenant).await;
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|r| r.state == "confirmed"), "{rows:?}");
+    let receipt = |link: &PayoutLinkWrite, stream: &str| {
+        rows.iter()
+            .find(|r| r.link_id == link.link_id && r.stream == stream)
+            .unwrap()
+            .receipt
+            .clone()
+    };
+    assert_eq!(
+        receipt(&links[0], "referral").as_deref(),
+        Some(near_ai_receipt_hash(lost_referral).as_str())
+    );
+    assert_eq!(
+        receipt(&links[1], "earned").as_deref(),
+        Some(near_ai_receipt_hash(lost_earned).as_str())
+    );
+    let fresh_earned = rails.sent(recipient_org(41), NEAR_AI_PROGRAM_PREFIX)[0].id;
+    let fresh_referral = rails.sent(recipient_org(42), NEAR_AI_REFERRAL_PROGRAM_PREFIX)[0].id;
+    assert_eq!(
+        receipt(&links[0], "earned").as_deref(),
+        Some(near_ai_receipt_hash(fresh_earned).as_str())
+    );
+    assert_eq!(
+        receipt(&links[1], "referral").as_deref(),
+        Some(near_ai_receipt_hash(fresh_referral).as_str())
+    );
+
+    completed(&pass().run_once().await);
+    assert_eq!(
+        rails.mock.transfers().len(),
+        before + 2,
+        "nothing more on a rerun"
+    );
 }

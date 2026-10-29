@@ -37,12 +37,21 @@
 //! with the account's referral bonus: `owed_referral` is the sum of its
 //! `trace_referral_bonus_accruals` rows, netted against what closed links'
 //! referral programs already got (`final_paid_referral`). It runs through
-//! its own rail object (the dedicated referral credential), its own
-//! capacity and send window, its own ceiling and its own holds; lines carry
+//! its own rail object, its own ceiling and its own holds; lines carry
 //! `stream = 'referral'`, recovery and receipt lookup read only the referral
-//! program, and closing a link reads both programs. The stream is
+//! program (both streams' sends sit in one sender org's history, whichever
+//! credential made them, so a transfer is attributed by program, never by
+//! credential), and closing a link reads both programs. With a dedicated
+//! referral credential the stream reads that credential's own capacity and
+//! keeps its own send window. With the payout credential shared
+//! ([`ReferralStreamSettings::shares_rail_credential`], owner decision
+//! 2026-10-29) it reads no capacity of its own and spends the earned
+//! stream's send budget, so one pass stays inside the one credential's send
+//! window and per-send maximum; the credential's lifetime budget is then
+//! one budget for both streams. The two streams run one after the other in
+//! one pass under the rail's lock, never at once. The stream is
 //! independent of the earned one: a referral-stream stop
-//! ([`RailRefusal::StopPass`] from the referral credential, its budget
+//! ([`RailRefusal::StopPass`] through the referral rail, its budget
 //! spent included) stops only the referral stream for the rest of the run,
 //! and a referral-stream hold (a label starting [`REFERRAL_HOLD_PREFIX`])
 //! never holds earned sends. The shared account standing, an unreadable
@@ -266,6 +275,12 @@ pub struct ReferralStreamSettings {
     /// The most referral credit one referrer is owed before its referral
     /// stream is held ([`REFERRAL_OVER_CEILING`]).
     pub account_ceiling: AtomicUnits,
+    /// The referral rail sends with the pass's own credential (owner
+    /// decision, 2026-10-29). Then one credential has one send window and
+    /// one per-send maximum, so the stream reads no capacity of its own and
+    /// spends the earned stream's send budget; it never believes it has the
+    /// window to itself.
+    pub shares_rail_credential: bool,
 }
 
 /// How a pass ended.
@@ -428,6 +443,9 @@ enum ReferralRun {
     DryRun,
     /// Send, inside the referral credential's own window.
     Live(SendBudget),
+    /// Send with the pass's own credential, spending the earned stream's
+    /// send budget: one credential, one window.
+    LiveShared,
     /// The referral rail stopped the stream for the rest of this run.
     Stopped,
 }
@@ -503,7 +521,8 @@ impl PayoutPass {
     }
 
     /// Adds the referral stream. `rail` is the same rail driven by the
-    /// referral credential; a `live` stream needs it (configuration refuses
+    /// referral stream's credential (dedicated, or the payout credential
+    /// when `settings.shares_rail_credential`); a `live` stream needs it (configuration refuses
     /// a live stream without one, and the pass, given none, sends no
     /// referral line and counts `referral_rail_unconfigured`). A rail with a
     /// different id is refused the same way: the stream never pays another
@@ -692,9 +711,10 @@ impl PayoutPass {
     /// The referral stream's state for this run. A `live` stream reads its
     /// self-trip control first (spec section 7): while the abuse check has
     /// halted it, the stream runs as `dry_run`, and a control that cannot be
-    /// read stops it. It then reads the referral credential's own capacity
-    /// once; a refusal there, or sending off, stops the referral stream
-    /// alone, never the earned one.
+    /// read stops it. With a dedicated credential it then reads that
+    /// credential's own capacity once; a refusal there, or sending off,
+    /// stops the referral stream alone, never the earned one. On the shared
+    /// payout credential it reads none and spends the earned budget.
     async fn referral_run(&self, report: &mut PayoutPassReport) -> ReferralRun {
         match self.referral_mode() {
             PayoutMode::Disabled => ReferralRun::Off,
@@ -719,6 +739,15 @@ impl PayoutPass {
                     report.referral_stopped = Some("referral_rail_unconfigured");
                     return ReferralRun::Stopped;
                 };
+                // One credential: the pass already read its capacity, and
+                // a second read would hand the stream the same window again.
+                if self
+                    .referral
+                    .as_ref()
+                    .is_some_and(|referral| referral.settings.shares_rail_credential)
+                {
+                    return ReferralRun::LiveShared;
+                }
                 let label = match on.rail.preflight().await {
                     Ok(capacity) if capacity.sending_enabled => {
                         let limit = self.settings.local_send_limit;
@@ -771,7 +800,9 @@ impl PayoutPass {
             hook.run_tenant(tenant, self.rail_id()).await;
             // The bonus pass may have just tripped the referral stream to
             // `dry_run`: no referral send after that, in this run either.
-            if hook.tripped() == Some(true) && matches!(referral, ReferralRun::Live(_)) {
+            if hook.tripped() == Some(true)
+                && matches!(referral, ReferralRun::Live(_) | ReferralRun::LiveShared)
+            {
                 *referral = ReferralRun::DryRun;
                 report.referral_mode = PayoutMode::DryRun;
             }
@@ -1097,9 +1128,13 @@ impl PayoutPass {
                 self.count_referral_dry_run(tenant, account, &link, report)
                     .await
             }
-            ReferralRun::Live(referral_budget) => {
+            ReferralRun::Live(_) | ReferralRun::LiveShared => {
                 // Re-read: the earned send may have marked the recipient.
                 let link = self.reload_live(tenant, account).await?.unwrap_or(link);
+                let referral_budget = match referral {
+                    ReferralRun::Live(referral_budget) => referral_budget,
+                    _ => &mut *budget,
+                };
                 match self
                     .pay_referral(tenant, account, &link, referral_budget, report)
                     .await
@@ -1174,14 +1209,15 @@ impl PayoutPass {
         let referral_total = match link.referral_program.as_deref() {
             None => None,
             Some(program) => {
-                // Read through the referral credential while its stream
-                // runs; otherwise through the rail's own, which reads any
+                // Read through the referral rail while its stream runs
+                // (on the earned budget when the credential is shared); otherwise through the rail's own, which reads any
                 // program of our org (a zero send moves nothing).
                 let (rail, referral_budget, through_referral) =
                     match (self.referral_rail(), &mut *referral) {
                         (Some(on), ReferralRun::Live(referral_budget)) => {
                             (on.rail, referral_budget, true)
                         }
+                        (Some(on), ReferralRun::LiveShared) => (on.rail, &mut *budget, true),
                         _ => (self.rail.as_ref(), &mut *budget, false),
                     };
                 if referral_budget.remaining == 0 {
@@ -1199,7 +1235,7 @@ impl PayoutPass {
                 {
                     Ok(Some(total)) => Some(total),
                     Ok(None) => return Ok(false),
-                    // The referral credential stopped: its stream stops,
+                    // The referral rail stopped: its stream stops,
                     // the link waits for a later pass, the earned stream
                     // goes on.
                     Err(Halt::Stop(label)) if through_referral => {

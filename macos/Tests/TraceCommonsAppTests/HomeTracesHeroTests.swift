@@ -11,7 +11,7 @@ import XCTest
 final class HomeTracesHeroTests: XCTestCase {
     func test_theHeroSaysWhatContributingIsAndOpensTraces() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
-        XCTAssertEqual(words.tracesHeroTitle, "Contribute traces, earn credit")
+        XCTAssertEqual(words.tracesHeroTitle, "Contribute traces, earn credit, use Private AI")
         XCTAssertEqual(
             words.tracesHeroBody,
             "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.")

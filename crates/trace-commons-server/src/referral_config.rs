@@ -274,7 +274,8 @@ impl ReferralConfig {
 // -- The bonus pass's settings (spec sections 4, 5 and 7) --------------------
 //
 // - `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE`: `disabled` (default), `dry_run`
-//   or `live`; `live` without the referral credential and its id refuses
+//   or `live`; `live` sends with the payout credential unless the referral
+//   credential and its id are both set, and one without the other refuses
 //   (`near_ai_referral_config_missing`). The credential itself is read and
 //   checked by `near_ai_rail_config`.
 // - `TRACE_COMMONS_REFERRAL_BONUS_BPS` and `TRACE_COMMONS_REFERRAL_EARN_DAYS`,
@@ -300,7 +301,8 @@ pub const REFERRAL_EARN_DAYS_PROMISED: u32 = REFERRAL_EARN_DAYS_FLOOR;
 pub enum ReferralBonusConfigError {
     #[error("near_ai_referral_mode_invalid")]
     ModeInvalid,
-    /// `live` without the referral credential and its id.
+    /// `live` with one of the referral credential and its id set and not
+    /// the other.
     #[error("near_ai_referral_config_missing")]
     LiveUnconfigured,
     #[error("referral_bonus_bps_invalid")]
@@ -372,13 +374,14 @@ impl ReferralBonusSettings {
     ) -> Result<Self, ReferralBonusConfigError> {
         let mode = PayoutMode::parse(get(NEAR_AI_REFERRAL_MODE_ENV).as_deref())
             .map_err(|_| ReferralBonusConfigError::ModeInvalid)?;
-        // `live` needs the referral credential and its id. They are checked
-        // in full by `near_ai_rail_config::NearAiReferralConfig`; here only
-        // their presence, so the bonus pass never runs `live` without them.
+        // `live` sends with the payout credential unless a dedicated pair is
+        // set (owner decision, 2026-10-29). The pair is checked in full by
+        // `near_ai_rail_config::NearAiReferralConfig`; here only that it is
+        // set whole or not at all.
         if mode == PayoutMode::Live {
             let present = |name: &str| get(name).is_some_and(|value| !value.is_empty());
-            if !present(NEAR_AI_REFERRAL_CREDENTIAL_ENV)
-                || !present(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)
+            if present(NEAR_AI_REFERRAL_CREDENTIAL_ENV)
+                != present(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)
             {
                 return Err(ReferralBonusConfigError::LiveUnconfigured);
             }
@@ -632,16 +635,19 @@ mod bonus_settings_tests {
     }
 
     #[test]
-    fn dry_run_is_accepted_and_live_refuses_without_the_credential() {
+    fn dry_run_and_live_are_accepted_without_a_dedicated_credential() {
         assert_eq!(
             with(&[(NEAR_AI_REFERRAL_MODE_ENV, "dry_run")])
                 .unwrap()
                 .mode,
             PayoutMode::DryRun
         );
-        let live = with(&[(NEAR_AI_REFERRAL_MODE_ENV, "live")]).unwrap_err();
-        assert_eq!(live.label(), "near_ai_referral_config_missing");
-        assert_eq!(live.setting(), NEAR_AI_REFERRAL_MODE_ENV);
+        // Live with neither setting sends with the payout credential (owner
+        // decision, 2026-10-29).
+        assert_eq!(
+            with(&[(NEAR_AI_REFERRAL_MODE_ENV, "live")]).unwrap().mode,
+            PayoutMode::Live
+        );
         let typo = with(&[(NEAR_AI_REFERRAL_MODE_ENV, "dryrun")]).unwrap_err();
         assert_eq!(typo, ReferralBonusConfigError::ModeInvalid);
     }
@@ -664,6 +670,18 @@ mod bonus_settings_tests {
         ])
         .unwrap_err();
         assert_eq!(without_id, ReferralBonusConfigError::LiveUnconfigured);
+        let without_credential = with(&[
+            (NEAR_AI_REFERRAL_MODE_ENV, "live"),
+            (
+                NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV,
+                "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f",
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            without_credential.label(),
+            "near_ai_referral_config_missing"
+        );
     }
 
     #[test]
