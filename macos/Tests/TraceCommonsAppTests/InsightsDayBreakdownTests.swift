@@ -125,7 +125,8 @@ final class InsightsDayBreakdownTests: XCTestCase {
     /// Tokens by day moved to Details (product owner, 2026-10-28).
     func testAClickOnTheChartPicksTheDayAndASecondPutsTheWeekBack() throws {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsTokensByDay.swift")
-        XCTAssertTrue(overview.contains("pickedDay = pickedDay == day.id ? nil : day.id"))
-        XCTAssertTrue(overview.contains("InsightsDayPick.pick(pickedDay, days: overview.by_day)"))
+        XCTAssertTrue(overview.contains("pick(pickedDay == day.id ? nil : day.id)"))
+        let detail = try GlassSurfaceRulesTests.text("Views/InsightsBreakdownInspector.swift")
+        XCTAssertTrue(detail.contains("InsightsDayPick.pick(inspector.pickedDay, days: overview?.shown?.by_day)"))
     }
 }

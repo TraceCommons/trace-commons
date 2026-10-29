@@ -30,17 +30,16 @@ project is not available for saved snapshots. Every word is the core's
 `ui_copy()` analytics table, marked DRAFT pending approval; every figure is
 the core's. Advice, what-if estimates and costs are not shown.
 
-Patterns reads `patterns` and, for each card's "See sessions", the
-`pattern_sessions` list, over the same saved snapshots. Its four cards are
-repeated reads, retried tool calls, "Edit, failed command, edit" (inferred
-from the order of tool calls) and long context, each with the token figure
-first, the count beneath it and six weekly bars; a week with no counted
-Claude Code session is a gap, never a zero bar. The first three are estimates
-from result size; long context is counted input. The figures overlap and do
-not add up to the week's tokens. Only Claude Code sessions record tool calls,
-so a week with Codex sessions says how many sessions the figures cover. The
-re-read table names files only by a letter and the extension; no path is
-stored or shown. Week-to-week change is left out here.
+Breakdown's details are drawn in the Monitor window's inspector, not under
+the chart that asked for them: a day picked on Tokens by day shows that
+day's sessions there and opens the inspector; with nothing picked it shows
+"Breakdown" over the dash.
+
+Breakdown draws no pattern card (owner, 2026-10-29: Retried tool calls, the
+last one, was removed). It reads `patterns` only for the week's scope and
+coverage lines and the weeks it can show; the core still answers
+`patterns` and `pattern_sessions` with every card, for the other shells.
+Week-to-week change is left out under the saved feed.
 
 When the daemon's watched-folder counting (feed T, the
 `insights_counter_pass` setting, on by default since 2026-10-29) is on and readable,

@@ -1,7 +1,8 @@
 //! Where NEAR AI credit went, from the route tallies' charges (product
 //! owner, 2026-10-28, CodexBar-style): one window's sum, and for the
-//! selected week the same sum by inferred task, by tool, by project
-//! folder and by the model that served the calls.
+//! selected week the same sum by project folder and by the model that
+//! served the calls. (By task and by tool were removed with Insights' By
+//! task and By tool views, owner 2026-10-29.)
 //!
 //! - Owner decision 2026-10-28 (overrides D5 for Insights): Insights may
 //!   show money. Only the NEAR AI charge the ledger recorded is summed
@@ -31,17 +32,12 @@ use chrono::{DateTime, Utc};
 
 use super::insights_route_tally::{HourCharge, NearAiCharge};
 
-/// One session's charge and what it is grouped by. The labels are fixed
-/// words or the local folder label; `None` is the unknown group.
+/// One session's charge and the folder it is grouped by: the local folder
+/// label; `None` is the unknown group.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CreditSession<'a> {
     pub charge: &'a NearAiCharge,
     pub last_call_at: DateTime<Utc>,
-    /// `bug_fix`, `refactor`, `tests`, `docs` or `other`: the person's own
-    /// label when set, else the inferred task.
-    pub task: Option<&'a str>,
-    /// `claude_code` or `codex`.
-    pub tool: Option<&'a str>,
     /// The Sessions list's folder label.
     pub folder: Option<&'a str>,
     /// Whether it is a trace, counted in `sessions`; `false` for the spend
@@ -85,11 +81,11 @@ impl Sum {
 /// One window's NEAR AI charge as it crosses the socket: `from` and `to`
 /// (RFC 3339), `usd_micros` (`null` when unknown), `sessions`, `calls`,
 /// `calls_without_charge` and `tokens` (`null` when unknown), and the
-/// `*_known` and `*_partial` figures; with `groups`, also `by_task[]`,
-/// `by_tool[]`, `by_folder[]` and `by_model[]` (the served model, as the
-/// ledger names it, lowercased), each `{key, usd_micros, sessions, calls,
-/// calls_without_charge, tokens}` with the same `*_known` and `*_partial`
-/// figures. A session is in each `by_model` group it had a call in.
+/// `*_known` and `*_partial` figures; with `groups`, also `by_folder[]` and
+/// `by_model[]` (the served model, as the ledger names it, lowercased),
+/// each `{key, usd_micros, sessions, calls, calls_without_charge, tokens}`
+/// with the same `*_known` and `*_partial` figures. A session is in each
+/// `by_model` group it had a call in.
 ///
 /// Groups are in order of known charge, largest first, then the unknown
 /// ones; ties by key, the unknown key (`null`) last.
@@ -101,8 +97,6 @@ pub(crate) fn window_value(
     groups: bool,
 ) -> serde_json::Value {
     let mut total = Sum::default();
-    let mut by_task: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
-    let mut by_tool: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     let mut by_folder: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     let mut by_model: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     for session in sessions {
@@ -111,14 +105,6 @@ pub(crate) fn window_value(
         };
         let counts = session.counts_session;
         total.add(&charge, counts);
-        by_task
-            .entry(session.task)
-            .or_default()
-            .add(&charge, counts);
-        by_tool
-            .entry(session.tool)
-            .or_default()
-            .add(&charge, counts);
         by_folder
             .entry(session.folder)
             .or_default()
@@ -136,8 +122,6 @@ pub(crate) fn window_value(
     value["from"] = serde_json::json!(from.to_rfc3339());
     value["to"] = serde_json::json!(to.to_rfc3339());
     if groups {
-        value["by_task"] = groups_value(by_task);
-        value["by_tool"] = groups_value(by_tool);
         value["by_folder"] = groups_value(by_folder);
         value["by_model"] = groups_value(by_model);
     }
@@ -207,17 +191,10 @@ mod tests {
         charge
     }
 
-    fn session<'a>(
-        charge: &'a NearAiCharge,
-        task: Option<&'a str>,
-        tool: Option<&'a str>,
-        folder: Option<&'a str>,
-    ) -> CreditSession<'a> {
+    fn session<'a>(charge: &'a NearAiCharge, folder: Option<&'a str>) -> CreditSession<'a> {
         CreditSession {
             charge,
             last_call_at: at(0),
-            task,
-            tool,
             folder,
             counts_session: true,
         }
@@ -227,17 +204,14 @@ mod tests {
     fn a_window_sums_only_the_calls_made_in_it() {
         let a = charge(&[(1, Some(100)), (30, Some(5))]);
         let b = charge(&[(2, Some(20))]);
-        let sessions = [
-            session(&a, Some("bug_fix"), Some("codex"), Some("app")),
-            session(&b, Some("docs"), Some("claude_code"), None),
-        ];
+        let sessions = [session(&a, Some("app")), session(&b, None)];
         let day = window_value(&sessions, at(0), at(24), false);
         assert_eq!(day["usd_micros"], 120);
         assert_eq!(day["sessions"], 2);
         assert_eq!(day["calls"], 2);
         assert_eq!(day["calls_without_charge"], 0);
         assert_eq!(day["tokens"], 2_000);
-        assert!(day.get("by_task").is_none());
+        assert!(day.get("by_folder").is_none());
         let next = window_value(&sessions, at(24), at(48), false);
         assert_eq!(next["usd_micros"], 5);
         assert_eq!(next["sessions"], 1);
@@ -252,29 +226,29 @@ mod tests {
         let charged = charge(&[(1, Some(300))]);
         let missing = charge(&[(1, Some(50)), (2, None)]);
         let sessions = [
-            session(&charged, Some("bug_fix"), Some("codex"), Some("app")),
-            session(&missing, Some("docs"), Some("codex"), Some("site")),
+            session(&charged, Some("app")),
+            session(&missing, Some("site")),
         ];
         let week = window_value(&sessions, at(0), at(24 * 7), true);
         assert_eq!(week["usd_micros"], serde_json::Value::Null);
         assert_eq!(week["calls_without_charge"], 1);
-        assert_eq!(week["by_tool"][0]["key"], "codex");
-        assert_eq!(week["by_tool"][0]["usd_micros"], serde_json::Value::Null);
-        let tasks = week["by_task"].as_array().unwrap();
-        assert_eq!(tasks[0]["key"], "bug_fix");
-        assert_eq!(tasks[0]["usd_micros"], 300);
-        assert_eq!(tasks[1]["key"], "docs");
-        assert_eq!(tasks[1]["usd_micros"], serde_json::Value::Null);
-        assert_eq!(tasks[1]["calls_without_charge"], 1);
+        assert!(week.get("by_task").is_none(), "by task was removed");
+        assert!(week.get("by_tool").is_none(), "by tool was removed");
+        let folders = week["by_folder"].as_array().unwrap();
+        assert_eq!(folders[0]["key"], "app");
+        assert_eq!(folders[0]["usd_micros"], 300);
+        assert_eq!(folders[1]["key"], "site");
+        assert_eq!(folders[1]["usd_micros"], serde_json::Value::Null);
+        assert_eq!(folders[1]["calls_without_charge"], 1);
         // Owner, 2026-10-28: the known part as a minimum, partial; unknown
         // only when no call carried a charge.
-        assert_eq!(tasks[1]["usd_micros_known"], 50);
-        assert_eq!(tasks[1]["usd_partial"], true);
-        assert_eq!(tasks[0]["usd_partial"], false);
+        assert_eq!(folders[1]["usd_micros_known"], 50);
+        assert_eq!(folders[1]["usd_partial"], true);
+        assert_eq!(folders[0]["usd_partial"], false);
         assert_eq!(week["usd_micros_known"], 350);
         assert_eq!(week["usd_partial"], true);
         let none = charge(&[(1, None)]);
-        let only_unknown = window_value(&[session(&none, None, None, None)], at(0), at(24), false);
+        let only_unknown = window_value(&[session(&none, None)], at(0), at(24), false);
         assert_eq!(only_unknown["usd_micros_known"], serde_json::Value::Null);
         assert_eq!(only_unknown["usd_partial"], false);
     }
@@ -300,10 +274,7 @@ mod tests {
         // A charge kept before models were, all served by one model.
         let mut single = charge(&[(1, Some(500))]);
         single.served_model = Some("glm-4.6".to_string());
-        let sessions = [
-            session(&mixed, Some("bug_fix"), Some("claude_code"), Some("app")),
-            session(&single, Some("docs"), Some("codex"), Some("site")),
-        ];
+        let sessions = [session(&mixed, Some("app")), session(&single, Some("site"))];
         let week = window_value(&sessions, at(0), at(24 * 7), true);
         let groups = week["by_model"].as_array().unwrap();
         let keys: Vec<serde_json::Value> = groups.iter().map(|g| g["key"].clone()).collect();
@@ -345,12 +316,12 @@ mod tests {
         let b = charge(&[(1, Some(500))]);
         let c = charge(&[(1, Some(10))]);
         let sessions = [
-            session(&a, None, Some("codex"), None),
-            session(&b, Some("tests"), Some("codex"), Some("app")),
-            session(&c, Some("docs"), Some("claude_code"), Some("site")),
+            session(&a, None),
+            session(&b, Some("app")),
+            session(&c, Some("site")),
         ];
         let week = window_value(&sessions, at(0), at(24), true);
-        let keys: Vec<serde_json::Value> = week["by_task"]
+        let keys: Vec<serde_json::Value> = week["by_folder"]
             .as_array()
             .unwrap()
             .iter()
@@ -359,14 +330,12 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                serde_json::json!("tests"),
-                serde_json::json!("docs"),
+                serde_json::json!("app"),
+                serde_json::json!("site"),
                 serde_json::Value::Null
             ]
         );
-        assert_eq!(week["by_folder"][2]["key"], serde_json::Value::Null);
-        assert_eq!(week["by_tool"][0]["key"], "codex");
-        assert_eq!(week["by_tool"][0]["usd_micros"], 510);
-        assert_eq!(week["by_tool"][0]["sessions"], 2);
+        assert_eq!(week["by_folder"][0]["usd_micros"], 500);
+        assert_eq!(week["by_folder"][0]["sessions"], 1);
     }
 }

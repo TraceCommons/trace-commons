@@ -5000,20 +5000,22 @@ sessions on disk. Otherwise:
   `null` (and the flag false) only when no call carried one; a window with
   no call is a true 0. Groups carry the same four fields. `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
-  zero; a window with no call is a true 0. `week` also carries `by_task[]`,
-  `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
-  calls_without_charge}`, grouped by the session's stored row: `key` is the
-  task, the person's own label (`insights_session_label`) when set, else the
-  inferred one (`bug_fix`, `refactor`, `tests`, `docs` or `other`, which
-  takes `no_edits` too, as the task words do), the tool (`claude_code`, `codex`) or the folder's label as
-  `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
+  zero; a window with no call is a true 0. `week` also carries
+  `by_folder[]` and `by_model[]`, each `{key, usd_micros, sessions, calls,
+  calls_without_charge}`. `by_model[]`'s `key` is the served model, as the
+  ledger names it, lowercased, and a session is in each model group it had
+  a call in. `by_folder[]` is grouped by the session's stored row: `key` is the
+  folder's label as `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
   this view: a folder name is answered over this socket and shown on this
   Mac only, never sent anywhere), and `null` when unknown (a session with
   no row, no facts, or no folder the daemon knows, an Analyze snapshot
   included). A group's `usd_micros` is `null` when any call in it had no
   charge. Groups are ordered by known charge, largest first, then the
-  unknown ones; ties by key, `null` last. A daemon that predates it omits
-  it; a shell reads that as no credit figure, never as zero.
+  unknown ones; ties by key, `null` last. `week`'s `by_task[]` and
+  `by_tool[]` were removed (owner, 2026-10-29) with macOS Insights' By task
+  and By tool views, their only reader. A daemon that predates
+  `near_ai_credit` omits it; a shell reads that as no credit figure, never
+  as zero.
 - `usage_by_day[]` (additive, product owner 2026-10-28) is Claude Code and
   Codex tokens on each of the last 7 local days, oldest first, today last,
   each `{date, claude_code, codex}`; it does not move with the week on

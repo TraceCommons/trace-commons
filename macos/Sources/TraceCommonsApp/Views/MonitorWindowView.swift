@@ -128,6 +128,9 @@ struct MonitorWindowView: View {
     @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
     @State private var home = HomeStore(client: nil)
+    /// Insights Breakdown's details, which the inspector shows while
+    /// Breakdown is on screen (owner, 2026-10-29).
+    @State private var insightsInspector = InsightsBreakdownInspector()
 
     /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
     /// set; nil otherwise, and then the live client is attached below. A
@@ -284,7 +287,8 @@ struct MonitorWindowView: View {
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
-                                 subscriptions: model.subscriptionUsageModel, home: home,
+                                 subscriptions: model.subscriptionUsageModel,
+                                 inspector: insightsInspector, home: home,
                                  payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),
                                  openTraces: {
                                      tab = .traces
@@ -493,6 +497,9 @@ struct MonitorWindowView: View {
         // nothing is drawn then either.
         if !model.onboardingKnown || !inspectorAvailable {
             Color.clear
+        } else if shownTab == .insights, let detail = insightsInspector.detail {
+            // Insights' Breakdown: the picked day's sessions.
+            detail()
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // On Traces the prompts and the health banners are drawn
@@ -532,15 +539,18 @@ struct MonitorWindowView: View {
         (tab == .traces && tracesPage == .history) || (tab == .home && homePage == .history)
     }
 
-    /// Whether the inspector may open on what is shown: on Traces, and on
-    /// Home's History, whose opened row is the inspector's. Never on Home's
-    /// other pages (owner, 2026-10-08), Insights or Inference (2026-10-09):
-    /// they have nothing for it to show, and their prompts head their page.
-    static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page) -> Bool {
+    /// Whether the inspector may open on what is shown: on Traces, on
+    /// Home's History, whose opened row is the inspector's, and on Insights
+    /// while its Breakdown tab hands it its details (`insightsDetail`,
+    /// owner 2026-10-29). Never on Home's other pages (owner, 2026-10-08),
+    /// Insights' other tabs or Inference (2026-10-09): they have nothing for
+    /// it to show, and their prompts head their page.
+    static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page, insightsDetail: Bool = false) -> Bool {
         switch shown {
         case .traces: true
         case .home: homePage == .history
-        case .insights, .inference: false
+        case .insights: insightsDetail
+        case .inference: false
         }
     }
 
@@ -554,7 +564,7 @@ struct MonitorWindowView: View {
     }
 
     private var inspectorAvailable: Bool {
-        Self.inspectorAvailable(shownTab, homePage: homePage)
+        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.detail != nil)
     }
 
     /// What the inspector must show right now (`InspectorDemand`); the
@@ -565,6 +575,10 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
+            // A day the person picked on Insights' Breakdown: its
+            // sessions live in the inspector, as a selected Traces session's
+            // card does. On every tab, so showing a tab again is no new key.
+            .union(insightsInspector.demandKey.map { [$0] } ?? [])
     }
 
     /// The tab on screen (`shownTab(_:requiresOnboarding:)`).
