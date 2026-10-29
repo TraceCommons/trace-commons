@@ -17,8 +17,8 @@ calculate independent metrics, discover files, enroll contributors, or
 upload traces.
 
 Overview reads `week_overview` and, for each card's drill-down,
-`card_inputs` from the same local service. It counts only sessions you
-analyzed and saved (feed S), dated by their own recorded timestamps, never by
+`card_inputs` from the same local service. It counts only snapshots saved
+to the local store (feed S), dated by their own recorded timestamps, never by
 when they were imported, in the local ISO week (Monday to Sunday) at the
 shell's current UTC offset. Claude Code and Codex tokens are separate lines
 and are never summed; Codex is the change between its first and last
@@ -26,7 +26,7 @@ counters. A session without usage counters is counted as unknown, never as
 zero, and the coverage line says how many. Week-to-week figures ("vs last
 week", "Your best week") need watched-folder counting and are left out
 here; the feed line says so. By model keeps the core's fixed order (alphabetical, unknown last); By
-project is not available for analyzed files. Every word is the core's
+project is not available for saved snapshots. Every word is the core's
 `ui_copy()` analytics table, marked DRAFT pending approval; every figure is
 the core's. Advice, what-if estimates and costs are not shown.
 
@@ -94,16 +94,18 @@ keep the PNGs.
 
 A dev build is ad-hoc signed, so it cannot read the team keychain access
 group that holds the Insights digest keys: its watched-folder counting
-answers `key_unavailable` and it cannot save an analysis, and every tab is
-empty. For a design review, a Debug build launched with
-`TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
+answers `key_unavailable`, and every tab is empty. For a design review, a
+Debug build launched with `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
 fixed watched-folder week with goals, the lever and the weekly summary, and
 no saved traces. Only the core's copy and the Overview drill-downs go to the
 store. A goal or lever write is answered and kept nowhere; any other write
 is refused, so none reaches the store. A release build never reads the variable.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
-late results. Reopening loads saved results again.
+late results. Reopening Insights, or bringing the app to the front while it
+is open, reads the saved snapshots again. A failed read of the core's copy
+or of the saved snapshots shows an error line under the tab bar (the core's
+own words once its copy has been read).
 
 Verify with a freshly built contributor FFI library:
 
@@ -112,15 +114,10 @@ TC_FFI_LIB_DIR=/path/to/target/debug swift test
 ```
 
 Bridge tests exercise the real ABI with a temporary store; model tests cover
-first-run navigation, explicit persistence, summary refresh/failure, missing
-evidence navigation, unknown/zero/partial coverage, and completion after close.
-The automated suite does not qualify VoiceOver, the native file picker,
-Gatekeeper/notarization, or all display sizes on a packaged release.
-
-Saved details show bounded declared-model metadata with physical source
-coordinates, missing/invalid/omitted counts, and its source digest. Older
-snapshots remain unknown until explicitly reimported. Declarations do not
-verify serving identity or allocate work to a model.
+first-run navigation, the copy-and-list read and its failure line, reading
+the snapshots again, unknown/zero/partial coverage, and completion after
+close. The automated suite does not qualify VoiceOver, Gatekeeper/notarization,
+or all display sizes on a packaged release.
 
 Since store version 13, a Claude Code snapshot also carries usage evidence
 (per-message counters, with the 5-minute and 1-hour cache-write split),
@@ -130,35 +127,5 @@ call. The series holds counts, sizes, dates, declared model labels and keyed
 digests only; no path, body, command, or message, tool or session ID is
 stored in readable form. The digest key is kept in the OS keychain, apart
 from the store. A Claude snapshot saved before version 13 has none of these
-and stays unknown until it is reimported. A record whose counters are not
-all stated is unknown, never zero.
-
-Saved snapshots can link an explicitly selected local repository and full
-commit object ID, or import a selected structured test-report JSON file. The
-import control explains the accepted fields. Git inspection and imported
-report assertions have separate authority labels; neither establishes task
-acceptance or model attribution. Removing a link preserves original files.
-Each picker freezes its snapshot selection (and Git commit); refresh, selection
-changes, and closing invalidate pending selections. Successful link changes
-refresh saved detail, history, and summary; failures clear prior detail.
-
-Episodes group one or more whole saved snapshots selected by the user. The
-native screen creates and lists groups, resolves current member evidence, shows
-snapshot overlap with other groups, and supports complete membership replacement,
-an independent category/outcome assessment, clearing that assessment, and group
-deletion. These groups do not establish task boundaries, independent tasks,
-model attribution, rankings, time saved, or cost.
-
-An open group freezes its ID and revision. Member edits submit the complete
-selection against that revision; assessment and deletion use the same conflict
-check. A conflict discards the draft, refreshes the group, and requires review
-instead of retrying the write. Leaving the group or Insights invalidates pending
-callbacks. Episode IO has separate busy state, so the compact screen keeps its
-snapshot analysis, save, detail, evidence, and assessment controls available.
-
-Snapshot replacement or deletion can remove episode groups. The screen shows
-the committed group IDs and explains the loss of grouping and assessments. This
-notice survives automatic episode/history refresh, including a refresh failure,
-and clears on the next user action or closing Insights. A failed or missing
-episode refresh clears editable detail; a successful mutation is reconciled by
-reading the episode list and current detail from the local service.
+and stays unknown. A record whose counters are not all stated is unknown,
+never zero.
