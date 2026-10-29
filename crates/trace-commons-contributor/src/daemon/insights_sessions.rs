@@ -611,6 +611,7 @@ mod tests {
                     modified_at: written(),
                     started_at: None,
                     group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
                 })
                 .collect();
             self.pass
@@ -1808,6 +1809,7 @@ mod tests {
                 modified_at: written(),
                 started_at: None,
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             })
             .collect();
         s.insights_counter
@@ -1868,6 +1870,7 @@ mod tests {
                     modified_at: written(),
                     started_at: None,
                     group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
                 })
                 .collect();
             self.pass

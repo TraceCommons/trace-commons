@@ -289,6 +289,7 @@ mod tests {
                 modified_at: written,
                 started_at: Some(written),
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             };
             let summary = self
                 .shared

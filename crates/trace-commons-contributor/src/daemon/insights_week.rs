@@ -410,7 +410,8 @@ pub(crate) enum NotAnalyzable {
     /// A Codex file that does not record exactly one `session_meta`.
     NotOneSession,
     /// A file only the counter pass reads, which Analyze & save does not
-    /// find: a compressed Codex rollout.
+    /// find: a compressed Codex rollout, or a session in a NEAR AI managed
+    /// profile.
     InsightsOnly,
 }
 
@@ -862,6 +863,20 @@ pub(crate) struct CounterCandidate {
     pub started_at: Option<DateTime<Utc>>,
     /// Delegated transcripts beside the session file, which are not read.
     pub group_member_count: u32,
+    /// Where the watcher found it.
+    pub role: CandidateRole,
+}
+
+/// Where a counter-pass candidate was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateRole {
+    /// Through the watched sources, as offers are.
+    Watched,
+    /// In a NEAR AI managed profile (`<state>/managed-profiles/<id>/`),
+    /// which only this pass reads. The one copy of its session counted: a
+    /// watched copy of the same session (the post-exit export) is passed
+    /// over. See `superseded_by_profiles`.
+    ManagedProfile,
 }
 
 /// What one pass did. Counts only.
@@ -1185,7 +1200,7 @@ pub(crate) fn row_key(key: &DigestKey, source: &str, path: &Path) -> KeyedDigest
 /// Whether the candidate is read by this pass alone, never offered or
 /// found by Analyze & save.
 fn insights_only(candidate: &CounterCandidate) -> bool {
-    is_compressed_codex(candidate)
+    candidate.role == CandidateRole::ManagedProfile || is_compressed_codex(candidate)
 }
 
 fn is_compressed_codex(candidate: &CounterCandidate) -> bool {
@@ -1207,12 +1222,22 @@ fn read_cost(candidate: &CounterCandidate) -> u64 {
     }
 }
 
-/// Which candidates this pass leaves unread (by index into `candidates`)
-/// because another one is the same session: a compressed Codex rollout and
-/// its plain twin share a row key, and while both are on disk (Codex
-/// between writing one and removing the other) the plain file is read and
-/// the compressed one is not.
-fn superseded_twins(key: &DigestKey, candidates: &[CounterCandidate]) -> BTreeSet<usize> {
+/// Which candidates this pass leaves unread because another one is the
+/// same session (by index into `candidates`), and, for each one whose row
+/// should go, the row key of the candidate that replaces it.
+///
+/// - A compressed Codex rollout and its plain twin share a row key; while
+///   both are on disk (Codex between writing one and removing the other)
+///   the plain file is read and the compressed one is not.
+/// - A session found in a managed profile is counted from there. Any other
+///   candidate whose file name names the same session (the post-exit
+///   export, or a copy in the home folder) is not read, and its row is
+///   dropped once the profile's row exists. The newest profile copy wins
+///   among several.
+fn superseded_by_profiles(
+    key: &DigestKey,
+    candidates: &[CounterCandidate],
+) -> (BTreeSet<usize>, Vec<(KeyedDigest, KeyedDigest)>) {
     let mut skip = BTreeSet::new();
     let mut by_key: BTreeMap<KeyedDigest, usize> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
@@ -1232,7 +1257,38 @@ fn superseded_twins(key: &DigestKey, candidates: &[CounterCandidate]) -> BTreeSe
             }
         }
     }
-    skip
+    let mut profile: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.role != CandidateRole::ManagedProfile || skip.contains(&index) {
+            continue;
+        }
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let slot = profile.entry((candidate.source, id)).or_insert(index);
+        if candidates[*slot].modified_at < candidate.modified_at {
+            *slot = index;
+        }
+    }
+    let mut replaced = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let Some(&keeper) = profile.get(&(candidate.source, id)) else {
+            continue;
+        };
+        if keeper == index {
+            continue;
+        }
+        let own = row_key(key, candidate.source, &candidate.path);
+        let keeper_row = row_key(key, candidates[keeper].source, &candidates[keeper].path);
+        if own != keeper_row {
+            replaced.push((own, keeper_row));
+        }
+        skip.insert(index);
+    }
+    (skip, replaced)
 }
 
 /// `8-4-4-4-12` hex digits.
@@ -1636,7 +1692,7 @@ impl CounterPass {
             }
         }
 
-        let skip = superseded_twins(&key, candidates);
+        let (skip, replaced) = superseded_by_profiles(&key, candidates);
         let mut order: Vec<&CounterCandidate> = candidates
             .iter()
             .enumerate()
@@ -1777,6 +1833,16 @@ impl CounterPass {
                 "insights counter pass could not read compressed sessions; counted as unknown"
             );
         }
+        // A copy of a managed-profile session goes once the profile's own
+        // row exists, so the session is never missing in between.
+        for (copy, keeper) in replaced {
+            let keeper_kept = (current.rows.contains_key(&keeper) && !removals.contains(&keeper))
+                || reads.iter().any(|(session, _)| *session == keeper);
+            if keeper_kept && current.rows.contains_key(&copy) {
+                removals.insert(copy);
+            }
+        }
+
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
         let purge = never_sessions.touches(&current.routing);
@@ -4750,6 +4816,7 @@ mod tests {
             modified_at: written(),
             started_at: Some(written() - Duration::hours(1)),
             group_member_count: 0,
+            role: CandidateRole::Watched,
         }
     }
 

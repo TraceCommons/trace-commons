@@ -4592,9 +4592,9 @@ whatever the last finished pass stored, with its `updated_at`.
 It is not tied to whether a session was offered, sent, kept or
 declined.
 
-Beside the sessions a poll discovers, the pass reads one kind that nothing
+Beside the sessions a poll discovers, the pass reads two kinds that nothing
 offers, queues or uploads, and that `insights_analyze_session` does not
-find (it lists with `analyzable: false`):
+find (each lists with `analyzable: false`):
 - Codex's compressed rollouts. Codex replaces an older
   `rollout-<...>.jsonl` with `rollout-<...>.jsonl.zst` of the same name and
   last write, in the same folder. The pass streams it through a zstd
@@ -4608,6 +4608,14 @@ find (it lists with `analyzable: false`):
   plain name it replaced, so a row first read from the plain file is
   replaced when Codex compresses it, never doubled; while both are on disk
   only the plain file is read.
+- Sessions in NEAR AI managed profiles: each profile's Claude Code
+  `projects/` and Codex `sessions/` under the daemon's `managed-profiles/`
+  folder, compressed rollouts included. A managed session is counted from
+  its profile only: another copy of it the pass finds (the post-exit
+  export, or one in a watched folder), named by its file name, is not
+  read, and that copy's row is dropped once the profile's row exists. Its
+  route joins as every row's does, by the session ID its transcript
+  records.
 
 A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
@@ -5467,7 +5475,8 @@ reaches the network.
   `insights-session-too-large`; a Codex file that does not record exactly
   one `session_meta` (as the pass found it) is
   `insights-session-not-one-session`; a file only the counter pass reads
-  (a compressed Codex rollout) is `insights-session-insights-only`. Such a row lists with `analyzable:
+  (a compressed Codex rollout, or a session in a NEAR AI managed profile)
+  is `insights-session-insights-only`. Such a row lists with `analyzable:
   false`.
 - Any other analysis that fails is `unavailable` with the core's fixed
   label, never a path.

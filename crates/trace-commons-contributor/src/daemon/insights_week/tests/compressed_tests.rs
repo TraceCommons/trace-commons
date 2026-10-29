@@ -1,4 +1,5 @@
-//! Codex's compressed rollouts (`.jsonl.zst`) in the counter pass. A child of `insights_week::tests`, for its fixture.
+//! Codex's compressed rollouts (`.jsonl.zst`) and managed-profile sessions
+//! in the counter pass. A child of `insights_week::tests`, for its fixture.
 
 use super::*;
 
@@ -27,6 +28,13 @@ fn only_row(f: &Fixture) -> CounterRow {
     let store = f.pass.load_cached().unwrap().unwrap();
     assert_eq!(store.rows.len(), 1, "one row");
     store.rows.values().next().unwrap().clone()
+}
+
+fn managed(candidate: CounterCandidate) -> CounterCandidate {
+    CounterCandidate {
+        role: CandidateRole::ManagedProfile,
+        ..candidate
+    }
 }
 
 #[test]
@@ -203,11 +211,104 @@ fn a_compressed_rollout_is_charged_its_decompressed_size() {
     );
 }
 
-/// A compressed row joins its route tally by the session ID the transcript
-/// records, as any other row does: the file's name does not enter the
-/// join, so each reads as the route the ledger recorded.
 #[test]
-fn compressed_rows_carry_the_route_their_calls_recorded() {
+fn a_managed_profile_session_is_counted_and_not_analyzable_here() {
+    let f = Fixture::new();
+    let path = f.write(&rollout_name(), &codex_bytes_for(CODEX_ID));
+    let summary = f.run(&[managed(candidate(SOURCE_CODEX, &path))]);
+    assert_eq!(summary.read, 1);
+    assert_eq!(codex_tokens(&f.week(&[])), 80 + 30);
+    let row = only_row(&f);
+    assert!(row.harness_session.is_some());
+    assert_eq!(row.not_analyzable, Some(NotAnalyzable::InsightsOnly));
+}
+
+#[test]
+fn a_managed_profile_session_in_a_never_folder_is_not_read() {
+    let f = Fixture::new();
+    let path = f.write(&rollout_name(), &codex_bytes_for(CODEX_ID));
+    let summary = run_with(
+        &f.pass,
+        &[managed(candidate(SOURCE_CODEX, &path))],
+        &[PROJECT.to_string()],
+        true,
+    );
+    assert_eq!(summary.read, 0);
+    assert_eq!(f.week(&[PROJECT.to_string()])["sessions_stored"], 0);
+}
+
+/// A managed session copied anywhere else the watcher reads (the
+/// post-exit export, or the home folder) is counted once, from the
+/// profile, and a row already made from the copy is dropped once the
+/// profile's own row exists.
+#[test]
+fn a_managed_session_is_never_also_counted_from_a_copy() {
+    let f = Fixture::new();
+    let copies = f.dir.path().join("copies");
+    let profile = f.dir.path().join("profile");
+    std::fs::create_dir_all(&copies).unwrap();
+    std::fs::create_dir_all(&profile).unwrap();
+    let copy = copies.join(rollout_name());
+    std::fs::write(&copy, codex_bytes_for(CODEX_ID)).unwrap();
+    assert_eq!(f.run(&[candidate(SOURCE_CODEX, &copy)]).read, 1);
+    assert_eq!(f.week(&[])["sessions_stored"], 1);
+
+    let original = profile.join(rollout_name());
+    std::fs::write(&original, codex_bytes_for(CODEX_ID)).unwrap();
+    let summary = f.run(&[
+        candidate(SOURCE_CODEX, &copy),
+        managed(candidate(SOURCE_CODEX, &original)),
+    ]);
+    assert_eq!(summary.read, 1, "only the profile's");
+    assert_eq!(summary.dropped, 1, "the copy's row");
+    let value = f.week(&[]);
+    assert_eq!(value["sessions_stored"], 1);
+    assert_eq!(codex_tokens(&value), 80 + 30);
+    let key = f.pass.keys.load_or_create().unwrap();
+    let store = f.pass.load_cached().unwrap().unwrap();
+    assert!(
+        store
+            .rows
+            .contains_key(&row_key(&key, SOURCE_CODEX, &original))
+    );
+
+    // Next poll: still one, nothing read.
+    let summary = f.run(&[
+        candidate(SOURCE_CODEX, &copy),
+        managed(candidate(SOURCE_CODEX, &original)),
+    ]);
+    assert_eq!(summary.read, 0);
+    assert_eq!(f.week(&[])["sessions_stored"], 1);
+}
+
+/// The copy keeps its row while the profile's session is still being
+/// written: a session is never missing from the count in between.
+#[test]
+fn a_copy_keeps_its_row_until_the_profile_row_exists() {
+    let f = Fixture::new();
+    let copies = f.dir.path().join("copies");
+    let profile = f.dir.path().join("profile");
+    std::fs::create_dir_all(&copies).unwrap();
+    std::fs::create_dir_all(&profile).unwrap();
+    let copy = copies.join(rollout_name());
+    std::fs::write(&copy, codex_bytes_for(CODEX_ID)).unwrap();
+    f.run(&[candidate(SOURCE_CODEX, &copy)]);
+    let original = profile.join(rollout_name());
+    std::fs::write(&original, codex_bytes_for(CODEX_ID)).unwrap();
+    let mut writing = managed(candidate(SOURCE_CODEX, &original));
+    writing.modified_at = now();
+    let summary = f.run(&[candidate(SOURCE_CODEX, &copy), writing]);
+    assert_eq!(summary.read, 0);
+    assert_eq!(summary.dropped, 0);
+    assert_eq!(f.week(&[])["sessions_stored"], 1);
+}
+
+/// A managed-profile row, and a compressed one, join their route tally by
+/// the session ID the transcript records, as any other row does: where the
+/// file lives does not enter the join, so each reads as the route the
+/// ledger recorded.
+#[test]
+fn profile_and_compressed_rows_carry_the_route_their_calls_recorded() {
     let f = Fixture::new();
     let verified_id = CODEX_ID;
     let unverified_id = "66666666-6666-4666-8666-666666666666";
@@ -217,7 +318,7 @@ fn compressed_rows_carry_the_route_their_calls_recorded() {
         &zst(&codex_bytes_for(unverified_id)),
     );
     let summary = f.run(&[
-        candidate(SOURCE_CODEX, &profile),
+        managed(candidate(SOURCE_CODEX, &profile)),
         candidate(SOURCE_CODEX, &compressed),
     ]);
     assert_eq!(summary.read, 2);

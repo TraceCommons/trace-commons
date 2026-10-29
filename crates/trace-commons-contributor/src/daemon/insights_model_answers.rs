@@ -104,6 +104,7 @@ mod tests {
                 modified_at: written(),
                 started_at: None,
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             };
             self.pass
                 .run_pass(&[candidate], &NeverFolders::NONE, now(), QUIET, &mut |_| {
@@ -127,6 +128,7 @@ mod tests {
                         modified_at: written(),
                         started_at: None,
                         group_member_count: 0,
+                        role: crate::daemon::insights_week::CandidateRole::Watched,
                     }
                 })
                 .collect();

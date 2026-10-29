@@ -231,7 +231,7 @@ fn tick_over(
     // Insights feed T, after the offers: a full pass only, and only while
     // the contributor has switched it on. Only the job is made here; the
     // pass reads on its own thread, after this tick has moved on.
-    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices);
+    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices, sources.len());
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
@@ -278,15 +278,23 @@ fn tick_over(
 /// later, on the pass's thread, and only for a session about to be read or
 /// one that may hold a Never folder's route tally.
 ///
-/// Beside the tick's own listing, the job takes each Codex source's
-/// compressed rollouts (`.jsonl.zst`, which Codex leaves in place of older
-/// rollouts; `TraceSource::discover_insights_only`), which only this pass
-/// reads: they are never offered, queued or uploaded.
+/// Beside the tick's own listing, the job takes sessions only this pass
+/// reads, which are never offered, queued or uploaded:
+/// - each Codex source's compressed rollouts (`.jsonl.zst`, which Codex
+///   leaves in place of older rollouts; `TraceSource::discover_insights_only`);
+/// - every NEAR AI managed profile's Claude Code `projects/` and Codex
+///   `sessions/` (`NativeProfiles::existing_roots`), read by sources this
+///   job owns. A managed session is counted from its profile only; a
+///   watched copy of it is passed over (`insights_week::CandidateRole`).
+///
+/// A Never folder is left out whichever root a session lives in: its
+/// folder is resolved from the session's own cwd, as for any session.
 fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
     source_indices: &[usize],
+    tick_sources: usize,
 ) -> Option<CounterJobDraft> {
     let (enabled, quiescence_secs) = {
         let s = shared.settings.lock().expect("settings lock");
@@ -295,6 +303,7 @@ fn counter_pass_job(
     if !enabled {
         return None;
     }
+    use super::insights_week::CandidateRole;
     let mut job = CounterCandidates::default();
     for ((source, refs), &source_index) in discovered.iter().zip(source_indices) {
         if !matches!(
@@ -305,11 +314,32 @@ fn counter_pass_job(
         }
         // `source_index` is which of the tick's own sources this is, so the
         // job can own it.
-        job.add(source_index, refs, false);
+        job.add(source_index, refs, CandidateRole::Watched, false);
         // Compressed rollouts: an error lists none, and leaves the tick's
         // own listing as it is.
         if let Ok(compressed) = source.discover_insights_only() {
-            job.add(source_index, &compressed, true);
+            job.add(source_index, &compressed, CandidateRole::Watched, true);
+        }
+    }
+    let mut extra_sources: Vec<Box<dyn TraceSource>> = Vec::new();
+    for root in crate::managed::profiles::NativeProfiles::new(&shared.store).existing_roots() {
+        let profile: [Box<dyn TraceSource>; 2] = [
+            Box::new(crate::source::claude_code::ClaudeCodeSource::new(
+                root.join("projects"),
+            )),
+            Box::new(crate::source::codex::CodexSource::new(
+                root.join("sessions"),
+            )),
+        ];
+        for source in profile {
+            let index = tick_sources + extra_sources.len();
+            if let Ok(refs) = source.discover() {
+                job.add(index, &refs, CandidateRole::ManagedProfile, true);
+            }
+            if let Ok(refs) = source.discover_insights_only() {
+                job.add(index, &refs, CandidateRole::ManagedProfile, true);
+            }
+            extra_sources.push(source);
         }
     }
     let CounterCandidates {
@@ -321,6 +351,7 @@ fn counter_pass_job(
     Some(CounterJobDraft {
         candidates,
         origins,
+        extra_sources,
         never_project_keys,
         now,
         quiescence_secs,
@@ -329,11 +360,12 @@ fn counter_pass_job(
 
 /// Where one counter-pass candidate came from.
 struct CounterOrigin {
-    /// Its source: an index into the tick's sources.
+    /// Its source: an index into the tick's sources, then the job's own.
     source_index: usize,
     session_ref: SessionRef,
     observation: Observation,
-    /// Read by the counter pass alone (a compressed rollout): its folder is resolved without the watcher's
+    /// Read by the counter pass alone (a compressed rollout, or a managed
+    /// profile's session): its folder is resolved without the watcher's
     /// cwd cache, which counts the sessions the watcher offers per folder.
     insights_only: bool,
 }
@@ -346,7 +378,13 @@ struct CounterCandidates {
 }
 
 impl CounterCandidates {
-    fn add(&mut self, source_index: usize, refs: &[SessionRef], insights_only: bool) {
+    fn add(
+        &mut self,
+        source_index: usize,
+        refs: &[SessionRef],
+        role: super::insights_week::CandidateRole,
+        insights_only: bool,
+    ) {
         for session_ref in refs {
             let modified_at = match session_ref.group_modified_at {
                 Some(at) => at,
@@ -364,6 +402,7 @@ impl CounterCandidates {
                     modified_at,
                     started_at: session_ref.started_at,
                     group_member_count: session_ref.group_member_count,
+                    role,
                 });
             self.origins.push(CounterOrigin {
                 source_index,
@@ -384,6 +423,8 @@ struct CounterJobDraft {
     candidates: Vec<super::insights_week::CounterCandidate>,
     /// Per candidate (`CounterCandidate::origin`).
     origins: Vec<CounterOrigin>,
+    /// Sources only this job reads (managed profiles), after the tick's.
+    extra_sources: Vec<Box<dyn TraceSource>>,
     never_project_keys: super::insights_week::NeverFolders,
     now: DateTime<Utc>,
     quiescence_secs: u64,
@@ -392,8 +433,9 @@ struct CounterJobDraft {
 impl CounterJobDraft {
     /// The job, owning `sources` so the pass's thread can resolve a
     /// session's folder through the same cwd cache the watcher uses.
-    fn into_job(self, sources: Vec<Box<dyn TraceSource>>) -> super::insights_week::CounterJob {
+    fn into_job(self, mut sources: Vec<Box<dyn TraceSource>>) -> super::insights_week::CounterJob {
         let origins = self.origins;
+        sources.extend(self.extra_sources);
         // The folder's resolved rule, the contribution override included
         // (owner decision D4): a global Never leaves every folder out, as
         // it does from sending. The state and policy locks are each taken
@@ -2947,6 +2989,109 @@ mod tests {
         );
         tick(&f.shared, later).await.unwrap();
         assert_eq!(stored(&f), 2, "read again once the override is cleared");
+    }
+
+    /// The counter pass also reads Codex's compressed rollouts and every
+    /// NEAR AI managed profile's sessions, which nothing offers, queues or
+    /// uploads. A managed session copied into a watched folder is counted
+    /// once, from its profile; a Never folder is left out wherever the
+    /// session file lives.
+    #[tokio::test]
+    async fn the_counter_pass_reads_compressed_rollouts_and_managed_profiles_only_for_insights() {
+        let f = WatcherFixture::new();
+        f.write_session("home", "11111111-1111-1111-1111-111111111111", 0);
+        let claude_body = |project: &str, id: &str| {
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
+                 \"cwd\":\"{cwd}\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+                 \"version\":\"2.0.1\",\"sessionId\":\"{id}\",\"uuid\":\"a1\"}}\n"
+            )
+        };
+        // A managed Claude profile's session, and its copy in the watched
+        // folder (as the post-exit export would make).
+        let managed_id = "22222222-2222-2222-2222-222222222222";
+        let profile = f
+            .shared
+            .store
+            .dir()
+            .join("managed-profiles")
+            .join(uuid::Uuid::new_v4().to_string());
+        let profile_project = profile.join("projects/-Users-testuser-code-managed");
+        std::fs::create_dir_all(&profile_project).unwrap();
+        let profile_session = profile_project.join(format!("{managed_id}.jsonl"));
+        std::fs::write(&profile_session, claude_body("managed", managed_id)).unwrap();
+        let copy_project = f.claude_root.join("-Users-testuser-code-managed");
+        std::fs::create_dir_all(&copy_project).unwrap();
+        std::fs::write(
+            copy_project.join(format!("{managed_id}.jsonl")),
+            claude_body("managed", managed_id),
+        )
+        .unwrap();
+        // A compressed rollout in the watched Codex folder, and one in the
+        // profile's Codex folder.
+        let rollout = |project: &str, id: &str| {
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+            let meta = format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\"}}}}\n"
+            );
+            zstd::bulk::compress(meta.as_bytes(), 3).unwrap()
+        };
+        let codex_day = f._dir.path().join("codex-sessions/2026/08/08");
+        std::fs::create_dir_all(&codex_day).unwrap();
+        std::fs::write(
+            codex_day
+                .join("rollout-2026-08-08T10-00-00-33333333-3333-3333-3333-333333333333.jsonl.zst"),
+            rollout("zipped", "33333333-3333-3333-3333-333333333333"),
+        )
+        .unwrap();
+        let profile_day = profile.join("sessions/2026/08/08");
+        std::fs::create_dir_all(&profile_day).unwrap();
+        std::fs::write(
+            profile_day
+                .join("rollout-2026-08-08T11-00-00-44444444-4444-4444-4444-444444444444.jsonl.zst"),
+            rollout("managed", "44444444-4444-4444-4444-444444444444"),
+        )
+        .unwrap();
+
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        f.settle(later).await;
+        tick(&f.shared, later).await.unwrap();
+        // home, the managed Claude session once, and two compressed rollouts.
+        assert_eq!(stored(&f), 4);
+        // Nothing only the counter pass reads was offered.
+        for entry in f.shared.queue.lock().unwrap().all() {
+            let path = entry.path.to_string_lossy().to_string();
+            assert!(!path.contains("managed-profiles"), "{path}");
+            assert!(!path.ends_with(".zst"), "{path}");
+        }
+        assert!(
+            f.shared
+                .state
+                .lock()
+                .unwrap()
+                .cwd_cache
+                .keys()
+                .all(|path| !path.contains("managed-profiles") && !path.ends_with(".zst")),
+            "the per-folder session counts never see them"
+        );
+
+        // A Never folder is left out, whichever root its sessions are in.
+        f.set_mode("managed", ProjectMode::Ignore);
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2);
     }
 
     /// A session still being written is not read by the counter pass.
