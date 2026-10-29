@@ -2941,6 +2941,18 @@ for that project already carries.
 `unknown-project` bucket reports `notify_only` even if a hand-edited policy
 file says `auto_upload`, because the daemon refuses to act on that.
 
+#### `offerable_modes`
+
+The modes `set_project_mode` accepts for this row, in display order. The
+unknown-project bucket (`is_unresolved_bucket`) carries
+`["notify_only", "ignore"]`, since it can never be armed. Every other row
+carries `["notify_only", "auto_upload", "ignore"]`, under the
+include-existing grant too (see `grant_automatic` below): there a folder set
+to `notify_only` is an exception to the grant, as one set to `ignore` is.
+Until 2026-10-29 a row under that grant carried only
+`["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
+`automatic-sharing-requires-ignore`; both are gone.
+
 #### `unpurposed_traces` (K7)
 
 A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
@@ -3777,6 +3789,24 @@ themselves.
 That is what makes a re-grant after logout safe. Logout wipes the policy,
 including a project set to `ignore`; a re-grant records the disk again, so that
 project asks rather than being armed as new.
+
+**The include-existing grant.** `grant_automatic_including_existing` (or
+`grant_automatic` with `include_existing: true`) widens the grant to every
+watched folder's existing history. It is a fresh global choice: it clears any
+contribution override, drops per-folder arm-from-now holds, and arms every
+folder whose mode is `notify_only` on the next session the watcher sees there,
+including folders set to `notify_only` before the grant. A folder set to
+`ignore` is never armed. Neither is a folder set to `notify_only` **after**
+the grant (owner decision 2026-10-29): it is an exception to the grant, so it
+resolves to Ask, its sessions wait as `pending`, and every other folder stays
+automatic. "After" is the folder's own last mode change, strictly later than
+`granted_at`, so a later include-existing grant supersedes the exception in
+the same way. A folder the grant armed and a void then returned to
+`notify_only` keeps asking too. Setting the folder back to `auto_upload`
+arms it with its backlog (`include_backlog: false` is refused with
+`automatic-sharing-includes-existing` under this grant), so what it held as
+`pending` is approved on the next pass. Adopting the contributor's chosen
+data uses (`adopt_chosen_scopes`, #1739) keeps the grant and its exceptions.
 
 Widened terms void the grant itself as well as the projects it armed, with an
 `automatic-grant-voided` entry. `withdraw_automatic_grant` returns

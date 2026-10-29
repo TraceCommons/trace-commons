@@ -4930,10 +4930,11 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         let project_seen = seen.get(key);
         let session_count = project_seen.map_or(0, |s| s.count);
         let last_session_at = project_seen.and_then(|s| s.last_modified_at);
+        // Ask is offered on every real folder, under the include-existing
+        // grant too: there it is an exception to the grant, as Never is
+        // (`ProjectPolicy::asks_despite_grant`, owner decision 2026-10-29).
         row["offerable_modes"] = serde_json::json!(if key == UNKNOWN_PROJECT_KEY {
             vec![ProjectMode::NotifyOnly, ProjectMode::Ignore]
-        } else if policy.includes_existing_automatically() {
-            vec![ProjectMode::AutoUpload, ProjectMode::Ignore]
         } else {
             vec![
                 ProjectMode::NotifyOnly,
@@ -5521,10 +5522,10 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let label = disambiguated_label(&key, shown.as_deref(), &known);
         (key, label)
     };
+    // Ask is accepted under the include-existing grant: the folder becomes an
+    // exception to it (`ProjectPolicy::asks_despite_grant`). Automatic from
+    // now is not, because the grant already includes every folder's backlog.
     let broad_automatic = policy.includes_existing_automatically();
-    if broad_automatic && key != UNKNOWN_PROJECT_KEY && mode == ProjectMode::NotifyOnly {
-        return Response::err(req.id, ERR_BAD_PARAMS, "automatic-sharing-requires-ignore");
-    }
     if broad_automatic && mode == ProjectMode::AutoUpload && include_backlog == Some(false) {
         return Response::err(
             req.id,

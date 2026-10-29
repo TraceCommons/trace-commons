@@ -4897,35 +4897,60 @@ mod tests {
         assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
     }
 
+    /// Owner decision 2026-10-29 (Ron's staging report): Ask is offered on
+    /// every real folder under the include-existing grant, beside Automatic
+    /// and Never. The unknown bucket keeps its own two.
     #[tokio::test]
-    async fn onboarding_broad_grant_offers_only_effective_modes_and_refuses_stale_ask() {
+    async fn onboarding_broad_grant_offers_ask_and_refuses_only_a_from_now_arming() {
         let f = WatcherFixture::new();
         f.shared
             .store
             .save_config(&grant_test_cfg(&["debugging_evaluation"]))
             .unwrap();
         f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session_with_cwd(
+            "no-cwd",
+            "relative/dir",
+            "22222222-2222-2222-2222-222222222222",
+        );
         grant_automatic_with_existing(&f);
         f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         let key = project_key_for(Some(&abs("Users/testuser/code/old")));
-        let listed = ipc_call(&f, "list_projects", serde_json::json!({}))
-            .result
-            .unwrap();
+        let listed = ipc_call(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        )
+        .result
+        .unwrap();
         let rows = listed["projects"].as_array().unwrap();
         let id = crate::daemon::policy::project_id_for(&key);
         let row = rows.iter().find(|row| row["project_id"] == id).unwrap();
         assert_eq!(
             row["offerable_modes"],
-            serde_json::json!(["auto_upload", "ignore"])
+            serde_json::json!(["notify_only", "auto_upload", "ignore"])
+        );
+        let unknown_id =
+            crate::daemon::policy::project_id_for(crate::daemon::policy::UNKNOWN_PROJECT_KEY);
+        let unknown = rows
+            .iter()
+            .find(|row| row["project_id"] == unknown_id)
+            .unwrap_or_else(|| panic!("no unknown bucket row in {rows:?}"));
+        assert_eq!(
+            unknown["offerable_modes"],
+            serde_json::json!(["notify_only", "ignore"])
         );
         let before = f.shared.policy.lock().unwrap().clone();
-        for params in [
-            serde_json::json!({"project_id": id, "mode": "notify_only"}),
-            serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
-        ] {
-            assert!(ipc_call(&f, "set_project_mode", params).error.is_some());
-            assert_eq!(*f.shared.policy.lock().unwrap(), before);
-        }
+        assert!(
+            ipc_call(
+                &f,
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
+            )
+            .error
+            .is_some()
+        );
+        assert_eq!(*f.shared.policy.lock().unwrap(), before);
         // Re-sending Automatic must not introduce a new history hold.
         assert!(
             ipc_call(
@@ -4953,6 +4978,68 @@ mod tests {
             .is_none()
         );
         assert_eq!(mode_of(&f, "old"), (ProjectMode::Ignore, true));
+    }
+
+    /// A folder set to Ask after the include-existing grant is an exception
+    /// to it: what it had approved unattended goes back to waiting, its new
+    /// sessions wait for a person, and every other folder under the grant
+    /// stays automatic. Setting it back to Automatic resumes, backlog
+    /// included, as the grant's own arming did.
+    #[tokio::test]
+    async fn a_folder_set_to_ask_under_the_broad_grant_waits_while_the_rest_stay_automatic() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let old_ask = f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        let old_auto = f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &old_auto), (QueueState::Approved, true));
+
+        let key = project_key_for(Some(&abs("Users/testuser/code/ask")));
+        let id = crate::daemon::policy::project_id_for(&key);
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "notify_only"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["retracted"], 1);
+        assert_eq!(state_at(&f, &old_ask).0, QueueState::Pending);
+
+        let new_ask = f.write_session("ask", "33333333-3333-3333-3333-333333333333", 0);
+        let new_auto = f.write_session("auto", "44444444-4444-4444-4444-444444444444", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::NotifyOnly, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_auto), (QueueState::Approved, true));
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .includes_existing_automatically()
+        );
+        let status = ipc_call(&f, "status", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(status["decisions_owed"], 2, "{status}");
+
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "auto_upload"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["from_now"], false);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::AutoUpload, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Approved, true));
     }
 
     #[tokio::test]
