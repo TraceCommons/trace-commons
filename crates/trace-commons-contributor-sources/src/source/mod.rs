@@ -65,11 +65,11 @@ pub struct SessionTooLarge {
 /// over 64 MB and 3 over 256 MB.
 ///
 /// This bounds what is read, not what is sent. `MAX_TRACE_ENVELOPE_BYTES`
-/// (16 MB after redaction) is unchanged and still refuses an over-cap
-/// envelope locally, at approval, as `envelope-too-large`. At the measured
-/// median of about 3.4 raw bytes per envelope byte, most sessions above
-/// roughly 55 MB still build an envelope over that cap: this figure lets
-/// them be previewed, and the envelope cap decides whether they can be
+/// (512 MiB after redaction, raised from 16 MB on 2026-10-29) still refuses
+/// an over-cap envelope locally, at approval, as `envelope-too-large`, and
+/// the preview says so up front. At the measured median of about 3.4 raw
+/// bytes per envelope byte, a session this size almost always builds an
+/// envelope under that cap; the envelope cap decides whether it can be
 /// sent.
 ///
 /// Memory: measured on synthetic sessions in a release build, a preview's

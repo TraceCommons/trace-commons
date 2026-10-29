@@ -103,11 +103,19 @@ pub const PRIVACY_FILTER_CANARY_VERSION: &str = "trace-privacy-filter-canary-v1"
 /// bought nothing. Everything downstream is now derived from this value with
 /// explicit headroom, and tests assert the ordering holds.
 ///
-/// Sized for whole agent coding sessions: a 42 MB raw session redacts to
-/// roughly 2.8 MB of envelope, so this clears the observed worst case by a
-/// wide margin. Scoring cost does not scale with it -- the gate chunk cap
-/// bounds how much of a trace is ever scored.
-pub const MAX_TRACE_ENVELOPE_BYTES: usize = 16_000_000;
+/// 512 MiB, the same number as the contributor's per-session read limit
+/// (`source::MAX_SESSION_BYTES`), owner decision 2026-10-29. Real sessions
+/// shrink about 3.4:1 (median) on the way to an envelope, so a session the
+/// contributor will read almost always builds an envelope under this. Binary
+/// units on purpose, to match the session limit; the value was 16,000,000
+/// (decimal) before.
+///
+/// Scoring cost does not scale with it -- the gate chunk cap bounds how much
+/// of a trace is ever scored. Memory does: ingest buffers the whole body and
+/// makes copies of it, so the large-body byte budget in ingest
+/// (`LARGE_BODY_GLOBAL_BYTES`) is what keeps a few concurrent uploads at this
+/// size from exhausting the server.
+pub const MAX_TRACE_ENVELOPE_BYTES: usize = 512 * 1024 * 1024;
 /// Largest single field text an external privacy filter will accept.
 ///
 /// Tied to the envelope cap, because any one event could in principle carry

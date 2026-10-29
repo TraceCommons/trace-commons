@@ -245,6 +245,13 @@ async fn round_trip(
     (written, elapsed, receipt_status)
 }
 
+/// Above the old 16 MB cap, in the default run: a 24 MB envelope is accepted
+/// and reads back whole.
+#[tokio::test]
+async fn an_envelope_above_the_old_cap_round_trips() {
+    round_trip(24_000_000, true).await;
+}
+
 /// Manual probe, for the peak resident set of one large submission:
 ///
 /// ```text

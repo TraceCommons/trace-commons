@@ -64,10 +64,10 @@ use super::{
 /// the daemon's preview admission cap.
 ///
 /// It bounds what is read, not what can be sent. `MAX_TRACE_ENVELOPE_BYTES`
-/// is 16 MB *after* redaction and mapping, and at the measured median of
-/// about 3.4 raw bytes per envelope byte a group over roughly 55 MB builds
-/// an envelope over it. Such a group is previewed, then refused locally at
-/// approval as `envelope-too-large`, as a whole. This budget no longer tries
+/// is 512 MiB *after* redaction and mapping; at the measured median of
+/// about 3.4 raw bytes per envelope byte a group rarely builds an envelope
+/// over it. One that does is previewed with that warning, then refused
+/// locally at approval as `envelope-too-large`, as a whole. This budget no longer tries
 /// to keep groups under the envelope cap; it bounds the daemon's memory.
 ///
 /// When a group exceeds this, `load` drops its largest members until it

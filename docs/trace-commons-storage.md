@@ -707,6 +707,35 @@ Primary key: `(tenant_id, submission_id, consent_scope)`.
 
 Object keys must not reveal raw user ids, local paths, prompt content, or secrets. The service, not reviewer/user tokens, owns object-store credentials. Any backend write that stores an object reference must prove the referenced object belongs to the same `(tenant_id, submission_id)` as the row being written; bare UUID lookups are not sufficient in a multitenant corpus.
 
+### Envelope Size and Ingest Memory
+
+The largest envelope is `MAX_TRACE_ENVELOPE_BYTES` in
+`crates/trace-commons-protocol` (512 MiB since 2026-10-29; 16,000,000 bytes
+before). Ingest derives its request-body ceiling from it (`+ 4 MiB` of
+framing) and the contributor refuses a larger envelope locally as
+`envelope-too-large`.
+
+Ingest buffers the whole request body and, while it processes a submission,
+holds several copies of it at once: the raw body (kept for the witness
+digest), the parsed envelope, the compact serialization that is encrypted,
+the ciphertext, and its base64 form inside the JSON artifact record (the
+v1/v2 artifact formats store `ciphertext_base64` inside a JSON object, and
+AEAD is one-shot over the whole plaintext). Resident memory for one upload is
+therefore a multiple of its size; `large_envelope_tests` in the ingest crate
+measures it (`large_envelope_submit_probe`,
+`large_envelope_pilot_shaped_submit_probe`, and
+`pipeline_http_pg_tests::large_envelope_pipeline_receipt_probe`). Reads that
+decrypt an envelope (workers, account read-back, exports) hold a similar
+multiple.
+
+Uploads are admitted against a deployment-wide byte budget
+(`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`, default one maximal upload plus
+128 MiB) by declared `Content-Length`, before the body is read; size it with
+that multiple against the host's memory. Reads are not under that budget.
+Reducing the multiple below roughly 3x needs a streaming artifact format
+(raw ciphertext, chunked AEAD, streamed to the object store), which is a
+change to this contract.
+
 ### Derived Records
 
 `trace_derived_records`

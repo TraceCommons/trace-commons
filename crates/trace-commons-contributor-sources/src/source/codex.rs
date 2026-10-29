@@ -445,9 +445,9 @@ fn decompressed_bytes_memoized(
 /// One number, not two, because these bound the same thing -- how much of
 /// one conversation may become resident on its way to being discarded.
 ///
-/// It bounds what is read, not what can be sent: a rollout over roughly
-/// 55 MB usually builds an envelope over `MAX_TRACE_ENVELOPE_BYTES`, which
-/// is refused locally at approval as `envelope-too-large`.
+/// It bounds what is read, not what can be sent: a rollout whose envelope
+/// comes out over `MAX_TRACE_ENVELOPE_BYTES` (512 MiB) is refused locally
+/// at approval as `envelope-too-large`.
 const ROLLOUT_BYTE_BUDGET: u64 = super::MAX_SESSION_BYTES;
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {

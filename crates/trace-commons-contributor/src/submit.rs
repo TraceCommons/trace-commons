@@ -679,6 +679,13 @@ pub struct SubmitContext<'a> {
     /// `subagents_dropped`, the one second-look input the envelope does not.
     /// One-shot, like the hold above.
     hold_unless_scrub_clear: Option<u32>,
+    /// The large-session gate, when the session about to be submitted is
+    /// over `large_session_gate::LARGE_SESSION_BYTES` and its caller took
+    /// the gate before reading it. `submit_loaded` takes it at the start
+    /// and drops it once the envelope is built and checked, right before
+    /// the upload, so the network transfer never holds it. One-shot, like
+    /// the holds above.
+    large_session_permit: Option<crate::large_session_gate::LargeSessionPermit>,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -792,6 +799,7 @@ impl<'a> SubmitContext<'a> {
             approved_token_bundle: None,
             hold_unless_low_risk: false,
             hold_unless_scrub_clear: None,
+            large_session_permit: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
@@ -1435,6 +1443,18 @@ impl<'a> SubmitContext<'a> {
         self.background_witness = true;
     }
 
+    /// Hand the next `submit_loaded` the large-session gate its caller took
+    /// before reading the session, so the gate stays held through the build
+    /// and is released before the upload. See `crate::large_session_gate`.
+    /// Set immediately before the call, like `set_upload_provenance`, so it
+    /// cannot outlive the submission it was taken for.
+    pub fn hold_large_session_permit(
+        &mut self,
+        permit: crate::large_session_gate::LargeSessionPermit,
+    ) {
+        self.large_session_permit = Some(permit);
+    }
+
     /// Record the queue entry's provenance for the very next submission this
     /// context runs (K7). One-shot, like `use_approved_envelope`: taken at
     /// the top of `submit_loaded` so it cannot leak onto whatever session
@@ -1484,6 +1504,9 @@ impl<'a> SubmitContext<'a> {
         source: &dyn TraceSource,
         session_ref: &SessionRef,
     ) -> Result<SubmitOutcome> {
+        // Before the read: a large session waits here for any other large
+        // build to finish. See `crate::large_session_gate`.
+        let permit = crate::large_session_gate::admit(session_ref.size_bytes).await;
         let transcript = match source.load(session_ref) {
             Ok(t) => t,
             Err(_) => {
@@ -1492,6 +1515,7 @@ impl<'a> SubmitContext<'a> {
                 });
             }
         };
+        self.large_session_permit = Some(permit);
         self.submit_loaded(transcript).await
     }
 
@@ -1537,6 +1561,9 @@ impl<'a> SubmitContext<'a> {
         };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
         let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
+        // Held until the envelope is built and checked, and dropped before
+        // either upload below; every early return drops it too.
+        let large_session_permit = self.large_session_permit.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1903,6 +1930,10 @@ impl<'a> SubmitContext<'a> {
         // Every check above has passed, so this is the certificate the send
         // below carries, if it goes.
         self.last_sent_witness = witnessed.clone();
+
+        // The envelope is built and measured; the network transfer below
+        // must not keep the next large session waiting.
+        drop(large_session_permit);
 
         if let Some(bundle) = self.approved_token_bundle.take() {
             let journal =
@@ -2693,6 +2724,47 @@ pub(crate) fn build_ingest_client(
     .build()
 }
 
+/// The least time any `/v1/traces` upload is given, however small its body:
+/// room for the TLS handshake, the server's admission checks and its
+/// answer, none of which scale with the body.
+pub(crate) const UPLOAD_TIMEOUT_FLOOR: StdDuration = StdDuration::from_secs(60);
+
+/// The slowest uplink an upload is sized for, in bytes per second: 1 Mbit/s.
+/// A contributor on a slower link can still time out on a large body; one
+/// on any faster link cannot.
+pub(crate) const UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC: u64 = 125_000;
+
+/// The whole-request timeout for a `/v1/traces` upload of `body_len` bytes:
+/// [`UPLOAD_TIMEOUT_FLOOR`] plus the time the body takes at
+/// [`UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC`], rounded up to the second.
+///
+/// The operator client's default is a flat 30 s, which is right for the
+/// small calls that share [`build_ingest_client`] and wrong for an envelope
+/// that can now be 512 MiB (about 140 Mbit/s to send in 30 s). Only the
+/// upload uses this.
+pub(crate) fn upload_timeout(body_len: u64) -> StdDuration {
+    UPLOAD_TIMEOUT_FLOOR.saturating_add(StdDuration::from_secs(
+        body_len.div_ceil(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC),
+    ))
+}
+
+/// [`build_ingest_client`] with its timeout sized for an upload of
+/// `body_len` bytes. See [`upload_timeout`].
+fn build_upload_client(
+    cfg: &ContributorConfig,
+    token: &ClaimToken,
+    body_len: u64,
+) -> std::result::Result<Client, OcError> {
+    Client::builder(
+        &cfg.ingest_url,
+        "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
+    )
+    .bearer_token(&token.access_token)
+    .host_allowlist(config_allowlist(cfg))
+    .timeout(upload_timeout(body_len))
+    .build()
+}
+
 /// Upload `envelope`, retrying transient transport failures up to 3 attempts
 /// total (1s then 4s backoff) and, on a 401/403, re-minting the claim once
 /// and retrying once more before giving up.
@@ -2737,7 +2809,16 @@ async fn upload_with_retry(
             .as_ref()
             .expect("a claim must be minted before uploading")
             .clone();
-        let client = match build_ingest_client(cfg, &token) {
+        // The length of exactly the body this attempt sends, measured
+        // without materialising it: the certified bytes for a witnessed
+        // upload, and for an ordinary one the counting-sink serialization of
+        // the same value `call_json` is about to serialize (re-measured each
+        // attempt, because a re-mint restamps the scopes). Should the
+        // measurement ever fail, the timeout is sized for the largest
+        // envelope there is rather than for nothing.
+        let body_len =
+            sent_envelope_bytes(envelope, witnessed).unwrap_or(MAX_ENVELOPE_BYTES as u64);
+        let client = match build_upload_client(cfg, &token, body_len) {
             Ok(c) => c,
             Err(e) => return Err(e.kind().to_string()),
         };
@@ -2934,6 +3015,35 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_upload_timeout_grows_with_the_body() {
+        // An empty body still gets the whole floor.
+        assert_eq!(upload_timeout(0), UPLOAD_TIMEOUT_FLOOR);
+        // One second of the slowest uplink assumed adds one second.
+        assert_eq!(
+            upload_timeout(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC),
+            UPLOAD_TIMEOUT_FLOOR + StdDuration::from_secs(1)
+        );
+        // A byte past a whole second rounds up, never down.
+        assert_eq!(
+            upload_timeout(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC + 1),
+            UPLOAD_TIMEOUT_FLOOR + StdDuration::from_secs(2)
+        );
+        // A body at the envelope limit: 512 MiB at 1 Mbit/s is 4295 s on
+        // top of the floor, far past the operator client's 30 s default.
+        let at_limit = upload_timeout(MAX_ENVELOPE_BYTES as u64);
+        assert_eq!(
+            at_limit,
+            UPLOAD_TIMEOUT_FLOOR
+                + StdDuration::from_secs(
+                    (MAX_ENVELOPE_BYTES as u64).div_ceil(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC)
+                )
+        );
+        assert!(at_limit > StdDuration::from_secs(30 * 60));
+        // Never overflows, whatever length it is handed.
+        assert!(upload_timeout(u64::MAX) > at_limit);
+    }
     use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
@@ -3989,6 +4099,31 @@ mod tests {
         assert!(note.contains("TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS"));
         assert!(residual_risk_storage_note(ResidualPiiRisk::Low).contains("accepted"));
         assert!(residual_risk_storage_note(ResidualPiiRisk::High).contains("quarantines"));
+    }
+
+    /// What the CLI prints for an over-size session: `refused
+    /// (session-too-large) session=… size=… limit=…`. The limit is the
+    /// envelope cap itself, never a literal.
+    #[test]
+    fn refused_for_size_names_the_session_the_size_and_the_limit() {
+        let outcome = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1);
+        match outcome {
+            SubmitOutcome::Refused {
+                reason_label,
+                session_ref,
+                size_bytes,
+                limit_bytes,
+            } => {
+                assert_eq!(reason_label, "session-too-large");
+                assert_eq!(session_ref, "sha256:abc");
+                assert_eq!(size_bytes, Some(MAX_ENVELOPE_BYTES + 1));
+                assert_eq!(limit_bytes, Some(MAX_ENVELOPE_BYTES));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let refusal = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1);
+        assert!(!outcomes_have_failure(std::slice::from_ref(&refusal), true));
+        assert!(outcomes_have_failure(&[refusal], false));
     }
 
     #[test]

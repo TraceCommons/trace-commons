@@ -1601,6 +1601,23 @@ overhead usually outweighs whatever redaction shortened. Measured example: a
 assumes `would_send_bytes < raw_session_bytes`; assert nothing about the
 direction, only that `would_send_bytes` is the number that governs consent.
 
+`reason_label` is present only when `would_send_bytes` is over the upload
+limit (`MAX_TRACE_ENVELOPE_BYTES`, 512 MiB), and its value is then always
+`envelope-too-large` -- the word `approve` refuses the entry under (see
+`approve`'s `skipped[].reason_label`). The preview says it up front so a
+contributor is not told only once they approve. It is a warning about the
+envelope this build produced, not a state change: the entry stays `pending`
+(no envelope that size is ever stored, so there is no pin), and the entry's
+own `entry.reason_label` is untouched until `approve` moves it to
+`refused`. Render it with the existing `envelope-too-large` copy
+("too large to send"). Absent, not `null`, when the envelope fits.
+Additive; a client that ignores it behaves exactly as before and learns at
+`approve` instead.
+
+```json
+{ "would_send_bytes": 600000000, "reason_label": "envelope-too-large", "...": "…" }
+```
+
 `preview` requires an entry currently in the queue (`bad_params` /
 `unknown-entry-id` otherwise) and a working privacy filter (`unavailable` /
 `preview-failed` on failure). Neither `redactions` nor `pii_labels_present`
@@ -1804,7 +1821,8 @@ with an object whose `state` is one of:
 `summary` also carries `scrub`, `marks`, `content_marks`, `unsure_spans`
 and `second_look`, describing that build (see "The scrub state and
 `second_look`" above). Beyond those, it carries exactly the fields
-`preview` returns -- `would_send_bytes`,
+`preview` returns -- `would_send_bytes`, `reason_label` (only when over the
+upload limit; see `preview`),
 `raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
 `pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
 `input_fingerprint`, `enrolled` -- with one deliberate omission: it does
