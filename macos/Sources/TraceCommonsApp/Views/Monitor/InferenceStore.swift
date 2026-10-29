@@ -132,6 +132,15 @@ final class InferenceStore {
         _ = await (harnesses, calls, summary, networkSummary, destinations, privateAI)
     }
 
+    /// Reads the Private AI switch and listener state again, alone: the
+    /// app's settings read saw it move (a NEAR AI sign-in or sign-out
+    /// landed), and every dot drawn from this store follows now rather than
+    /// on the next event. Nothing while the daemon is still starting.
+    func reloadPrivateAI() async {
+        guard !awaiting else { return }
+        await loadPrivateAI()
+    }
+
     private func loadPrivateAI() async {
         let startedAt = beginPrivateAIRead()
         await read("private_ai", { try await $0.privateAI() }) { self.landPrivateAIRead($0, startedAt: startedAt) }

@@ -39,10 +39,16 @@ enum PrivateInferenceIndicator {
         }
     }
 
-    /// The window's Inference tab dot and the map's Private AI segment:
-    /// the same rule as `status`.
-    static func dotStatus(_ tone: PrivateInferenceTone) -> GlassStatus {
-        status(tone)
+    /// The Private AI dot for a listener state: the core's menu tone
+    /// (`PrivateInferenceSurface.menuState`, the table that knows whether
+    /// NEAR AI answers), drawn by `status`; grey when the core gave no word.
+    /// The one tone source for every Private AI dot -- the Inference tab,
+    /// the map's Private AI segment, the heading's Status row, the menu bar
+    /// and the Settings switch card -- so a signed-out "On" is amber on each
+    /// of them, never red on one and amber on another.
+    static func dot(_ state: PrivateInferenceState, calls: PrivateInferenceCalls) -> GlassStatus {
+        guard let menu = PrivateInferenceSurface.menuState(state, calls: calls) else { return .off }
+        return status(menu.tone)
     }
 }
 
@@ -79,7 +85,7 @@ struct PrivateAISwitchCard: View {
         state: PrivateInferenceState, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
     ) -> (line: String, status: GlassStatus) {
         (PrivateInferenceSurface.stateLine(state, copy: copy, calls: calls),
-         PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls)))
+         PrivateInferenceIndicator.dot(state, calls: calls))
     }
 
     var body: some View {
