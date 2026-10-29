@@ -122,16 +122,17 @@ pub(crate) async fn handle_model_spend(shared: &DaemonShared, req: &Request) -> 
 
 pub(crate) fn handle_private_ai(shared: &DaemonShared, req: &Request) -> Response {
     let (on, lifecycle) = match super::settings::DaemonSettings::load(&shared.store) {
-        Ok(_) => (
-            Some(
-                shared
-                    .settings
-                    .lock()
-                    .expect("settings lock")
-                    .private_inference,
-            ),
-            shared.private_inference_value(),
-        ),
+        Ok(_) => {
+            // Read, and the guard dropped, before the lifecycle: that reads
+            // the settings lock too, and a guard held across it would
+            // deadlock.
+            let on = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .private_inference;
+            (Some(on), shared.private_inference_value())
+        }
         Err(_) => (None, serde_json::json!({"state":null,"port":null})),
     };
     Response::ok(
