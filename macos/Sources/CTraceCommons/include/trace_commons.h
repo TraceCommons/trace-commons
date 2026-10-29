@@ -332,6 +332,25 @@ char*       tc_settings_ranges_json(void);
  */
 char*       tc_build_channel_json(void);
 
+/* The command-line tool's state for the app at bundle_path, as a JSON
+ * object:
+ *
+ * {"command_name":"near-ai","link_path":"/usr/local/bin/near-ai",
+ *  "state":"not_installed","install_script":"do shell script ...",
+ *  "uninstall_script":null}
+ *
+ * state is "not_installed", "installed", "stale" (our link to an app that
+ * moved), "foreign" (something this app did not create; no script is
+ * offered) or "unavailable" (bundle_path is not an app bundle with an
+ * executable Contents/MacOS/near-ai). Each script is present only when its
+ * action is offered: one "do shell script ... with administrator
+ * privileges" statement of fixed text and single-quoted, validated paths.
+ * Reads without following the link and writes nothing. NULL or a non-UTF-8
+ * bundle_path reads as "unavailable". Returns an owned string; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_cli_tool_json(const char* bundle_path);
+
 /* The sentence the app shows instead of starting when its bundle and this
  * library disagree on the channel. Returns an owned string; free it with
  * tc_string_free. NULL only on a caught panic.
