@@ -84,7 +84,7 @@ struct ReferralsSection: View {
                     }
                 }
                 if let refusal = model.refusal, refusal != .notApplied, refusal != .invalidCode {
-                    refusalLine(surface.refusalLine(refusal))
+                    refusalLine(surface.refusalLine(refusal, maxLiveCodes: model.listing?.maxLiveCodes))
                 }
             }
         }

@@ -365,13 +365,18 @@ public struct ReferralSurface: Equatable, Sendable {
         status?.canApply == true
     }
 
-    public func refusalLine(_ refusal: ReferralRefusal) -> String {
+    /// The line for a refusal. `maxLiveCodes` is the listing's limit, which
+    /// the limit line names; without it (no listing read, which a Create
+    /// cannot outrun) the limit line is not drawn half-filled.
+    public func refusalLine(_ refusal: ReferralRefusal, maxLiveCodes: Int? = nil) -> String {
         switch refusal {
         case .sessionEnded: return copy.sessionEnded
         case .notApplied: return copy.notApplied
         case .invalidCode: return copy.invalidCode
         case .unavailable: return copy.unavailable
-        case .limitReached: return copy.limitReached
+        case .limitReached:
+            guard let maxLiveCodes else { return copy.failed }
+            return ReferralCopy.render(copy.limitReached, ["n": String(maxLiveCodes)])
         case .failed: return copy.failed
         }
     }

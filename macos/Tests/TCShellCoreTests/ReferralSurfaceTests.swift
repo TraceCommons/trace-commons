@@ -89,6 +89,12 @@ final class ReferralSurfaceTests: XCTestCase {
         XCTAssertEqual(surface.refusalLine(.failed), "T:failed")
     }
 
+    func testTheLimitRefusalNamesTheLimit() {
+        XCTAssertEqual(surface.refusalLine(.limitReached, maxLiveCodes: 5), "T:limit 5")
+        XCTAssertFalse(surface.refusalLine(.limitReached, maxLiveCodes: 3).contains("{n}"))
+        XCTAssertEqual(surface.refusalLine(.limitReached), "T:failed")
+    }
+
     func testCodeRowsOfferCopyAndTurnOffOnlyWhenTheyApply() {
         let live = ReferralCodeRow(codeId: "c1", code: "TC-AAAAA-BBBBB", state: "live", refereeCount: 1)
         let off = ReferralCodeRow(codeId: "c2", code: "TC-CCCCC-DDDDD", state: "disabled", refereeCount: 4)
