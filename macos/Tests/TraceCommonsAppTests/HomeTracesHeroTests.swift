@@ -31,5 +31,12 @@ final class HomeTracesHeroTests: XCTestCase {
         // The three steps run across the whole card, under the graphic.
         XCTAssertTrue(body.contains("contentSpansGraphic: true"))
         XCTAssertTrue(body.contains("HomeHeroSteps(steps: ["))
+        // Contribute opens Traces and Use Private AI opens Private AI, each
+        // its own button, so the hero is a panel and only its pill is the
+        // hero's button; Earn credit opens nothing (owner, 2026-10-29).
+        XCTAssertTrue(body.contains("contentSpansGraphic: true, actionOnPill: true"))
+        XCTAssertTrue(body.contains("detail: words.tracesHeroStepContributeDetail,\n                          action: openTraces),"))
+        XCTAssertTrue(body.contains("detail: words.tracesHeroStepEarnDetail),"))
+        XCTAssertTrue(body.contains("detail: words.tracesHeroStepUseDetail,\n                          action: openPrivateAI),"))
     }
 }

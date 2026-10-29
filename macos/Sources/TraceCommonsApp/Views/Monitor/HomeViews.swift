@@ -392,17 +392,19 @@ private struct HomeOverview: View {
                 gradient: GlassTokens.Gradient.heroMissions,
                 title: words.tracesHeroTitle, subtitle: words.tracesHeroBody,
                 actionTitle: words.tracesHeroAction, action: openTraces,
-                contentSpansGraphic: true
+                contentSpansGraphic: true, actionOnPill: true
             ) {
                 HomeHeroRing()
             } content: {
                 HomeHeroSteps(steps: [
                     .init(number: 1, systemImage: "apple.terminal",
-                          title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail),
+                          title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
+                          action: openTraces),
                     .init(number: 2, systemImage: "cylinder.split.1x2",
                           title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
                     .init(number: 3, systemImage: "sparkles",
-                          title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),
+                          title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
+                          action: openPrivateAI),
                 ])
             }
         }
@@ -1712,7 +1714,11 @@ struct HomeAccountTiles: View {
 /// arrow between each, each a translucent panel on the hero's ground with
 /// a numbered disc, an icon, a title and one line. All in heroInk, as
 /// every word on a hero is; the discs and icons are heroAccent, the
-/// owner's mock-up's blue. The panels are as tall as the tallest. Part of the hero's one button, so VoiceOver reads
+/// owner's mock-up's blue. The panels are as tall as the tallest.
+/// Contribute opens Traces and Use Private AI opens Private AI, each panel
+/// a button of its own; Earn credit stays on Home, a plain panel (owner,
+/// 2026-10-29). The hero itself is a panel, so these clicks are not
+/// swallowed by it; its Start earning pill is its own button. Part of the hero's one button, so VoiceOver reads
 /// the steps with the card.
 struct HomeHeroSteps: View {
     struct Step: Identifiable {
@@ -1720,6 +1726,8 @@ struct HomeHeroSteps: View {
         let systemImage: String
         let title: String
         let detail: String
+        /// Opens the step's tab; nil draws a plain panel.
+        var action: (() -> Void)? = nil
         var id: Int { number }
     }
 
@@ -1738,28 +1746,52 @@ struct HomeHeroSteps: View {
                         .foregroundStyle(ink.opacity(0.6))
                         .accessibilityHidden(true)
                 }
-                panel(step, ink: ink)
+                HomeHeroStepPanel(step: step)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(.top, GlassTokens.Space.s2)
     }
+}
 
-    private func panel(_ step: Step, ink: Color) -> some View {
+/// One of the Traces hero's steps: a translucent panel, brighter under the
+/// pointer when it opens a tab, and then a button that reads its title and
+/// line to VoiceOver as one.
+struct HomeHeroStepPanel: View {
+    let step: HomeHeroSteps.Step
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if let action = step.action {
+            Button(action: action) { panel }
+                .buttonStyle(GlassPressStyle())
+                .onHover { inside in
+                    withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
+        } else {
+            panel.accessibilityElement(children: .combine)
+        }
+    }
+
+    private var panel: some View {
+        let ink = GlassTokens.Color.heroInk.color
         let shape = RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous)
         return HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
             Text("\(step.number)")
                 .glassType(GlassTokens.TypeScale.bodyStrong)
                 .foregroundStyle(ink)
-                .frame(width: Self.disc, height: Self.disc)
+                .frame(width: HomeHeroSteps.disc, height: HomeHeroSteps.disc)
                 .background(Circle().fill(GlassTokens.Color.heroAccent.color))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 Image(systemName: step.systemImage)
-                    .glassGlyph(Self.icon, weight: .regular)
+                    .glassGlyph(HomeHeroSteps.icon, weight: .regular)
                     .foregroundStyle(GlassTokens.Color.heroAccent.color)
                     // One height for every icon, so the titles line up.
-                    .frame(height: Self.icon + 6, alignment: .leading)
+                    .frame(height: HomeHeroSteps.icon + 6, alignment: .leading)
                     .accessibilityHidden(true)
                     .padding(.bottom, GlassTokens.Space.s1)
                 Text(step.title)
@@ -1774,7 +1806,8 @@ struct HomeHeroSteps: View {
         }
         .padding(GlassTokens.Space.s3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(shape.fill(ink.opacity(0.08)))
+        .background(shape.fill(ink.opacity(hovering ? 0.16 : 0.08)))
+        .contentShape(shape)
         .overlay(shape.strokeBorder(ink.opacity(0.18), lineWidth: 1))
     }
 }
