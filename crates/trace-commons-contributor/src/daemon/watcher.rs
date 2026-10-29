@@ -8164,14 +8164,14 @@ mod tests {
     }
 
     /// The refusal `source::codex` raises for a rollout past its byte
-    /// budget, built here rather than by writing a 64 MB file: this is a
+    /// budget, built here rather than by writing a 512 MiB file: this is a
     /// test about what the *watcher* does with the refusal, and the refusal
     /// itself is pinned in `source::codex`'s own suite.
     fn too_large() -> anyhow::Error {
         crate::source::SessionTooLarge {
             label: "rollout-too-large",
-            declared_bytes: 70_000_000,
-            budget_bytes: 64_000_000,
+            declared_bytes: crate::source::MAX_SESSION_BYTES + 1,
+            budget_bytes: crate::source::MAX_SESSION_BYTES,
         }
         .into()
     }

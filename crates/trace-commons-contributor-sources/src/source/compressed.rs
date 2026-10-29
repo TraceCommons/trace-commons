@@ -29,16 +29,23 @@ use std::path::Path;
 /// The suffix a compressed rollout adds to its plain name.
 pub const COMPRESSED_SUFFIX: &str = ".zst";
 
-/// The most bytes one compressed file may decompress to. Above the largest
-/// plain rollout measured on a heavy Codex user's machine (453 MB), so a
-/// compressed session is read at least as far as its plain twin would be;
+/// The most bytes one compressed file may decompress to: the session cap,
+/// [`super::MAX_SESSION_BYTES`], so a compressed rollout is read exactly as
+/// far as its plain twin would be and refused at the same size. Above the
+/// largest plain rollout measured on a heavy Codex user's machine (453 MB);
 /// 13 of 5,457 compressed rollouts on that machine were larger than 64 MiB
 /// decompressed, and 2 larger than this.
-pub const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+///
+/// The Codex adapter reads at most one byte past its budget, so a rollout
+/// over the cap trips this bound and the adapter's own check together, and
+/// either way is refused as `rollout-too-large`.
+pub const MAX_DECOMPRESSED_BYTES: u64 = super::MAX_SESSION_BYTES;
 
 /// The most output per byte of input, checked once the output passes
 /// [`RATIO_FLOOR_BYTES`]. The highest ratio measured over 5,457 real
-/// rollouts was 22.
+/// rollouts was 22, so this leaves about three times headroom. A rollout at
+/// the session cap compresses at that ratio to about 23 MiB, and this bound
+/// would refuse it only below 8 MiB.
 pub const MAX_DECOMPRESSION_RATIO: u64 = 64;
 
 /// Output below this is never refused for its ratio.

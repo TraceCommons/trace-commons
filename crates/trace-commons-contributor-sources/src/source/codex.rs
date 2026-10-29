@@ -433,22 +433,22 @@ fn decompressed_bytes_memoized(
     Some(decompressed)
 }
 
-/// The largest rollout this adapter will load, mirroring
-/// `claude_code::GROUP_RAW_BYTE_BUDGET` and set to the same 64 MB.
+/// The largest rollout this adapter will load: [`super::MAX_SESSION_BYTES`],
+/// 512 MiB, the same figure as `claude_code::GROUP_RAW_BYTE_BUDGET` and the
+/// daemon's preview admission cap. For a compressed rollout it counts the
+/// bytes the rollout decompresses to.
 ///
 /// Streaming stopped the loader holding two copies of a file, but the events
 /// it builds are still proportional to what it parses, and a rollout has no
-/// upper bound: the machine this was measured on had a 385 MB one. The
-/// Claude adapter has bounded its equivalent since it was written; Codex
-/// bounding nothing was an asymmetry rather than a decision.
+/// upper bound: the owner's machine has had a 432 MB one in the last month.
 ///
 /// One number, not two, because these bound the same thing -- how much of
 /// one conversation may become resident on its way to being discarded.
 ///
-/// On the measured corpus this declines 10 of 3,066 rollouts (0.3%). It is a
-/// guard against pathology, not a filter: the median rollout is 541 KB and
-/// the 99th percentile is 40 MB.
-const ROLLOUT_BYTE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+/// It bounds what is read, not what can be sent: a rollout over roughly
+/// 55 MB usually builds an envelope over `MAX_TRACE_ENVELOPE_BYTES`, which
+/// is refused locally at approval as `envelope-too-large`.
+const ROLLOUT_BYTE_BUDGET: u64 = super::MAX_SESSION_BYTES;
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // Declined rather than truncated, and named rather than silent. A
@@ -937,26 +937,131 @@ mod tests {
         );
     }
 
-    /// The 64 MB load budget applies to what a compressed rollout
+    /// `rollout_bytes` padded with newlines to `total` bytes, compressed
+    /// as a stream to `path`, so a rollout past the 512 MiB budget never
+    /// sits in the test's memory. `declare` records the size in the frame
+    /// header, as `zstd::bulk` and Codex's own writer do.
+    fn write_compressed_rollout(path: &Path, total: u64, declare: bool) {
+        use std::io::Write;
+        let head = rollout_bytes("/w/big");
+        let mut encoder =
+            zstd::stream::Encoder::new(std::fs::File::create(path).unwrap(), 1).unwrap();
+        encoder.include_contentsize(declare).unwrap();
+        if declare {
+            encoder.set_pledged_src_size(Some(total)).unwrap();
+        }
+        encoder.write_all(&head).unwrap();
+        let chunk = vec![b'\n'; 1 << 20];
+        let mut left = total - head.len() as u64;
+        while left > 0 {
+            let n = left.min(chunk.len() as u64) as usize;
+            encoder.write_all(&chunk[..n]).unwrap();
+            left -= n as u64;
+        }
+        encoder.finish().unwrap();
+    }
+
+    /// The 512 MiB load budget applies to what a compressed rollout
     /// decompresses to, under the existing label: refused from the size its
-    /// frame records, and from the stream when the frame records none.
+    /// frame records, and from the stream when the frame records none. (The
+    /// undeclared stream is all newlines, so the decoder's ratio bound ends
+    /// it first; the label is the same either way.)
     #[test]
     fn a_compressed_rollout_over_the_load_budget_is_rollout_too_large() {
         let dir = tempfile::tempdir().unwrap();
-        let mut bytes = rollout_bytes("/w/big");
-        bytes.resize((ROLLOUT_BYTE_BUDGET + 1024) as usize, b'\n');
-        for (name, compressed) in [
-            ("rollout-a.jsonl", zstd::bulk::compress(&bytes, 3).unwrap()),
-            ("rollout-b.jsonl", zstd::encode_all(&bytes[..], 3).unwrap()),
-        ] {
-            std::fs::write(dir.path().join(format!("{name}.zst")), compressed).unwrap();
+        for (name, declare) in [("rollout-a.jsonl", true), ("rollout-b.jsonl", false)] {
+            write_compressed_rollout(
+                &dir.path().join(format!("{name}.zst")),
+                ROLLOUT_BYTE_BUDGET + 1024,
+                declare,
+            );
             let error = load_session(&dir.path().join(name)).unwrap_err();
             let too_large = error
                 .downcast_ref::<crate::source::SessionTooLarge>()
                 .unwrap_or_else(|| panic!("{name}: {error}"));
             assert_eq!(too_large.label, "rollout-too-large");
+            assert_eq!(too_large.budget_bytes, crate::source::MAX_SESSION_BYTES);
             assert!(too_large.declared_bytes > ROLLOUT_BYTE_BUDGET, "{name}");
+            if declare {
+                assert_eq!(too_large.declared_bytes, ROLLOUT_BYTE_BUDGET + 1024);
+            }
         }
+    }
+
+    /// A plain rollout over 512 MiB is refused from its size alone, under
+    /// the existing label, before a byte of it is read. The file is sparse,
+    /// so the test writes nothing.
+    #[test]
+    fn a_plain_rollout_over_the_load_budget_is_rollout_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-big.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::source::MAX_SESSION_BYTES + 1).unwrap();
+        drop(file);
+        let error = load_session(&path).unwrap_err();
+        let too_large = error
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .unwrap_or_else(|| panic!("{error}"));
+        assert_eq!(too_large.label, "rollout-too-large");
+        assert_eq!(
+            too_large.declared_bytes,
+            crate::source::MAX_SESSION_BYTES + 1
+        );
+        assert_eq!(too_large.budget_bytes, crate::source::MAX_SESSION_BYTES);
+    }
+
+    /// A rollout over the old 64 MB budget now loads, plain and compressed.
+    /// About 100 MB, carried mostly by a few large tool outputs so a debug
+    /// build parses it quickly. The output is pseudo-random letters, because
+    /// a run of one byte compresses past the decoder's ratio bound and would
+    /// be refused as a zip bomb, which no real rollout resembles.
+    #[test]
+    fn a_rollout_over_the_old_64_mb_budget_loads() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let output: String = (0..4 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (b'a' + (state % 26) as u8) as char
+            })
+            .collect();
+        let mut body = rollout_bytes("/w/long");
+        let mut calls = 0;
+        while body.len() < 100_000_000 {
+            calls += 1;
+            body.extend_from_slice(
+                format!(
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":\"c{calls}\",\"arguments\":\"{{}}\"}}}}\n\
+                     {{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"c{calls}\",\"output\":\"{output}\"}}}}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        assert!(body.len() as u64 > 64 * 1024 * 1024);
+        assert!((body.len() as u64) < ROLLOUT_BYTE_BUDGET);
+        let plain = dir.path().join("rollout-plain.jsonl");
+        std::fs::write(&plain, &body).unwrap();
+        let loaded = load_session(&plain).expect("a 100 MB rollout loads");
+        assert_eq!(loaded.cwd.as_deref(), Some("/w/long"));
+        assert!(
+            loaded.events.len() > 2 * calls,
+            "every call and output mapped"
+        );
+
+        let mut encoder = zstd::stream::Encoder::new(
+            std::fs::File::create(dir.path().join("rollout-zst.jsonl.zst")).unwrap(),
+            1,
+        )
+        .unwrap();
+        encoder.write_all(&body).unwrap();
+        encoder.finish().unwrap();
+        let compressed = load_session(&dir.path().join("rollout-zst.jsonl"))
+            .expect("a 100 MB compressed rollout loads");
+        assert_eq!(compressed.session_hash, loaded.session_hash);
+        assert_eq!(compressed.events.len(), loaded.events.len());
     }
 
     /// A corrupt compressed rollout is refused, never loaded as empty.
