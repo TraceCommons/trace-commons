@@ -10,7 +10,8 @@ import TCShellCore
 /// never mixed with the person's own: each tab draws either its real
 /// models or these, never both.
 enum InsightsSample {
-    private static func totals(_ key: String?, sessions: Int, usd: Int64, edits: Int64, undone: Int64, denied: Int64,
+    private static func totals(_ key: String?, sessions: Int, usd: Int64,
+                               edits: Int64, undone: Int64, denied: Int64,
                                cacheSavings: Int64 = 0) -> DaemonData.InsightsWorkTotals {
         .init(key: key, sessions: sessions, usdMicrosKnown: usd, cacheSavingsUsdMicrosKnown: cacheSavings,
               editsKnown: edits, editsUndoneKnown: undone,
@@ -102,7 +103,7 @@ enum InsightsSample {
               quality: pick((sonnet, claude, 950), (opus, claude, 930)),
               value: pick((sonnet, claude, 290_000), (opus, claude, 1_100_000)),
               speed: pick((sonnet, claude, 660), (opus, claude, 900)),
-              tip: tip("rereads") { $0.sessionsWith = 6; $0.sessions = 17 }),
+              tip: tip("test_first") { $0.fasterPermille = 220; $0.sessionsWithout = 5; $0.sessions = 17 }),
         .init(key: "docs", sessions: 9,
               quality: pick((sonnet, claude, 970), (haiku, claude, 950)),
               value: pick((haiku, claude, 60_000), (sonnet, claude, 210_000)),

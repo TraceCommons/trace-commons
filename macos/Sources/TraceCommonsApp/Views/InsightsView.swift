@@ -183,6 +183,8 @@ struct InsightsView: View {
             GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
+            // A failed copy or snapshot read, on every tab.
+            if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
@@ -257,6 +259,11 @@ struct InsightsView: View {
             patternsModel.reload()
         }
         .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
+        // Snapshots saved while the app was in the background; a changed
+        // list reloads Overview and Breakdown through the onChange above.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.reloadSnapshots()
+        }
         .onDisappear {
             model.close(); overviewModel.close(); patternsModel.close(); comparisonsModel.clear()
         }

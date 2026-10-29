@@ -159,8 +159,8 @@ enum InsightsProjectRows {
         let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
-        /// Claude and Codex at API prices (product
-        /// owner, 2026-10-29); `nil` from a daemon that predates `work`.
+        /// Claude and Codex at API prices (product owner, 2026-10-29);
+        /// `nil` from a daemon that predates `work`.
         var spend: String? = nil
         var spendMicros: Int64 = 0
     }
@@ -268,14 +268,11 @@ struct InsightsDetailsTable: View {
 
     /// The views this week has something for: By project always; By task
     /// and By tool only with a NEAR AI call this week, since they split
-    /// NEAR AI spend; By model only with a model's spend, NEAR AI's
-    /// models included.
+    /// NEAR AI spend; By model as `InsightsCreditWords.showsModels` says.
     static func dimensions(_ week: DaemonData.InsightsWeek) -> [InsightsCreditWords.Dimension] {
         var shown: [InsightsCreditWords.Dimension] = [.folder]
         if InsightsProjectRows.hasNearAi(week) { shown += [.task, .tool] }
-        if !(week.work?.byModel ?? []).isEmpty || !(week.nearAiCredit?.week.byModel ?? []).isEmpty {
-            shown.append(.model)
-        }
+        if InsightsCreditWords.showsModels(week) { shown.append(.model) }
         return shown
     }
 

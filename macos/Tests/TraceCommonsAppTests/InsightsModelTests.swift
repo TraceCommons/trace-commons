@@ -43,14 +43,88 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where await recorder.operations.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
-        for _ in 0..<20 { await Task.yield() }
+        await model.loading?.value
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
         XCTAssertEqual(operations, ["copy", "list"])
         XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
         model.close()
     }
+
+    /// A failed read shows the failure line, not blank words or an empty
+    /// store that looks like no snapshots.
+    @MainActor
+    func testAFailedCopyReadSetsTheFailureLine() async {
+        let model = InsightsModel(service: { _ in throw InsightsError.operationFailed })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.error, "insights-operation-failed")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+        XCTAssertNil(model.error)
+    }
+
+    /// A list read answered with another type is a failure, in the core's
+    /// own words once the copy has been read.
+    @MainActor
+    func testAMismatchedListResponseSetsTheCoresFailureLine() async {
+        let model = InsightsModel(service: { _ in
+            let json = "{\"type\":\"copy\",\"copy\":{\"error\":\"Could not read Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.text("error"), "Could not read Insights")
+        XCTAssertEqual(model.error, "Could not read Insights")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+    }
+
+    /// A read that succeeds clears an earlier failure.
+    @MainActor
+    func testASuccessfulReadClearsAnEarlierFailure() async {
+        let recorder = Recorder()
+        let fail = FailOnce()
+        let model = InsightsModel(service: { request in
+            if await fail.next() { throw InsightsError.operationFailed }
+            return try await recorder.call(request)
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertNotNil(model.error)
+        model.close()
+        model.open()
+        await model.loading?.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
+        model.close()
+    }
+
+    /// Reading the snapshots again lists only, once the copy is in hand,
+    /// and picks up a snapshot saved since.
+    @MainActor
+    func testReloadSnapshotsListsAgainWithoutTheCopy() async {
+        let recorder = Recorder()
+        let model = InsightsModel(service: { request in try await recorder.call(request) })
+        model.open()
+        await model.loading?.value
+        await recorder.add("snap-2")
+        model.reloadSnapshots()
+        await model.loading?.value
+        let operations = await recorder.operations
+        XCTAssertEqual(operations, ["copy", "list", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1", "snap-2"])
+        model.close()
+        model.reloadSnapshots()
+        XCTAssertNil(model.loading, "a closed screen reads nothing")
+        let after = await recorder.operations
+        XCTAssertEqual(after.count, 3)
+    }
+}
+
+private actor FailOnce {
+    private var failed = false
+    func next() -> Bool { defer { failed = true }; return !failed }
 }
 
 private actor ResponseGate {
@@ -68,15 +142,15 @@ private actor ResponseGate {
 }
 private actor Recorder {
     var operations: [String] = []
+    private var ids = ["snap-1"]
+    func add(_ id: String) { ids.append(id) }
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
         if request.operation.type == "copy" {
             let json = "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
             return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
         }
-        let list: [String: Any] = ["type": "list", "insights": [
-            InsightsSessionsTests.snapshotJSON("snap-1"),
-        ]]
+        let list: [String: Any] = ["type": "list", "insights": ids.map { InsightsSessionsTests.snapshotJSON($0) }]
         return try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: list))
     }
 }

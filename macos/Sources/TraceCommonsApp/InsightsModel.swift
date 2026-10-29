@@ -40,6 +40,9 @@ final class InsightsModel {
     private var active = false
     private(set) var copy: [String: String] = [:]
     func text(_ key: String) -> String { copy[key] ?? "" }
+    /// The last read's failure line, shown under the tab bar; `nil` while
+    /// reads succeed.
+    private(set) var error: String?
     /// The saved snapshots, newest first, so a drill-down row reads as its
     /// session's label.
     private(set) var snapshots: [LocalInsight] = []
@@ -83,23 +86,43 @@ final class InsightsModel {
         if weekReader != nil { Task { [weak self] in await self?.loadWeek() } } else { weekSettled = true }
     }
     func close() {
-        active = false; generation = UUID(); task?.cancel(); task = nil
+        active = false; generation = UUID(); task?.cancel(); task = nil; error = nil
         weekGeneration = UUID()
     }
-    private func load() {
+    /// Read the saved snapshots again, as when the app becomes active
+    /// while Insights is open: the list only once the copy is in hand, so
+    /// a snapshot saved elsewhere (the CLI) shows without reopening.
+    func reloadSnapshots() {
+        guard active else { return }
+        load(readCopy: copy.isEmpty)
+    }
+    /// The copy-and-list read in flight, so a caller can wait for it to
+    /// land rather than poll.
+    var loading: Task<Void, Never>? { task }
+    /// Reads the copy, then the saved snapshots. A failed or mismatched
+    /// read sets `error` (the core's "error" line, or a fixed code before
+    /// the copy is read) and stops; a later read that succeeds clears it.
+    private func load(readCopy: Bool = true) {
         task?.cancel()
+        error = nil
         let token = generation
         let service = service
         task = Task { [weak self] in
-            if let response = try? await service(.init(operation: .init("copy"))),
-               response.type == "copy", let copy = response.copy {
-                guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
-                self.copy = copy
-            }
-            if let response = try? await service(.init(operation: .init("list"))),
-               response.type == "list", let values = response.insights {
-                guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
+            do {
+                if readCopy {
+                    let copied = try await service(.init(operation: .init("copy")))
+                    guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
+                    guard copied.type == "copy", let copy = copied.copy else { throw InsightsError.invalidResponse }
+                    self.copy = copy
+                }
+                guard let self else { return }
+                let listed = try await service(.init(operation: .init("list")))
+                guard self.active, self.generation == token, !Task.isCancelled else { return }
+                guard listed.type == "list", let values = listed.insights else { throw InsightsError.invalidResponse }
                 self.snapshots = values
+            } catch {
+                guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
+                self.error = self.copy["error"] ?? "insights-operation-failed"
             }
         }
     }
