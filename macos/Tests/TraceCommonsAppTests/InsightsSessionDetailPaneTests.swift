@@ -70,7 +70,7 @@ final class InsightsSessionDetailPaneTests: XCTestCase {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("} else if shownTab == .insights, let detail = insightsInspector.detail {"))
         XCTAssertTrue(window.contains(".union(insightsInspector.demandKey.map { [$0] } ?? [])"))
-        XCTAssertTrue(window.contains("inspector: insightsInspector)"))
+        XCTAssertTrue(window.contains("inspector: insightsInspector, home: home)"))
         let view = try MonitorNavigationTests.text("Views/InsightsView.swift")
         XCTAssertTrue(view.contains("detailInInspector: inspector != nil,"))
         XCTAssertTrue(view.contains("opened: { inspector?.personOpened() })"))

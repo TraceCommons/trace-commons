@@ -61,12 +61,6 @@ final class InsightsGlassConventionsTests: XCTestCase {
         let hide = try XCTUnwrap(source.range(of: #"Button(text("analytics_recap_turn_off")) { turnOffRecap() }"#
                                                 + "\n                        .buttonStyle(GlassButtonStyle(.link))"))
         XCTAssertLessThan(recapStyle.lowerBound, hide.lowerBound, "Hide comes after View week")
-
-        let reads = try XCTUnwrap(source.range(of: #"Button(text("analytics_lever_show_reads")) { showReads() }"#
-                                                 + "\n                            .buttonStyle(GlassButtonStyle(.glass, small: true))"))
-        let notUseful = try XCTUnwrap(source.range(of: #"Button(text("analytics_lever_not_useful")) { comparisons.notUseful() }"#
-                                                     + "\n                        .buttonStyle(GlassButtonStyle(.link))"))
-        XCTAssertLessThan(reads.lowerBound, notUseful.lowerBound, "Not useful comes after Show reads")
     }
 
     /// Every chart is plotted on the chart surface, never straight on glass,
@@ -115,14 +109,18 @@ final class InsightsGlassConventionsTests: XCTestCase {
     }
 
     /// The week picker has its row to itself, on the right (owner,
-    /// 2026-10-19), on Overview and Patterns. Under it is one section
-    /// (owner, 2026-10-20): Overview's Sessions figure, or Patterns' scope
-    /// line ("Claude Code traces only"), over the coverage line.
+    /// 2026-10-19), on Patterns. Under it is one section (owner,
+    /// 2026-10-20): the scope line ("Claude Code traces only"), over the
+    /// coverage line. Overview's picker shares its row with the coverage
+    /// line (product owner, 2026-10-29: the Sessions figure left Overview).
     func test_theWeekPickerHasItsRowAndTheSectionIsUnderIt() throws {
-        // Overview's Sessions figure no longer drills (owner, 2026-10-22):
-        // its breakdown is always shown under the section.
-        for (file, leading) in [("Views/InsightsOverviewTab.swift", "Text(text(\"analytics_card_sessions\")).insightsEyebrow()"),
-                                ("Views/InsightsPatternsTab.swift", "InsightsScopeLine(source: \"claude_code\", line: line)")] {
+        let overview = try Self.text("Views/InsightsOverviewTab.swift")
+        let start = try XCTUnwrap(overview.range(of: "private func weekPicker("))
+        let row = String(overview[start.upperBound...].prefix(600))
+        let coverageLine = try XCTUnwrap(row.range(of: "InsightsCoverageLine("))
+        let picker = try XCTUnwrap(row.range(of: "InsightsWeekSelect("))
+        XCTAssertLessThan(coverageLine.lowerBound, picker.lowerBound, "the picker is on the right")
+        for (file, leading) in [("Views/InsightsPatternsTab.swift", "InsightsScopeLine(source: \"claude_code\", line: line)")] {
             let source = try Self.text(file)
             let start = try XCTUnwrap(source.range(of: "private func header("), file)
             let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex), file)

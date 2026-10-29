@@ -25,8 +25,6 @@ struct InsightsOverviewTab: View {
     /// "Watched-folder counting is unavailable right now", shown with feed S
     /// when feed T is switched on but could not be read.
     var notice: String?
-    /// The same week's patterns, for "Where tokens went"; `nil` hides it.
-    var patterns: InsightsWeekPatterns?
     /// Current subscription limits are independent of the selected week.
     var subscriptions: SubscriptionUsageModel?
     /// NEAR AI spend from this Mac (product owner, 2026-10-28): the week's
@@ -37,22 +35,21 @@ struct InsightsOverviewTab: View {
     var usageByDay: [DaemonData.InsightsUsageDay]?
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
+    /// Spend at API prices, lines, edits and trends (product owner,
+    /// 2026-10-29); `nil` from a daemon that predates `work`.
+    var work: DaemonData.InsightsWork?
+    /// The week's token change per tool, for Trends.
+    var weekChanges: [DaemonData.InsightsWeekChange]?
+    /// Home's credit tile, so the two never disagree; `nil` hides it.
+    var creditTile: (value: String, detail: String)?
+    /// "Benchmarks": the Benchmarks tab.
+    var showBenchmarks: () -> Void = {}
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
     var openRecap: () -> Void = {}
     /// "Hide": the daemon's `insights_recap_card_enabled`.
     var turnOffRecap: (() -> Void)?
-    /// "Show the reads": the Patterns tab.
-    var showReads: () -> Void = {}
-    /// "Patterns": the Patterns tab.
-    var showPatterns: () -> Void = {}
-    @State private var breakdown: Breakdown = .model
-
-    /// By project is not drawn: analyzed files carry no project and
-    /// watched-folder rows keep only a digest of one (owner decision D7,
-    /// open), and a tab that cannot be used is hidden.
-    enum Breakdown: Hashable { case model, tool }
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
@@ -60,37 +57,27 @@ struct InsightsOverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                // AI usage at a glance leads (product owner, 2026-10-28):
-                // one card per resource found on this Mac.
-                InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
-                                   copy: copy, showProjects: showProjects)
+                // The week at a glance, then limits, spend by model, lines
+                // and trends (product owner, 2026-10-29). The harness
+                // cards, lever, "Where tokens went" and the By model / By
+                // tool tokens left Overview with that review.
                 if let overview = model.shown {
+                    weekPicker(overview)
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
-                    // The Sessions breakdown and Tokens by day are off
-                    // Overview (product owner, 2026-10-28): Tokens by day,
-                    // and a picked day's sessions, are on Details.
-                    header(overview)
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        ForEach(overview.sources) { source in
-                            harnessCard(source, overview: overview)
-                        }
+                }
+                InsightsWeekTiles(work: work, credit: creditTile, copy: copy)
+                InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
+                                   work: work, copy: copy, showProjects: showProjects)
+                if let work {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: GlassTokens.Space.cardGap,
+                                                 alignment: .top)],
+                              alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks)
+                        InsightsLinesCard(work: work, copy: copy)
                     }
-                    if overview.sources.isEmpty {
-                        Text(text("analytics_unavailable")).insightsFigure()
-                    }
-                    if let inputs = model.inputs {
-                        InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
-                    }
-                    if overview.feed == "counter_pass", let lever = comparisons.comparisons?.lever {
-                        leverCard(lever)
-                    }
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        if let patterns, patterns.week_start == overview.week_start, !patterns.cards.isEmpty {
-                            whereTokensWent(patterns)
-                        }
-                        breakdownCard(overview)
-                    }
-                } else if model.failed {
+                    InsightsTrendsCard(work: work, tokenChanges: weekChanges, copy: copy)
+                }
+                if model.shown == nil, model.failed {
                     Text(text("analytics_unavailable")).insightsError()
                 }
                 if model.busy { GlassSpinner() }
@@ -101,26 +88,14 @@ struct InsightsOverviewTab: View {
         }
     }
 
-    /// The week picker on its own row, on the right as on Patterns (owner,
-    /// 2026-10-19), then one section under it (owner, 2026-10-20): the
-    /// Sessions figure over the coverage line, with whatever qualifies the
-    /// counts behind its "i", on a card as the harnesses' are.
-    private func header(_ overview: InsightsWeekOverview) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
-                                   select: selectWeek)
-            }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(text("analytics_card_sessions")).insightsEyebrow()
-                    Text(String(overview.sessions)).insightsFigure()
-                }
-                InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSection()
+    /// The week's coverage, with whatever qualifies the counts behind its
+    /// "i", and the week picker on the right.
+    private func weekPicker(_ overview: InsightsWeekOverview) -> some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
+            Spacer(minLength: 0)
+            InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
+                               select: selectWeek)
         }
     }
 
@@ -182,44 +157,6 @@ struct InsightsOverviewTab: View {
         .insightsSection()
     }
 
-    /// The lever of the week: an observation only (owner decision D2, open).
-    @ViewBuilder
-    private func leverCard(_ lever: InsightsLeverState) -> some View {
-        if let pick = lever.pick {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                HStack(spacing: GlassTokens.Space.s5) {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
-                        .glassGlyph(12, weight: .semibold)
-                        .foregroundStyle(GlassColor.accentText)
-                        .frame(width: GlassTokens.Size.toolTile, height: GlassTokens.Size.toolTile)
-                        .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous)
-                            .fill(GlassTokens.Color.tintAccent.color))
-                        .accessibilityHidden(true)
-                    Text(text("analytics_lever_title")).insightsTitle()
-                }
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    ForEach(InsightsComparisonsWords.leverLines(pick, copy: copy), id: \.self) { line in
-                        Text(line).insightsNote()
-                    }
-                }
-                .insightsCardBody()
-                HStack(spacing: GlassTokens.Space.s4) {
-                    if pick.kind == "repeated_reads" {
-                        Button(text("analytics_lever_show_reads")) { showReads() }
-                            .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    }
-                    // The decline is a link, after the action (Ron's #1287 review).
-                    Button(text("analytics_lever_not_useful")) { comparisons.notUseful() }
-                        .buttonStyle(GlassButtonStyle(.link))
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSection()
-        } else if !lever.disabled.isEmpty {
-            Text(text("analytics_lever_off")).insightsCaption()
-        }
-    }
-
     /// A figure that opens its drill-down. A second press on the open one
     /// closes it. Feed T rows carry no session reference the core could
     /// look up, so under feed T only the Sessions figure drills, from the
@@ -240,61 +177,6 @@ struct InsightsOverviewTab: View {
         }
     }
 
-    /// One harness: its tokens and cache share side by side, then, for
-    /// Codex, the note that it records whole-trace totals. Claude's days are
-    /// on Details' Tokens by day (product owner, 2026-10-28).
-    private func harnessCard(_ source: InsightsWeekSource, overview: InsightsWeekOverview) -> some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-            // The core's line for the harness says how it is counted:
-            // "Claude Code · counted per turn".
-            HStack(spacing: GlassTokens.Space.s5) {
-                InsightsHarnessTile(source: source.source)
-                Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsTitle()
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
-                    drillButton("tokens") {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                            Text(text("analytics_card_tokens")).insightsEyebrow()
-                            Text(figure(source.tokens)).insightsFigure()
-                            if source.change_permille != nil {
-                                Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
-                            }
-                            if let largest = source.largest_session {
-                                Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
-                                    .insightsCaption()
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    drillButton("cache_share") {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                            Text(text("analytics_card_cache_share")).insightsEyebrow()
-                            Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
-                                 ?? text("analytics_unavailable")).insightsFigure()
-                            // A bar, not a ring (owner decision D1, open).
-                            InsightsShareBar(permille: source.cache_share?.permille,
-                                             tick: InsightsOverviewWords.bestTick(source))
-                                .padding(.vertical, GlassTokens.Space.s2)
-                            if source.best != nil {
-                                Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                if source.source == "codex" {
-                    codexInterval(overview)
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
     /// Codex counts whole traces, not days: a dashed box, never zero bars.
     private func codexInterval(_ overview: InsightsWeekOverview) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
@@ -310,77 +192,6 @@ struct InsightsOverviewTab: View {
         .modifier(InsightsInlineContainer())
     }
 
-    /// The same week's patterns, by name and figure, in the core's order.
-    private func whereTokensWent(_ patterns: InsightsWeekPatterns) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            InsightsSectionTitle(title: text("analytics_where_tokens_went"),
-                                 info: [text("analytics_patterns_overlap")]) {
-                Button(text("analytics_tab_patterns")) { showPatterns() }
-                    .buttonStyle(GlassButtonStyle(.link))
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(spacing: 0) {
-                    ForEach(Array(patterns.cards.enumerated()), id: \.element.id) { index, card in
-                        GlassTableRow(first: index == 0) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(InsightsPatternsWords.title(card.kind, copy: copy))
-                                Spacer(minLength: GlassTokens.Space.s4)
-                                // The Patterns card's own headline: a count
-                                // when the estimate rounds to 0.
-                                Text(InsightsPatternsWords.headline(card, copy: copy)).insightsMono()
-                            }
-                        }
-                    }
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    private func breakdownCard(_ overview: InsightsWeekOverview) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassSegmentedTabs(text("analytics_card_by_model"), selection: $breakdown, segments: [
-                    GlassSegment(text("analytics_card_by_model"), value: Breakdown.model),
-                    GlassSegment(text("analytics_card_by_tool"), value: Breakdown.tool),
-                ])
-                InsightsInfo(text("analytics_card_by_model"), [text("analytics_model_labels_note")])
-            }
-            LazyVStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                switch breakdown {
-                case .model:
-                    let rows = InsightsOverviewWords.modelRows(overview, copy: copy)
-                    let most = rows.map(\.tokens).max() ?? 0
-                    ForEach(rows) { row in
-                        #if DEBUG
-                        let _ = OtherCollectionRowBodies.record("supplementalModels", String(row.id))
-                        #endif
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                            HStack {
-                                Text(row.label).lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                                Text(InsightsOverviewWords.figure(row.tokens, copy: copy)).insightsMono()
-                            }
-                            InsightsShareBar(fraction: most == 0 ? 0 : Double(row.tokens) / Double(most))
-                        }
-                    }
-                case .tool:
-                    ForEach(overview.by_tool) { tool in
-                        HStack {
-                            Text(InsightsOverviewWords.harness(tool.source, copy: copy))
-                            Spacer()
-                            Text(InsightsOverviewWords.figure(tool.tokens, copy: copy)).insightsMono()
-                        }
-                    }
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
 }
 
 /// A Breakdown card's session list opens folded to its first few rows

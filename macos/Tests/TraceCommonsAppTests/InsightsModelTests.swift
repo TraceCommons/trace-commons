@@ -618,9 +618,6 @@ final class InsightsPatternsTests: XCTestCase {
         let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(view.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()"))
         XCTAssertTrue(view.contains("if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {"))
-        // Overview's "Where tokens went" rows say the same as the cards.
-        let overview = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
-        XCTAssertTrue(overview.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsMono()"))
     }
 
     func testACountHeadlineCardDrawsNoZeroOnItsCurrentWeekBar() throws {

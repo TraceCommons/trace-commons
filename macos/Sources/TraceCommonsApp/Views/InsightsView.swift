@@ -12,6 +12,9 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    @State private var benchmarksModel: InsightsBenchmarksModel
+    /// Home's figures, for Overview's credit tile; `nil` hides the tile.
+    private let home: HomeStore?
     @State private var fallbackSubscriptionModel: SubscriptionUsageModel
     private let sharedSubscriptionModel: SubscriptionUsageModel?
     private var subscriptionModel: SubscriptionUsageModel { sharedSubscriptionModel ?? fallbackSubscriptionModel }
@@ -35,7 +38,8 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
-                    inspector: InsightsInspector? = nil) {
+                    inspector: InsightsInspector? = nil,
+                    home: HomeStore? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -83,6 +87,12 @@ struct InsightsView: View {
             subscriptions = nil
         }
         #endif
+        var benchmarks: InsightsBenchmarksModel.Reader? = daemon.map { client in
+            { @Sendable weeks in try await client.insightsBenchmarks(weeks: weeks) }
+        }
+        #if DEBUG
+        if InsightsSampleWeek.enabled { benchmarks = nil }
+        #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
@@ -96,7 +106,9 @@ struct InsightsView: View {
                   turnOffRecapCard: turnOff,
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
-                  inspector: inspector)
+                  inspector: inspector,
+                  benchmarks: InsightsBenchmarksModel(reader: benchmarks),
+                  home: home)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -113,7 +125,9 @@ struct InsightsView: View {
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
-                    inspector: InsightsInspector? = nil) {
+                    inspector: InsightsInspector? = nil,
+                    benchmarks: InsightsBenchmarksModel? = nil,
+                    home: HomeStore? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -123,6 +137,8 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _benchmarksModel = State(initialValue: benchmarks ?? InsightsBenchmarksModel(reader: nil))
+        self.home = home
         self.sharedSubscriptionModel = subscriptionModel
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
@@ -130,9 +146,16 @@ struct InsightsView: View {
         self.inspector = inspector
     }
 
-    /// The tabs on the bar, in order: Overview, then Breakdown (product
-    /// owner, 2026-10-29).
-    static let shownTabs: [InsightsTab] = [.overview, .patterns]
+    /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
+    /// (product owner, 2026-10-29).
+    static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+
+    /// Home's credit tile, the same figure and word as Home's.
+    private var creditTile: (value: String, detail: String)? {
+        guard let home, home.rollup != nil || home.credit != nil else { return nil }
+        return HomeFormat.creditTile(final: home.rollup?.creditFinal, pending: home.rollup?.creditPending,
+                                     accepted: home.rollup?.allTime?.accepted, credit: home.credit)
+    }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
     /// for the standard store, which shows no location line.
@@ -165,9 +188,9 @@ struct InsightsView: View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            // Overview and Breakdown only (product owner, 2026-10-29):
-            // Sessions and Analyze are off the bar. A picked day or row
-            // shows its sessions in place; Analyze's views go next.
+            // Overview, Breakdown and Benchmarks (product owner,
+            // 2026-10-29): Sessions and Analyze are off the bar. A picked
+            // day shows its sessions in place.
             GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
@@ -179,18 +202,19 @@ struct InsightsView: View {
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
-                    patterns: patternsModel.shown,
                     subscriptions: subscriptionModel,
                     nearAiCredit: model.counterWeek?.nearAiCredit,
                     usageByDay: model.counterWeek?.usageByDay,
                     showProjects: { detailsView = .folder; tab = .patterns },
+                    work: model.counterWeek?.work,
+                    weekChanges: model.counterWeek?.changeVsLastWeek,
+                    creditTile: creditTile,
+                    showBenchmarks: { tab = .benchmarks },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
                         { Task { try? await turnOff(); await model.loadWeek() } }
-                    },
-                    showReads: { tab = .patterns },
-                    showPatterns: { tab = .patterns })
+                    })
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
@@ -204,6 +228,8 @@ struct InsightsView: View {
                                     openAnalysis: { tab = .analyze },
                                     detailInInspector: inspector != nil,
                                     opened: { inspector?.personOpened() })
+            case .benchmarks:
+                InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
             case .analyze: content
             }
         }
@@ -586,13 +612,14 @@ struct InsightDetail: View {
 /// are no longer on the bar (`InsightsView.shownTabs`); only a caller's
 /// `initialTab` opens them, until their views are removed.
 enum InsightsTab: Hashable {
-    case overview, patterns, sessions, analyze
+    case overview, patterns, benchmarks, sessions, analyze
 
     /// The copy key of the tab's name.
     var copyKey: String {
         switch self {
         case .overview: "analytics_tab_overview"
         case .patterns: "analytics_tab_patterns"
+        case .benchmarks: "analytics_tab_benchmarks"
         case .sessions: "analytics_tab_sessions"
         case .analyze: "analytics_tab_analyze"
         }
