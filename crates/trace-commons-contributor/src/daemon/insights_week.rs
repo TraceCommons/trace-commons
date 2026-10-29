@@ -2066,6 +2066,7 @@ impl CounterPass {
             "routing_available": routing_unavailable.is_none(),
             "routing_unavailable": routing_unavailable,
             "near_ai_credit": credit,
+            "usage_by_day": usage_by_day_value(&inputs, now, tz),
             "overview": overview,
             "patterns": patterns,
             "history": history,
@@ -4200,6 +4201,52 @@ fn near_ai_credit_value(
             false,
         ),
     })
+}
+
+/// `insights_week`'s `usage_by_day` (product owner, 2026-10-28): Claude and
+/// Codex tokens on each of the last 7 local days, oldest first, today last,
+/// for the usage cards' bars. It does not move with the week on screen.
+/// Claude's are the four series a day stacks on "Tokens by day"; Codex's
+/// are its per-turn series split by day (`WeekRollup::codex_by_day`). A day
+/// is `null` (unknown, never 0) when a session on it could not be counted
+/// or split; a week with no session of that tool is a true 0.
+fn usage_by_day_value(
+    inputs: &[SessionInput],
+    now: DateTime<Utc>,
+    tz: FixedOffset,
+) -> serde_json::Value {
+    let today = now.with_timezone(&tz).date_naive();
+    let this = local_week_start(&now, &tz);
+    let weeks = [this - Duration::days(7), this]
+        .map(|start| week_rollup(Feed::CounterPass, inputs, start, &tz));
+    let has = |week: &WeekRollup, source: AnalyticsSource| {
+        week.sources.iter().any(|line| line.source == source)
+    };
+    let days: Vec<serde_json::Value> = (0..7)
+        .rev()
+        .map(|back| {
+            let day = today - Duration::days(back);
+            let week = weeks
+                .iter()
+                .find(|week| day >= week.week_start && day < week.week_start + Duration::days(7));
+            let (claude, codex) = week.map_or((None, None), |week| {
+                let offset = usize::try_from((day - week.week_start).num_days()).unwrap_or(0);
+                let claude = match &week.by_day {
+                    Some(days) => days
+                        .get(offset)
+                        .map(|d| d.uncached + d.cache_read + d.cache_write + d.output),
+                    None => (!has(week, AnalyticsSource::ClaudeCode)).then_some(0),
+                };
+                let codex = match &week.codex_by_day {
+                    Some(days) => days.get(offset).copied().flatten(),
+                    None => (!has(week, AnalyticsSource::Codex)).then_some(0),
+                };
+                (claude, codex)
+            });
+            serde_json::json!({"date": day.to_string(), "claude_code": claude, "codex": codex})
+        })
+        .collect();
+    serde_json::Value::Array(days)
 }
 
 /// The wire word for the person's own task label.

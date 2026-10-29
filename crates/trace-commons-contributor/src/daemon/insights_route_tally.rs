@@ -155,6 +155,13 @@ pub(crate) struct HourCharge {
     /// The sum overflowed `u64`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overflowed: bool,
+    /// The calls' tokens (uncached input, cache reads, cache writes and
+    /// output, normalized per facade as feed L reads them), so the NEAR AI
+    /// card compares with Claude's and Codex's (product owner,
+    /// 2026-10-28). `None` (unknown, never 0) once any call's counters are
+    /// unknown, and for an hour kept before tokens were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -165,6 +172,13 @@ fn is_zero(value: &u64) -> bool {
 impl HourCharge {
     /// Add `other` into this one; an overflow makes the sum unknown.
     pub(crate) fn absorb(&mut self, other: &HourCharge) {
+        self.tokens = if self.calls == 0 {
+            other.tokens
+        } else {
+            self.tokens
+                .zip(other.tokens)
+                .and_then(|(a, b)| a.checked_add(b))
+        };
         self.calls = self.calls.saturating_add(other.calls);
         self.calls_without_charge = self
             .calls_without_charge
@@ -209,6 +223,7 @@ impl NearAiCharge {
                 usd_micros: self.usd_micros,
                 calls_without_charge: self.calls_without_charge,
                 overflowed: self.overflowed,
+                tokens: None,
             },
         )])
     }
@@ -238,7 +253,7 @@ impl NearAiCharge {
 
     fn add(
         &mut self,
-        usd: Option<f64>,
+        (usd, tokens): (Option<f64>, Option<u64>),
         served: Option<String>,
         at: DateTime<Utc>,
         last_call_at: DateTime<Utc>,
@@ -262,6 +277,7 @@ impl NearAiCharge {
             usd_micros: micros.unwrap_or(0),
             calls_without_charge: u64::from(micros.is_none()),
             overflowed: false,
+            tokens,
         });
         match micros {
             Some(micros) => {
@@ -722,12 +738,17 @@ fn charged_by_near_ai(row: &RoutedExchange) -> bool {
 /// 5xx status) with no recorded charge was not billed, and adds a known
 /// $0 (owner question, 2026-10-28). Any other call with no charge (a
 /// completed one, or one with no status) is unknown, never zero.
-fn call_charge(row: &RoutedExchange) -> Option<f64> {
-    match row.cost_usd {
+fn call_charge(row: &RoutedExchange) -> (Option<f64>, Option<u64>) {
+    let refused = (400..600).contains(&row.status);
+    let usd = match row.cost_usd {
         Some(usd) => Some(usd),
-        None if (400..600).contains(&row.status) => Some(0.0),
+        None if refused => Some(0.0),
         None => None,
-    }
+    };
+    // Tokens as feed L counts them; a refused call with none recorded used
+    // none.
+    let tokens = call_tokens(row).or(refused.then_some(0));
+    (usd, tokens)
 }
 
 fn session_of(row: &RoutedExchange) -> Option<&str> {
@@ -1077,6 +1098,7 @@ mod tests {
                     HourCharge {
                         calls: 1,
                         usd_micros: 12_500,
+                        tokens: Some(110),
                         ..HourCharge::default()
                     }
                 )]),

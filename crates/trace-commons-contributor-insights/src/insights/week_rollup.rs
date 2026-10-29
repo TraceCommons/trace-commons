@@ -301,6 +301,14 @@ pub struct WeekRollup {
     pub by_day: Option<Vec<DayTokens>>,
     /// Codex deltas, which are intervals and not by day.
     pub codex_interval_tokens: Option<u64>,
+    /// Codex tokens on each local date, Monday first, from the per-turn
+    /// series' dated turns (product owner, 2026-10-28), as `by_day` is
+    /// Claude's. A day is `None` (unknown, never 0) when a Codex session
+    /// active on it has no series, a trimmed one, or a turn with no date
+    /// or no known counters. `None` altogether when no Codex session is in
+    /// the week. Absent from an answer made before it.
+    #[serde(default)]
+    pub codex_by_day: Option<Vec<Option<u64>>>,
     /// Alphabetical by declared label, unknown last. Never by value.
     pub by_model: Vec<ModelTokens>,
     pub sessions: Vec<SessionWeek>,
@@ -415,6 +423,7 @@ pub fn week_rollup<Tz: TimeZone>(
         .collect();
     let mut any_claude_known = false;
     let mut codex_interval: Option<u64> = None;
+    let mut codex_days: Option<[Option<u64>; 7]> = None;
     let mut models: BTreeMap<String, u64> = BTreeMap::new();
     let mut unknown_label_tokens: Option<u64> = None;
 
@@ -522,10 +531,19 @@ pub fn week_rollup<Tz: TimeZone>(
                     true
                 }
             }
-            SessionBody::Codex { observed, .. } => match observed {
+            SessionBody::Codex { observed, series } => match observed {
                 Some(observed) => {
                     let first = local_week_start(&observed.first_at, tz);
                     let last = local_week_start(&observed.last_at, tz);
+                    if !(week_start < first || last < week_start) && !prepared.reimport_overlap {
+                        codex_split(
+                            codex_days.get_or_insert([Some(0); 7]),
+                            observed,
+                            series.as_ref(),
+                            week_start,
+                            tz,
+                        );
+                    }
                     if week_start < first || last < week_start {
                         false
                     } else if prepared.reimport_overlap {
@@ -660,8 +678,52 @@ pub fn week_rollup<Tz: TimeZone>(
         sources: lines.into_values().collect(),
         by_day: any_claude_known.then_some(days),
         codex_interval_tokens: codex_interval,
+        codex_by_day: codex_days.map(|days| days.to_vec()),
         by_model,
         sessions: rows,
+    }
+}
+
+/// Add one Codex session's dated turns to `days` (the week from
+/// `week_start`). Days the session was active on (its first to last
+/// reading) that cannot be split, with no series, a trimmed one, or a turn
+/// with no date or no known counters, become unknown.
+fn codex_split<Tz: TimeZone>(
+    days: &mut [Option<u64>; 7],
+    observed: &CodexObserved,
+    series: Option<&CodexTurnSeriesEvidence>,
+    week_start: NaiveDate,
+    tz: &Tz,
+) {
+    let offset =
+        |at: &DateTime<Utc>| -> i64 { (at.with_timezone(tz).date_naive() - week_start).num_days() };
+    let unknown_span = |days: &mut [Option<u64>; 7]| {
+        let (from, to) = (
+            offset(&observed.first_at).max(0),
+            offset(&observed.last_at).min(6),
+        );
+        for day in from..=to {
+            if let Ok(day) = usize::try_from(day) {
+                if let Some(slot) = days.get_mut(day) {
+                    *slot = None;
+                }
+            }
+        }
+    };
+    let Some(series) = series.filter(|series| !series.series.truncated) else {
+        unknown_span(days);
+        return;
+    };
+    for turn in &series.series.turns {
+        let (Some(at), Some(usage)) = (turn.at, turn.known_usage()) else {
+            unknown_span(days);
+            return;
+        };
+        if let Ok(day) = usize::try_from(offset(&at)) {
+            if let Some(Some(slot)) = days.get_mut(day) {
+                *slot += usage.total();
+            }
+        }
     }
 }
 
@@ -1408,6 +1470,45 @@ mod tests {
         let rollup = roll(&[codex("c", 1, at(6, 1), at(6, 2))]);
         assert_eq!(rollup.codex_interval_tokens, Some(1_200));
         assert_eq!(rollup.by_day, None);
+    }
+
+    /// Product owner, 2026-10-28: Codex by local day, from the per-turn
+    /// series' dated turns, as Claude's days are; a day that cannot be
+    /// split is unknown, never 0.
+    #[test]
+    fn codex_tokens_split_by_day_from_dated_turns() {
+        let mut split = codex("split", 1, at(6, 1), at(7, 2));
+        if let SessionBody::Codex { series, .. } = &mut split.body {
+            *series = Some(CodexTurnSeriesEvidence {
+                model_labels: vec![],
+                series: UsageSeries {
+                    turns: vec![turn(0, Some(at(6, 1)), None), turn(1, Some(at(7, 2)), None)],
+                    tool_calls: vec![],
+                    truncated: false,
+                },
+            });
+        }
+        let rollup = roll(&[split.clone()]);
+        let days = rollup.codex_by_day.unwrap();
+        let monday = monday();
+        let offset = |at: DateTime<Utc>| (at.date_naive() - monday).num_days() as usize;
+        assert_eq!(days[offset(at(6, 1))], Some(TURN_TOTAL));
+        assert_eq!(days[offset(at(7, 2))], Some(TURN_TOTAL));
+        assert_eq!(days.iter().flatten().sum::<u64>(), 2 * TURN_TOTAL);
+        assert_eq!(days.len(), 7);
+
+        // A session with no series makes its active days unknown, and only
+        // those.
+        let rollup = roll(&[split, codex("whole", 2, at(8, 1), at(8, 3))]);
+        let days = rollup.codex_by_day.unwrap();
+        assert_eq!(days[offset(at(8, 1))], None);
+        assert_eq!(days[offset(at(6, 1))], Some(TURN_TOTAL));
+
+        // No Codex session in the week: no figure at all.
+        assert_eq!(
+            roll(&[claude("a", 1, vec![turn(0, Some(at(6, 1)), None)])]).codex_by_day,
+            None
+        );
     }
 
     #[test]

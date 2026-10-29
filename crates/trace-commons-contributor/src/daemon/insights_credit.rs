@@ -63,13 +63,16 @@ impl Sum {
             "sessions": self.sessions,
             "calls": self.charge.calls,
             "calls_without_charge": self.charge.calls_without_charge,
+            // The calls' tokens; `null` once any call's are unknown. No call
+            // is a true 0.
+            "tokens": if self.charge.calls == 0 { Some(0) } else { self.charge.tokens },
         })
     }
 }
 
 /// One window's NEAR AI charge as it crosses the socket: `from` and `to`
-/// (RFC 3339), `usd_micros` (`null` when unknown), `sessions`, `calls` and
-/// `calls_without_charge`; with `groups`, also `by_task[]`, `by_tool[]` and
+/// (RFC 3339), `usd_micros` (`null` when unknown), `sessions`, `calls`,
+/// `calls_without_charge` and `tokens` (`null` when unknown); with `groups`, also `by_task[]`, `by_tool[]` and
 /// `by_folder[]`, each `{key, usd_micros, sessions, calls,
 /// calls_without_charge}`.
 ///
@@ -163,6 +166,7 @@ mod tests {
                 usd_micros: micros.unwrap_or(0),
                 calls_without_charge: u64::from(micros.is_none()),
                 overflowed: false,
+                tokens: Some(1_000),
             });
             match micros {
                 Some(m) => {
@@ -204,11 +208,13 @@ mod tests {
         assert_eq!(day["sessions"], 2);
         assert_eq!(day["calls"], 2);
         assert_eq!(day["calls_without_charge"], 0);
+        assert_eq!(day["tokens"], 2_000);
         assert!(day.get("by_task").is_none());
         let next = window_value(&sessions, at(24), at(48), false);
         assert_eq!(next["usd_micros"], 5);
         assert_eq!(next["sessions"], 1);
         let empty = window_value(&sessions, at(48), at(72), false);
+        assert_eq!(empty["tokens"], 0, "no call is a true zero");
         assert_eq!(empty["usd_micros"], 0, "no call in it is a true zero");
         assert_eq!(empty["sessions"], 0);
     }

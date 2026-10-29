@@ -177,6 +177,15 @@
           "calls_without_counts": 1
         }
       }
+    ],
+    "codex_by_day": [
+      null,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
     ]
   },
   "routing_available": true,
@@ -196,7 +205,8 @@
           "sessions": 1,
           "calls": 1,
           "calls_without_charge": 0,
-          "key": "other"
+          "key": "other",
+          "tokens": 110
         }
       ],
       "by_tool": [
@@ -205,7 +215,8 @@
           "sessions": 1,
           "calls": 1,
           "calls_without_charge": 0,
-          "key": "codex"
+          "key": "codex",
+          "tokens": 110
         }
       ],
       "by_folder": [
@@ -214,9 +225,11 @@
           "sessions": 1,
           "calls": 1,
           "calls_without_charge": 0,
-          "key": null
+          "key": null,
+          "tokens": 110
         }
-      ]
+      ],
+      "tokens": 110
     },
     "today": {
       "usd_micros": 12500,
@@ -224,7 +237,8 @@
       "calls": 1,
       "calls_without_charge": 0,
       "from": "2026-09-14T00:00:00+00:00",
-      "to": "2026-09-15T00:00:00+00:00"
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110
     },
     "by_day": [
       {
@@ -234,7 +248,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-08T00:00:00+00:00",
         "to": "2026-09-09T00:00:00+00:00",
-        "date": "2026-09-08"
+        "date": "2026-09-08",
+        "tokens": 0
       },
       {
         "usd_micros": 0,
@@ -243,7 +258,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-09T00:00:00+00:00",
         "to": "2026-09-10T00:00:00+00:00",
-        "date": "2026-09-09"
+        "date": "2026-09-09",
+        "tokens": 0
       },
       {
         "usd_micros": 0,
@@ -252,7 +268,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-10T00:00:00+00:00",
         "to": "2026-09-11T00:00:00+00:00",
-        "date": "2026-09-10"
+        "date": "2026-09-10",
+        "tokens": 0
       },
       {
         "usd_micros": 0,
@@ -261,7 +278,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-11T00:00:00+00:00",
         "to": "2026-09-12T00:00:00+00:00",
-        "date": "2026-09-11"
+        "date": "2026-09-11",
+        "tokens": 0
       },
       {
         "usd_micros": 0,
@@ -270,7 +288,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-12T00:00:00+00:00",
         "to": "2026-09-13T00:00:00+00:00",
-        "date": "2026-09-12"
+        "date": "2026-09-12",
+        "tokens": 0
       },
       {
         "usd_micros": 0,
@@ -279,7 +298,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-13T00:00:00+00:00",
         "to": "2026-09-14T00:00:00+00:00",
-        "date": "2026-09-13"
+        "date": "2026-09-13",
+        "tokens": 0
       },
       {
         "usd_micros": 12500,
@@ -288,7 +308,8 @@
         "calls_without_charge": 0,
         "from": "2026-09-14T00:00:00+00:00",
         "to": "2026-09-15T00:00:00+00:00",
-        "date": "2026-09-14"
+        "date": "2026-09-14",
+        "tokens": 110
       }
     ],
     "last_31_days": {
@@ -297,7 +318,8 @@
       "calls": 1,
       "calls_without_charge": 0,
       "from": "2026-08-15T00:00:00+00:00",
-      "to": "2026-09-15T00:00:00+00:00"
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110
     }
   },
   "overview": {
@@ -764,5 +786,42 @@
       "past_threshold": null
     }
   ],
-  "recap_card_enabled": true
+  "recap_card_enabled": true,
+  "usage_by_day": [
+    {
+      "date": "2026-09-08",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-09",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-10",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-11",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-12",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-13",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-14",
+      "claude_code": 37235,
+      "codex": null
+    }
+  ]
 }

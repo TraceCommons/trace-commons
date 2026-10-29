@@ -614,7 +614,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
@@ -4974,10 +4974,14 @@ sessions on disk. Otherwise:
   `YYYY-MM-DD`) and `last_31_days` today and the 30 local days before it
   (none of these moves with the week on screen), each from local midnight
   to local midnight. Each window is `{from, to, usd_micros,
-  sessions, calls, calls_without_charge}`: the calls through the NEAR AI
+  sessions, calls, calls_without_charge, tokens}`: the calls through the NEAR AI
   route started in it (by clock hour), their sum in integer USD micros, the
   sessions they came from (the `loose_charge` counts in every sum and in each
-  unknown group, as no session), and the calls with no charge. `usd_micros` is
+  unknown group, as no session), the calls with no charge, and the calls'
+  tokens (uncached input, cache reads, cache writes and output, as feed L
+  counts them; `null` once any call's counters are unknown, and for hours
+  kept before tokens were; a call refused with HTTP 4xx or 5xx and no
+  counters adds 0). `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
   zero; a window with no call is a true 0. `week` also carries `by_task[]`,
   `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
@@ -4993,6 +4997,16 @@ sessions on disk. Otherwise:
   charge. Groups are ordered by known charge, largest first, then the
   unknown ones; ties by key, `null` last. A daemon that predates it omits
   it; a shell reads that as no credit figure, never as zero.
+- `usage_by_day[]` (additive, product owner 2026-10-28) is Claude Code and
+  Codex tokens on each of the last 7 local days, oldest first, today last,
+  each `{date, claude_code, codex}`; it does not move with the week on
+  screen. Claude Code's are the four series a day stacks in `rollup.by_day`;
+  Codex's come from `rollup.codex_by_day`, its per-turn series split by the
+  turns' dates. A day is `null` (unknown, never 0) when a session on it
+  could not be counted or split (a Codex session with no series, a trimmed
+  one, or an undated or uncounted turn); a week with no session of that tool
+  is a true 0. `rollup.codex_by_day` (additive) is the same split for the
+  week on screen, Monday first, `null` when the week has no Codex session.
 - `started_at`, `routing`, `routing_available` and `routing_unavailable`
   are additive: a daemon that predates them omits all four. A shell reads
   an absent `routing_available` as false and draws no route, and an absent
