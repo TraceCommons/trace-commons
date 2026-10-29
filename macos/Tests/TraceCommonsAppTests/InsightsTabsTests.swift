@@ -4,7 +4,7 @@ import TCBridge
 @testable import TraceCommonsApp
 
 /// Insights' tab bar (product owner, 2026-10-29): Overview, Breakdown and
-/// Benchmarks. Sessions and Analyze are off the bar.
+/// Benchmarks.
 @MainActor
 final class InsightsTabsTests: XCTestCase {
     func testTheBarShowsOverviewBreakdownAndBenchmarks() {

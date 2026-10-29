@@ -158,15 +158,15 @@ final class DesignRulings20261020Tests: XCTestCase {
     }
 
     /// An "i" follows its line's last word wherever the line wraps (owner,
-    /// 2026-10-20): Insights' section titles, group headings and coverage
-    /// line flow their words with the "i" on the last.
+    /// 2026-10-20): Insights' section titles and coverage line flow their
+    /// words with the "i" on the last.
     func test_theInfoFollowsTheLastWord() throws {
         XCTAssertEqual(InsightsTextWithInfo.words("Oct 9 \u{b7} Claude Code  trace"),
                        ["Oct", "9", "\u{b7}", "Claude", "Code", "trace"])
         XCTAssertEqual(InsightsTextWithInfo.words(""), [])
         XCTAssertGreaterThan(InsightsTextWithInfo.wordGap(GlassTokens.TypeScale.title), 0)
         let glass = try Self.text("Views/InsightsGlass.swift")
-        XCTAssertEqual(glass.components(separatedBy: "InsightsTextWithInfo(").count - 1, 3)
+        XCTAssertEqual(glass.components(separatedBy: "InsightsTextWithInfo(").count - 1, 2)
         XCTAssertTrue(glass.contains(
             "Text(words.last ?? \"\").accessibilityHidden(true)\n                    InsightsInfo(infoTitle, info)"))
         XCTAssertFalse(glass.contains("            InsightsInfo(title, info)\n            Spacer("), "the title's i is at the row's end again")
@@ -177,8 +177,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// bare glyph, and the icon card's beside its title no more.
     func test_everyRefreshIsTheRightAlignedIconButton() throws {
         XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
-        let files = ["Views/ComparisonTasksView.swift", "Views/ComparisonSpecificationsView.swift",
-                     "Views/InsightsEpisodesView.swift", "Views/InsightsView.swift", "Views/MissionDraftsView.swift",
+        let files = ["Views/MissionDraftsView.swift",
                      "Views/Settings/ConsentSection.swift", "Views/Settings/StartupSection.swift",
                      "Views/Settings/WatchingSection.swift"]
         for file in files {

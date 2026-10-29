@@ -62,12 +62,6 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/MonitorWindowView.swift",
         "Views/Monitor/FirstRunViews.swift",
         "Views/InsightsView.swift",
-        "Views/InsightsSummaryView.swift",
-        "Views/InsightsEpisodesView.swift",
-        "Views/InsightCardsView.swift",
-        "Views/InsightEvidenceView.swift",
-        "Views/ComparisonTasksView.swift",
-        "Views/ComparisonSpecificationsView.swift",
         "Views/MissionDraftsView.swift",
         // Ron's inspector host and its prompts (#1146, Task 3 of #1241).
         "Views/Monitor/TracesInspectorHost.swift",
