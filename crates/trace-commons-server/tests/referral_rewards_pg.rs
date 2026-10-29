@@ -18,7 +18,7 @@
 use tokio_postgres::error::SqlState;
 use trace_commons_server::{
     config::DatabaseConfig,
-    db::{Database, postgres::PgBackend},
+    db::{Database, REFERRAL_RESOLVER_ASSUME_SQL, postgres::PgBackend},
 };
 use uuid::Uuid;
 
@@ -438,6 +438,28 @@ async fn the_resolver_reads_code_owners_across_tenants_and_nothing_else() {
         .await
         .unwrap();
     assert!(!role.get::<_, bool>(0) && !role.get::<_, bool>(1) && !role.get::<_, bool>(2));
+    // SET LOCAL ROLE loads no role settings, so the role carries none and
+    // the timeout comes from the transaction that assumes it.
+    let config: Option<Vec<String>> = client
+        .query_one(
+            "SELECT rolconfig FROM pg_roles WHERE rolname = 'trace_referral_resolver'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(config, None, "a role setting would never apply");
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute(REFERRAL_RESOLVER_ASSUME_SQL)
+        .await
+        .unwrap();
+    let row = tx
+        .query_one("SELECT current_user::TEXT, current_setting('statement_timeout')", &[])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "trace_referral_resolver");
+    assert_eq!(row.get::<_, String>(1), "2s");
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]

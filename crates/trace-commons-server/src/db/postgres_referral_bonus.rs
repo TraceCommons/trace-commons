@@ -248,7 +248,7 @@ impl PgBackend {
     ) -> Result<Vec<tokio_postgres::Row>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
-        tx.batch_execute("SET LOCAL ROLE trace_referral_resolver")
+        tx.batch_execute(super::postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL)
             .await?;
         let rows = tx.query(sql, params).await?;
         tx.commit().await?;

@@ -342,7 +342,13 @@ DROP POLICY IF EXISTS trace_referral_resolver_cross_tenant_read ON trace_referra
 CREATE POLICY trace_referral_resolver_cross_tenant_read ON trace_referral_codes
     FOR SELECT TO trace_referral_resolver
     USING (true);
-ALTER ROLE trace_referral_resolver SET statement_timeout = '2s';
+-- No ALTER ROLE ... SET statement_timeout here: the role is NOLOGIN and
+-- assumed only with SET LOCAL ROLE, which never loads role settings. Every
+-- transaction that assumes it sets SET LOCAL statement_timeout itself
+-- (REFERRAL_RESOLVER_ASSUME_SQL in db/postgres_referral.rs).
+-- The RESET clears the setting an earlier draft of this file left on a
+-- cluster's (global) role.
+ALTER ROLE trace_referral_resolver RESET statement_timeout;
 
 -- Runtime grants.
 REVOKE ALL ON trace_referral_codes, trace_referral_attributions, trace_referral_referees,

@@ -152,6 +152,14 @@ async fn identity_marks(
     Ok(marks)
 }
 
+/// Assumes `trace_referral_resolver` for the rest of a transaction, with
+/// a statement timeout. The role is NOLOGIN and taken only with
+/// `SET LOCAL ROLE`, which loads none of its `ALTER ROLE ... SET` settings,
+/// so the timeout is set here, in every transaction that assumes it.
+#[doc(hidden)]
+pub const REFERRAL_RESOLVER_ASSUME_SQL: &str =
+    "SET LOCAL ROLE trace_referral_resolver; SET LOCAL statement_timeout = '2s'";
+
 impl PgBackend {
     /// Which tenant and account own the live code `code_index`, read as
     /// `trace_referral_resolver` in a transaction of its own. Not offered
@@ -162,8 +170,7 @@ impl PgBackend {
     ) -> Result<Option<(String, Uuid)>, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
-        tx.batch_execute("SET LOCAL ROLE trace_referral_resolver")
-            .await?;
+        tx.batch_execute(REFERRAL_RESOLVER_ASSUME_SQL).await?;
         let row = tx
             .query_opt(
                 &format!(
