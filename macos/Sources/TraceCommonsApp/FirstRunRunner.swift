@@ -45,8 +45,10 @@ protocol FirstRunDaemon: AnyObject {
     /// End the browser sign-in `nearAILogin` is waiting on
     /// (`near_ai_credential_cancel`). True only once the daemon took it.
     func cancelNearAILogin() async -> Bool
-    /// Enroll this Mac through that login, with no invite.
-    func enrollNearAI() async -> FirstRunNearAIEnrolment
+    /// Enroll this Mac through that login, with no invite, carrying the
+    /// referral code the person typed, if any (referral spec section 6).
+    /// A code that does not apply never fails the enrolment.
+    func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment
     func setAskEachTime() async -> Bool
     func saveConsentScopes(_ scopes: [String]) async -> Bool
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool
@@ -130,6 +132,9 @@ final class FirstRunRunner: ObservableObject {
     /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
     /// beside the spinning Sign in only while this holds.
     @Published private(set) var signInWaiting = false
+    /// The optional referral code on Join's NEAR AI sign-in, as typed. Sent
+    /// with the NEAR AI enrolment only; the daemon checks it.
+    @Published var referralCode = ""
     /// The login `signInWaiting` covers, so Cancel can end its wait.
     private var loginTask: Task<Bool, Never>?
     /// The daemon's answer to a Cancel, awaited before the commit ends so
@@ -304,7 +309,7 @@ final class FirstRunRunner: ObservableObject {
                 return fail(.signInFailed)
             }
         case .enrollNearAI:
-            switch await daemon.enrollNearAI() {
+            switch await daemon.enrollNearAI(referralCode: Self.sentReferralCode(referralCode)) {
             case .enrolled:
                 state.nearAIEnrolled = true
                 state.signedIn = true
@@ -444,5 +449,12 @@ final class FirstRunRunner: ObservableObject {
     private func fail(_ reason: FirstRunFailure) -> Bool {
         failure = reason
         return false
+    }
+
+    /// The referral code the enrolment carries: nil for an empty field, the
+    /// typed text otherwise, which the daemon normalizes and checks.
+    nonisolated static func sentReferralCode(_ typed: String) -> String? {
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

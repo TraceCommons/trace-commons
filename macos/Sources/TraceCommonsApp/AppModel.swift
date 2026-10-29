@@ -4389,11 +4389,11 @@ extension AppModel: FirstRunDaemon {
 
     /// Enroll through the near.ai login with no invite. The daemon's label
     /// is passed back for the core's line, never shown.
-    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+    func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment {
         guard let client else { return .refused(label: "near_ai_enroll_unavailable") }
         let outcome = await Task.detached(priority: .userInitiated) { () -> FirstRunNearAIEnrolment in
             do {
-                return try client.nearAiAccountEnroll().enrolled
+                return try client.nearAiAccountEnroll(referralCode: referralCode).enrolled
                     ? .enrolled : .refused(label: "near_ai_enroll_unavailable")
             } catch let failure as DaemonClient.Failure {
                 return .refused(label: failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
