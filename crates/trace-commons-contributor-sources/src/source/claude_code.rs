@@ -664,10 +664,29 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
         Ok(md) if md.is_dir() => {}
         _ => return (members, excluded),
     }
-    let Ok(entries) = std::fs::read_dir(&subagents_dir) else {
+    let session_uuid = stem.to_string_lossy().into_owned();
+    let (found, skipped) = validated_members_in(&subagents_dir, &session_uuid, |_| true);
+    members.extend(found);
+    excluded += skipped;
+    members.sort_by_key(|m| file_name_bytes(&m.path));
+    (members, excluded)
+}
+
+/// The validated transcripts directly inside `dir` (one level, no descent):
+/// regular `.jsonl` files whose name `accept` takes, refusing symlinks,
+/// whose `sessionId` is `session_uuid` or absent; plus a count of the
+/// entries excluded. Unsorted. The membership rule `group_members_for`
+/// states, shared so the spawned-transcript listing cannot drift from it.
+fn validated_members_in(
+    dir: &Path,
+    session_uuid: &str,
+    accept: impl Fn(&Path) -> bool,
+) -> (Vec<GroupMember>, usize) {
+    let mut members = Vec::new();
+    let mut excluded = 0usize;
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return (members, excluded);
     };
-    let session_uuid = stem.to_string_lossy().into_owned();
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -677,7 +696,7 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
             }
         };
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") || !accept(&path) {
             continue;
         }
         // Refuse symlinks, for the same reason and by the same test as the
@@ -721,9 +740,87 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
             modified_at,
         });
     }
-    members.sort_by_key(|m| file_name_bytes(&m.path));
     (members, excluded)
 }
+
+/// How a spawned transcript was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpawnedKind {
+    /// A sub-agent the session delegated to:
+    /// `<session-uuid>/subagents/<name>.jsonl`.
+    Agent,
+    /// A sub-agent a workflow the session ran started:
+    /// `<session-uuid>/subagents/workflows/<run>/agent-*.jsonl`.
+    Workflow,
+}
+
+/// One transcript a Claude session spawned, as found on disk. Never read
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedTranscript {
+    pub path: PathBuf,
+    pub kind: SpawnedKind,
+    pub size_bytes: u64,
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Every transcript the top-level session file `parent` spawned: its
+/// delegated sub-agents (`subagents/*.jsonl`, the members
+/// `group_members_for` finds) and its workflows' sub-agents
+/// (`subagents/workflows/<run>/agent-*.jsonl`, not group members), by the
+/// same rules: symlinks refused, a `sessionId` other than the parent's
+/// excluded, absence included. Sub-agents first, then workflow ones, each
+/// by raw path bytes.
+///
+/// For Insights only (the counter pass reads each as its own sub-agent
+/// row). The upload group is `group_members_for`'s and is not widened by
+/// this: a workflow's sub-agents are not uploaded with the session.
+pub fn spawned_transcripts_for(parent: &Path) -> Vec<SpawnedTranscript> {
+    let mut out = Vec::new();
+    let (Some(stem), Some(subagents_dir)) = (parent.file_stem(), subagents_dir_for(parent)) else {
+        return out;
+    };
+    let real_dir = |dir: &Path| {
+        std::fs::symlink_metadata(dir).is_ok_and(|md| md.is_dir())
+    };
+    if !real_dir(&subagents_dir) {
+        return out;
+    }
+    let session_uuid = stem.to_string_lossy().into_owned();
+    let mut push = |found: Vec<GroupMember>, kind: SpawnedKind| {
+        let mut found = found;
+        found.sort_by(|a, b| a.path.as_os_str().as_encoded_bytes().cmp(b.path.as_os_str().as_encoded_bytes()));
+        out.extend(found.into_iter().map(|m| SpawnedTranscript {
+            path: m.path,
+            kind,
+            size_bytes: m.size_bytes,
+            modified_at: m.modified_at,
+        }));
+    };
+    let (agents, _) = validated_members_in(&subagents_dir, &session_uuid, |_| true);
+    push(agents, SpawnedKind::Agent);
+    let workflows = subagents_dir.join(WORKFLOWS_DIR_NAME);
+    let mut runs = Vec::new();
+    if real_dir(&workflows) {
+        if let Ok(entries) = std::fs::read_dir(&workflows) {
+            for entry in entries.flatten() {
+                // `DirEntry::file_type` does not follow a symlink.
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                    let (found, _) = validated_members_in(&entry.path(), &session_uuid, |path| {
+                        path.file_name()
+                            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"agent-"))
+                    });
+                    runs.extend(found);
+                }
+            }
+        }
+    }
+    push(runs, SpawnedKind::Workflow);
+    out
+}
+
+/// The directory under `subagents/` a workflow's runs are written into.
+const WORKFLOWS_DIR_NAME: &str = "workflows";
 
 /// A path's file name as raw bytes, for an ordering that cannot depend on
 /// locale or Unicode normalization.
@@ -2360,6 +2457,76 @@ mod tests {
             }
         }
         (root, parent)
+    }
+
+    /// Places a workflow sub-agent transcript, and the workflow's journal,
+    /// under `parent`'s `subagents/workflows/<run>/`.
+    fn add_workflow_member(parent: &Path, run: &str, name: &str, session: &str) -> PathBuf {
+        let dir = subagents_dir_for(parent).unwrap().join("workflows").join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("journal.jsonl"), "{}\n").unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, record(session, "workflow turn")).unwrap();
+        path
+    }
+
+    #[test]
+    fn spawned_transcripts_include_workflow_sub_agents_that_the_group_leaves_out() {
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (_root, parent) = group_fixture(&[("agent-a.jsonl", "a"), ("agent-b.jsonl", "b")]);
+        let workflow = add_workflow_member(&parent, "run-1", "agent-w.jsonl", session);
+        // Another session's transcript planted in this one's workflows.
+        add_workflow_member(&parent, "run-2", "agent-x.jsonl", "33333333-3333-3333-3333-333333333333");
+
+        // The upload group is unchanged: flat members only.
+        let (members, excluded) = group_members_for(&parent);
+        assert_eq!(members.len(), 2);
+        assert_eq!(excluded, 0);
+
+        let spawned = spawned_transcripts_for(&parent);
+        let kinds: Vec<(SpawnedKind, String)> = spawned
+            .iter()
+            .map(|t| (t.kind, t.path.file_name().unwrap().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (SpawnedKind::Agent, "agent-a.jsonl".to_string()),
+                (SpawnedKind::Agent, "agent-b.jsonl".to_string()),
+                (SpawnedKind::Workflow, "agent-w.jsonl".to_string()),
+            ]
+        );
+        let w = spawned.iter().find(|t| t.path == workflow).unwrap();
+        assert_eq!(w.size_bytes, std::fs::metadata(&workflow).unwrap().len());
+        assert!(w.modified_at.is_some());
+    }
+
+    #[test]
+    fn spawned_transcripts_of_a_session_with_none_are_empty() {
+        let (_root, parent) = group_fixture(&[]);
+        assert!(spawned_transcripts_for(&parent).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_transcripts_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (_root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("agent-o.jsonl"), record(session, "o")).unwrap();
+        let workflows = subagents_dir_for(&parent).unwrap().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        // A symlinked run directory, and a symlinked transcript.
+        symlink(outside.path(), workflows.join("run-link")).unwrap();
+        let run = workflows.join("run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        symlink(outside.path().join("agent-o.jsonl"), run.join("agent-l.jsonl")).unwrap();
+        let names: Vec<String> = spawned_transcripts_for(&parent)
+            .iter()
+            .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["agent-a.jsonl".to_string()]);
     }
 
     #[test]
