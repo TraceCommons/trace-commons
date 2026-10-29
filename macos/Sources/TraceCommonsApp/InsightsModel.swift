@@ -600,6 +600,16 @@ enum InsightsPatternsWords {
         value.map(String.init) ?? dash(copy)
     }
 
+    /// The pattern kinds this app does not show (owner, 2026-10-29: Retried
+    /// tool calls is removed from macOS Insights). The core still sends
+    /// them for the other shells.
+    static let removedKinds: Set<String> = ["retried_calls"]
+
+    /// The week's cards this app shows, in the core's order.
+    static func shownCards(_ cards: [InsightsPatternCard]) -> [InsightsPatternCard] {
+        cards.filter { !removedKinds.contains($0.kind) }
+    }
+
     /// The card's name, by its wire kind.
     static func title(_ kind: String, copy: [String: String]) -> String {
         text("analytics_pattern_" + kind, copy)
@@ -614,7 +624,7 @@ enum InsightsPatternsWords {
 
     /// Each card's hole for its count in the headline words.
     private static let countHole = [
-        "repeated_reads": "r", "retried_calls": "c", "edit_fail_edit": "l", "long_context": "n",
+        "repeated_reads": "r", "edit_fail_edit": "l", "long_context": "n",
     ]
 
     /// The card's headline: the token figure, or the count with its unit
@@ -638,15 +648,11 @@ enum InsightsPatternsWords {
             let key = "analytics_pattern_repeated_reads_count_under_count"
                 + (card.files == 1 ? "_one" : "_other")
             return fill(text(key, copy), ["f": count(card.files, copy)])
-        case "retried_calls" where underCount:
-            return text("analytics_pattern_retried_calls_count_under_count", copy)
         case "edit_fail_edit" where underCount:
             return text("analytics_pattern_edit_fail_edit_count_under_count", copy)
         case "repeated_reads":
             return fill(text("analytics_pattern_repeated_reads_count", copy),
                         ["r": count(card.count, copy), "f": count(card.files, copy)])
-        case "retried_calls":
-            return fill(text("analytics_pattern_retried_calls_count", copy), ["c": count(card.count, copy)])
         case "edit_fail_edit":
             return fill(text("analytics_pattern_edit_fail_edit_count", copy), ["l": count(card.count, copy)])
         case "long_context":
@@ -1043,7 +1049,8 @@ enum InsightsComparisonsWords {
             return fill(text(met ? "analytics_recap_goal_met" : "analytics_recap_goal_not_met", copy),
                         ["goal": Self.goal(goal, copy: copy)])
         case "pattern_up":
-            guard let pattern = item.pattern, let up = item.up_permille else { return nil }
+            guard let pattern = item.pattern, let up = item.up_permille,
+                  !InsightsPatternsWords.removedKinds.contains(pattern) else { return nil }
             return fill(text("analytics_recap_pattern_up", copy), [
                 "pattern": InsightsPatternsWords.title(pattern, copy: copy), "p": InsightsOverviewWords.percent(up),
             ])

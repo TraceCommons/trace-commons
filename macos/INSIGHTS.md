@@ -37,11 +37,12 @@ the card. Picking either opens the inspector; with nothing picked it shows
 "Breakdown" over the dash.
 
 Patterns reads `patterns` and, for each card's "See sessions", the
-`pattern_sessions` list, over the same saved snapshots. Its four cards are
-repeated reads, retried tool calls, "Edit, failed command, edit" (inferred
-from the order of tool calls) and long context, each with the token figure
+`pattern_sessions` list, over the same saved snapshots. Its three cards are
+repeated reads, "Edit, failed command, edit" (inferred from the order of
+tool calls) and long context (the core's retried tool calls card is left
+out on macOS), each with the token figure
 first, the count beneath it and six weekly bars; a week with no counted
-Claude Code session is a gap, never a zero bar. The first three are estimates
+Claude Code session is a gap, never a zero bar. The first two are estimates
 from result size; long context is counted input. The figures overlap and do
 not add up to the week's tokens. Only Claude Code sessions record tool calls,
 so a week with Codex sessions says how many sessions the figures cover. The

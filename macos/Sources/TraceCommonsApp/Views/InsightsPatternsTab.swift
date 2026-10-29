@@ -59,7 +59,7 @@ struct InsightsPatternsTab: View {
                     }
                     // A card's sessions are the inspector's too.
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        ForEach(patterns.cards) { card in
+                        ForEach(InsightsPatternsWords.shownCards(patterns.cards)) { card in
                             patternCard(card, threshold: patterns.long_context_threshold)
                         }
                     }
