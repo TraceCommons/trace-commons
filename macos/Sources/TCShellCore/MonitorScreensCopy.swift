@@ -76,6 +76,10 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let previous: String
     public let next: String
     public let creditPending: String
+    /// Home's received and pending credit tiles (owner, 2026-10-29); `nil`
+    /// from a core that predates them.
+    public let creditReceived: String?
+    public let creditPendingTitle: String?
     public let openTraces: String
     public let quit: String
     public let coreUnreachable: String
@@ -178,6 +182,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case previous
         case next
         case creditPending = "credit_pending"
+        case creditReceived = "credit_received"
+        case creditPendingTitle = "credit_pending_title"
         case openTraces = "open_traces"
         case quit
         case coreUnreachable = "core_unreachable"
@@ -267,6 +273,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "previous",
         "next",
         "credit_pending",
+        "credit_received",
+        "credit_pending_title",
         "open_traces",
         "quit",
         "core_unreachable",
