@@ -29,6 +29,11 @@ struct InsightsUsageCards: View {
     let copy: [String: String]
     /// "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
+    /// The NEAR AI payout split (referral spec section 6): credit from own
+    /// traces and from referrals, from the payout rail's streams
+    /// (`NearAiEarningsSplit`). Empty draws nothing, as it is for an
+    /// account that never referred anyone.
+    var earnings: [NearAiEarningsSplit.Row] = []
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
@@ -50,9 +55,7 @@ struct InsightsUsageCards: View {
                     if let failure = subscriptions?.failureKey {
                         Text(text(failure)).insightsError()
                     }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: GlassTokens.Space.cardGap,
-                                                 alignment: .top)],
-                              alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InsightsCardFlow(minimum: 220, maximum: 560) {
                         ForEach(logins) { row in loginCard(row) }
                         if let credit = nearAiShown { nearAiCard(credit) }
                     }
@@ -127,6 +130,9 @@ struct InsightsUsageCards: View {
                              value: InsightsCreditWords.spendAndTokens(credit.today, copy: copy))
             InsightsUsageRow(label: text("analytics_usage_last_31_days"),
                              value: InsightsCreditWords.spendAndTokens(credit.last31Days, copy: copy))
+            ForEach(earnings) { row in
+                InsightsUsageRow(label: row.label, value: row.value)
+            }
         })
     }
 }
@@ -151,9 +157,16 @@ struct InsightsUsageCard<Header: View, Rows: View>: View {
                     .accessibilityAddTraits(.isHeader)
                 header()
             }
+            // Every card's header is as tall as one with a Refresh button,
+            // so the rows under it line up across the row of cards.
+            .frame(minHeight: GlassTokens.Size.controlLarge, alignment: .leading)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { rows() }
             Spacer(minLength: 0)
-            InsightsUsageBars(days: bars, caption: text("analytics_usage_last_7_days"))
+            // No bars from a daemon that sends no days, rather than an
+            // empty plot.
+            if !bars.isEmpty {
+                InsightsUsageBars(days: bars, caption: text("analytics_usage_last_7_days"))
+            }
             Button(text("analytics_usage_by_project")) { showProjects() }
                 .buttonStyle(GlassButtonStyle(.link))
                 .accessibilityLabel(InsightsOverviewWords.fill(text("analytics_usage_by_project_a11y"), ["label": title]))
@@ -241,11 +254,10 @@ enum InsightsUsageWords {
     /// daemon that predates it.
     static func days(_ credit: DaemonData.InsightsNearAiCredit, copy: [String: String]) -> [Day] {
         (credit.byDay ?? []).enumerated().map { index, window in
-            // A partly known day draws its known part, read out as "at
-            // least" (owner, 2026-10-28).
+            // A partly known day draws and reads its known part (owner,
+            // 2026-10-28; no "at least", 2026-10-29).
             Day(id: window.date ?? String(index), label: weekday(window.date, fallback: index),
-                amount: InsightsCreditWords.spend(window.usdMicros, known: window.usdMicrosKnown,
-                                                  partial: window.usdPartial, copy: copy),
+                amount: InsightsCreditWords.spend(window.usdMicros, known: window.usdMicrosKnown, copy: copy),
                 value: (window.usdMicros ?? (window.usdPartial == true ? window.usdMicrosKnown : nil))
                     .map { Double($0) / 1_000_000 })
         }

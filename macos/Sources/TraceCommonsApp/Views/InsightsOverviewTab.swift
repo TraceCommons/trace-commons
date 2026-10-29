@@ -33,6 +33,8 @@ struct InsightsOverviewTab: View {
     /// Claude and Codex tokens on each of the last 7 days, for the usage
     /// cards' bars.
     var usageByDay: [DaemonData.InsightsUsageDay]?
+    /// The NEAR AI card's own-traces and referrals rows; empty draws none.
+    var earnings: [NearAiEarningsSplit.Row] = []
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
     /// Spend at API prices and trends (product owner,
@@ -54,44 +56,51 @@ struct InsightsOverviewTab: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
 
+    /// The get-started card over this tab drawn from the sample (product
+    /// owner, 2026-10-29); `nil` for the person's own week.
+    var getStarted: InsightsGetStarted?
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                // The week at a glance, then limits, spend by model
-                // and trends (product owner, 2026-10-29). The harness
-                // cards, lever, "Where tokens went" and the By model / By
-                // tool tokens left Overview with that review.
-                if let overview = model.shown {
-                    weekPicker(overview)
-                    if let recap = comparisons.comparisons?.recap { recapCard(recap) }
-                }
-                InsightsWeekTiles(work: work, credit: creditTile, copy: copy)
-                InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
-                                   copy: copy, showProjects: showProjects)
-                // Without `work` (feed S, or a daemon that predates it) the
-                // harness cards keep the week's tokens on screen.
-                if work == nil, let overview = model.shown {
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        ForEach(overview.sources) { source in
-                            harnessCard(source, overview: overview)
-                        }
-                    }
-                    if overview.sources.isEmpty {
-                        Text(text("analytics_unavailable")).insightsFigure()
-                    }
-                }
-                if let work {
-                    InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks)
-                    InsightsTrendsCard(work: work, tokenChanges: weekChanges, copy: copy)
-                }
-                if model.shown == nil, model.failed {
-                    Text(text("analytics_unavailable")).insightsError()
-                }
-                if model.busy { GlassSpinner() }
+        InsightsTabPage(getStarted: getStarted) {
+            // The week at a glance, then limits, spend by model and
+            // trends (product owner, 2026-10-29; lines accepted left
+            // with the owner's later review that day). The harness
+            // cards, lever, "Where tokens went" and the By model / By
+            // tool tokens left Overview with that review.
+            if let overview = model.shown {
+                weekPicker(overview)
+                if let recap = comparisons.comparisons?.recap { recapCard(recap) }
             }
-            .padding(.vertical, GlassTokens.Space.s7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSurface()
+            InsightsWeekTiles(work: work, credit: creditTile, copy: copy)
+            InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
+                               copy: copy, showProjects: showProjects, earnings: earnings)
+            // Without `work` (feed S, or a daemon that predates it) the
+            // harness cards keep the week's tokens on screen.
+            // Only a harness with a trace this week has a card: a Claude
+            // user sees no empty Codex card, and the reverse.
+            if work == nil, let overview = model.shown {
+                let sources = overview.sources.filter { $0.sessions > 0 }
+                LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    ForEach(sources) { source in
+                        harnessCard(source, overview: overview)
+                    }
+                }
+            }
+            // A card with nothing known is left out, not drawn as dashes.
+            if let work {
+                let byModel = !InsightsWorkWords.modelRows(work, copy: copy).isEmpty
+                let trends = InsightsWorkWords.showsTrends(work, tokens: weekChanges, copy: copy)
+                if byModel || trends {
+                    InsightsCardFlow(minimum: 380) {
+                        if byModel { InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks) }
+                        if trends { InsightsTrendsCard(work: work, tokenChanges: weekChanges, copy: copy) }
+                    }
+                }
+            }
+            if model.shown == nil, model.failed {
+                Text(text("analytics_unavailable")).insightsError()
+            }
+            if model.busy { GlassSpinner() }
         }
     }
 
@@ -373,7 +382,7 @@ struct InsightsCounterSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }
@@ -475,7 +484,7 @@ struct InsightsCardInputsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }

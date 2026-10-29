@@ -67,9 +67,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "folder",
     // The weekday picked on "Tokens by day".
     "day",
-    // Overview and Benchmarks (product owner, 2026-10-29): lines added,
-    // a limit window's name, and the two models a tip compares.
-    "a",
+    // Overview and Benchmarks (product owner, 2026-10-29): a limit
+    // window's name, and the two models a tip compares.
     "window",
     "first",
     "second",
@@ -237,10 +236,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_usage_weekly_resets", "Weekly resets"),
     // NEAR AI tokens beside its spend, and under its spend on By project.
     ("analytics_usage_tokens", "{t} tokens"),
-    // A NEAR AI figure some of whose calls carried no charge: the known
-    // sum as a minimum (owner-approved wording, 2026-10-28). `{x}` is the
-    // amount or the token figure.
-    ("analytics_usage_at_least", "at least {x}"),
     ("analytics_usage_near_ai", "NEAR AI"),
     ("analytics_usage_last_31_days", "Last 31 days"),
     ("analytics_usage_last_7_days", "Last 7 days"),
@@ -252,19 +247,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_usage_by_project_a11y", "{label} by project"),
     // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): Details'
     // drill-down, by project (Claude Code and Codex tokens beside NEAR AI
-    // spend), by task or by tool (NEAR AI spend). By tool and By project
-    // reuse the breakdown card's words.
+    // spend) or by model. By task and By tool were removed (owner,
+    // 2026-10-29). By project reuses the breakdown card's words.
     ("analytics_credit_title", "Where usage went"),
-    (
-        "analytics_credit_scope",
-        "This week, from this Mac. By task and By tool show NEAR AI spend.",
-    ),
+    // DRAFT, NEEDS APPROVAL (owner, 2026-10-29): the views it named are gone.
+    ("analytics_credit_scope", "This week, from this Mac."),
     ("analytics_projects_project", "Project"),
     ("analytics_projects_traces", "{n} traces"),
     ("analytics_projects_traces_one", "{n} trace"),
-    ("analytics_credit_by_task", "By task"),
-    ("analytics_credit_spent", "Spent"),
-    ("analytics_credit_traces", "Traces"),
     // "Claude" everywhere, never "Claude Code" (owner, 2026-10-28).
     ("analytics_credit_tool_claude_code", "Claude"),
     ("analytics_credit_tool_codex", "Codex"),
@@ -927,4 +917,45 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{first} had {x}× fewer edits undone than {second}.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
+    // 26. Approved by the product owner in these words (2026-10-29): the
+    // get-started card and the sample data under it, on Overview, Breakdown
+    // and Benchmarks while Insights has no trace of the person's own. The
+    // steps name the app's own screens: Traces' folder list and its rules
+    // (Ask / Automatic, `project_copy`); the one action, "Choose what to
+    // share", is a text link with an arrow to that list. "Sessions" in the
+    // steps is the owner's word for what Claude Code and Codex record on
+    // this Mac. "30 minutes" is the daemon's default quiet time before a
+    // finished trace is sent.
+    (
+        "analytics_start_title",
+        "Your Insights grow with your traces",
+    ),
+    (
+        "analytics_start_why",
+        "Keep using AI as you normally do. As your traces come in, you'll see how much you spend, which models you use most, and which work best for your tasks.",
+    ),
+    ("analytics_start_step_use", "Keep using Claude or Codex"),
+    (
+        "analytics_start_step_use_detail",
+        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
+    ),
+    ("analytics_start_step_share", "Choose what to share"),
+    (
+        "analytics_start_step_share_detail",
+        "Go to Traces to select a folder. Choose Automatic to share eligible traces without reviewing each one, or Ask to approve them first.",
+    ),
+    ("analytics_start_choose", "Choose what to share"),
+    ("analytics_start_step_fill", "See your Insights take shape"),
+    (
+        "analytics_start_step_fill_detail",
+        "As traces are collected, your Insights update automatically. In Automatic mode, completed sessions are shared after about 30 minutes of inactivity.",
+    ),
+    // The API-price note when only one tool was used this week.
+    ("analytics_tile_api_prices_claude", "Claude at API prices"),
+    ("analytics_tile_api_prices_codex", "Codex at API prices"),
+    ("analytics_sample_banner", "Sample data — not yours"),
+    (
+        "analytics_sample_banner_detail",
+        "This is what Insights shows once your traces come in.",
+    ),
 ];

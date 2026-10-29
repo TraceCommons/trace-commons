@@ -14,6 +14,8 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     var failing: ((FirstRunCall) -> Bool) = { _ in false }
     var lookup: FirstRunLookup = .found(RecordingFirstRunDaemon.validLookup)
     var grant: FirstRunGrantAnswer = .granted
+    /// The referral code each `enrollNearAI` carried.
+    private(set) var referralCodes: [String?] = []
 
     static let validLookup: DaemonData.InviteLookup = {
         let json = #"{"valid":true,"issuer_display_name":"Issuer"}"#
@@ -73,8 +75,9 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
         cancels += 1
         return cancelAnswer
     }
-    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+    func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment {
         log.append(.enrollNearAI)
+        referralCodes.append(referralCode)
         return nearAIEnrolment
     }
     func setAskEachTime() async -> Bool { record(.setAskEachTime) }
@@ -590,6 +593,26 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
         XCTAssertTrue(runner.state.nearAIEnrolled)
         XCTAssertEqual(runner.state.step, .join)
+    }
+
+    /// The optional referral code on Join rides the NEAR AI enrolment as
+    /// typed (the daemon reads it); an empty field sends none.
+    func test_theReferralCodeRidesTheNearAIEnrolment() async throws {
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.referralCode = "  tc-7k3m9-qx2rd "
+        await runner.commit(.signIn)
+        XCTAssertEqual(
+            daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin, .enrollNearAI])
+        XCTAssertEqual(daemon.referralCodes, ["tc-7k3m9-qx2rd"])
+
+        XCTAssertNil(FirstRunRunner.sentReferralCode(""))
+        XCTAssertNil(FirstRunRunner.sentReferralCode(" \n "))
+        XCTAssertEqual(FirstRunRunner.sentReferralCode(" TC-7K3M9-QX2RD"), "TC-7K3M9-QX2RD")
     }
 
     /// A refused enrollment says why in the core's own line for its label

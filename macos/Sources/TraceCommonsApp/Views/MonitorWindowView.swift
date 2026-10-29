@@ -54,6 +54,20 @@ struct MonitorWindowView: View {
         requiresOnboarding ? .inference : tab
     }
 
+    /// The NEAR AI payout rail's streams for Insights' NEAR AI card, read
+    /// off the main actor. Any refusal (no account session, no rail, a
+    /// daemon that predates streams) reads as none, so the card is drawn
+    /// as before.
+    static func payoutStreams(_ client: DaemonClient?) -> (@Sendable () async -> [PayoutStreamStatus]?)? {
+        client.map { client in
+            { @Sendable in
+                await DaemonWork.run {
+                    (try? client.payoutLink.status()).flatMap { PayoutLinkSurface.nearAiRail(in: $0)?.streams }
+                }
+            }
+        }
+    }
+
     enum MapTab: String {
         case traces
         case privateAI
@@ -114,9 +128,9 @@ struct MonitorWindowView: View {
     @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
     @State private var home = HomeStore(client: nil)
-    /// The Insights Sessions tab's open trace, which the inspector shows
-    /// while Sessions is on screen (Ron's feedback, Insights PM 2026-10-26).
-    @State private var insightsInspector = InsightsInspector()
+    /// Insights Breakdown's details, which the inspector shows while
+    /// Breakdown is on screen (owner, 2026-10-29).
+    @State private var insightsInspector = InsightsBreakdownInspector()
 
     /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
     /// set; nil otherwise, and then the live client is attached below. A
@@ -274,7 +288,12 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
-                                 inspector: insightsInspector, home: home)
+                                 inspector: insightsInspector, home: home,
+                                 payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -479,7 +498,7 @@ struct MonitorWindowView: View {
         if !model.onboardingKnown || !inspectorAvailable {
             Color.clear
         } else if shownTab == .insights, let detail = insightsInspector.detail {
-            // Insights' Sessions: the open trace's details, beside the list.
+            // Insights' Breakdown: the picked day's sessions.
             detail()
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -522,10 +541,10 @@ struct MonitorWindowView: View {
 
     /// Whether the inspector may open on what is shown: on Traces, on
     /// Home's History, whose opened row is the inspector's, and on Insights
-    /// while its Sessions tab hands it the open trace (`insightsDetail`,
-    /// Insights PM 2026-10-26). Never on Home's other pages (owner,
-    /// 2026-10-08), Insights' other tabs or Inference (2026-10-09): they
-    /// have nothing for it to show, and their prompts head their page.
+    /// while its Breakdown tab hands it its details (`insightsDetail`,
+    /// owner 2026-10-29). Never on Home's other pages (owner, 2026-10-08),
+    /// Insights' other tabs or Inference (2026-10-09): they have nothing for
+    /// it to show, and their prompts head their page.
     static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page, insightsDetail: Bool = false) -> Bool {
         switch shown {
         case .traces: true
@@ -556,9 +575,9 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
-            // A trace the person opened on Insights' Sessions: its details
-            // live in the inspector, as a selected Traces session's card
-            // does. On every tab, so showing a tab again is no new key.
+            // A day the person picked on Insights' Breakdown: its
+            // sessions live in the inspector, as a selected Traces session's
+            // card does. On every tab, so showing a tab again is no new key.
             .union(insightsInspector.demandKey.map { [$0] } ?? [])
     }
 

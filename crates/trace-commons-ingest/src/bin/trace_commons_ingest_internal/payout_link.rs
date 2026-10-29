@@ -38,12 +38,14 @@ use super::*;
 use trace_commons_protocol::payout_link::{
     PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction as WireAction, PayoutLinkConfirmed,
     PayoutLinkOutcome, PayoutLinkProof, PayoutLinkRequest as WireRequest, PayoutLinkStarted,
-    PayoutRailLinkStatus, PayoutRailsStatus, near_ai_recipient_ref,
+    PayoutRailLinkStatus, PayoutRailsStatus, PayoutStreamKind, PayoutStreamStatus,
+    near_ai_recipient_ref,
 };
 use trace_commons_server::db::{
     PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutStore,
+    PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
 };
+use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::payout_recipient_proof::{
     NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof, RecipientProofRefusal,
@@ -478,6 +480,14 @@ pub(super) async fn status_handler(
             unlink_requested: newest.is_some_and(|link| link.unlink_requested_at.is_some()),
             recipient_unavailable: newest
                 .is_some_and(|link| link.recipient_unavailable_at.is_some()),
+            // Own and referral credit apart (referral rewards spec, R7),
+            // only once the rail runs a referral stream: until then the
+            // answer keeps the shape apps already read.
+            streams: if entry.referral_mode() == PayoutMode::Disabled {
+                Vec::new()
+            } else {
+                stream_statuses(store.as_ref(), &ctx, entry.rail_id()).await?
+            },
         });
     }
     Ok((
@@ -487,6 +497,61 @@ pub(super) async fn status_handler(
             rails,
         }),
     ))
+}
+
+/// The account's earned and referral streams on `rail`, earned first.
+/// Amounts only; a hold shows as its label.
+async fn stream_statuses(
+    store: &dyn PayoutStore,
+    ctx: &AccountCtx,
+    rail: &trace_commons_gate_api::RailId,
+) -> ApiResult<Vec<PayoutStreamStatus>> {
+    let tenant = ctx.tenant_id.as_str();
+    let account = ctx.account_id.as_uuid();
+    let standing = store
+        .payout_account_standing(tenant, account)
+        .await
+        .map_err(store_failed)?
+        .hold_label();
+    let open = store
+        .open_payout_hold_labels(tenant, account, rail)
+        .await
+        .map_err(store_failed)?;
+    let mut streams = Vec::with_capacity(PayoutStream::ALL.len());
+    for stream in PayoutStream::ALL {
+        // An owed sum the pass refuses (reversals above credits) shows as
+        // nothing owed; the pass holds that account rather than send.
+        let owed = match stream {
+            PayoutStream::Earned => store
+                .payout_owed(tenant, account, rail)
+                .await
+                .map_err(store_failed)?
+                .net(),
+            PayoutStream::Referral => {
+                store
+                    .payout_referral_owed(tenant, account, rail)
+                    .await
+                    .map_err(store_failed)?
+                    .net
+            }
+        }
+        .unwrap_or(0);
+        let sent = store
+            .payout_account_stream_sent(tenant, account, rail, stream)
+            .await
+            .map_err(store_failed)?;
+        streams.push(PayoutStreamStatus {
+            stream: match stream {
+                PayoutStream::Earned => PayoutStreamKind::Earned,
+                PayoutStream::Referral => PayoutStreamKind::Referral,
+            },
+            owed: owed.to_string(),
+            sent: sent.to_string(),
+            waiting: stream_waiting(owed, sent).to_string(),
+            hold_label: stream_status_hold_label(stream, standing, &open),
+        });
+    }
+    Ok(streams)
 }
 
 fn no_store() -> HeaderMap {

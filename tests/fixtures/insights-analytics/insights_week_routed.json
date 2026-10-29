@@ -199,34 +199,6 @@
       "calls_without_charge": 0,
       "from": "2026-09-14T00:00:00+00:00",
       "to": "2026-09-21T00:00:00+00:00",
-      "by_task": [
-        {
-          "usd_micros": 12500,
-          "sessions": 1,
-          "calls": 1,
-          "calls_without_charge": 0,
-          "key": "other",
-          "tokens": 110,
-          "usd_micros_known": 12500,
-          "usd_partial": false,
-          "tokens_known": 110,
-          "tokens_partial": false
-        }
-      ],
-      "by_tool": [
-        {
-          "usd_micros": 12500,
-          "sessions": 1,
-          "calls": 1,
-          "calls_without_charge": 0,
-          "key": "codex",
-          "tokens": 110,
-          "usd_micros_known": 12500,
-          "usd_partial": false,
-          "tokens_known": 110,
-          "tokens_partial": false
-        }
-      ],
       "by_folder": [
         {
           "usd_micros": 12500,

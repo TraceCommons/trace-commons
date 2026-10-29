@@ -134,6 +134,12 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
     public let organizationName: String?
     /// The locally saved organization ID, only when its recipient ref matches.
     public let organizationID: String?
+    /// What each payout stream owes, sent and waits (referral spec section
+    /// 5): `earned` for the person's own traces, `referral` for the bonus
+    /// from referrals. Nil from a daemon or commons that predates streams,
+    /// and for a `streams` this build cannot read, which never fails the
+    /// rail.
+    public let streams: [PayoutStreamStatus]?
 
     enum CodingKeys: String, CodingKey {
         case railId = "rail_id"
@@ -144,6 +150,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         case recipientRefCheck = "recipient_ref_check"
         case organizationName = "organization_name"
         case organizationID = "organization_id"
+        case streams
     }
 
     public init(from decoder: Decoder) throws {
@@ -160,6 +167,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         recipientRefCheck = try c.decodeIfPresent(String.self, forKey: .recipientRefCheck)
         organizationName = try c.decodeIfPresent(String.self, forKey: .organizationName)
         organizationID = try c.decodeIfPresent(String.self, forKey: .organizationID)
+        streams = try? c.decodeIfPresent([PayoutStreamStatus].self, forKey: .streams)
     }
 
     public init(
@@ -167,7 +175,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         state: String? = nil, version: Int64 = 0, requestState: String? = nil,
         unlinkRequested: Bool = false, recipientUnavailable: Bool = false,
         recipientRefCheck: String? = nil, organizationName: String? = nil,
-        organizationID: String? = nil
+        organizationID: String? = nil, streams: [PayoutStreamStatus]? = nil
     ) {
         self.railId = railId
         self.mode = mode
@@ -180,6 +188,7 @@ public struct PayoutRailStatus: Decodable, Equatable, Sendable {
         self.recipientRefCheck = recipientRefCheck
         self.organizationName = organizationName
         self.organizationID = organizationID
+        self.streams = streams
     }
 }
 

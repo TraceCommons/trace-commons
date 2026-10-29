@@ -30,8 +30,8 @@ use super::{
     PayoutLineState, PayoutLineWrite, PayoutLink, PayoutLinkAction, PayoutLinkClose,
     PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkInsert, PayoutLinkRequest,
     PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutLinkTransition,
-    PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutStore,
-    PendingPayoutLineInsert, SealedRecipient,
+    PayoutLinkWrite, PayoutOwed, PayoutRateEpoch, PayoutRateEpochRecord, PayoutReferralOwed,
+    PayoutStore, PayoutStream, PendingPayoutLineInsert, SealedRecipient,
 };
 use crate::error::DatabaseError;
 
@@ -85,6 +85,22 @@ fn parse_link_state(value: &str) -> Result<PayoutLinkState, DatabaseError> {
 
 fn parse_line_state(value: &str) -> Result<PayoutLineState, DatabaseError> {
     PayoutLineState::parse(value).ok_or_else(|| DatabaseError::Query("payout_state_unknown".into()))
+}
+
+fn parse_stream(value: &str) -> Result<PayoutStream, DatabaseError> {
+    PayoutStream::parse(value).ok_or_else(|| DatabaseError::Query("payout_stream_unknown".into()))
+}
+
+/// A signed NUMERIC sum as text: `None` below zero, the magnitude refused
+/// above `u128::MAX` like every other amount.
+fn parse_signed_units(value: &str) -> Result<Option<u128>, DatabaseError> {
+    match value.strip_prefix('-') {
+        Some(magnitude) => {
+            parse_units(magnitude)?;
+            Ok(None)
+        }
+        None => parse_units(value).map(Some),
+    }
 }
 
 fn parse_recipient_kind(value: String) -> Result<RecipientKind, DatabaseError> {
@@ -156,10 +172,11 @@ impl PgBackend {
 const LINK_COLUMNS: &str = "account_id, rail_id, link_id, recipient_kind, state,
     sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref, subject_index,
     program, final_paid::TEXT, unlink_requested_at, recipient_unavailable_at, version,
-    recipient_ref";
+    recipient_ref, referral_program, final_paid_referral::TEXT";
 
 fn link_from_row(row: &tokio_postgres::Row) -> Result<PayoutLink, DatabaseError> {
     let final_paid: Option<String> = row.get(11);
+    let final_paid_referral: Option<String> = row.get(17);
     Ok(PayoutLink {
         account_id: row.get(0),
         rail_id: parse_rail(row.get(1))?,
@@ -180,6 +197,12 @@ fn link_from_row(row: &tokio_postgres::Row) -> Result<PayoutLink, DatabaseError>
             .map(parse_units)
             .transpose()?
             .map(AtomicUnits::from_raw),
+        referral_program: row.get(16),
+        final_paid_referral: final_paid_referral
+            .as_deref()
+            .map(parse_units)
+            .transpose()?
+            .map(AtomicUnits::from_raw),
         unlink_requested_at: row.get(12),
         recipient_unavailable_at: row.get(13),
         version: row.get(14),
@@ -187,7 +210,7 @@ fn link_from_row(row: &tokio_postgres::Row) -> Result<PayoutLink, DatabaseError>
 }
 
 const LINE_COLUMNS: &str = "line_id, link_id, account_id, rail_id, target_total::TEXT,
-    delta::TEXT, state, receipt_hash, attempts, last_error_label";
+    delta::TEXT, state, receipt_hash, attempts, last_error_label, stream";
 
 fn line_from_row(row: &tokio_postgres::Row) -> Result<PayoutLine, DatabaseError> {
     let target: String = row.get(4);
@@ -203,6 +226,7 @@ fn line_from_row(row: &tokio_postgres::Row) -> Result<PayoutLine, DatabaseError>
         receipt_hash: row.get(7),
         attempts: row.get(8),
         last_error_label: row.get(9),
+        stream: parse_stream(row.get(10))?,
     })
 }
 
@@ -678,11 +702,12 @@ impl PayoutStore for PgBackend {
         Ok(PayoutLinkTransition::Moved)
     }
 
-    async fn close_payout_link(
+    async fn close_payout_link_streams(
         &self,
         tenant: &str,
         link_id: Uuid,
         final_paid: AtomicUnits,
+        final_paid_referral: Option<AtomicUnits>,
         successor: Option<Uuid>,
         actor_ref_hash: &str,
         label: Option<&str>,
@@ -694,31 +719,38 @@ impl PayoutStore for PgBackend {
             .query_opt(
                 "UPDATE trace_payout_links AS l
                     SET state = 'closed', final_paid = $3::TEXT::NUMERIC,
+                        final_paid_referral = $4::TEXT::NUMERIC,
                         version = l.version + 1, updated_at = clock_timestamp()
                   WHERE l.tenant_id = $1 AND l.link_id = $2 AND l.state = 'closing'
+                    AND (l.referral_program IS NULL) = ($4::TEXT IS NULL)
                     AND NOT EXISTS (
                         SELECT 1 FROM trace_payout_lines p
                          WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id
                            AND p.state = 'pending')
                   RETURNING l.account_id, l.rail_id",
-                &[&tenant, &link_id, &final_paid.get().to_string()],
+                &[
+                    &tenant,
+                    &link_id,
+                    &final_paid.get().to_string(),
+                    &final_paid_referral.map(|total| total.get().to_string()),
+                ],
             )
             .await?;
         let Some(closed) = closed else {
             // Nothing changed; say why. The transaction rolls back on drop.
-            let closing: bool = tx
-                .query_one(
-                    "SELECT EXISTS (SELECT 1 FROM trace_payout_links
-                                     WHERE tenant_id = $1 AND link_id = $2
-                                       AND state = 'closing')",
+            let closing = tx
+                .query_opt(
+                    "SELECT referral_program IS NOT NULL FROM trace_payout_links
+                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'closing'",
                     &[&tenant, &link_id],
                 )
-                .await?
-                .get(0);
-            return Ok(if closing {
-                PayoutLinkClose::PendingLineOpen
-            } else {
-                PayoutLinkClose::NotClosing
+                .await?;
+            return Ok(match closing {
+                None => PayoutLinkClose::NotClosing,
+                Some(row) if row.get::<_, bool>(0) != final_paid_referral.is_some() => {
+                    PayoutLinkClose::ReferralTotalMismatch
+                }
+                Some(_) => PayoutLinkClose::PendingLineOpen,
             });
         };
         let account: Uuid = closed.get(0);
@@ -773,8 +805,80 @@ impl PayoutStore for PgBackend {
         tenant: &str,
         line: &PayoutLineWrite,
     ) -> Result<PendingPayoutLineInsert, DatabaseError> {
+        // An earned line names no program; a referral line names the link's
+        // referral program, which is set here on the link's first one.
+        match (line.stream, line.referral_program.as_deref()) {
+            (PayoutStream::Earned, None) | (PayoutStream::Referral, Some(_)) => {}
+            _ => return Err(DatabaseError::Query("payout_line_stream_invalid".into())),
+        }
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        if line.stream == PayoutStream::Referral {
+            // First, so a void and this insert lock in one order.
+            super::postgres_referral_bonus::lock_account(&tx, tenant, line.account_id).await?;
+        }
+        if let Some(program) = line.referral_program.as_deref() {
+            // FOR UPDATE: the program is set once, under the link row's lock,
+            // in the same transaction as the line it was set for.
+            let current = tx
+                .query_opt(
+                    "SELECT referral_program FROM trace_payout_links
+                      WHERE tenant_id = $1 AND link_id = $2 AND account_id = $3
+                        AND rail_id = $4 AND state = 'active'
+                        FOR UPDATE",
+                    &[
+                        &tenant,
+                        &line.link_id,
+                        &line.account_id,
+                        &line.rail_id.as_str(),
+                    ],
+                )
+                .await?;
+            let Some(current) = current else {
+                return Ok(PendingPayoutLineInsert::LinkNotActive);
+            };
+            match current.get::<_, Option<String>>(0) {
+                Some(current) if current == program => {}
+                Some(_) => return Ok(PendingPayoutLineInsert::ReferralProgramMismatch),
+                None => {
+                    tx.execute(
+                        "UPDATE trace_payout_links SET referral_program = $3
+                          WHERE tenant_id = $1 AND link_id = $2 AND referral_program IS NULL",
+                        &[&tenant, &line.link_id, &program],
+                    )
+                    .await?;
+                }
+            }
+        }
+        if line.stream == PayoutStream::Referral {
+            let pending: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_payout_lines
+                                     WHERE tenant_id = $1 AND link_id = $2
+                                       AND stream = 'referral' AND state = 'pending')",
+                    &[&tenant, &line.link_id],
+                )
+                .await?
+                .get(0);
+            if pending {
+                return Ok(PendingPayoutLineInsert::LinkHasPendingLine);
+            }
+            // The pass priced this line from a read of what is owed made
+            // before its rail call. A void (or a reversal) that committed
+            // since took back only what was unsent then, so re-read owed and
+            // sent under the account lock those writes take, and write
+            // nothing that would send more than is owed now.
+            let owed = super::postgres_referral_bonus::owed_on_tx(
+                &tx,
+                tenant,
+                line.account_id,
+                line.rail_id.as_str(),
+            )
+            .await?;
+            if line.delta.get() > owed.unsent() {
+                return Ok(PendingPayoutLineInsert::ReferralOwedChanged);
+            }
+        }
         // Only onto the account's active link on the line's rail: never a
         // waiting, closing or closed one. FOR SHARE holds the link row until
         // commit, so a concurrent close either waits for this line (and the
@@ -784,10 +888,10 @@ impl PayoutStore for PgBackend {
             .execute(
                 "INSERT INTO trace_payout_lines (
                      tenant_id, line_id, account_id, rail_id, link_id, target_total,
-                     delta, owed_through_accrual_count, state
+                     delta, owed_through_accrual_count, state, stream
                  )
                  SELECT l.tenant_id, $2::UUID, l.account_id, l.rail_id, l.link_id,
-                        $6::TEXT::NUMERIC, $7::TEXT::NUMERIC, $8::BIGINT, 'pending'
+                        $6::TEXT::NUMERIC, $7::TEXT::NUMERIC, $8::BIGINT, 'pending', $9::TEXT
                    FROM trace_payout_links l
                   WHERE l.tenant_id = $1::TEXT AND l.link_id = $5::UUID
                     AND l.account_id = $3::UUID AND l.rail_id = $4::TEXT
@@ -802,6 +906,7 @@ impl PayoutStore for PgBackend {
                     &line.target_total.get().to_string(),
                     &line.delta.get().to_string(),
                     &line.owed_through_accrual_count,
+                    &line.stream.as_str(),
                 ],
             )
             .await;
@@ -822,10 +927,11 @@ impl PayoutStore for PgBackend {
         Ok(PendingPayoutLineInsert::Inserted)
     }
 
-    async fn pending_payout_line_for_link(
+    async fn pending_payout_line_for_stream(
         &self,
         tenant: &str,
         link_id: Uuid,
+        stream: PayoutStream,
     ) -> Result<Option<PayoutLine>, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
@@ -833,9 +939,10 @@ impl PayoutStore for PgBackend {
             .query_opt(
                 &format!(
                     "SELECT {LINE_COLUMNS} FROM trace_payout_lines
-                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'pending'"
+                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'pending'
+                        AND stream = $3"
                 ),
-                &[&tenant, &link_id],
+                &[&tenant, &link_id, &stream.as_str()],
             )
             .await?;
         tx.commit().await?;
@@ -1734,18 +1841,88 @@ impl PayoutStore for PgBackend {
         })
     }
 
-    async fn payout_link_confirmed_total(
+    async fn payout_link_stream_confirmed_total(
         &self,
         tenant: &str,
         link_id: Uuid,
+        stream: PayoutStream,
     ) -> Result<u128, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let row = tx
             .query_one(
                 "SELECT COALESCE(SUM(delta), 0)::TEXT FROM trace_payout_lines
-                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'confirmed'",
-                &[&tenant, &link_id],
+                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'confirmed'
+                    AND stream = $3",
+                &[&tenant, &link_id, &stream.as_str()],
+            )
+            .await?;
+        tx.commit().await?;
+        let total: String = row.get(0);
+        parse_units(&total)
+    }
+
+    async fn payout_account_stream_sent(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_one(
+                "SELECT COALESCE(SUM(delta), 0)::TEXT FROM trace_payout_lines
+                  WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+                    AND state = 'confirmed' AND stream = $4",
+                &[&tenant, &account, &rail.as_str(), &stream.as_str()],
+            )
+            .await?;
+        tx.commit().await?;
+        let total: String = row.get(0);
+        parse_units(&total)
+    }
+
+    async fn payout_referral_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutReferralOwed, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_one(
+                "SELECT COALESCE(SUM(bonus_units), 0)::TEXT, count(*)
+                   FROM trace_referral_bonus_accruals
+                  WHERE tenant_id = $1 AND rail_id = $2 AND account_id = $3",
+                &[&tenant, &rail.as_str(), &account],
+            )
+            .await?;
+        tx.commit().await?;
+        let net: String = row.get(0);
+        Ok(PayoutReferralOwed {
+            net: parse_signed_units(&net)?,
+            bonus_count: row.get(1),
+        })
+    }
+
+    async fn payout_closed_links_final_paid_referral(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<u128, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_one(
+                "SELECT COALESCE(SUM(final_paid_referral), 0)::TEXT
+                   FROM trace_payout_links
+                  WHERE tenant_id = $1 AND rail_id = $2 AND account_id = $3
+                    AND state = 'closed'",
+                &[&tenant, &rail.as_str(), &account],
             )
             .await?;
         tx.commit().await?;

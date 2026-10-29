@@ -631,7 +631,7 @@ pub(super) async fn status(
                         "expires_at": pending.expires_at,
                     })
                 });
-            serde_json::json!({
+            let mut shown = serde_json::json!({
                 "rail_id": rail.rail_id,
                 "mode": rail.mode,
                 "linked": rail.linked,
@@ -644,7 +644,14 @@ pub(super) async fn status(
                 "organization_id": organization_id,
                 "organization_name": organization_name,
                 "pending_here": pending_here,
-            })
+            });
+            // Own credit and referral credit apart, only while the rail runs
+            // a referral stream: an answer without streams keeps the
+            // pre-referral shape.
+            if !rail.streams.is_empty() {
+                shown["streams"] = serde_json::json!(rail.streams);
+            }
+            shown
         })
         .collect();
     drop(memory);

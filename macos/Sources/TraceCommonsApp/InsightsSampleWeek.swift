@@ -1,34 +1,45 @@
-#if DEBUG
 import Foundation
 import TCBridge
 import TCShellCore
 
-/// Debug builds only: `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from a
-/// fixed sample week, so a design review can see every chart and section in
-/// a dev build. A dev build is ad-hoc signed and cannot read the team
+/// A fixed sample week. Every build draws it under the get-started card,
+/// dimmed and labelled as sample data (`InsightsSample`), while Insights has
+/// no trace of the person's own. Debug builds only:
+/// `TRACE_COMMONS_INSIGHTS_SAMPLE=1` also draws Insights from it, so a
+/// design review can see every chart and section in a dev build. A dev build is ad-hoc signed and cannot read the team
 /// keychain group that holds the Insights digest keys, so its watched-folder
 /// counting and saved analyses stay empty. A release build never reads the
 /// variable.
 ///
 /// The week is shaped as the core sends it: a watched-folder week (feed T)
-/// with goals, the lever and the weekly summary, and the saved traces,
-/// summary and group Analyze shows (`InsightsSampleAnalyze.swift`), which
-/// Sessions drills into, and the week's counted sessions behind Overview's
-/// Sessions breakdown, split by day. Sample figures, never a pilot's. Every
-/// word is still the core's copy: the answers are sampled, only the core's
-/// copy and two Overview reads go to the real store, and a write is
-/// answered here and kept nowhere, or refused. No write reaches the store.
+/// with goals, the lever and the weekly summary, and the week's counted
+/// sessions behind Overview's Sessions breakdown, split by day. No saved
+/// traces. Sample figures, never a pilot's. Every word is still the core's
+/// copy: the answers are sampled, only the core's copy and two Overview
+/// reads go to the real store, and a write is answered here and kept
+/// nowhere, or refused. No write reaches the store.
 enum InsightsSampleWeek {
     static var enabled: Bool {
-        ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #else
+        return false
+        #endif
     }
 
     static let weekStart = "2026-10-05"
 
-    /// The sample's answers; the store's for `storeReads` only, and the
-    /// core's for a chosen file analyzed but not saved, which reads that
-    /// file and writes nothing. Anything else is refused here, so no write
-    /// the window sends reaches the store.
+    /// The refusal for an operation the sample does not answer. Not a core
+    /// code, so the window shows its usual failure line.
+    static let refusal = "insights_sample_not_answered"
+
+    /// The operations the sample leaves to the store: the core's copy and
+    /// the two Overview drill-downs. Every one is a read.
+    static let storeReads: Set<String> = ["copy", "card_inputs", "pattern_sessions"]
+
+    /// The sample's answers; the store's for `storeReads` only. Anything
+    /// else is refused here, so no write the window sends reaches the
+    /// store.
     static func service(fallback: @escaping InsightsModel.Service) -> InsightsModel.Service {
         { request in
             if let answer = try response(request.operation) { return answer }
@@ -37,15 +48,13 @@ enum InsightsSampleWeek {
         }
     }
 
-    /// A read the sample leaves to the core: one of `storeReads`, or a
-    /// chosen file analyzed without saving it.
+    /// A read the sample leaves to the core: one of `storeReads`.
     static func reachesStore(_ operation: InsightsRequest.Operation) -> Bool {
-        storeReads.contains(operation.type) || (operation.type == "analyze" && operation.save != true)
+        storeReads.contains(operation.type)
     }
 
     /// The sample's answer to a request, decoded and checked as the core's
-    /// are (`TCInsights.decode`); `nil` for one it does not answer. A drill
-    /// answers for whichever trace was asked for.
+    /// are (`TCInsights.decode`); `nil` for one it does not answer.
     static func response(_ operation: InsightsRequest.Operation) throws -> InsightsResponse? {
         let type = operation.type
         let body: [String: Any]
@@ -53,12 +62,11 @@ enum InsightsSampleWeek {
         case "week_overview": body = ["type": type, "overview": overview]
         case "patterns": body = ["type": type, "patterns": patterns]
         case "comparisons": body = ["type": type, "comparisons": comparisons]
-        case "session_drill": body = ["type": type, "session": session(operation.snapshot_id ?? "sample")]
+        // No saved traces: Overview's rows are the counted sessions.
+        case "list": body = ["type": type, "insights": [Any]()]
         case "goal_set", "goal_delete", "lever_feedback", "recap_opened":
             body = ["type": type, "state": ["goals": [Any](), "lever_card_off": false]]
-        default:
-            guard let answer = try analyzeBody(operation) else { return nil }
-            body = answer
+        default: return nil
         }
         return try TCInsights.decode(JSONSerialization.data(withJSONObject: body), for: operation)
     }
@@ -193,31 +201,13 @@ enum InsightsSampleWeek {
         return rows.enumerated().map { index, row in row.merging(["session_ref": "t\(index + 1)"]) { $1 } }
     }
 
-    /// Six weeks, oldest first; `nil` is a week with no figure.
-    private static func patternWeeks(_ values: [Int?]) -> [[String: Any]] {
-        let starts = ["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05"]
-        return zip(starts, values).map { start, value in ["week_start": start, "tokens": value ?? NSNull()] }
-    }
-
-    private static func card(_ kind: String, tokens: Int, count: Int?, files: Int? = nil, sessions: Int,
-                             basis: String, inferred: Bool, change: Int, weeks: [Int?]) -> [String: Any] {
-        var card: [String: Any] = ["kind": kind, "tokens": tokens, "sessions": sessions, "basis": basis,
-                                   "inferred": inferred, "change": change, "weeks": patternWeeks(weeks)]
-        if let count { card["count"] = count }
-        if let files { card["files"] = files }
-        return card
-    }
-
     static var patterns: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
             "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
             "long_context_threshold": 150_000,
-            "cards": [
-                card("retried_calls", tokens: 410_000, count: 37, sessions: 7,
-                     basis: "estimate_from_result_size", inferred: false, change: -60,
-                     weeks: [520_000, 470_000, nil, 390_000, 440_000, 410_000]),
-            ],
+            // No pattern card is shown on macOS any more (owner, 2026-10-29).
+            "cards": [Any](),
             "reread_files": [Any](),
             "weeks": weeks,
         ]
@@ -238,8 +228,9 @@ enum InsightsSampleWeek {
                 ["id": "g1", "goal": cacheGoal, "figure": 872,
                  "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
             ],
-            "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
-                      "disabled": [String](), "card_enabled": true],
+            // No pattern is shown any more (owner, 2026-10-29), so the
+            // sample's lever picks none.
+            "lever": ["pick": NSNull(), "disabled": [String](), "card_enabled": true],
             "recap": [
                 "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
                 "sources": [["source": "claude_code", "tokens": 45_000_000, "change_permille": -120],
@@ -247,47 +238,8 @@ enum InsightsSampleWeek {
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
                     ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
-                    ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
         ]
     }
-
-    /// One trace, 52 turns, dated and sourced as the saved trace asked for
-    /// (Claude Code otherwise): context grows to the threshold, the cache is
-    /// written again after a pause, and context shrinks.
-    /// A saved Codex trace is drawn as the core draws one: no per-turn
-    /// series ("not recorded"), no turns and no markers.
-    static func session(_ snapshotID: String) -> [String: Any] {
-        let saved = traces.first { $0.id == snapshotID }
-        if saved?.source == "codex", let saved {
-            return [
-                "feed": "saved", "session_ref": snapshotID, "source": "codex",
-                "date": String(saved.firstEvent.prefix(10)), "tz": 0,
-                "tokens": 1_200_000, "span_secs": 2_700, "state": "known", "reasons": [String](),
-                "long_context_threshold": 150_000, "series_unavailable": "not_recorded",
-                "markers": [Any](),
-            ]
-        }
-        let turns: [[String: Any]] = (1 ... 52).map { turn in
-            let context = turn < 48 ? 14_000 + 3_000 * turn : 60_000 + 3_000 * (turn - 48)
-            let write = turn == 31 ? 96_000 : 3_000
-            let uncached = turn == 31 ? 2_000 : 1_500
-            return ["ordinal": turn, "uncached": uncached, "cache_read": context - write - uncached,
-                    "cache_write": write, "output": 900, "context": context]
-        }
-        return [
-            "feed": "saved", "session_ref": snapshotID, "source": saved?.source ?? "claude_code",
-            "date": saved.map { String($0.firstEvent.prefix(10)) } ?? "2026-10-09", "tz": 0,
-            "turns": 52, "tokens": 4_400_000, "span_secs": 6480, "state": "known", "reasons": [String](),
-            "long_context_threshold": 150_000, "series": turns,
-            "markers": [
-                ["letter": "A", "turn_ordinal": 31, "kind": "cache_written_again", "basis": "inferred_from_counters",
-                 "pause_minutes": 7, "cache_write": 96_000],
-                ["letter": "B", "turn_ordinal": 48, "kind": "context_shrank", "basis": "inferred_from_counters",
-                 "context_from": 155_000, "context": 60_000],
-            ],
-        ]
-    }
 }
-#endif

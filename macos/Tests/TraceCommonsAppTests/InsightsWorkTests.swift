@@ -128,12 +128,12 @@ final class InsightsWorkTests: XCTestCase {
         let lines = InsightsCreditWords.modelLines(try InsightsSessionRouteTests.decode(object), copy: copy)
         XCTAssertEqual(lines.map(\.label), ["claude-opus-4-7", "zai-org/glm-4.6", copy["analytics_unknown_label"]])
         XCTAssertEqual(lines.map(\.tool), ["Claude", "NEAR AI", "NEAR AI"])
-        XCTAssertEqual(lines.map(\.amount), ["$2.00", "$0.0125", "at least $0.30"])
+        XCTAssertEqual(lines.map(\.amount), ["$2.00", "$0.01", "$0.30"], "to the cent, no at least")
         XCTAssertEqual(Set(lines.map(\.id)).count, 3)
     }
 
-    /// Breakdown's By project carries Claude and Codex spend at API prices
-    /// at API prices, and the largest spend leads.
+    /// Breakdown's By project carries Claude and Codex spend at API prices,
+    /// and the largest spend leads.
     func testByProjectAddsSpendFromWork() throws {
         let copy = try words()
         var object = try InsightsSessionRouteTests.recorded()

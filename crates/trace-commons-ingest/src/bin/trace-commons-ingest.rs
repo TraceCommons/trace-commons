@@ -39,6 +39,10 @@ mod payout_link_routes;
 mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/referral_admin.rs"]
+mod referral_admin;
+#[path = "trace_commons_ingest_internal/referral.rs"]
+mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
@@ -1770,6 +1774,20 @@ struct AppState {
     /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
     /// when unset: those routes then refuse every caller. Never the token.
     payout_control_token_hash: Option<String>,
+    /// The referral code store (referral spec sections 2 and 3): the
+    /// database mirror's PostgreSQL backend, or `None` without one. The
+    /// referral routes then answer `referral_unavailable`, and a sign-up
+    /// code is not applied.
+    referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
+    /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
+    /// validated at boot. Unset means the program has not started.
+    referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
+    /// The key network marks are made under
+    /// (`TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY`). Required, at boot,
+    /// whenever the referral program or its bonus is configured; `None`
+    /// otherwise, and then no mark is recorded.
+    referral_network_mark_key:
+        Option<Arc<trace_commons_server::referral_network::ReferralNetworkMarkKey>>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -5041,17 +5059,49 @@ impl AppState {
         let payout_store = db_connections.as_ref().map(|connections| {
             connections.postgres.clone() as Arc<dyn trace_commons_server::db::PayoutStore>
         });
-        let payout_rails = Arc::new(
+        // The referral bonus rides the near_ai pass; `disabled`, the
+        // default, attaches nothing.
+        let payout_rails = Arc::new(referral_admin::with_referral_bonus_from_env(
             payout_rails::payout_rails_from_env(
                 credit_settlement_table.as_deref(),
                 payout_store.as_deref(),
             )
             .await?,
-        );
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.clone()),
+        )?);
         // Any live rail needs the operator's control token, or its kill
         // switch would be unreachable.
         let payout_control_token_hash =
             payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
+        // Referral codes (referral spec section 3): the settings refuse boot
+        // when malformed, naming the setting, never its value.
+        let referral_config = Arc::new(
+            trace_commons_server::referral_config::ReferralConfig::from_env()
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?,
+        );
+        // Server-observed network marks (owner decision 2026-10-29): with the
+        // program or its bonus configured, a missing key refuses the start
+        // rather than run the abuse checks without the network signal.
+        let referral_network_mark_key =
+            trace_commons_server::referral_network::ReferralNetworkMarkKey::from_env(
+                referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?
+            .map(Arc::new);
+        // The operator's grant of trace_referral_resolver, checked once at
+        // boot while referrals are on (fail closed, safe label).
+        referral_admin::require_referral_resolver(
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.as_ref()),
+            referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+        )
+        .await?;
+        let referral_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
+        });
         // A finalized pipeline credit batch wakes every enabled rail.
         if let Some(service) = pipeline_service.as_ref() {
             service.attach_payout_notifier(payout_rails.notifier());
@@ -5253,6 +5303,9 @@ impl AppState {
             payout_rails,
             payout_store,
             payout_control_token_hash,
+            referral_store,
+            referral_config,
+            referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -8674,6 +8727,9 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // status on the signed-in account session; no passkey (owner,
         // 2026-10-23).
         .merge(payout_link_routes::routes())
+        // Referral codes and applying one (referral spec section 6), on the
+        // signed-in account session as the payout links are.
+        .merge(referral_routes::routes())
         // The devices linked to the account: list, rename, revoke.
         .merge(account_devices_routes::routes())
         // One-time codes that link a headless device: mint and status.
@@ -9493,6 +9549,26 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
             post(payout_rails::payout_link_release_handler),
+        )
+        .route(
+            "/v1/admin/referrals/suspended",
+            get(referral_admin::referral_suspended_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/clear",
+            post(referral_admin::referral_code_clear_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/void",
+            post(referral_admin::referral_code_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/void",
+            post(referral_admin::referral_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/dry-run-report",
+            post(referral_admin::referral_dry_run_report_handler),
         )
         .route(
             "/v1/admin/near-attestation-drill",
@@ -22630,6 +22706,18 @@ static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
 /// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
     lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+/// The client address the trusted edge observed, for a referral network
+/// mark: the same hop, and the same trust assumption, as
+/// [`client_ip_for_rate_limit`], but the address itself, so the mark can
+/// take its /24 or /48. `None` when unattributed or malformed: nothing is
+/// recorded then. Never a client-set field, and never logged.
+fn client_ip_for_referral_mark(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    trace_commons_server::invite_lookup::trusted_edge_hop(
         headers,
         &axum::http::HeaderName::from_static("x-forwarded-for"),
     )

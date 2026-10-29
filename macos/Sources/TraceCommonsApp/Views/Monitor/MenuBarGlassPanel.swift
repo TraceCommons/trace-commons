@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCUpdates
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
 /// popover" handoff, as the owner reshaped it on 2026-10-19 and
@@ -22,6 +23,9 @@ import TCShellCore
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    /// Whether the popover offers a manual update check, and whether it can
+    /// run now.
+    @ObservedObject private var updates = UpdateController.shared
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
@@ -231,6 +235,16 @@ struct MenuBarGlassPanel: View {
             // Settings and Quit are icon buttons in the top row, and
             // Manage rules is gone (owner, 2026-10-19).
             Button(MenuWords.openApp) { open(nil) }
+            // Only where Sparkle runs; Homebrew-managed and other modes have
+            // no updater (owner, 2026-10-29). Sparkle's window belongs to a
+            // menu-bar app that is not frontmost, so raise the app first.
+            if updates.mode == .selfUpdating, let title = MenuWords.checkForUpdates {
+                Button(title) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    updates.checkNow()
+                }
+                .disabled(!updates.canCheckNow)
+            }
         }
         .buttonStyle(GlassMenuRowStyle())
         .padding(.vertical, -GlassTokens.Space.s2)
@@ -866,6 +880,7 @@ enum MenuWords {
     static var kept: String { MonitorWords.table?.kept ?? "" }
     static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
     static var openApp: String { MonitorWords.table?.openApp ?? "" }
+    static var checkForUpdates: String? { MonitorWords.table?.checkForUpdates }
     static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }

@@ -20,7 +20,16 @@ final class InsightsBenchmarksModel {
     /// 4 or 13 weeks.
     var weeks = 4
 
+    /// Whether a read has finished at least once, or there is nothing to
+    /// read: until then the get-started card is not drawn.
+    private(set) var settled = false
+
     init(reader: Reader?) { self.reader = reader }
+
+    /// A fixed answer and no reader: the sample under the get-started card.
+    init(sample: DaemonData.InsightsBenchmarks) {
+        reader = nil; answer = sample; settled = true
+    }
 
     /// Whether this daemon can answer at all.
     var available: Bool { reader != nil }
@@ -29,7 +38,7 @@ final class InsightsBenchmarksModel {
     private var generation = 0
 
     func load() async {
-        guard let reader else { return }
+        guard let reader else { settled = true; return }
         generation += 1
         let mine = generation, asked = weeks
         busy = true
@@ -38,12 +47,14 @@ final class InsightsBenchmarksModel {
             guard mine == generation else { return }
             answer = reply
             failed = false
+            settled = true
         } catch is CancellationError {
             // Leaving the tab or picking another period is not a failure.
         } catch {
             guard mine == generation else { return }
             answer = nil
             failed = true
+            settled = true
         }
         if mine == generation { busy = false }
     }
@@ -140,34 +151,31 @@ enum InsightsBenchmarkWords {
 struct InsightsBenchmarksTab: View {
     let model: InsightsBenchmarksModel
     let copy: [String: String]
+    /// The get-started card over this tab drawn from the sample (product
+    /// owner, 2026-10-29); `nil` for the person's own benchmarks.
+    var getStarted: InsightsGetStarted?
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                header
-                if let answer = model.answer, answer.enabled, answer.readable != false {
-                    let categories = InsightsBenchmarkWords.ordered(answer)
-                    if categories.allSatisfy({ $0.sessions == 0 }) {
-                        Text(text("analytics_bench_empty")).insightsNote()
-                    } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: GlassTokens.Space.cardGap,
-                                                     alignment: .top)],
-                                  alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                            ForEach(categories) { category in
-                                card(category, minimum: answer.minSessions ?? 5)
-                            }
+        InsightsTabPage(getStarted: getStarted) {
+            header
+            if let answer = model.answer, answer.enabled, answer.readable != false {
+                // A kind of work with no trace has no card.
+                let categories = InsightsBenchmarkWords.ordered(answer).filter { $0.sessions > 0 }
+                if categories.isEmpty {
+                    Text(text("analytics_bench_empty")).insightsNote()
+                } else {
+                    InsightsCardFlow(minimum: 420) {
+                        ForEach(categories) { category in
+                            card(category, minimum: answer.minSessions ?? 5)
                         }
                     }
-                } else if model.failed || model.answer != nil || !model.available {
-                    Text(text("analytics_unavailable")).insightsNote()
                 }
-                if model.busy { GlassSpinner() }
+            } else if model.failed || model.answer != nil || !model.available {
+                Text(text("analytics_unavailable")).insightsNote()
             }
-            .padding(.vertical, GlassTokens.Space.s7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSurface()
+            if model.busy { GlassSpinner() }
         }
         .task(id: model.weeks) { await model.load() }
     }
@@ -176,7 +184,7 @@ struct InsightsBenchmarksTab: View {
         @Bindable var model = model
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                if let sessions = model.answer?.sessions {
+                if getStarted == nil, let sessions = model.answer?.sessions {
                     Text(InsightsOverviewWords.fill(text("analytics_bench_intro"), ["n": String(sessions)]))
                         .insightsHeading()
                 }
@@ -219,7 +227,8 @@ struct InsightsBenchmarksTab: View {
                     ForEach(picks) { pick in
                         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                             Text(pick.title).insightsEyebrow()
-                            Text(pick.model).glassType(GlassTokens.TypeScale.label.weight(.semibold)).lineLimit(1)
+                            Text(pick.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                             Text(pick.figure).insightsMono()
                             Text(pick.next).insightsCaption()
                         }
@@ -236,6 +245,6 @@ struct InsightsBenchmarksTab: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .insightsCard()
+        .insightsSection()
     }
 }

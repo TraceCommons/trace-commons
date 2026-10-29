@@ -621,6 +621,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `insights_benchmarks` | `weeks` (optional: `4` or `13`, default `4`), `tool` (optional: `claude_code`, `codex`, or `null` for both) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `weeks`, `tool`, `pricing` (`{basis, tables[]}`), `sessions`, `min_sessions`, `categories[]` (eight, one per kind of work), `left_out` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; list-price figures owner-approved 2026-10-29; see "`insights_benchmarks`" below |
+| `insights_submitted` | `weeks` (optional: `4`, `13`, or `null`/absent for all time), `tz` (optional UTC offset in seconds) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `weeks`, `window_start`, `window_end`, `pricing`, `totals`, `by_model`, `by_model_left_out`, `by_task`, `by_task_unknown`, `code`, `by_week`, `by_project`, `left_out`, `traces_total`, `traces[]` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; every submitted trace joined to its counter row through the upload queue (product owner, 2026-10-29); see "`insights_submitted`" below |
 | `subscription_usage` | `refresh` (optional bool), `interactive` (optional bool; needs refresh), `provider` (optional `codex`/`claude`), `login` (optional local login ID; required for Claude Refresh) | versioned provider/login snapshots with current windows and banked reset inventory | display only; off answers without reading credentials. Explicit Refresh schedules bounded selected-login work and returns immediately; background ticks never acquire credentials. Each provider's `enabled` follows its setting: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`, both on by default. See “Subscription usage” below. |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -637,6 +638,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
+| `referral_codes_list` | — | `codes[]` of `{code_id, code, state, created_at, referee_count, bonus_owed_nano_usd}`, `max_live_codes`, `live_codes`, `can_create`, `people_joined`, `bonus_owed_nano_usd`, `bonus_sent_nano_usd`, `bonus_waiting_nano_usd` | asynchronous only; account session (`account-session-required` without one). `code` is `TC-XXXXX-XXXXX`, or `null` when the commons cannot open it; `state` is `live`, `disabled`, `suspended` or `voided`. Amounts are whole nano-USD, never below zero. Referral spec section 6 |
+| `referral_codes_create` | — | `code_id`, `code`, `created_at` | asynchronous only; account session. Refusals keep the commons label: `referral_unavailable` (the program is not open), `referral_code_limit_reached`, `referral_account_ineligible`. Writes the label-only audit row `referral-code-created` |
+| `referral_codes_disable` | `code_id` (**required**, a UUID the list answered) | `code_id`, `state` | asynchronous only; account session. People who joined with the code keep earning its owner a bonus. `referral_code_not_found` for a code this account does not hold. Audit row `referral-code-disabled` |
+| `referral_apply` | `code` (**required**, as typed) | `outcome: "applied"`, `applied_at`, `earn_until` | asynchronous only; account session. Text that is not a code is refused here with `referral-code-invalid` and never sent; a code is sent only in canonical form. Every refusal by the commons is the one label `referral_not_applied`, whatever the reason. Audit row `referral-applied` |
+| `referral_status` | — | `applied`, `applied_at`, `applied_via` (`signup` or `later`), `earn_until`, `apply_until`, `can_apply` | asynchronous only; account session. The referee sees that a code is applied, never whose. `can_apply` is true while none is applied and `apply_until` has not passed |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -5021,20 +5027,22 @@ sessions on disk. Otherwise:
   `null` (and the flag false) only when no call carried one; a window with
   no call is a true 0. Groups carry the same four fields. `usd_micros` is
   `null` when any call in it had no charge (or the sum overflowed), never
-  zero; a window with no call is a true 0. `week` also carries `by_task[]`,
-  `by_tool[]` and `by_folder[]`, each `{key, usd_micros, sessions, calls,
-  calls_without_charge}`, grouped by the session's stored row: `key` is the
-  task, the person's own label (`insights_session_label`) when set, else the
-  inferred one (`bug_fix`, `refactor`, `tests`, `docs` or `other`, which
-  takes `no_edits` too, as the task words do), the tool (`claude_code`, `codex`) or the folder's label as
-  `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
+  zero; a window with no call is a true 0. `week` also carries
+  `by_folder[]` and `by_model[]`, each `{key, usd_micros, sessions, calls,
+  calls_without_charge}`. `by_model[]`'s `key` is the served model, as the
+  ledger names it, lowercased, and a session is in each model group it had
+  a call in. `by_folder[]` is grouped by the session's stored row: `key` is the
+  folder's label as `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
   this view: a folder name is answered over this socket and shown on this
   Mac only, never sent anywhere), and `null` when unknown (a session with
   no row, no facts, or no folder the daemon knows, an Analyze snapshot
   included). A group's `usd_micros` is `null` when any call in it had no
   charge. Groups are ordered by known charge, largest first, then the
-  unknown ones; ties by key, `null` last. A daemon that predates it omits
-  it; a shell reads that as no credit figure, never as zero.
+  unknown ones; ties by key, `null` last. `week`'s `by_task[]` and
+  `by_tool[]` were removed (owner, 2026-10-29) with macOS Insights' By task
+  and By tool views, their only reader. A daemon that predates
+  `near_ai_credit` omits it; a shell reads that as no credit figure, never
+  as zero.
 - `usage_by_day[]` (additive, product owner 2026-10-28) is Claude Code and
   Codex tokens on each of the last 7 local days, oldest first, today last,
   each `{date, claude_code, codex}`; it does not move with the week on
@@ -5707,6 +5715,104 @@ min_sessions, categories, left_out}`:
 
 No session reference, path, folder name or backend crosses; the one digest
 is a price table's `table_id`. No NEAR AI charge is read.
+
+### `insights_submitted`
+
+Takes `weeks` (`4`, `13`, or `null` for all time; absent is all time) and
+`tz` (optional UTC offset in seconds, as `insights_week` takes it; the
+daemon's own offset when absent). Any other `weeks` is refused with
+`bad_params` and the label `weeks_invalid`, a bad `tz` with `tz-invalid`.
+Every trace the contributor has submitted, whatever became of it
+(accepted, quarantined, rejected, withdrawn or still pending), from the
+history cache, joined to what the counter pass stored about its session
+(product owner, 2026-10-29). Gated as `insights_benchmarks` is: off answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason, and an unreadable history cache
+with `history_unreadable`. Read-only, no network, local in a dry-run daemon.
+
+**The join.** A history row's `session_hash` hashes the bytes uploaded,
+which the counter store does not keep. The upload queue entry the trace was
+uploaded from carries its `submission_id`, adapter and session file, and an
+`uploaded` entry is never expired or compacted, so the join outlives
+`queue_ttl_days`: history row, then queue entry by `submission_id` (else by
+`session_hash` and adapter), then the counter row stored under that
+adapter and file. Nothing is guessed: a submission with no queue entry
+(`no_queue_entry`), of an adapter the pass does not read
+(`source_not_read`), or whose row is gone, aged out of the store's 13
+weeks, evicted or not read yet (`no_session_row`), is unmatched, and it is
+still counted in every history figure. A row describes the session file as
+the pass last read it, so a session continued after upload holds more than
+was sent.
+
+A submission from a Never folder, by the history row's project id, its
+queue entry's folder or its row's folder, enters no figure; it is counted
+in `left_out.never_folder` only. There is no minimum anywhere: one
+submitted trace answers every part, with the counts behind each figure.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, weeks, window_start, window_end, pricing, totals, by_model,
+by_model_left_out, by_task, by_task_unknown, code, by_week, by_project,
+left_out, traces_total, traces}`:
+
+- `window_start`: RFC 3339, local midnight on the Monday `weeks` local weeks
+  back, this week included; `null` for all time. A submission is in the
+  window by its `submitted_at`. `window_end` is now.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`.
+- Credit is in points as the history stores them, summed and rounded to
+  0.001. By History's rule a row with a final figure (0 included) adds it
+  to `credit_final` and nothing to `credit_pending`; a row with none adds
+  its pending figure.
+- A *tally* is `{submitted, accepted, credit_final, credit_pending,
+  matched}`.
+- `totals`: a tally plus `unmatched`, `by_status` (`accepted`, `pending`,
+  `quarantined`, `rejected`, `withdrawn`, `other`, each always present;
+  `pending` is the server's `submitted` or `processing`, `withdrawn` is any
+  row taken back here or on the web), `by_outcome_reason` (the server's
+  credit outcome label to its count, e.g. `policy_mismatch`,
+  `novelty_failed`, `duplicate`), and `unmatched_by_reason`
+  (`no_queue_entry`, `source_not_read`, `no_session_row`).
+- *Edit counts* are `edits_known`, `edits_kept_known`,
+  `edits_undone_known`, `edits_denied_known`, each beside its own
+  `*_partial`, then `lines_added_known`, `lines_removed_known` and
+  `lines_partial`. Kept is edits less undone and declined, per session; an
+  unknown declined count reads as none declined (as in Benchmarks), so a
+  session whose edits were never put to the person leaves
+  `edits_denied_partial` true but kept known. *Spend* is
+  `usd_micros_known`, `usd_partial`, `priced_sessions`,
+  `unpriced_sessions` and `near_ai_sessions`: API list prices over the
+  session's per-turn series; a session any of whose usage went through
+  NEAR AI (a route tally, with the ledger feed on) is not list-priced and
+  counts in `near_ai_sessions`.
+- `by_model`: matched sessions by the normalized declared label serving a
+  strict majority of the session's turns, most submitted first: `{label,
+  tool}`, a tally, spend, edit counts and `tasks` (task key to count).
+  `by_model_left_out`: `{unmatched, mixed_models, no_model}`.
+- `by_task`: always eight tallies, in Benchmarks' order and by its
+  `bench_category` rule (`bug_fix`, `feature`, `refactor`, `tests`,
+  `docs`, `understand`, `review`, `setup`), each with its `key`; the
+  person's own task label wins. `by_task_unknown`: the tally of submissions
+  with no task (unmatched, or stored without facts).
+- `code`: over matched sessions: `sessions`, `sessions_with_files`,
+  `files` (`{source, test, doc, config, total}`, distinct edited files per
+  extension class, summed), `files_partial`, edit counts and spend. Never a
+  path or a file name.
+- `by_week`: a tally per local week, `{week_start}` a `YYYY-MM-DD` Monday,
+  oldest first, every week from the window's first (all time: the earliest
+  submission's, at most 520 weeks) to this one, empty weeks included.
+- `by_project`: a tally per History project label, `{label}`, most
+  submitted first.
+- `traces_total` and `traces`: one row per submission, newest first, at most
+  500: `{submission_id, submitted_at, project_label, source, status,
+  credit_points_pending, credit_points_final, credit_outcome_reason,
+  matched, unmatched_reason, tool, model, mixed_models, task, files, edits,
+  edits_kept, edits_undone, edits_denied, usd_micros, near_ai}`.
+  `submission_id` is the reference History rows already carry; `source` is
+  the adapter name History shows; every session figure is `null` when
+  unmatched or unknown, never zero.
+
+No path, file name, session ID or hash, project key or id, prompt or
+command crosses; the one digest is a price table's `table_id`.
 
 ### `set_settings`
 

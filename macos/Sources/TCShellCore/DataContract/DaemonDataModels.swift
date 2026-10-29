@@ -982,6 +982,9 @@ extension DaemonData {
         /// daemon runs the counter pass for `insights_week` (on by default
         /// and always on; product owner, 2026-10-29).
         public let insightsCounterPass: Bool?
+        /// Decode-only: whether the 2026-10-29 default change turned the
+        /// counter pass on; `nil` from a daemon that predates it.
+        public let insightsCounterPassDefaultedOn: Bool?
         /// Native subscription readers, on by default since 2026-10-27; nil
         /// means an older daemon. The Overview usage snapshot remains
         /// authoritative for its controls. `subscriptionUsageClaudeEnabled` is
@@ -1036,6 +1039,7 @@ extension DaemonData {
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
+            case insightsCounterPassDefaultedOn = "insights_counter_pass_defaulted_on"
             case subscriptionUsageCodexEnabled = "subscription_usage_codex_enabled"
             case subscriptionUsageClaudeEnabled = "subscription_usage_claude_enabled"
             case subscriptionUsageClaudeOn = "subscription_usage_claude_on"
@@ -2315,8 +2319,6 @@ extension DaemonData {
         public var usdPartial: Bool? = nil
         public var tokensKnown: Int64? = nil
         public var tokensPartial: Bool? = nil
-        public let byTask: [InsightsCreditGroup]?
-        public let byTool: [InsightsCreditGroup]?
         public let byFolder: [InsightsCreditGroup]?
         /// By the model that served each call, lowercased as the ledger
         /// names it; a trace that used two models is in both. `nil` from a
@@ -2324,12 +2326,11 @@ extension DaemonData {
         public let byModel: [InsightsCreditGroup]?
 
         public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
-                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil, byTask: [InsightsCreditGroup]? = nil,
-                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil,
-                    byModel: [InsightsCreditGroup]? = nil) {
+                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil,
+                    byFolder: [InsightsCreditGroup]? = nil, byModel: [InsightsCreditGroup]? = nil) {
             self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
             self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
-            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder; self.byModel = byModel
+            self.byFolder = byFolder; self.byModel = byModel
         }
 
         public enum CodingKeys: String, CodingKey {
@@ -2340,17 +2341,14 @@ extension DaemonData {
             case tokensKnown = "tokens_known"
             case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
-            case byTask = "by_task"
-            case byTool = "by_tool"
             case byFolder = "by_folder"
             case byModel = "by_model"
         }
     }
 
-    /// One group of a week's charge. `key` is the inferred task, the tool
-    /// (`claude_code`, `codex`), the folder's local label or the served
-    /// model; `nil` is the
-    /// unknown group. Largest known charge first, unknown ones after.
+    /// One group of a week's charge. `key` is the folder's local label or
+    /// the served model; `nil` is the unknown group. Largest known charge
+    /// first, unknown ones after.
     public struct InsightsCreditGroup: Codable, Equatable, Sendable {
         public let key: String?
         public let usdMicros: Int64?
@@ -2380,157 +2378,6 @@ extension DaemonData {
             case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
         }
-    }
-
-    /// `insights_sessions`: the Sessions tab's list over the daemon's counter
-    /// pass (feed T), newest first. Use it only when `showsCounterPass`;
-    /// otherwise the tab shows saved snapshots. Each row is known by an
-    /// opaque `sessionRef`; no path, digest or session id crosses.
-    public struct InsightsSessions: Codable, Equatable, Sendable {
-        public let enabled: Bool
-        public let feed: String
-        /// `nil` while disabled; `false` when the store, key or folder rules
-        /// could not be read, which is never drawn as an empty list.
-        public let readable: Bool?
-        public let reason: String?
-        public let updatedAt: String?
-        public let sessionsStored: Int?
-        /// Moves only when the store makes a row (`updated_at` moves on every
-        /// pass); `nil` from a daemon that predates it.
-        public let revision: Int?
-        /// More rows follow this page.
-        public let truncated: Bool?
-        /// The cursor for the next page (`before`); `nil` at the end of the
-        /// list, and from a daemon that predates paging, which lists one
-        /// page only.
-        public let next: String?
-        public let sessions: [InsightsWatchedSession]?
-
-        /// Enabled, readable, from the counter pass, and carrying a list.
-        public var showsCounterPass: Bool {
-            enabled && readable == true && feed == "counter_pass" && sessions != nil
-        }
-
-        public enum CodingKeys: String, CodingKey {
-            case enabled, feed, readable, reason, revision, truncated, next, sessions
-            case updatedAt = "updated_at"
-            case sessionsStored = "sessions_stored"
-        }
-    }
-
-    /// A watched trace's tokens per turn, folded for its row: at most 32
-    /// whole numbers, oldest first, each the largest turn in its run, and
-    /// the largest one turn with its ordinal.
-    public struct InsightsSessionSparkline: Codable, Equatable, Sendable {
-        public let points: [UInt64]
-        public let peakTokens: UInt64
-        public let peakTurn: UInt32
-
-        public init(points: [UInt64], peakTokens: UInt64, peakTurn: UInt32) {
-            self.points = points; self.peakTokens = peakTokens; self.peakTurn = peakTurn
-        }
-
-        public enum CodingKeys: String, CodingKey {
-            case points
-            case peakTokens = "peak_tokens"
-            case peakTurn = "peak_turn"
-        }
-    }
-
-    /// One watched trace in `insights_sessions`.
-    public struct InsightsWatchedSession: Codable, Equatable, Sendable, Identifiable {
-        /// Opaque; made again when the trace's file grows, so it is listed
-        /// again rather than kept.
-        public let sessionRef: String
-        public let source: String
-        /// The earliest recorded event, RFC 3339.
-        public let startedAt: String?
-        /// Claude Code only; `nil` for Codex, which records no turns.
-        public let turns: Int?
-        /// The folder's label, the one `list_projects` shows; `nil` when no
-        /// folder the daemon knows matches, drawn with the core's word.
-        public let folder: String?
-        /// The trace's tokens as its drill's header counts them; `nil` when
-        /// no counter is known (or from a daemon that predates it), never 0.
-        public let tokens: UInt64?
-        /// Tokens per turn for the row; `nil` for Codex, for a trace with no
-        /// known turn, and from a daemon that predates it.
-        public let sparkline: InsightsSessionSparkline?
-        /// The task the daemon's rules infer: `bug_fix`, `refactor`,
-        /// `tests`, `docs`, `other` or `no_edits`; `nil` with no facts and
-        /// from a daemon that predates the labels.
-        public let inferredTask: String?
-        /// The person's own task (`insights_session_label`), one of the five
-        /// task words; `nil` while unset. Settable, so the model can show a
-        /// change before the daemon answers.
-        public var userTask: String?
-        /// The person's own outcome: `kept`, `partly_kept` or
-        /// `thrown_away`; `nil` while unset.
-        public var userOutcome: String?
-        /// Whether `insights_analyze_session` can analyze the trace: `false`
-        /// when its file is over the core's size limit, or is a Codex file
-        /// without exactly one session in it. Absent from a daemon before
-        /// the flag; read as `true` then, and the daemon's refusal says why.
-        public let analyzable: Bool?
-
-        public var id: String { sessionRef }
-        /// `analyzable`, `true` from a daemon that predates it.
-        public var canAnalyze: Bool { analyzable ?? true }
-
-        public enum CodingKeys: String, CodingKey {
-            case source, turns, folder, tokens, sparkline, analyzable
-            case sessionRef = "session_ref"
-            case startedAt = "started_at"
-            case inferredTask = "inferred_task"
-            case userTask = "user_task"
-            case userOutcome = "user_outcome"
-        }
-    }
-
-    /// One `insights_session_label` param: absent (`keep`), `null`
-    /// (`clear`) or a closed word (`set`).
-    public enum InsightsLabelChange: Equatable, Sendable {
-        case keep
-        case clear
-        case set(String)
-    }
-
-    /// `insights_session_label`: the labelled row as `insights_sessions` now
-    /// lists it (`session`). The same three shapes as the list: off,
-    /// unreadable, and the row.
-    public struct InsightsSessionLabelAnswer: Codable, Equatable, Sendable {
-        public let enabled: Bool
-        public let feed: String
-        public let readable: Bool?
-        public let reason: String?
-        public let session: InsightsWatchedSession?
-    }
-
-    /// `insights_analyze_session`: one listed watched trace analyzed by the
-    /// daemon from the file its watcher found, and with `save` stored as a
-    /// dated snapshot in the standard Insights store. `analysis` is the
-    /// core's own `analyze` response, kept as the JSON it came as so the app
-    /// decodes it with the same `TCBridge` type the in-process call returns.
-    /// The same three shapes as the list: off, unreadable, and the analysis.
-    /// No path crosses.
-    public struct InsightsAnalyzeSessionAnswer: Codable, Equatable, Sendable {
-        public let enabled: Bool
-        public let feed: String
-        public let readable: Bool?
-        public let reason: String?
-        public let analysis: CoreJSON?
-    }
-
-    /// `insights_session_drill`: one watched trace turn by turn, in the
-    /// core's own `session_drill` shape (`session`), kept as the JSON it
-    /// came as so the app decodes it with the same `TCBridge` type the
-    /// saved drill uses.
-    public struct InsightsSessionDrillAnswer: Codable, Equatable, Sendable {
-        public let enabled: Bool
-        public let feed: String
-        public let readable: Bool?
-        public let reason: String?
-        public let session: CoreJSON?
     }
 
     /// `insights_model_answers`: the Models card's six answers over the

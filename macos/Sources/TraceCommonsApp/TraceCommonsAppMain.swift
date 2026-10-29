@@ -288,6 +288,11 @@ struct MonitorCommands: Commands {
         CommandGroup(replacing: .appSettings) {
             OpenSettingsButton(navigation: navigation)
         }
+        // Install, update or remove the command-line tool (owner,
+        // 2026-10-29), like VS Code's "Install 'code' command in PATH".
+        CommandGroup(after: .appSettings) {
+            CliToolMenuItem()
+        }
     }
 
     /// The switch, under the same asymmetry the menu-bar row follows.
