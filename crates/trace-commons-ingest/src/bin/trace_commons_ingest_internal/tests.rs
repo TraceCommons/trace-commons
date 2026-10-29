@@ -30,6 +30,8 @@ mod payout_rails_tests;
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
 mod public_run_tests;
+#[path = "tests/referral_admin_tests.rs"]
+mod referral_admin_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
 #[path = "tests/step_up_page_tests.rs"]
