@@ -42,8 +42,8 @@ struct InsightsOverviewTab: View {
     var weekChanges: [DaemonData.InsightsWeekChange]?
     /// Home's credit tile, so the two never disagree; `nil` hides it.
     var creditTile: (value: String, detail: String)?
-    /// "Benchmarks": the Benchmarks tab.
-    var showBenchmarks: () -> Void = {}
+    /// By model's link to the Submitted tab.
+    var showSubmitted: () -> Void = {}
     /// Put a week on screen; the window routes it to the feed showing.
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
@@ -90,7 +90,7 @@ struct InsightsOverviewTab: View {
                 let trends = InsightsWorkWords.showsTrends(work, tokens: weekChanges, copy: copy)
                 if byModel || trends {
                     InsightsCardFlow(minimum: 380) {
-                        if byModel { InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks) }
+                        if byModel { InsightsSpendByModelCard(work: work, copy: copy, showSubmitted: showSubmitted) }
                         if trends { InsightsTrendsCard(work: work, tokenChanges: weekChanges, copy: copy) }
                     }
                 }

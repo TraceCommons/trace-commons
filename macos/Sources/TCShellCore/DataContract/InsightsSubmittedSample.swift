@@ -121,8 +121,9 @@ enum SubmittedSample {
         .init(usdMicrosKnown: ts.compactMap(\.usdMicros).reduce(0, +), pricedSessions: ts.count)
     }
 
-    static func build() -> DaemonData.InsightsSubmitted {
-        let all = traces()
+    /// The answer for `all` (newest first) as the daemon would give it for
+    /// all time: weeks from the oldest trace's to the newest sample week.
+    static func build(_ all: [DaemonData.InsightsSubmittedTrace] = traces()) -> DaemonData.InsightsSubmitted {
         var totals = Sums()
         var byStatus = ["accepted": 0, "pending": 0, "quarantined": 0, "rejected": 0, "withdrawn": 0, "other": 0]
         var reasons: [String: Int] = [:]
@@ -131,7 +132,8 @@ enum SubmittedSample {
             byStatus[t.status, default: 0] += 1
             if let r = t.creditOutcomeReason { reasons[r, default: 0] += 1 }
         }
-        let byModel = models.map { m -> DaemonData.InsightsSubmittedModel in
+        let byModel = models.filter { m in all.contains { $0.model == m.label } }
+            .map { m -> DaemonData.InsightsSubmittedModel in
             let ts = all.filter { $0.model == m.label }
             var s = Sums()
             ts.forEach { s.add($0) }
@@ -145,7 +147,9 @@ enum SubmittedSample {
             all.filter { $0.task == key }.forEach { s.add($0) }
             return s.tally(key: key)
         }
-        let byWeek = (0..<6).reversed().map { back -> DaemonData.InsightsSubmittedTally in
+        let oldest = all.compactMap { ISO8601DateFormatter().date(from: $0.submittedAt) }.min() ?? lastMonday
+        let span = max(0, Int((lastMonday.timeIntervalSince(oldest) / (7 * 86_400)).rounded(.up)))
+        let byWeek = (0...span).reversed().map { back -> DaemonData.InsightsSubmittedTally in
             let monday = lastMonday.addingTimeInterval(TimeInterval(-back * 7 * 86_400))
             let next = monday.addingTimeInterval(7 * 86_400)
             var s = Sums()
@@ -159,7 +163,7 @@ enum SubmittedSample {
             var s = Sums()
             all.filter { $0.projectLabel == label }.forEach { s.add($0) }
             return s.tally(label: label)
-        }.sorted { $0.submitted > $1.submitted }
+        }.filter { $0.submitted > 0 }.sorted { $0.submitted > $1.submitted }
         let files = all.compactMap(\.files).reduce(DaemonData.InsightsSubmittedFiles()) {
             .init(source: $0.source + $1.source, test: $0.test + $1.test, doc: $0.doc + $1.doc,
                   config: $0.config + $1.config)

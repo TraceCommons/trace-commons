@@ -4,7 +4,7 @@ import TCBridge
 @testable import TCShellCore
 @testable import TraceCommonsApp
 
-/// Overview's week at a glance and Benchmarks (product owner, 2026-10-29),
+/// Overview's week at a glance and Submitted's kinds of work (product owner, 2026-10-29),
 /// from the core's own words.
 @MainActor
 final class InsightsWorkTests: XCTestCase {
@@ -65,33 +65,13 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(work.byDay.first?.date, "2026-10-23")
     }
 
-    func testBenchmarkPicksAndTipsReadInTheCoresWords() throws {
+    func testEveryKindOfWorkHasAName() throws {
         let copy = try words()
-        var tip = DaemonData.InsightsBenchmarkTip(kind: "test_first")
-        tip.fasterPermille = 350; tip.sessionsWithout = 12; tip.sessions = 34
-        let category = DaemonData.InsightsBenchmarkCategory(
-            key: "bug_fix", sessions: 34,
-            quality: .init(leader: .init(label: "gpt-5.5", tool: "codex", figure: 930),
-                           next: .init(label: "opus", tool: "claude_code", figure: 880)),
-            value: .init(leader: .init(label: "sonnet", tool: "claude_code", figure: 400_000),
-                         next: .init(label: "gpt-5.5", tool: "codex", figure: 950_000)),
-            speed: nil, tip: tip)
-        let picks = InsightsBenchmarkWords.picks(category, copy: copy)
-        XCTAssertEqual(picks.map(\.id), ["quality", "value"], "a measure without two qualifying models is left out")
-        XCTAssertEqual(picks[0].figure, "93% kept")
-        XCTAssertEqual(picks[0].next, "Next: opus, 88% kept")
-        XCTAssertEqual(picks[1].figure, "$0.40 per trace")
-        XCTAssertEqual(InsightsBenchmarkWords.name("bug_fix", copy: copy), "Fix a bug")
-        XCTAssertEqual(InsightsBenchmarkWords.tip(tip, copy: copy),
-                       "Fixes where a failing test ran first finished 35% faster. 12 of your 34 fixes did not start that way.")
-        XCTAssertNil(InsightsBenchmarkWords.tip(.init(kind: "from_a_newer_daemon"), copy: copy))
-    }
-
-    func testEveryBenchmarkCategoryHasAName() throws {
-        let copy = try words()
-        for key in InsightsBenchmarkWords.categories {
-            XCTAssertFalse(InsightsBenchmarkWords.name(key, copy: copy).isEmpty, key)
+        for key in InsightsSubmittedWords.tasks {
+            XCTAssertFalse(InsightsSubmittedWords.taskName(key, copy: copy).isEmpty, key)
         }
+        XCTAssertEqual(InsightsSubmittedWords.taskName("bug_fix", copy: copy), "Fix a bug")
+        XCTAssertEqual(InsightsSubmittedWords.taskName(nil, copy: copy), "Kind not recorded")
     }
 
     /// Breakdown's By model lists NEAR AI's models beside Claude's and

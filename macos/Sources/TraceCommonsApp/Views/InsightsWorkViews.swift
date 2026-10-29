@@ -207,7 +207,7 @@ struct InsightsWeekTiles: View {
 struct InsightsSpendByModelCard: View {
     let work: DaemonData.InsightsWork
     let copy: [String: String]
-    var showBenchmarks: () -> Void = {}
+    var showSubmitted: () -> Void = {}
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
@@ -245,7 +245,7 @@ struct InsightsSpendByModelCard: View {
                 .accessibilityElement(children: .combine)
             }
             Spacer(minLength: 0)
-            Button(text("analytics_tab_benchmarks")) { showBenchmarks() }
+            Button(text("analytics_by_model_open_submitted")) { showSubmitted() }
                 .buttonStyle(GlassButtonStyle(.link))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

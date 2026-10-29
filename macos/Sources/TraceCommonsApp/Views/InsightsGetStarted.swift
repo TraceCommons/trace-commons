@@ -5,7 +5,8 @@ import TCShellCore
 
 /// When Insights has nothing of the person's own to show (product owner,
 /// 2026-10-29): no trace in the week on screen or in any kept week, or, on
-/// Benchmarks, no kind of work with a trace. Kept pure for tests.
+/// Submitted, no trace ever sent (`InsightsSubmittedWords.isEmpty`). Kept
+/// pure for tests.
 enum InsightsEmptyState {
     /// The two folders the app watches for Claude and Codex traces.
     static let watchedFolders = (claude: "~/.claude/projects", codex: "~/.codex/sessions")
@@ -15,12 +16,6 @@ enum InsightsEmptyState {
     static func weekHasData(_ overview: InsightsWeekOverview?, history: [InsightsWeekFigures]?) -> Bool {
         if let overview, overview.sessions > 0 || !overview.weeks.isEmpty { return true }
         return (history ?? []).contains { $0.sessions > 0 }
-    }
-
-    /// Whether Benchmarks has a kind of work with a trace in it.
-    static func benchmarksHaveData(_ answer: DaemonData.InsightsBenchmarks?) -> Bool {
-        guard let answer, answer.enabled, answer.readable != false else { return false }
-        return (answer.categories ?? []).contains { $0.sessions > 0 }
     }
 }
 
@@ -33,6 +28,34 @@ struct InsightsGetStarted {
     var openTraces: (() -> Void)?
     /// Settings, at Projects; `nil` draws no button.
     var openSettings: (() -> Void)?
+    /// The card's words: Overview and Breakdown's, or Submitted's.
+    var words: Words = .week
+
+    /// The copy keys of a card: its title, why, three steps (a title and
+    /// a detail each), and the sample banner's detail.
+    struct Words {
+        let title: String
+        let why: String
+        let steps: [(title: String, detail: String)]
+        let bannerDetail: String
+
+        static let week = Words(
+            title: "analytics_start_title", why: "analytics_start_why",
+            steps: [("analytics_start_step_use", "analytics_start_step_use_detail"),
+                    ("analytics_start_step_share", "analytics_start_step_share_detail"),
+                    ("analytics_start_step_fill", "analytics_start_step_fill_detail")],
+            bannerDetail: "analytics_sample_banner_detail")
+
+        /// Submitted: every step leads to the first trace sent.
+        static let submitted = Words(
+            title: "analytics_sub_start_title", why: "analytics_sub_start_why",
+            steps: [("analytics_sub_start_step_folder", "analytics_sub_start_step_folder_detail"),
+                    ("analytics_sub_start_step_send", "analytics_sub_start_step_send_detail"),
+                    ("analytics_sub_start_step_see", "analytics_sub_start_step_see_detail")],
+            bannerDetail: "analytics_sub_sample_banner_detail")
+
+        var keys: [String] { [title, why, bannerDetail] + steps.flatMap { [$0.title, $0.detail] } }
+    }
 }
 
 /// The get-started card, then the sample banner. Every word is the core's.
@@ -42,7 +65,7 @@ struct InsightsGetStartedHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
             InsightsGetStartedCard(start: start)
-            InsightsSampleBanner(copy: start.copy)
+            InsightsSampleBanner(copy: start.copy, detailKey: start.words.bannerDetail)
         }
     }
 }
@@ -65,21 +88,21 @@ struct InsightsGetStartedCard: View {
                     .background(Circle().fill(GlassTokens.Color.chartSeries1.color.opacity(0.14)))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(text("analytics_start_title")).insightsTitle()
+                    Text(text(start.words.title)).insightsTitle()
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
-                    Text(text("analytics_start_why")).insightsNote()
+                    Text(text(start.words.why)).insightsNote()
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-                step(1, title: text("analytics_start_step_use"),
-                     detail: InsightsOverviewWords.fill(text("analytics_start_step_use_detail"), [
+                step(1, title: text(start.words.steps[0].title),
+                     detail: InsightsOverviewWords.fill(text(start.words.steps[0].detail), [
                          "first": InsightsEmptyState.watchedFolders.claude,
                          "second": InsightsEmptyState.watchedFolders.codex,
                      ])) { EmptyView() }
-                step(2, title: text("analytics_start_step_share"),
-                     detail: text("analytics_start_step_share_detail")) {
+                step(2, title: text(start.words.steps[1].title),
+                     detail: text(start.words.steps[1].detail)) {
                     if start.openTraces != nil || start.openSettings != nil {
                         HStack(spacing: GlassTokens.Space.s4) {
                             if let openTraces = start.openTraces {
@@ -94,8 +117,8 @@ struct InsightsGetStartedCard: View {
                         .padding(.top, GlassTokens.Space.s2)
                     }
                 }
-                step(3, title: text("analytics_start_step_fill"),
-                     detail: text("analytics_start_step_fill_detail")) { EmptyView() }
+                step(3, title: text(start.words.steps[2].title),
+                     detail: text(start.words.steps[2].detail)) { EmptyView() }
             }
             .insightsCardBody()
         }
@@ -132,6 +155,7 @@ struct InsightsGetStartedCard: View {
 /// "Sample data — not yours", full width above the sample.
 struct InsightsSampleBanner: View {
     let copy: [String: String]
+    var detailKey = "analytics_sample_banner_detail"
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
@@ -143,7 +167,7 @@ struct InsightsSampleBanner: View {
                 Text(copy["analytics_sample_banner"] ?? "")
                     .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                     .foregroundStyle(GlassColor.textPrimary)
-                Text(copy["analytics_sample_banner_detail"] ?? "").insightsCaption()
+                Text(copy[detailKey] ?? "").insightsCaption()
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)

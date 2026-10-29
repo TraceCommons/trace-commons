@@ -8,7 +8,7 @@ struct InsightsView: View {
     @State private var overviewModel: InsightsOverviewModel
     @State private var patternsModel: InsightsPatternsModel
     @State private var comparisonsModel: InsightsComparisonsModel
-    @State private var benchmarksModel: InsightsBenchmarksModel
+    @State private var submittedStore: InsightsSubmittedStore
     /// Home's figures, for Overview's credit tile; `nil` hides the tile.
     private let home: HomeStore?
     @State private var fallbackSubscriptionModel: SubscriptionUsageModel
@@ -27,6 +27,12 @@ struct InsightsView: View {
     /// Settings, at Projects. `nil` draws no button.
     private let openTraces: (() -> Void)?
     private let openSettings: (() -> Void)?
+    /// Traces' History page, where Train consent is added; `nil` draws no
+    /// button on Submitted.
+    private let openHistory: (() -> Void)?
+    /// History's words for statuses and no-credit reasons, which Submitted
+    /// shows as History does.
+    private let historyLabels: PublicRunCopy?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -38,8 +44,10 @@ struct InsightsView: View {
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
                     home: HomeStore? = nil,
+                    historyLabels: PublicRunCopy? = nil,
                     openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil) {
+                    openSettings: (() -> Void)? = nil,
+                    openHistory: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -65,11 +73,11 @@ struct InsightsView: View {
             subscriptions = nil
         }
         #endif
-        var benchmarks: InsightsBenchmarksModel.Reader? = daemon.map { client in
-            { @Sendable weeks in try await client.insightsBenchmarks(weeks: weeks) }
+        var submitted: InsightsSubmittedStore.Reader? = daemon.map { client in
+            { @Sendable weeks in try await client.insightsSubmitted(weeks: weeks) }
         }
         #if DEBUG
-        if InsightsSampleWeek.enabled { benchmarks = nil }
+        if InsightsSampleWeek.enabled { submitted = nil }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { @Sendable in _ = try await client.setInsightsRecapCard(false) }
@@ -79,8 +87,9 @@ struct InsightsView: View {
                   turnOffRecapCard: turnOff,
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
-                  benchmarks: InsightsBenchmarksModel(reader: benchmarks),
-                  home: home, openTraces: openTraces, openSettings: openSettings)
+                  submitted: InsightsSubmittedStore(reader: submitted),
+                  home: home, historyLabels: historyLabels, openTraces: openTraces, openSettings: openSettings,
+                  openHistory: openHistory)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -94,19 +103,23 @@ struct InsightsView: View {
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
-                    benchmarks: InsightsBenchmarksModel? = nil,
+                    submitted: InsightsSubmittedStore? = nil,
                     home: HomeStore? = nil,
+                    historyLabels: PublicRunCopy? = nil,
                     openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil) {
+                    openSettings: (() -> Void)? = nil,
+                    openHistory: (() -> Void)? = nil) {
         self.openTraces = openTraces
         self.openSettings = openSettings
+        self.openHistory = openHistory
+        self.historyLabels = historyLabels ?? PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? "")
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
         _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
-        _benchmarksModel = State(initialValue: benchmarks ?? InsightsBenchmarksModel(reader: nil))
+        _submittedStore = State(initialValue: submitted ?? InsightsSubmittedStore(reader: nil))
         self.home = home
         self.sharedSubscriptionModel = subscriptionModel
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
@@ -114,9 +127,9 @@ struct InsightsView: View {
         self.turnOffRecapCard = turnOffRecapCard
     }
 
-    /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
-    /// (product owner, 2026-10-29).
-    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+    /// The tabs on the bar, in order: Overview, Breakdown, Submitted
+    /// (product owner, 2026-10-29: Submitted in place of Benchmarks).
+    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .submitted]
 
     /// Home's credit tile, the same figure and word as Home's.
     private var creditTile: (value: String, detail: String)? {
@@ -138,21 +151,24 @@ struct InsightsView: View {
         weekSettled && !InsightsEmptyState.weekHasData(overviewModel.shown, history: model.counterWeek?.coreHistory)
     }
 
-    /// Benchmarks has no kind of work with a trace in it.
-    private var benchmarksEmpty: Bool {
-        benchmarksModel.settled && !InsightsEmptyState.benchmarksHaveData(benchmarksModel.answer)
-    }
+    /// Submitted has no trace ever sent to show.
+    private var submittedEmpty: Bool { InsightsSubmittedWords.isEmpty(submittedStore) }
 
     /// Whether the tab on screen draws the get-started card and the sample.
     private var showsSample: Bool {
         switch tab {
         case .overview, .patterns: weekEmpty
-        case .benchmarks: benchmarksEmpty
+        case .submitted: submittedEmpty
         }
     }
 
     private var getStarted: InsightsGetStarted {
         InsightsGetStarted(copy: model.copy, openTraces: openTraces, openSettings: openSettings)
+    }
+
+    /// Submitted's get-started card: its steps lead to the first trace sent.
+    private var submittedGetStarted: InsightsGetStarted {
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces, openSettings: openSettings, words: .submitted)
     }
 
     @ViewBuilder
@@ -178,7 +194,7 @@ struct InsightsView: View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            // Overview, Breakdown and Benchmarks (product owner,
+            // Overview, Breakdown and Submitted (product owner,
             // 2026-10-29). A picked day shows its sessions in place.
             GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
@@ -202,9 +218,10 @@ struct InsightsView: View {
                     InsightsPatternsTab(model: sample.patterns, comparisons: sample.comparisons, copy: model.copy,
                                         week: sample.week, overview: sample.overview, getStarted: getStarted)
                 }
-            case .benchmarks where showsSample:
+            case .submitted where showsSample:
                 if let sample {
-                    InsightsBenchmarksTab(model: sample.benchmarks, copy: model.copy, getStarted: getStarted)
+                    InsightsSubmittedTab(store: sample.submitted, copy: model.copy, labels: historyLabels,
+                                         getStarted: submittedGetStarted)
                 }
             case .overview:
                 InsightsOverviewTab(
@@ -218,7 +235,7 @@ struct InsightsView: View {
                     work: model.counterWeek?.work,
                     weekChanges: model.counterWeek?.changeVsLastWeek,
                     creditTile: creditTile,
-                    showBenchmarks: { tab = .benchmarks },
+                    showSubmitted: { tab = .submitted },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -230,8 +247,9 @@ struct InsightsView: View {
                                     selectWeek: selectWeek,
                                     week: model.counterWeek, detailsView: $detailsView,
                                     overview: overviewModel, snapshots: model.snapshots)
-            case .benchmarks:
-                InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
+            case .submitted:
+                InsightsSubmittedTab(store: submittedStore, copy: model.copy, labels: historyLabels,
+                                     openHistory: openHistory)
             }
         }
         .onAppear { model.open() }
@@ -251,7 +269,7 @@ struct InsightsView: View {
                 guard !Task.isCancelled else { return }
                 await model.loadWeek()
                 overviewModel.reload()
-                await benchmarksModel.load()
+                await submittedStore.load()
             }
         }
         .onChange(of: model.snapshots.map(\.id)) { _, _ in
@@ -316,16 +334,16 @@ struct InsightsView: View {
 }
 
 /// The Insights window's tabs: Overview, Breakdown (`patterns`) and
-/// Benchmarks.
+/// Submitted.
 enum InsightsTab: Hashable {
-    case overview, patterns, benchmarks
+    case overview, patterns, submitted
 
     /// The copy key of the tab's name.
     var copyKey: String {
         switch self {
         case .overview: "analytics_tab_overview"
         case .patterns: "analytics_tab_patterns"
-        case .benchmarks: "analytics_tab_benchmarks"
+        case .submitted: "analytics_tab_submitted"
         }
     }
 }

@@ -947,7 +947,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_sub_period_all", "All time"),
     ("analytics_sub_none_in_period", "No traces sent in this period"),
     ("analytics_sub_tile_submitted", "Submitted"),
-    ("analytics_sub_tile_submitted_note", "Traces you sent"),
+    ("analytics_sub_tile_submitted_note", "Accepted or not"),
     ("analytics_sub_tile_accepted", "Accepted"),
     ("analytics_sub_tile_accepted_rate", "{p}% of traces sent"),
     ("analytics_sub_tile_credit", "Credit received"),
@@ -963,6 +963,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Add Train consent in History",
     ),
     ("analytics_sub_models_title", "By model"),
+    // Overview's Spend by model links here.
+    ("analytics_by_model_open_submitted", "What each model earned"),
     ("analytics_sub_col_model", "Model"),
     ("analytics_sub_col_submitted", "Submitted"),
     ("analytics_sub_col_accepted", "Accepted"),

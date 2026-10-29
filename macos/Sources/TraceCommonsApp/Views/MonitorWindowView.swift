@@ -271,6 +271,7 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel, home: home,
+                                 historyLabels: model.publicRunCopy,
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
@@ -278,6 +279,12 @@ struct MonitorWindowView: View {
                                  openSettings: {
                                      navigation.requestSettings(at: .projects)
                                      openWindow(id: WindowID.settings)
+                                 },
+                                 // Submitted's "Add Train consent in
+                                 // History" (product owner, 2026-10-29).
+                                 openHistory: {
+                                     tab = .traces
+                                     tracesPage = .history
                                  })
                 }
             } footer: {

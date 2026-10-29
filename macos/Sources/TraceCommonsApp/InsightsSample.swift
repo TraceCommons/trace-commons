@@ -5,7 +5,7 @@ import TCShellCore
 /// The sample Insights draws under the get-started card while it has no
 /// trace of the person's own (product owner, 2026-10-29): the sample week
 /// (`InsightsSampleWeek`) as the daemon would send it, with spend at API
-/// prices, edits and benchmarks to go with it. Claude and Codex
+/// prices and edits to go with it. Claude and Codex
 /// models, six folders and seven days. Sample figures, never a pilot's, and
 /// never mixed with the person's own: each tab draws either its real
 /// models or these, never both.
@@ -62,53 +62,6 @@ enum InsightsSample {
         ],
         byDay: days(InsightsSampleWeek.weekStart, [18.40, 24.90, 27.30, 21.60, 16.20, 6.80, 10.30]),
         lastWeekByDay: days("2026-09-28", [16.10, 21.30, 24.80, 19.90, 17.40, 5.20, 7.30]))
-
-    private static func pick(_ leader: (String, String, Int64),
-                             _ next: (String, String, Int64)) -> DaemonData.InsightsBenchmarkPick {
-        .init(leader: .init(label: leader.0, tool: leader.1, figure: leader.2),
-              next: .init(label: next.0, tool: next.1, figure: next.2))
-    }
-
-    private static let opus = "claude-opus-5-5", sonnet = "claude-sonnet-5-5", haiku = "claude-haiku-5-5"
-    private static let codex = "gpt-5-codex", claude = "claude_code", codexTool = "codex"
-
-    private static func tip(_ kind: String, _ fill: (inout DaemonData.InsightsBenchmarkTip) -> Void)
-        -> DaemonData.InsightsBenchmarkTip {
-        var tip = DaemonData.InsightsBenchmarkTip(kind: kind)
-        fill(&tip)
-        return tip
-    }
-
-    /// Four weeks of sample benchmarks: five kinds of work, two models
-    /// compared on each.
-    static let benchmarks = DaemonData.InsightsBenchmarks(weeks: 4, sessions: 107, minSessions: 5, categories: [
-        .init(key: "bug_fix", sessions: 34,
-              quality: pick((opus, claude, 930), (codex, codexTool, 880)),
-              value: pick((sonnet, claude, 410_000), (opus, claude, 1_840_000)),
-              speed: pick((codex, codexTool, 840), (opus, claude, 1_260)),
-              tip: tip("test_first") { $0.fasterPermille = 350; $0.sessionsWithout = 12; $0.sessions = 34 }),
-        .init(key: "feature", sessions: 28,
-              quality: pick((opus, claude, 910), (sonnet, claude, 860)),
-              value: pick((sonnet, claude, 620_000), (opus, claude, 2_450_000)),
-              speed: pick((sonnet, claude, 1_500), (opus, claude, 2_100)),
-              tip: tip("cheaper_same_quality") {
-                  $0.cheap = sonnet; $0.expensive = opus; $0.costRatioPermille = 250
-              }),
-        .init(key: "refactor", sessions: 19,
-              quality: pick((codex, codexTool, 940), (opus, claude, 900)),
-              value: pick((codex, codexTool, 780_000), (opus, claude, 1_960_000)),
-              speed: pick((opus, claude, 1_080), (codex, codexTool, 1_320)),
-              tip: tip("fewer_undos") { $0.better = codex; $0.worse = opus; $0.ratioPermille = 2_300 }),
-        .init(key: "tests", sessions: 17,
-              quality: pick((sonnet, claude, 950), (opus, claude, 930)),
-              value: pick((sonnet, claude, 290_000), (opus, claude, 1_100_000)),
-              speed: pick((sonnet, claude, 660), (opus, claude, 900)),
-              tip: tip("test_first") { $0.fasterPermille = 220; $0.sessionsWithout = 5; $0.sessions = 17 }),
-        .init(key: "docs", sessions: 9,
-              quality: pick((sonnet, claude, 970), (haiku, claude, 950)),
-              value: pick((haiku, claude, 60_000), (sonnet, claude, 210_000)),
-              speed: pick((haiku, claude, 240), (sonnet, claude, 420))),
-    ])
 
     /// The sample week as `insights_week` sends it, before `work`: the
     /// rollup of the sample's counted traces, the core's Overview and
@@ -187,7 +140,7 @@ final class InsightsSampleModels {
     let overview: InsightsOverviewModel
     let patterns: InsightsPatternsModel
     let comparisons: InsightsComparisonsModel
-    let benchmarks: InsightsBenchmarksModel
+    let submitted: InsightsSubmittedStore
     let subscriptions: SubscriptionUsageModel
     let week: DaemonData.InsightsWeek?
 
@@ -196,7 +149,7 @@ final class InsightsSampleModels {
         overview = InsightsOverviewModel(service: refuse)
         patterns = InsightsPatternsModel(service: refuse)
         comparisons = InsightsComparisonsModel(service: refuse)
-        benchmarks = InsightsBenchmarksModel(sample: InsightsSample.benchmarks)
+        submitted = InsightsSubmittedStore(sample: .sample)
         let usage = InsightsSample.subscriptions()
         subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
         week = try? InsightsSample.week()

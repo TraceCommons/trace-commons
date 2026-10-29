@@ -4,6 +4,7 @@ import TCBridge
 import TCDesign
 import TCShellCore
 import XCTest
+@testable import TCShellCore
 @testable import TraceCommonsApp
 
 /// The get-started card and its sample (product owner, 2026-10-29), and
@@ -45,11 +46,26 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         XCTAssertTrue(InsightsEmptyState.weekHasData(empty, history: kept), "a kept week with traces is real data")
     }
 
-    func testBenchmarksNeedAKindOfWorkWithATrace() {
-        XCTAssertFalse(InsightsEmptyState.benchmarksHaveData(nil))
-        XCTAssertFalse(InsightsEmptyState.benchmarksHaveData(.init(categories: [.init(key: "bug_fix", sessions: 0)])))
-        XCTAssertFalse(InsightsEmptyState.benchmarksHaveData(.init(enabled: false, categories: nil)))
-        XCTAssertTrue(InsightsEmptyState.benchmarksHaveData(InsightsSample.benchmarks))
+    /// Submitted shows the get-started card only with no trace ever sent:
+    /// never because a shorter period holds none, nor for a failed read.
+    func testSubmittedGuideShowsOnlyWithNothingEverSent() async {
+        let none = Self.submitted(.empty)
+        let store = InsightsSubmittedStore(reader: { _ in none })
+        XCTAssertFalse(InsightsSubmittedWords.isEmpty(store), "not before the first read")
+        await store.load()
+        XCTAssertTrue(InsightsSubmittedWords.isEmpty(store))
+        let some = DaemonData.InsightsSubmitted.sample
+        let picked = InsightsSubmittedStore(reader: { weeks in weeks == nil ? some : none })
+        await picked.load()
+        picked.weeks = 4
+        await picked.load()
+        XCTAssertFalse(InsightsSubmittedWords.isEmpty(picked), "a period with none is not the guide")
+        let failing = InsightsSubmittedStore(reader: { _ in throw DaemonDataError.notAvailableYet(method: "x") })
+        await failing.load()
+        XCTAssertFalse(InsightsSubmittedWords.isEmpty(failing))
+        let noDaemon = InsightsSubmittedStore(reader: nil)
+        await noDaemon.load()
+        XCTAssertTrue(InsightsSubmittedWords.isEmpty(noDaemon))
     }
 
     func testTheSampleIsBelievableAndAddsUp() throws {
@@ -59,10 +75,6 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         XCTAssertEqual(work.byDay.reduce(0) { $0 + $1.usdMicrosKnown }, work.week.usdMicrosKnown)
         XCTAssertEqual(work.byDay.count, 7)
         XCTAssertEqual(Set(work.byModel.map(\.tool)), ["claude_code", "codex"])
-        for category in InsightsSample.benchmarks.categories ?? [] {
-            XCTAssertNotNil(category.quality, category.key)
-            XCTAssertNotEqual(category.quality?.leader.label, category.quality?.next.label, category.key)
-        }
         let week = try InsightsSample.week()
         XCTAssertTrue(week.showsCounterPass)
         XCTAssertEqual(week.rollup?.sessions.count, 37)
@@ -76,6 +88,9 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                     "analytics_start_step_share_detail", "analytics_start_open_traces",
                     "analytics_start_open_settings", "analytics_start_step_fill", "analytics_start_step_fill_detail",
                     "analytics_sample_banner", "analytics_sample_banner_detail"] {
+            XCTAssertFalse((copy[key] ?? "").isEmpty, key)
+        }
+        for key in InsightsGetStarted.Words.submitted.keys {
             XCTAssertFalse((copy[key] ?? "").isEmpty, key)
         }
         XCTAssertTrue(copy["analytics_sample_banner"]?.contains("not yours") == true)
@@ -256,30 +271,18 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                 "last_31_days": window(15_800_000, 4_900_000, 190)]
     }
 
-    static func benchmarks(_ state: UserState) -> DaemonData.InsightsBenchmarks {
-        switch state {
-        case .empty:
-            return .init(sessions: 0, categories: [])
-        case .both, .nearAi:
-            return InsightsSample.benchmarks
-        case .claude, .codex:
-            // One tool: the Claude models still compare with each other;
-            // Codex alone has one model, so no kind of work has two.
-            let claude = state == .claude
-            let categories = (InsightsSample.benchmarks.categories ?? []).map { category in
-                func only(_ pick: DaemonData.InsightsBenchmarkPick?) -> DaemonData.InsightsBenchmarkPick? {
-                    guard let pick, claude, pick.leader.tool == "claude_code", pick.next.tool == "claude_code"
-                    else { return nil }
-                    return pick
-                }
-                let quality = only(category.quality), value = only(category.value), speed = only(category.speed)
-                return DaemonData.InsightsBenchmarkCategory(
-                    key: category.key, sessions: claude ? category.sessions * 3 / 4 : max(2, category.sessions / 4),
-                    quality: quality, value: value, speed: speed,
-                    tip: quality == nil ? nil : category.tip)
-            }
-            return .init(sessions: categories.reduce(0) { $0 + $1.sessions }, categories: categories)
+    /// What a kind of user has sent: nothing yet, or the sample's traces
+    /// of their tools.
+    static func submitted(_ state: UserState) -> DaemonData.InsightsSubmitted {
+        let traces = (DaemonData.InsightsSubmitted.sample.traces ?? []).filter { state.tools.contains($0.tool ?? "") }
+        guard !traces.isEmpty else {
+            return .init(weeks: nil, totals: .init(
+                submitted: 0, accepted: 0, creditFinal: 0, creditPending: 0, matched: 0, unmatched: 0,
+                byStatus: ["accepted": 0, "pending": 0, "quarantined": 0, "rejected": 0, "withdrawn": 0, "other": 0],
+                byOutcomeReason: [:], unmatchedByReason: [:]),
+                byModel: [], byTask: [], byWeek: [], byProject: [], tracesTotal: 0, traces: [])
         }
+        return SubmittedSample.build(traces)
     }
 
     static func subscriptions(_ state: UserState) -> DaemonData.SubscriptionUsage {
@@ -324,15 +327,57 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         }
     }
 
+    /// Submitted for each case the product owner named (2026-10-29):
+    /// nothing sent (the guide over the sample), one trace, an answer built
+    /// from the daemon's fixture, and one model only.
+    func testSubmittedRendersForEveryCase() async throws {
+        let sample = DaemonData.InsightsSubmitted.sample.traces ?? []
+        let one = try Self.oneTrace()
+        let cases: [(String, DaemonData.InsightsSubmitted)] = [
+            ("no-submissions", Self.submitted(.empty)),
+            ("one-trace", SubmittedSample.build([one])),
+            ("fixture", try Self.submittedFixture()),
+            ("single-model", SubmittedSample.build(sample.filter { $0.model == "claude-opus-5-5" })),
+        ]
+        for (name, answer) in cases {
+            for width in [1100, 760] as [CGFloat] {
+                let png = try await Self.shot(.claude, tab: .submitted, width: width, submitted: answer)
+                XCTAssertGreaterThan(png.count, 20_000, "\(name) \(width)")
+                if let dir = Self.shotsDir {
+                    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                    try png.write(to: URL(fileURLWithPath: dir)
+                        .appendingPathComponent("submitted-\(name)-\(Int(width)).png"))
+                }
+            }
+        }
+    }
+
+    /// A first trace: accepted, credited, with files changed.
+    static func oneTrace() throws -> DaemonData.InsightsSubmittedTrace {
+        try XCTUnwrap(DaemonData.InsightsSubmitted.sample.traces?.first {
+            $0.status == "accepted" && ($0.creditPointsFinal ?? 0) > 0 && ($0.files?.total ?? 0) > 0
+        })
+    }
+
+    /// The daemon's `insights_submitted` fixture, as the wire tests read it.
+    static func submittedFixture() throws -> DaemonData.InsightsSubmitted {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_submitted.json")
+        return try JSONDecoder().decode(DaemonData.InsightsSubmitted.self, from: Data(contentsOf: url))
+    }
+
     static func name(_ tab: InsightsTab) -> String {
         switch tab {
         case .overview: "overview"
         case .patterns: "breakdown"
-        case .benchmarks: "benchmarks"
+        case .submitted: "submitted"
         }
     }
 
-    static func shot(_ state: UserState, tab: InsightsTab, width: CGFloat) async throws -> Data {
+    static func shot(_ state: UserState, tab: InsightsTab, width: CGFloat,
+                     submitted fixed: DaemonData.InsightsSubmitted? = nil) async throws -> Data {
         let copy = TCInsights.copy()
         let week: DaemonData.InsightsWeek? = state == .empty ? nil : try Self.week(state)
         let reader: InsightsModel.WeekReader = { _ in
@@ -341,17 +386,17 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         }
         let model = InsightsModel(service: emptyStore, weekReader: reader)
         let overview = InsightsOverviewModel(service: emptyStore)
-        let bench = benchmarks(state)
-        let benchmarks = InsightsBenchmarksModel(reader: { _ in bench })
+        let answer = fixed ?? submitted(state)
+        let store = InsightsSubmittedStore(reader: { _ in answer })
         let usage = subscriptions(state)
         let subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
-                                initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,
-                                openTraces: {}, openSettings: {})
+                                initialTab: tab, subscriptionModel: subscriptions, submitted: store,
+                                openTraces: {}, openSettings: {}, openHistory: {})
         let height: CGFloat = width < 900 ? 4_000 : 2_800
         return try await render(AnyView(view), width: width, height: height) {
             model.weekSettled && !overview.busy && overview.shown != nil
-                && (tab != .benchmarks || benchmarks.settled)
+                && (tab != .submitted || store.settled)
         }
     }
 
