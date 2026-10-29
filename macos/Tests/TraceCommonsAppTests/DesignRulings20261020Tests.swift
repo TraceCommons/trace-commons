@@ -68,8 +68,9 @@ final class DesignRulings20261020Tests: XCTestCase {
     }
 
     /// Home's groups are titled, in the owner's words. The order is the
-    /// 2026-10-28 ruling: Traces (with its hero) first, then Account, then
-    /// Private AI, below and smaller than Traces.
+    /// 2026-10-28 ruling: Traces first, then Account, then Private AI,
+    /// below and smaller than Traces. The Traces hero sits above the Traces
+    /// heading (owner, 2026-10-29), so the heading is over Waiting.
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -77,11 +78,13 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let traces = try XCTUnwrap(home.range(of: "            HomeSection(words?.sectionTraces) {\n                tracesHero\n"))
+        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            HomeSection(words?.sectionTraces) {\n                Grid("))
+        let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
         let privateAI = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n            privateAI\n"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
+        XCTAssertLessThan(hero.lowerBound, traces.lowerBound)
         XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
         XCTAssertLessThan(account.lowerBound, privateAI.lowerBound)
