@@ -3378,6 +3378,13 @@ leg waits for an operator to reconcile it against the adapter's records by
 | The pipeline's issuer must be configured (with the list set and no issuer, the row above withholds first). The tenant's authority must exist, and so must its policy when the authority requires one. The policy comes from the runtime's authority provider, the source the receipt uses. | `credit_check_error` |
 | The submission's allowed uses must include `model_training`, and its consent scopes and `model_training` must be inside the tenant policy's allowlists. The default consent scope (debugging and evaluation) does not allow model training, so its credit is withheld, as on `main`. | `policy_mismatch` |
 
+A contributor can add `model_training` to traces already sent
+(`/v1/contributors/me/model-training-consent`, V141; see
+`docs/trace-commons.md`). A run that has not reached Settle reads the new
+uses there, so its leg can pay. A leg that already completed withheld as
+`policy_mismatch` stays withheld: the grant re-runs only `main`'s withheld
+gate award and does not re-open a completed pipeline leg.
+
 `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is a canonical hashed
 principal ref (`principal_sha256:` and 64 hexadecimal characters), the same
 form the central-issuer list takes; ingest refuses to start with any other

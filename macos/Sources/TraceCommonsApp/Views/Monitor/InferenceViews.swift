@@ -447,22 +447,22 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let state = PrivateAISwitchCard.stateLabel(
-            state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
-            calls: model.privateInferenceCalls)
+        let status = Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)
         // The tab's heading row, in the one style every tab's heading
         // takes (owner, 2026-10-19, `GlassTabHeading`), with the state on
-        // the right. #1146: the Status dot is on while working, outside
-        // otherwise, always beside the core's sentence.
+        // the right: the menu bar's one word and dot, the core's full
+        // sentence as the row's help and accessibility hint.
         // The state right after the title (owner, 2026-10-20), not at the
         // row's far end.
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             GlassTabHeading(copy.inspectorStatus) {
-                GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                GlassStatusLabel(status.word, status: status.dot)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
+            .help(status.sentence)
+            .accessibilityHint(status.sentence)
             // What the destination is for, in the core's words, at the
             // title size (product owner, 2026-10-28: make it bigger).
             Text(Self.subtitle(copy, state: store.privateAI?.state))
@@ -472,17 +472,26 @@ struct PrivateAIInspectorView: View {
         }
     }
 
-    /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
-    /// listener is working, outside otherwise.
     /// The subtitle, with the credit sentence only while NEAR AI answers
     /// calls (`running`): otherwise calls use the tools' own accounts.
     static func subtitle(_ copy: PrivateInferenceCopy, state: DaemonData.PrivateInferenceState?) -> String {
         state?.state == "running" ? copy.subtitle + " " + copy.subtitleCredit : copy.subtitle
     }
 
-    static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
-        PrivateInferenceIndicator.dotStatus(
-            PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
+    /// The Status row: the menu bar's one word and dot for the listener's
+    /// state (`PrivateInferenceSurface.menuState`, `MenuPanelStatus.privateAIDot`:
+    /// clear green, attention amber, refused red, otherwise grey), and the
+    /// core's full sentence for the row's help and hint. A core that gave
+    /// no word draws the sentence, on grey.
+    static func statusRow(
+        _ state: DaemonData.PrivateInferenceState?, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
+    ) -> (word: String, dot: GlassStatus, sentence: String) {
+        let surface = InferenceAccountSection.surfaceState(state)
+        let sentence = PrivateInferenceSurface.stateLine(surface, copy: copy, calls: calls)
+        guard let menu = PrivateInferenceSurface.menuState(surface, calls: calls) else {
+            return (sentence, .off, sentence)
+        }
+        return (menu.word, MenuPanelStatus.privateAIDot(menu.tone), sentence)
     }
 }
 

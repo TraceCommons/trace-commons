@@ -73,6 +73,48 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
         XCTAssertEqual(MenuPanelStatus.privateAIDot(.held), .off)
     }
 
+    /// The Private AI tab's Status row draws the menu bar's word and dot,
+    /// with the page's full sentence kept for its help and hint. Signed out
+    /// of NEAR AI it read "On. Couldn't tell which account is answering."
+    /// on a red dot.
+    @MainActor
+    func testTheTabStatusRowIsTheMenuBarWordAndDot() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let labels = ["running", "running_destination_unknown", "running_answered_elsewhere", "running_no_backends",
+                      "running_elsewhere", "stopping", "off", "port_in_use", "start_failed", "crashed", "",
+                      "a_state_from_a_later_daemon"]
+        for label in labels {
+            let state = DaemonData.PrivateInferenceState(state: label, port: 1)
+            let row = PrivateAIInspectorView.statusRow(state, copy: copy, calls: Self.coreCalls)
+            let menu = try XCTUnwrap(PrivateInferenceSurface.menuState(
+                PrivateInferenceState(label: label, port: 1), calls: Self.coreCalls), label)
+            XCTAssertEqual(row.word, menu.word, label)
+            XCTAssertEqual(row.dot, MenuPanelStatus.privateAIDot(menu.tone), label)
+            XCTAssertEqual(row.sentence, PrivateInferenceSurface.stateLine(
+                PrivateInferenceState(label: label, port: 1), copy: copy, calls: Self.coreCalls), label)
+        }
+        let elsewhere = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running_answered_elsewhere", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(elsewhere.word, "On")
+        XCTAssertEqual(elsewhere.dot, .ask, "attention is amber, not red")
+        let unknown = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running_destination_unknown", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(unknown.dot, .ask, "attention is amber, not red")
+        let crashed = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "crashed", port: nil), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(crashed.dot, .outside, "refused stays red")
+        let running = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(running.dot, .on)
+        let unreported = PrivateAIInspectorView.statusRow(nil, copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(unreported.dot, .off, "no report is grey, never green")
+        // A core that wires no word: the sentence, on grey.
+        let noWord = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running", port: 1), copy: copy, calls: .testing)
+        XCTAssertEqual(noWord.word, noWord.sentence)
+        XCTAssertEqual(noWord.dot, .off)
+    }
+
     /// A caller that wires no word draws no word, not a guessed one.
     func testNoWordFromTheCoreIsUnknownNotOn() {
         XCTAssertNil(PrivateInferenceSurface.menuState(

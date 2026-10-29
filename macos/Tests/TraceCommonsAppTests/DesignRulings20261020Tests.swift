@@ -136,7 +136,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     func test_thePrivateAIStateFollowsItsTitle() throws {
         let tab = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(tab.contains(
-            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(state.line,"))
+            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(status.word,"))
     }
 
     /// The refresh glyph's ring sits on the circle's centre: its box is

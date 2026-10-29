@@ -269,6 +269,10 @@ private struct HomeOverview: View {
                         HomeInsightsVisual(glance: freshGlance, words: words)
                     }
                 }
+                // Sent traces without Train coding models, and Review, under
+                // the Insights card while there are any. Not closed with the
+                // card: it is the way back to a choice, not a promotion.
+                SentTracesTrainingLine(model: model.sentTracesTraining, history: store.history)
                 if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
                         systemImage: Self.catalogueIcon, title: catalogue,
@@ -1380,8 +1384,13 @@ private struct HistoryStats: View {
         let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))
+                // The same figures as Home's Credit tile (#1708), so the two
+                // never disagree once credit is decided.
+                let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending,
+                                                       accepted: rollup?.allTime?.accepted,
+                                                       credit: credit)
+                HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
+                             detail: creditTile.detail)
                 HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
                 HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
             }
@@ -1651,13 +1660,16 @@ struct HomeAccountTiles: View {
         let signIn = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
-                // The same pending figure as History's Credit tile, marked
-                // Pending (owner, 2026-10-28: Home said 0 while History said
-                // 50.3). Under D6 it is a figure only beside the commons'
-                // statement of what it waits on, a dash otherwise.
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, credit: freshCredit),
-                             detail: signIn ?? MonitorWords.pending,
+                // History's figures (owner, 2026-10-28: Home said 0 while
+                // History said 50.3): its Final once any credit is decided
+                // (#1703), with what is still pending under it; until then
+                // its pending figure, marked Pending, under D6.
+                let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal,
+                                                       pending: freshRollup?.creditPending,
+                                                       accepted: freshRollup?.allTime?.accepted,
+                                                       credit: freshCredit)
+                HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
+                             detail: signIn ?? creditTile.detail,
                              systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
@@ -1896,6 +1908,22 @@ enum HomeFormat {
         guard let pending, pending > 0, condition != nil,
               let template = MonitorWords.table?.shell.creditPendingAmount else { return nil }
         return template.replacingOccurrences(of: "{amount}", with: points(pending))
+    }
+
+    /// Home's Credit tile: History's Final figure once any credit is
+    /// decided, with the pending accessory (or Final) under it; before
+    /// that, the pending figure under D6, marked Pending.
+    /// `accepted` is the rollup's accepted count: with traces accepted and
+    /// nothing pending, every one is decided, so the tile reads Final even
+    /// at 0 (traces scored with no award, #1703), never Pending.
+    static func creditTile(final: Double?, pending: Double?, accepted: Int?,
+                           credit: DaemonData.CommonsCreditSummary?) -> (value: String, detail: String) {
+        let allDecided = (accepted ?? 0) > 0 && (pending ?? 0) == 0 && final != nil
+        guard let final, final > 0 || allDecided else {
+            return (pendingFigure(pending, credit: credit), MonitorWords.pending)
+        }
+        return (points(final),
+                creditPendingAccessory(pending, condition: pendingCondition(credit)) ?? MonitorWords.final)
     }
 
     /// Home's pending-credit tile and status-card link, in the core's words.

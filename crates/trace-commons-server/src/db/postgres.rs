@@ -21,6 +21,8 @@ mod account_trust_growth;
 mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
+#[path = "postgres_model_training_consent.rs"]
+mod model_training_consent;
 #[cfg(test)]
 mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
@@ -311,6 +313,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_reversal_hold_decisions",
     "trace_account_device_codes",
     "trace_device_session_renewals",
+    "trace_consent_grants",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1931,6 +1934,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         140,
         "account_device_codes",
         include_str!("../../../../migrations/V140__account_device_codes.sql"),
+    ),
+    // V141: the model_training use a contributor adds to traces already
+    // sent, one dated row per grant.
+    (
+        141,
+        "trace_model_training_consent_grants",
+        include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
     ),
 ];
 
@@ -5298,6 +5308,32 @@ impl Database for PgBackend {
         .await
     }
 
+    async fn list_model_training_consent_eligible(
+        &self,
+        tenant_id: &str,
+        owner_principal_refs: &[String],
+        limit: i64,
+    ) -> Result<crate::db::ModelTrainingConsentEligible, DatabaseError> {
+        self.model_training_consent_eligible(tenant_id, owner_principal_refs, limit)
+            .await
+    }
+
+    async fn grant_model_training_consent(
+        &self,
+        grant: crate::db::ModelTrainingConsentGrant<'_>,
+    ) -> Result<Vec<crate::db::ModelTrainingConsentGrantRow>, DatabaseError> {
+        self.model_training_consent_grant(grant).await
+    }
+
+    async fn withheld_policy_mismatch_gate_award(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<Option<crate::db::WithheldGateAward>, DatabaseError> {
+        self.model_training_withheld_gate_award(tenant_id, submission_id)
+            .await
+    }
+
     async fn mint_account_device_code(
         &self,
         code: crate::db::NewAccountDeviceCode<'_>,
@@ -8628,6 +8664,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
@@ -8676,6 +8713,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),

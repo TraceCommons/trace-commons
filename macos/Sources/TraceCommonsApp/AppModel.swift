@@ -276,8 +276,12 @@ final class AppModel: ObservableObject {
             guard let invite else { return }
             MainActor.assumeIsolated { self?.inviteLinkArrived(invite) }
         }
+        sentTracesTraining.client = { [weak self] in self?.client }
     }
     private var inviteLinks: AnyCancellable?
+    /// Sent traces without Train coding models: their count, the one-time
+    /// sheet a turn-on raises, and the marks a grant leaves.
+    let sentTracesTraining = SentTracesTrainingModel()
     /// An invite link that arrived before the config directory was known,
     /// so the watch-only marker it takes back is cleared once it is.
     private var inviteAwaitingConfigDirectory: String?
@@ -2636,14 +2640,29 @@ final class AppModel: ObservableObject {
     /// would still hold the scope that write withdraws.
     func toggleConsentScope(_ scope: ConsentScope, granted: Bool, options: [ConsentScope]) async {
         guard !consentWriteBusy, status.loggedIn, !scope.alwaysOn else { return }
+        let before = status.consentScopes
         let scopes = ConsentScopeRows.nextScopes(
-            reported: status.consentScopes, options: options, toggling: scope, granted: granted)
+            reported: before, options: options, toggling: scope, granted: granted)
         consentWriteRefused = false
         consentWriteBusy = true
-        if case .failed = await setConsentScopes(Array(scopes)) {
+        let outcome = await setConsentScopes(Array(scopes))
+        if case .failed = outcome {
             consentWriteRefused = true
         }
         consentWriteBusy = false
+        offerSentTracesTraining(outcome, before: before, at: .settings)
+    }
+
+    /// Train coding models was just turned on: offer it, once, on the
+    /// traces already sent without it (`SentTracesTrainingModel`). Only
+    /// after the daemon confirmed the write.
+    private func offerSentTracesTraining(
+        _ outcome: SetScopesOutcome, before: [String], at site: SentTracesTrainingSite
+    ) {
+        guard case .succeeded(let confirmed) = outcome,
+            SentTracesTrainingState.turnsOn(before: before, after: confirmed)
+        else { return }
+        Task { await sentTracesTraining.offerAfterTurnOn(at: site) }
     }
 
     /// A Watched folders write is in flight; the card is disabled until it
@@ -4389,7 +4408,12 @@ extension AppModel: FirstRunDaemon {
     }
 
     func saveConsentScopes(_ scopes: [String]) async -> Bool {
+        let before = status.consentScopes
         let outcome = await setConsentScopes(scopes)
+        // The first run's Start: a person who already has sent traces sees
+        // the sheet on the Monitor, which the first run hands off to, not
+        // over the Start that is still running.
+        offerSentTracesTraining(outcome, before: before, at: .monitor)
         if case .succeeded = outcome { return true }
         return false
     }

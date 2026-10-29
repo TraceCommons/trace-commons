@@ -166,6 +166,9 @@ struct SettingsWindowView: View {
             navigation: navigation, paused: model.status.paused,
             onClose: { dismiss() })
             .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
+            // The sheet for sent traces without Train coding models, when
+            // turning it on here raised it.
+            .modifier(SentTracesTrainingPresenter(site: .settings))
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.
             .glassModalHost()
