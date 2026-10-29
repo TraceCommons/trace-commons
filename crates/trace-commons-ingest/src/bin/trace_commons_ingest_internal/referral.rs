@@ -430,9 +430,10 @@ pub(super) async fn status_handler(
             applied_at: Some(attribution.applied_at),
             applied_via: Some(attribution.applied_via),
             earn_until: (!attribution.voided).then(|| {
-                state
-                    .referral_config
-                    .earn_until(attribution.referee_account_created_at, attribution.earn_until)
+                state.referral_config.earn_until(
+                    attribution.referee_account_created_at,
+                    attribution.earn_until,
+                )
             }),
             apply_until: None,
         },

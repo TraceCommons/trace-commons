@@ -455,7 +455,10 @@ async fn the_resolver_reads_code_owners_across_tenants_and_nothing_else() {
         .await
         .unwrap();
     let row = tx
-        .query_one("SELECT current_user::TEXT, current_setting('statement_timeout')", &[])
+        .query_one(
+            "SELECT current_user::TEXT, current_setting('statement_timeout')",
+            &[],
+        )
         .await
         .unwrap();
     assert_eq!(row.get::<_, String>(0), "trace_referral_resolver");
@@ -923,8 +926,8 @@ async fn only_a_login_granted_the_resolver_can_assume_it() {
         ))
         .await
         .expect("create the probe login");
-    let mut url = reqwest::Url::parse(&std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").unwrap())
-        .unwrap();
+    let mut url =
+        reqwest::Url::parse(&std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").unwrap()).unwrap();
     url.set_username(LOGIN).unwrap();
     url.set_password(Some(LOGIN)).unwrap();
     let probe = PgBackend::new(&DatabaseConfig::from_postgres_url(url.as_str(), 1))

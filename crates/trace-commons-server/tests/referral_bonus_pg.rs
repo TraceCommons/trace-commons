@@ -537,7 +537,15 @@ async fn lowering_the_days_never_shortens_a_referral_already_applied() {
     };
     let referrer = referrer(&fixture).await;
     // Created 130 days ago, applied the next day while the setting was 120.
-    let applied = referee_stamped(&fixture, &referrer, &referrer.code_index.clone(), 130, 1, 120).await;
+    let applied = referee_stamped(
+        &fixture,
+        &referrer,
+        &referrer.code_index.clone(),
+        130,
+        1,
+        120,
+    )
+    .await;
     let created = Utc::now() - Duration::days(130);
     // Past 92 days, inside the 120 promised.
     credit(
@@ -767,7 +775,10 @@ async fn an_earned_stream_hold_on_the_referee_pauses_their_bonus_until_it_clears
             .unwrap()
     );
     let report = hook.run_tenant(&held.tenant, &near_ai()).await;
-    assert_eq!(report.bonus_rows, 1, "the paused accrual is priced: {report:?}");
+    assert_eq!(
+        report.bonus_rows, 1,
+        "the paused accrual is priced: {report:?}"
+    );
     assert_eq!(
         bonus_rows(&fixture, &referrer, &held).await,
         vec![("bonus".into(), 1000, "1000".into(), "100".into())]
