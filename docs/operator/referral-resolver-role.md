@@ -51,16 +51,18 @@ only an explicit `SET ROLE` does:
 GRANT trace_referral_resolver TO <ingest login> WITH INHERIT FALSE, SET TRUE;
 ```
 
-On staging the ingest login is `app`, which created the role by migration and
-holds the admin option `GRANT` needs:
+On staging the ingest login is `app`. The grant was made on 2026-10-29 as
+the local `postgres` superuser on the staging VM, which needs no password and
+holds every admin option:
 
 ```bash
-PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
-    --project tracecommons-pilot-2026)" \
-  psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
+sudo -u postgres psql -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
 GRANT trace_referral_resolver TO app WITH INHERIT FALSE, SET TRUE;
 SQL
 ```
+
+Then check it in `pg_auth_members` (the verification query below): the row
+for member `app` must show `inherit_option = f` and `set_option = t`.
 
 On the pilot (`deploy/pilot-gcp`) the ingest login is also `app`, on the
 database `trace-commons` (the `DATABASE_URL` in
@@ -70,11 +72,45 @@ applied V142 does), then run the verification queries below against that
 database. The pilot template sets no referral setting, so referrals stay off
 there until the grant is made and the settings are added.
 
-The settings themselves are in [env-reference.md](./env-reference.md#referral-rewards-default-off);
-on staging, `deploy/staging-gcp/render-env.sh` writes them from
-`TC_REFERRAL_PROGRAM_START`, `TC_NEAR_AI_REFERRAL_MODE` and the rest, and
-reads the secrets `tc-staging-referral-network-mark-key` and (live only)
-`tc-staging-nearai-referral-key`.
+The settings themselves are in [env-reference.md](./env-reference.md#referral-rewards-default-off).
+
+### Staging as configured (2026-10-29, b9f0d8d2b)
+
+Staging runs the referral program with the bonus stream in `dry_run`, on top
+of the live own-trace payout rail, with no referral credential. After the
+grant, these three lines were appended by hand to `/etc/tracecommons/ingest.env`:
+
+```text
+TRACE_COMMONS_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z
+TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY=<openssl rand -base64 32, generated on the host>
+TRACE_COMMONS_NEAR_AI_REFERRAL_MODE=dry_run
+```
+
+After the restart, the boot log showed `referral bonus configured
+mode="dry_run" bps=1000 ...` and `payout rail configured ...
+referral_mode=...`, and the payout pass then completed.
+
+`deploy/staging-gcp/render-env.sh` rewrites that file from the templates, and
+by default it renders referrals off. Rerendering without the steps below
+silently drops the three lines above. Before the next render:
+
+1. Store the network mark key in Secret Manager, as the other staging secrets
+   are, under `tc-staging-referral-network-mark-key`. Use the value already in
+   `/etc/tracecommons/ingest.env`, not a new one: the marks recorded so far
+   are keyed with it, and a new key makes them incomparable with new marks.
+2. Render with `TC_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z` and
+   `TC_NEAR_AI_REFERRAL_MODE=dry_run`, with the payout settings it already
+   renders with. The render reads the mark key from the secret and refuses
+   if the secret is missing.
+
+Going `live` (`TC_NEAR_AI_REFERRAL_MODE=live`) also needs
+`TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` and
+`TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID`. The credential is an `oc_` org
+credential, not the reseller key, and the id is not the payout rail's. The
+render takes them from the secret `tc-staging-nearai-referral-key` and
+`TC_NEAR_AI_REFERRAL_CREDENTIAL_ID`. The ingest refuses to start `live`
+without them (`near_ai_referral_config_missing`), and refuses a live referral
+stream while the payout rail is not `live`.
 
 Make the grant before either of these is set:
 

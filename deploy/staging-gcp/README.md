@@ -257,15 +257,23 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    (`docs/operator/referral-resolver-role.md`):
 
    ```bash
-   PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
-       --project tracecommons-pilot-2026)" \
-     psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
+   sudo -u postgres psql -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
    GRANT trace_referral_resolver TO app WITH INHERIT FALSE, SET TRUE;
    SQL
    ```
 
+   This is how it was made on 2026-10-29, as the local `postgres` superuser.
+   `pg_auth_members` must then show inherit `f` and set `t` for `app`.
    Without it, ingest refuses to start with referrals on
    (`referral_resolver_unprovisioned`).
+
+   **Referral settings.** The template renders referrals off. Staging runs the
+   program with the bonus stream in `dry_run` (since 2026-10-29). Render with
+   `TC_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z TC_NEAR_AI_REFERRAL_MODE=dry_run`.
+   That needs the network mark key in Secret Manager as
+   `tc-staging-referral-network-mark-key`, holding the value already on the
+   host. Until the key is stored there, a render drops the referral settings.
+   See `docs/operator/referral-resolver-role.md` ("Staging as configured").
 
 7. **Verify.**
 

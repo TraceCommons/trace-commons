@@ -1020,6 +1020,26 @@ else
   fail "render-env.sh failed on the referral stream live with every setting"
   cat "$scratch/referral-live.err" >&2
 fi
+# Staging as configured on 2026-10-29: the own-trace rail live, the program
+# started, the bonus stream in dry_run, and no referral credential.
+mark_key_padded="$(printf 'bW1t%.0s' $(seq 10))bW0="
+if run_render referral-staging-2026-10-29 "${referral_live[@]}" \
+  TC_NEAR_AI_REFERRAL_MODE=dry_run TC_NEAR_AI_REFERRAL_CREDENTIAL_ID= \
+  TC_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_padded"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE live
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE dry_run
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_PROGRAM_START 2026-10-01T00:00:00Z
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY "$mark_key_padded"
+  if grep -q '^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL' "$out/ingest.env"; then
+    fail "render-env.sh wrote a referral credential for staging's dry_run"
+  else
+    pass "render-env.sh renders staging's referral configuration without a credential"
+  fi
+else
+  fail "render-env.sh refused staging's referral configuration"
+  cat "$scratch/referral-staging-2026-10-29.err" >&2
+fi
 referral_refused live-on-dry-run-rail "${payout_settings[@]}" \
   "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   TC_NEAR_AI_REFERRAL_MODE=live \
