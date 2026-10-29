@@ -67,6 +67,29 @@ set +x
 #                       characters on one line), the operator's token for
 #                       halt and resume, written as
 #                       TRACE_COMMONS_PAYOUT_CONTROL_TOKEN; dry_run does not.
+#   TC_REFERRAL_PROGRAM_START
+#                       optional RFC 3339 time: the referral program opens
+#                       (codes can be made and applied), written as
+#                       TRACE_COMMONS_REFERRAL_PROGRAM_START. Unset, the
+#                       program has not started. Grant trace_referral_resolver
+#                       first (docs/operator/referral-resolver-role.md).
+#   TC_REFERRAL_PROGRAM_END, TC_REFERRAL_LATE_DAYS, TC_REFERRAL_EARN_DAYS,
+#   TC_REFERRAL_BONUS_BPS
+#                       optional, each written as TRACE_COMMONS_REFERRAL_*
+#                       only when given; unset, the ingest's defaults hold.
+#   TC_NEAR_AI_REFERRAL_MODE
+#                       default disabled. dry_run needs TC_NEAR_AI_PAYOUT_MODE
+#                       dry_run or live; live needs it live, plus
+#                       TC_NEAR_AI_REFERRAL_CREDENTIAL_ID (a UUID other than
+#                       the payout rail's) and the secret
+#                       tc-staging-nearai-referral-key (an oc_ org credential
+#                       other than the reseller key). Optional
+#                       TC_REFERRAL_ACCOUNT_CEILING_NANO.
+#                       With a program start or a mode other than disabled,
+#                       the render also reads the secret
+#                       tc-staging-referral-network-mark-key (base64 of 32 or
+#                       more bytes), written as
+#                       TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY.
 #   TC_FIRST_RUN_USD_ESTIMATE_MICROS_MIN, TC_FIRST_RUN_USD_ESTIMATE_MICROS_MAX
 #                       optional, both or neither: the first run's estimated
 #                       NEAR AI credit per accepted trace, in micro-dollars,
@@ -498,6 +521,86 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
     ;;
   *) refuse "TC_NEAR_AI_PAYOUT_MODE must be disabled, dry_run or live" ;;
 esac
+
+# Referral rewards (docs/superpowers/specs/2026-10-29-referral-rewards-design.md).
+# Off unless the operator turns them on: with no TC_REFERRAL_PROGRAM_START
+# and TC_NEAR_AI_REFERRAL_MODE disabled, nothing below is rendered and no
+# referral secret is read, and the ingest reads the unset settings as off.
+# The ingest validates every value at boot and refuses a malformed one; the
+# shapes checked here only catch a mistake before the restart.
+TC_NEAR_AI_REFERRAL_MODE="${TC_NEAR_AI_REFERRAL_MODE:-disabled}"
+case "$TC_NEAR_AI_REFERRAL_MODE" in
+  disabled | dry_run | live) ;;
+  *) refuse "TC_NEAR_AI_REFERRAL_MODE must be disabled, dry_run or live" ;;
+esac
+referral_on=0
+rfc3339='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+if [ -n "${TC_REFERRAL_PROGRAM_START:-}" ]; then
+  [[ "$TC_REFERRAL_PROGRAM_START" =~ $rfc3339 ]] \
+    || refuse "TC_REFERRAL_PROGRAM_START is not an RFC 3339 time"
+  extra+="TRACE_COMMONS_REFERRAL_PROGRAM_START=$TC_REFERRAL_PROGRAM_START"$'\n'
+  referral_on=1
+fi
+if [ -n "${TC_REFERRAL_PROGRAM_END:-}" ]; then
+  [[ "$TC_REFERRAL_PROGRAM_END" =~ $rfc3339 ]] \
+    || refuse "TC_REFERRAL_PROGRAM_END is not an RFC 3339 time"
+  extra+="TRACE_COMMONS_REFERRAL_PROGRAM_END=$TC_REFERRAL_PROGRAM_END"$'\n'
+fi
+# Optional tuning, rendered only when given; unset, the ingest's defaults
+# hold (late days 30, earning days 92, bonus 1000 bps). The ingest refuses an
+# earning period under 92 days.
+for name in TRACE_COMMONS_REFERRAL_LATE_DAYS TRACE_COMMONS_REFERRAL_EARN_DAYS \
+  TRACE_COMMONS_REFERRAL_BONUS_BPS; do
+  var="TC_${name#TRACE_COMMONS_}"
+  [ -n "${!var:-}" ] || continue
+  [[ "${!var}" =~ ^[0-9]{1,5}$ ]] || refuse "$var is not a whole number"
+  extra+="$name=${!var}"$'\n'
+done
+if [ "$TC_NEAR_AI_REFERRAL_MODE" != disabled ]; then
+  # The bonus stream sends on the NEAR AI rail's links: it needs the rail
+  # on, and live needs the rail live (the ingest refuses either at boot,
+  # near_ai_referral_config_missing).
+  [ "$TC_NEAR_AI_PAYOUT_MODE" != disabled ] \
+    || refuse "TC_NEAR_AI_REFERRAL_MODE $TC_NEAR_AI_REFERRAL_MODE needs TC_NEAR_AI_PAYOUT_MODE dry_run or live"
+  if [ "$TC_NEAR_AI_REFERRAL_MODE" = live ] && [ "$TC_NEAR_AI_PAYOUT_MODE" != live ]; then
+    refuse "TC_NEAR_AI_REFERRAL_MODE live needs TC_NEAR_AI_PAYOUT_MODE live"
+  fi
+  extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_MODE=$TC_NEAR_AI_REFERRAL_MODE"$'\n'
+  if [ -n "${TC_REFERRAL_ACCOUNT_CEILING_NANO:-}" ]; then
+    [[ "$TC_REFERRAL_ACCOUNT_CEILING_NANO" =~ ^[1-9][0-9]{0,38}$ ]] \
+      || refuse "TC_REFERRAL_ACCOUNT_CEILING_NANO is not a positive whole number"
+    extra+="TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO=$TC_REFERRAL_ACCOUNT_CEILING_NANO"$'\n'
+  fi
+  # A live stream sends with its own org credential, so a NEAR AI-side cap
+  # on it bounds referrals alone: never the reseller key or its credential
+  # id, which would spend the earned budget. dry_run sends nothing and reads
+  # neither.
+  if [ "$TC_NEAR_AI_REFERRAL_MODE" = live ]; then
+    uuid='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+    [[ "${TC_NEAR_AI_REFERRAL_CREDENTIAL_ID:-}" =~ $uuid ]] \
+      || refuse "TC_NEAR_AI_REFERRAL_CREDENTIAL_ID is not set (referral live)"
+    [ "$(printf '%s' "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" | tr 'A-F' 'a-f')" \
+      != "$(printf '%s' "$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID" | tr 'A-F' 'a-f')" ] \
+      || refuse "TC_NEAR_AI_REFERRAL_CREDENTIAL_ID is the payout rail's credential id"
+    referral_key="$(secret tc-staging-nearai-referral-key)"
+    shaped tc-staging-nearai-referral-key "$referral_key" \
+      '^oc_[0-9A-Fa-f]{64}$' "an org credential (oc_ and 64 hex characters)"
+    [ "$referral_key" != "$reseller_key" ] \
+      || refuse "secret tc-staging-nearai-referral-key is the reseller key"
+    extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL=$referral_key"$'\n'
+    extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID=$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID"$'\n'
+  fi
+  referral_on=1
+fi
+# Configured referrals need the network mark key (the ingest refuses to boot
+# without it, referral_network_mark_key_missing): base64 of at least 32
+# bytes, as `openssl rand -base64 32` prints it.
+if [ "$referral_on" = 1 ]; then
+  mark_key="$(secret tc-staging-referral-network-mark-key)"
+  shaped tc-staging-referral-network-mark-key "$mark_key" \
+    '^[A-Za-z0-9+/]{43,}={0,2}$' "base64 of 32 or more bytes (openssl rand -base64 32)"
+  extra+="TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY=$mark_key"$'\n'
+fi
 
 export TC_PUBLIC_HOST TC_GCP_PROJECT TC_GCP_REGION TC_LE_EMAIL TC_GCS_BUCKET \
   TC_KMS_KEY_NAME TC_RUNTIME_SA TC_WEBAUTHN_RP_ID TC_DB_PASSWORD \

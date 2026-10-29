@@ -62,6 +62,20 @@ GRANT trace_referral_resolver TO app WITH INHERIT FALSE, SET TRUE;
 SQL
 ```
 
+On the pilot (`deploy/pilot-gcp`) the ingest login is also `app`, on the
+database `trace-commons` (the `DATABASE_URL` in
+`deploy/pilot-gcp/ingest.env.template`). Make the same grant there, as a role
+that holds the admin option on `trace_referral_resolver` (the role that
+applied V142 does), then run the verification queries below against that
+database. The pilot template sets no referral setting, so referrals stay off
+there until the grant is made and the settings are added.
+
+The settings themselves are in [env-reference.md](./env-reference.md#referral-rewards-default-off);
+on staging, `deploy/staging-gcp/render-env.sh` writes them from
+`TC_REFERRAL_PROGRAM_START`, `TC_NEAR_AI_REFERRAL_MODE` and the rest, and
+reads the secrets `tc-staging-referral-network-mark-key` and (live only)
+`tc-staging-nearai-referral-key`.
+
 Make the grant before either of these is set:
 
 - `TRACE_COMMONS_REFERRAL_PROGRAM_START` (the program accepts codes), or

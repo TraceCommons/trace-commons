@@ -614,6 +614,49 @@ See [legacy invite migration](./legacy-invite-migration.md).
 
 See the [payout design](../superpowers/specs/2026-10-21-nearai-credit-payout-design.md).
 
+## Referral rewards (default off)
+
+Unset means off: with no `TRACE_COMMONS_REFERRAL_PROGRAM_START` no code can
+be made or applied, and with `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` unset or
+`disabled` the bonus pass and the referral payout stream do not run. A value
+that is present but malformed or out of range (an empty one included) fails
+startup with the setting's name and a label, never the value; nothing falls
+back to a default. Referrals count as configured when a program start is set
+or the mode is not `disabled`; then startup also requires the network mark
+key and a login that can assume `trace_referral_resolver`
+(`referral_resolver_unprovisioned`, see
+[referral-resolver role](./referral-resolver-role.md)). On staging,
+`deploy/staging-gcp/render-env.sh` writes these from `TC_REFERRAL_*` and
+`TC_NEAR_AI_REFERRAL_*`.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_REFERRAL_PROGRAM_START` | optional | (unset: not started) | RFC 3339. The program accepts codes from this time. Malformed fails startup (`referral_config_invalid`). |
+| `TRACE_COMMONS_REFERRAL_PROGRAM_END` | optional | (none) | RFC 3339, after the start. |
+| `TRACE_COMMONS_REFERRAL_LATE_DAYS` | optional | `30` | How long after its creation an account may still apply a code, 1 to 365. |
+| `TRACE_COMMONS_REFERRAL_EARN_DAYS` | optional | `92` | How long after a referee's account creation the referrer earns, 92 to 3650. Under 92 fails startup (`referral_earn_days_below_promise`). Stamped on each referral when applied; a referral earns until the later of that and the current setting, so raising it extends live referrals and lowering it never shortens one. |
+| `TRACE_COMMONS_REFERRAL_BONUS_BPS` | optional | `1000` | The referrer's bonus in basis points of each referee accrual, 1 to 10000. |
+| `TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY` | R when referrals are configured | (none) | Base64 of at least 32 bytes (`openssl rand -base64 32`), the HMAC key for network marks; never reaches the database. Missing fails startup (`referral_network_mark_key_missing`), malformed (`referral_network_mark_key_invalid`). Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` | optional | `disabled` | `disabled`, `dry_run` or `live` for the referral payout stream. Anything else fails startup (`near_ai_referral_mode_invalid`). `dry_run` and `live` need `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` on, and `live` needs it `live` (`near_ai_referral_config_missing`). `dry_run` writes bonus rows and sends nothing. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` | R when the mode is `live` | (none) | A NEAR AI org credential (`oc_` and 64 hex) other than `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL`, so a NEAR AI-side cap on it bounds referrals alone. Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID` | R when the mode is `live` | (none) | The credential's UUID, other than the payout rail's. |
+| `TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO` | optional | `250000000000` | Per-account referral ceiling in nano-USD, above zero; owed referral credit over it is held. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_MIN_REFEREES` | optional | `5` | A code is scored once it has this many referees, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_SHARE_BPS` | optional | `4000` | Refused-referee share that suspends a code, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS` | optional | `5` | Submissions before a referee counts toward the refused share, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_CREDIT_HOLD_SHARE_BPS` | optional | `2000` | Credit-hold share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_ADVANCE_FORFEIT_SHARE_BPS` | optional | `2000` | Advance-forfeit share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_SHARED_IDENTITY_CLUSTER` | optional | `3` | Referees in one identity cluster, 2 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_DUPLICATE_SHARE_BPS` | optional | `2000` | Duplicate-trace share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_BURST_COUNT` | optional | `20` | More referees than this in 24 hours trips, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_SHARE_BPS` | optional | `6000` | Never-settles share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_DAYS` | optional | `30` | Days after joining before a referee can count as never settling, 1 to 3650. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_TRIP_CODES` | optional | `2` | More codes suspended than this in 24 hours switches the stream to `dry_run`, 1 to 100000. |
+
+The abuse thresholds fail startup with `referral_abuse_setting_invalid` when
+set but not a plain decimal in range. See the
+[referral rewards design](../superpowers/specs/2026-10-29-referral-rewards-design.md).
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.
