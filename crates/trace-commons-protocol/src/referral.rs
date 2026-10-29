@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn the_alphabet_is_crockford() {
         assert_eq!(CROCKFORD_ALPHABET.len(), 32);
-        for excluded in [b'I', b'L', b'O', b'U'] {
+        for excluded in *b"ILOU" {
             assert!(!CROCKFORD_ALPHABET.contains(&excluded));
         }
         let mut sorted = CROCKFORD_ALPHABET.to_vec();
