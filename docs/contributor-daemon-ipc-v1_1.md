@@ -5019,7 +5019,7 @@ sessions on disk. Otherwise:
   week on screen, Monday first, `null` when the week has no Codex session.
 - `work` (additive; the product owner approved showing Claude Code and
   Codex spend at API list prices on 2026-10-29) is the week's Claude Code
-  and Codex work: spend at published API list prices, lines and edits.
+  and Codex work: spend at published API list prices and edits.
   NEAR AI money stays in `near_ai_credit`. `null` when the feed has no row
   (no store, rows under another key, or every row in a Never folder).
   `{basis: "api_list", tables[], prices_as_of, week, last_week, by_tool[],
@@ -5029,8 +5029,7 @@ sessions on disk. Otherwise:
   is the oldest of their fetch times (RFC 3339), `null` when no turn
   priced. `week` and `last_week` are Totals: `{sessions, priced_sessions,
   unpriced_sessions, near_ai_sessions, usd_micros_known, usd_partial,
-  cache_savings_usd_micros_known, lines_added_known, lines_removed_known,
-  lines_partial, edits_known, edits_undone_known, edits_denied_known,
+  cache_savings_usd_micros_known, edits_known, edits_undone_known, edits_denied_known,
   edits_partial, edits_count_partial, edits_undone_partial,
   edits_denied_partial}`. Spend is priced turn by turn from the stored
   per-turn series, each turn on its own local day, so a session crossing
@@ -5053,11 +5052,11 @@ sessions on disk. Otherwise:
   then the priced turns' sum, a minimum, never a fabricated 0.
   `cache_savings_usd_micros_known` is, over priced turns, what their
   cache-read tokens would have cost at the model's uncached-input rate
-  less what they cost at its cache-read rate. Lines (`SessionShape`'s
-  lines added and removed) and edits (summed over each model's facts:
-  edit calls, undone, declined) are counted once per session, in the week
-  holding its first recorded activity; a session with no facts, or an
-  unknown count, sets the matching `*_partial` (`edits_partial` is true
+  less what they cost at its cache-read rate. Edits (summed over each
+  model's facts: edit calls, undone, declined) are counted once per
+  session, in the week holding its first recorded activity; a session with
+  no facts, or an unknown count, sets the matching `*_partial`
+  (`edits_partial` is true
   when any of `edits_count_partial`, `edits_undone_partial`,
   `edits_denied_partial` is). Automated sessions are counted, as the
   token figures count them. `last_week` (and `last_week_by_day[]`) is
@@ -5667,9 +5666,6 @@ min_sessions, categories, left_out}`:
     - `{kind: "fewer_undos", better, worse, ratio_permille}`: of the models
       with `min_sessions` known kept counts and at least 30 edits, the
       highest undone rate is at least twice the lowest nonzero one.
-    - `{kind: "rereads", sessions_with, sessions, files}` on `understand`:
-      of at least `min_sessions` Claude Code sessions there, at least half
-      read a file again (`files` is the distinct files re-read).
 - `left_out`: `{automated, no_facts, no_model, reviewer, unknown_task,
   mixed_models, routed, capped, delegated}`, each a count of sessions,
   counted under the first that holds: started by a tool; stored without

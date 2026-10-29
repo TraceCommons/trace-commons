@@ -234,7 +234,8 @@ pub struct MonitorTracesCopy {
 /// Every placeholder the monitor tables use, each written `{name}`:
 /// Ron's, and History's and Inference's (`shown`, `hours`) before them.
 /// `uploads` and `megabytes` are the daily limit's two remainders, and
-/// `section` is the part of the app an edge rail peek links into.
+/// `section` is the part of the app an edge rail peek links into. `path` is
+/// the command-line tool's link path.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "count",
     "total",
@@ -254,6 +255,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "amount",
     "days",
     "section",
+    "path",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -877,6 +879,13 @@ pub struct MonitorScreensCopy {
     /// Home's pending-credit count (shown only beside the commons'
     /// statement of what it waits on, D6).
     pub credit_pending: &'static str,
+    /// Home's tile of credit already decided (History's Final), beside
+    /// [`Self::credit_pending_title`] (product owner, 2026-10-29: Home shows
+    /// both received and pending credit). "Credit earned" approved by the
+    /// product owner, 2026-10-29.
+    pub credit_received: &'static str,
+    /// Home's tile of credit still pending, under D6. DRAFT, needs approval.
+    pub credit_pending_title: &'static str,
     /// Home's status-card link to the Traces tab.
     pub open_traces: &'static str,
     /// Quits the app. Approved 2026-10-08 (button rule).
@@ -950,6 +959,40 @@ pub struct MonitorScreensCopy {
     /// The edge rail (Claude Design "Run 1 OS-level Explorations", 1b):
     /// its switch in Settings, its icons' names and its peeks.
     pub edge_rail: MonitorEdgeRailCopy,
+    /// The command-line tool's row in Settings and its app-menu item
+    /// (owner, 2026-10-29: install the bundled CLI onto the PATH).
+    pub cli_tool: MonitorCliToolCopy,
+}
+
+/// The command-line tool's words: a row in Settings' system integrations
+/// card and an item in the app menu, which put the bundled CLI on the PATH
+/// as a symlink (`cli_tool`). `{path}` is the link path, such as
+/// `/usr/local/bin/near-ai`. DRAFT, NEEDS APPROVAL: every line.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorCliToolCopy {
+    /// The row's title.
+    pub title: &'static str,
+    /// The row's status, by state: nothing there; our link; our link to an
+    /// app that moved; and something this app did not create, which it
+    /// refuses to replace.
+    pub not_installed: &'static str,
+    pub installed: &'static str,
+    pub stale: &'static str,
+    pub foreign: &'static str,
+    /// The row's buttons, and each one's accessible name.
+    pub install: &'static str,
+    pub uninstall: &'static str,
+    pub update_link: &'static str,
+    pub install_label: &'static str,
+    pub uninstall_label: &'static str,
+    pub update_link_label: &'static str,
+    /// The app menu's item, by state. Each opens the password prompt.
+    pub menu_install: &'static str,
+    pub menu_uninstall: &'static str,
+    pub menu_update_link: &'static str,
+    /// When the change did not happen for a reason other than a cancelled
+    /// password prompt, which says nothing.
+    pub failed: &'static str,
 }
 
 /// The edge rail's words: the optional rail on the right edge of the
@@ -1429,6 +1472,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         previous: "Previous period",
         next: "Next period",
         credit_pending: "Credit",
+        credit_received: "Credit earned",
+        credit_pending_title: "Credit pending",
         open_traces: "Open Traces",
         quit: "Quit",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
@@ -1695,6 +1740,23 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             in_the_library_line_one: "1 contribution sent from this Mac.",
             in_the_library_line: "{count} contributions sent from this Mac.",
             nothing_sent: "Nothing is sent from the rail.",
+        },
+        cli_tool: MonitorCliToolCopy {
+            title: "Command-line tool",
+            not_installed: "Not installed",
+            installed: "Installed: {path}",
+            stale: "Link out of date: {path}",
+            foreign: "{path} already exists and wasn't installed by this app.",
+            install: "Install",
+            uninstall: "Uninstall",
+            update_link: "Update link",
+            install_label: "Install command-line tool",
+            uninstall_label: "Uninstall command-line tool",
+            update_link_label: "Update command-line tool link",
+            menu_install: "Install Command-Line Tool\u{2026}",
+            menu_uninstall: "Uninstall Command-Line Tool\u{2026}",
+            menu_update_link: "Update Command-Line Tool Link\u{2026}",
+            failed: "Couldn't change {path}.",
         },
     }
 }
@@ -2003,6 +2065,37 @@ mod tests {
             assert!(
                 !word.to_lowercase().contains("proxy"),
                 "{key} says proxy: {word}"
+            );
+        }
+    }
+
+    /// The command-line tool's status lines name the link path, and its
+    /// buttons, accessible names and menu items each have their own key.
+    #[test]
+    fn the_cli_tool_words_name_the_path_and_keep_separate_keys() {
+        let words = monitor_screens_copy().cli_tool;
+        for line in [words.installed, words.stale, words.foreign, words.failed] {
+            assert!(line.contains("{path}"), "{line}");
+        }
+        assert!(!words.not_installed.contains('{'));
+        for (button, label) in [
+            (words.install, words.install_label),
+            (words.uninstall, words.uninstall_label),
+            (words.update_link, words.update_link_label),
+        ] {
+            assert_ne!(button, label);
+            // The accessible name starts with the visible action's verb.
+            let verb = button.split(' ').next().unwrap();
+            assert!(label.starts_with(verb), "{label}");
+        }
+        for item in [
+            words.menu_install,
+            words.menu_uninstall,
+            words.menu_update_link,
+        ] {
+            assert!(
+                item.ends_with('\u{2026}'),
+                "a menu item that asks more ends with an ellipsis"
             );
         }
     }

@@ -5,9 +5,9 @@ import TCShellCore
 
 /// Overview's week at a glance (product owner, 2026-10-29): AI spend at API
 /// prices, the top model and credits earned, then spend by model and
-/// trends; lines accepted left Insights (product owner, 2026-10-29).
-/// Figures come from `insights_week`'s `work`; every one is a sum as far as known, read as
-/// "at least" while partial, and the dash when nothing is known.
+/// trends. Figures come from `insights_week`'s `work`; every one is the sum
+/// as far as known (the coverage line says how many traces that is), and the
+/// dash when nothing is known.
 enum InsightsWorkWords {
     struct ModelRow: Equatable, Identifiable {
         let id: String
@@ -42,13 +42,20 @@ enum InsightsWorkWords {
         return totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0
     }
 
-    /// Spend at list prices: exact, or the known part as "at least".
+    /// Spend at list prices: the sum as far as known, to the cent; a charge
+    /// under a cent keeps `InsightsCreditWords.money`'s digit so it is never
+    /// shown as zero.
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
         guard knowsSpend(totals), let totals else {
             return text("analytics_unavailable", copy)
         }
-        return InsightsCreditWords.spend(totals.usdPartial ? nil : totals.usdMicrosKnown,
-                                         known: totals.usdMicrosKnown, partial: totals.usdPartial, copy: copy)
+        return dollars(totals.usdMicrosKnown)
+    }
+
+    static func dollars(_ micros: Int64) -> String {
+        guard micros >= 10_000 else { return InsightsCreditWords.money(UInt64(max(0, micros))) }
+        return (Decimal(micros) / 1_000_000).formatted(Decimal.FormatStyle.Currency(code: "USD")
+            .precision(.fractionLength(2)))
     }
 
     static func count(_ value: Int64) -> String { value.formatted(.number) }
@@ -82,14 +89,12 @@ enum InsightsWorkWords {
             let share = total > 0 ? Double(model.usdMicrosKnown) / Double(total) : 0
             return ModelRow(id: model.tool + ":" + model.key, label: model.key,
                             tool: toolName(model.tool, copy: copy),
-                            amount: InsightsCreditWords.spend(model.usdPartial ? nil : model.usdMicrosKnown,
-                                                              known: model.usdMicrosKnown,
-                                                              partial: model.usdPartial, copy: copy),
+                            amount: dollars(model.usdMicrosKnown),
                             share: share, percent: "\(Int((share * 100).rounded()))%")
         }
     }
 
-    /// The changes that matter: spend, and each tool's tokens.
+    /// The changes that matter, largest first: spend and each tool's tokens.
     static func changes(_ work: DaemonData.InsightsWork, tokens: [DaemonData.InsightsWeekChange]?,
                         copy: [String: String]) -> [Change] {
         var changes: [Change] = []
@@ -154,7 +159,7 @@ enum InsightsWorkWords {
     }
 }
 
-/// The four figures that lead Overview.
+/// The figures that lead Overview.
 struct InsightsWeekTiles: View {
     let work: DaemonData.InsightsWork?
     /// Home's credit tile, the same figure and word (Kristi: Home and

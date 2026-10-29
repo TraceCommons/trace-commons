@@ -110,8 +110,7 @@ enum InsightsCreditWords {
             ModelLine(id: model.tool + ":" + model.key, label: model.key,
                       tool: InsightsWorkWords.toolName(model.tool, copy: copy),
                       tokens: tokens(model.tokens, copy: copy),
-                      amount: spend(model.usdPartial ? nil : model.usdMicrosKnown, known: model.usdMicrosKnown,
-                                    partial: model.usdPartial, copy: copy))
+                      amount: InsightsWorkWords.dollars(model.usdMicrosKnown))
         }
         let charged = (week.nearAiCredit?.week.byModel ?? []).map { group in
             ModelLine(id: "near_ai:" + (group.key ?? "\u{0}unknown"),
