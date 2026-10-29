@@ -103,7 +103,7 @@ async fn insert_referral_audit(
 }
 
 const MIRROR_COLUMNS: &str = "referee_ref_hash, code_index, applied_at, signal_labels,
-    recipient_index, subject_index, voided_at IS NOT NULL";
+    recipient_index, subject_index, voided_at IS NOT NULL, signals_updated_at IS NOT NULL";
 
 fn mirror_from_row(row: &tokio_postgres::Row) -> RefereeMirror {
     RefereeMirror {
@@ -114,6 +114,7 @@ fn mirror_from_row(row: &tokio_postgres::Row) -> RefereeMirror {
         recipient_index: row.get(4),
         subject_index: row.get(5),
         voided: row.get(6),
+        signals_seen: row.get(7),
     }
 }
 

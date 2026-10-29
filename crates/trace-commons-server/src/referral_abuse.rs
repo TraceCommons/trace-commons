@@ -342,6 +342,9 @@ pub struct RefereeMirror {
     pub recipient_index: Option<String>,
     pub subject_index: Option<String>,
     pub voided: bool,
+    /// The pass has written this row's labels at least once. A row that
+    /// was only applied is not yet evidence either way.
+    pub signals_seen: bool,
 }
 
 impl std::fmt::Debug for RefereeMirror {
@@ -514,9 +517,58 @@ pub fn score_code(
 }
 
 /// The referrer-level rollup: the same rates over every referee of every
-/// code the referrer owns. Exemptions are per code, so none apply here.
-pub fn score_referrer(rows: &[RefereeMirror], settings: &ReferralAbuseSettings) -> CodeScore {
-    score_rows(rows, settings, &BTreeSet::new())
+/// code the referrer owns. Exemptions are per code (`exempt_by_code`, keyed
+/// by code index), so a referee label the operator exempted on a code is
+/// dropped from that code's rows only; a code-level label
+/// (`referral_shared_identity`, `referral_burst`), which no one row
+/// carries, is exempt here only when every code with a live referee
+/// exempts it.
+pub fn score_referrer(
+    rows: &[RefereeMirror],
+    settings: &ReferralAbuseSettings,
+    exempt_by_code: &BTreeMap<String, BTreeSet<String>>,
+) -> CodeScore {
+    let exempt_on = |code: &str, label: &str| {
+        exempt_by_code
+            .get(code)
+            .is_some_and(|exempt| exempt.contains(label))
+    };
+    let stripped: Vec<RefereeMirror> = rows
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            row.signal_labels
+                .retain(|label| !exempt_on(&row.code_index, label));
+            row
+        })
+        .collect();
+    let live_codes: BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| !row.voided)
+        .map(|row| row.code_index.as_str())
+        .collect();
+    let exempt: BTreeSet<String> = [REFERRAL_SHARED_IDENTITY, REFERRAL_BURST]
+        .into_iter()
+        .filter(|label| {
+            !live_codes.is_empty() && live_codes.iter().all(|code| exempt_on(code, label))
+        })
+        .map(str::to_owned)
+        .collect();
+    score_rows(&stripped, settings, &exempt)
+}
+
+/// Whether the referrer-level hold opens: the referrer trips `after`, and
+/// the evidence grew since `before` (the same rows before one referee's
+/// labels were refreshed, or before that referee joined). A label that
+/// newly trips, or a tripped label carried by more referees, is new
+/// evidence; the same score on the next pass is not, so an operator who
+/// cleared the hold is not overruled by it (spec section 7).
+pub fn referrer_hold_is_new(before: &CodeScore, after: &CodeScore) -> bool {
+    after.tripped.iter().any(|label| {
+        !before.tripped.contains(label)
+            || after.counts.get(label).copied().unwrap_or(0)
+                > before.counts.get(label).copied().unwrap_or(0)
+    })
 }
 
 /// More than `trip_codes` codes suspended in the 24 hours up to `now`.
@@ -544,6 +596,7 @@ mod tests {
             recipient_index: Some(format!("recipient-{n}")),
             subject_index: Some(format!("subject-{n}")),
             voided: false,
+            signals_seen: true,
         }
     }
 
@@ -856,9 +909,98 @@ mod tests {
         assert!(!score_code("sha256:code", &rows, &settings(), &BTreeSet::new()).is_tripped());
         assert!(!score_code("sha256:other", &rows, &settings(), &BTreeSet::new()).is_tripped());
         assert_eq!(
-            score_referrer(&rows, &settings()).tripped,
+            score_referrer(&rows, &settings(), &BTreeMap::new()).tripped,
             vec![REFERRAL_REFUSED_SHARE]
         );
+    }
+
+    /// An exemption on one code drops that label from its own rows only.
+    #[test]
+    fn the_referrer_rollup_honours_each_code_s_exemptions() {
+        let mut rows: Vec<RefereeMirror> =
+            (0..6).map(|n| row(n, &[REFERRAL_REFUSED_SHARE])).collect();
+        for row in rows.iter_mut().take(3) {
+            row.code_index = "sha256:other".into();
+        }
+        let exempt = |codes: &[&str]| -> BTreeMap<String, BTreeSet<String>> {
+            codes
+                .iter()
+                .map(|code| {
+                    (
+                        (*code).to_owned(),
+                        BTreeSet::from([REFERRAL_REFUSED_SHARE.to_owned()]),
+                    )
+                })
+                .collect()
+        };
+        // Exempt on one code: 3 of 6 is still over 40%.
+        assert!(score_referrer(&rows, &settings(), &exempt(&["sha256:code"])).is_tripped());
+        // On both: nothing left to trip.
+        assert!(
+            !score_referrer(
+                &rows,
+                &settings(),
+                &exempt(&["sha256:code", "sha256:other"])
+            )
+            .is_tripped()
+        );
+        // A code-level label is exempt only when every live code exempts it.
+        let mut burst: Vec<RefereeMirror> = (0..22).map(|n| row(n, &[])).collect();
+        for (n, row) in burst.iter_mut().enumerate() {
+            row.applied_at = now() - Duration::minutes(n as i64);
+            if n % 2 == 0 {
+                row.code_index = "sha256:other".into();
+            }
+        }
+        let burst_exempt = |codes: &[&str]| -> BTreeMap<String, BTreeSet<String>> {
+            codes
+                .iter()
+                .map(|code| {
+                    (
+                        (*code).to_owned(),
+                        BTreeSet::from([REFERRAL_BURST.to_owned()]),
+                    )
+                })
+                .collect()
+        };
+        assert!(score_referrer(&burst, &settings(), &burst_exempt(&["sha256:code"])).is_tripped());
+        assert!(
+            !score_referrer(
+                &burst,
+                &settings(),
+                &burst_exempt(&["sha256:code", "sha256:other"])
+            )
+            .is_tripped()
+        );
+    }
+
+    #[test]
+    fn the_referrer_hold_opens_only_on_new_evidence() {
+        let rows = |bad: usize| -> Vec<RefereeMirror> {
+            (0..6)
+                .map(|n| {
+                    row(
+                        n,
+                        if n < bad {
+                            &[REFERRAL_REFUSED_SHARE]
+                        } else {
+                            &[]
+                        },
+                    )
+                })
+                .collect()
+        };
+        let score = |bad: usize| score_referrer(&rows(bad), &settings(), &BTreeMap::new());
+        // 2 of 6 is not over 40%; 3 of 6 trips: new.
+        assert!(!score(2).is_tripped());
+        assert!(referrer_hold_is_new(&score(2), &score(3)));
+        // The same score again is not new: a cleared hold stays cleared.
+        assert!(!referrer_hold_is_new(&score(3), &score(3)));
+        // One more referee with the label is.
+        assert!(referrer_hold_is_new(&score(3), &score(4)));
+        // Fewer is not, and nothing tripped never is.
+        assert!(!referrer_hold_is_new(&score(4), &score(3)));
+        assert!(!referrer_hold_is_new(&score(0), &score(2)));
     }
 
     #[test]
@@ -909,7 +1051,7 @@ mod tests {
         for label in REFERRAL_EVIDENCE_LABELS {
             assert!(!code.counts.contains_key(label), "{label}");
         }
-        assert!(!score_referrer(&rows, &settings()).is_tripped());
+        assert!(!score_referrer(&rows, &settings(), &BTreeMap::new()).is_tripped());
         for label in REFERRAL_EVIDENCE_LABELS {
             assert!(!REFERRAL_SIGNAL_LABELS.contains(&label), "{label}");
         }

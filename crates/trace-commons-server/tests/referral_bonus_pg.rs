@@ -1636,3 +1636,117 @@ async fn a_cleared_payout_org_hold_stays_cleared_until_a_new_referee_matches() {
         .unwrap();
     assert!(codes[0].suspended_at.is_none());
 }
+
+/// One more referee of `referrer`'s code with a reversal (the credit-hold
+/// signal), and the pass in its tenant.
+async fn bad_referee(fixture: &Fixture, hook: &ReferralBonusHook, referrer: &Referrer) -> Referee {
+    let referee = referee(fixture, referrer, &referrer.code_index, 40, 1).await;
+    let line = credit(
+        fixture,
+        &referee.tenant,
+        referee.account,
+        1_000,
+        Utc::now() - Duration::days(20),
+    )
+    .await;
+    reversal(fixture, &referee.tenant, referee.account, &line, 1_000).await;
+    hook.run_tenant(&referee.tenant, &near_ai()).await;
+    referee
+}
+
+/// The referrer-level hold opens on new evidence, as the trace, network
+/// and payout org holds do, so an operator's clear is not overruled by the
+/// next pass over the same referees. A new referee carrying a tripping
+/// label opens it again, unless the operator exempted that label on the
+/// referee's code.
+#[tokio::test]
+async fn a_cleared_referrer_hold_stays_cleared_until_the_evidence_grows() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let hook = hook(&fixture, settings());
+    // 2 of 5 is 40%: the code and the referrer trip.
+    let referrer = scored_code(&fixture, &hook, 2).await;
+    let held = |holds: Vec<String>| holds.contains(&"referral_referrer_suspended".to_owned());
+    assert!(held(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await
+    ));
+    let clear = || async {
+        fixture
+            .runtime
+            .clear_payout_hold(
+                &referrer.tenant,
+                referrer.account,
+                &near_ai(),
+                "referral_referrer_suspended",
+                ACTOR,
+            )
+            .await
+            .unwrap();
+    };
+    clear().await;
+
+    // Every referee visited again, nothing new: the clear stands.
+    let referees: Vec<String> = runtime_query(
+        &fixture,
+        &referrer.tenant,
+        "SELECT referee_ref_hash FROM trace_referral_referees WHERE tenant_id = $1",
+        &[&referrer.tenant],
+    )
+    .await
+    .iter()
+    .map(|row| row.get(0))
+    .collect();
+    assert_eq!(referees.len(), 5);
+    for tenant in referee_tenants(&fixture, &referrer).await {
+        let report = hook.run_tenant(&tenant, &near_ai()).await;
+        assert!(
+            !report.held.contains_key("referral_referrer_suspended"),
+            "{report:?}"
+        );
+    }
+    assert!(
+        !held(open_holds(&fixture, &referrer.tenant, referrer.account).await),
+        "the operator's clear stands"
+    );
+
+    // A sixth referee with the same signal is new evidence.
+    bad_referee(&fixture, &hook, &referrer).await;
+    assert!(held(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await
+    ));
+
+    // Exempted on the code, the label is not evidence against the
+    // referrer either.
+    fixture
+        .runtime
+        .resume_referral_code(
+            &referrer.tenant,
+            &referrer.code_index,
+            &["referral_credit_hold_share".to_owned()],
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    clear().await;
+    bad_referee(&fixture, &hook, &referrer).await;
+    assert!(!held(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await
+    ));
+}
+
+/// The tenants of `referrer`'s referees, from their attributions.
+async fn referee_tenants(fixture: &Fixture, referrer: &Referrer) -> Vec<String> {
+    let client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    client
+        .query(
+            "SELECT tenant_id FROM trace_referral_attributions
+              WHERE referrer_tenant_id = $1 AND referrer_account_id = $2",
+            &[&referrer.tenant, &referrer.account],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}

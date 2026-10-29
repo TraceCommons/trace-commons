@@ -68,7 +68,8 @@ use crate::referral_abuse::{
     REFERRAL_CODE_SUSPENDED, REFERRAL_DUPLICATE_TRACES, REFERRAL_OVER_CEILING,
     REFERRAL_REFERRER_SUSPENDED, REFERRAL_SAME_NETWORK, REFERRAL_SAME_PAYOUT_ORG,
     REFERRAL_SAME_PAYOUT_SUBJECT, REFERRAL_SAME_TRACES, REFERRAL_TRIPPED, RefereeFacts,
-    referee_signal_labels, score_code, score_referrer, should_trip_dry_run,
+    RefereeMirror, referee_signal_labels, referrer_hold_is_new, score_code, score_referrer,
+    should_trip_dry_run,
 };
 use crate::referral_config::ReferralBonusSettings;
 use crate::referral_network::network_mark_retention_days;
@@ -786,6 +787,19 @@ impl ReferralBonusHook {
             ),
             None => (None, None),
         };
+        // The referrer-level hold, on the same footing: it opens when this
+        // referee's new labels grow the evidence the referrer trips on, and
+        // before the mirror is refreshed, so a failed refresh retries it.
+        self.hold_referrer_on_new_evidence(
+            referrer_tenant,
+            referrer,
+            &attribution.referee_ref_hash,
+            &labels,
+            recipient_index,
+            subject_index,
+            report,
+        )
+        .await?;
         store(
             self.store
                 .refresh_referral_referee_signals(
@@ -809,9 +823,10 @@ impl ReferralBonusHook {
         self.check_ceiling(referrer_tenant, referrer, report).await
     }
 
-    /// Scores the referee's code and the referrer, suspends a tripped code,
-    /// holds the referrer's referral stream, and trips the stream when too
-    /// many codes were suspended in a day.
+    /// Scores the referee's code, suspends a tripped code, holds the
+    /// referrer's referral stream while a code is suspended, and trips the
+    /// stream when too many codes were suspended in a day. The
+    /// referrer-level hold is [`Self::hold_referrer_on_new_evidence`].
     async fn score(
         &self,
         tenant: &str,
@@ -851,7 +866,55 @@ impl ReferralBonusHook {
             self.hold(tenant, referrer, REFERRAL_CODE_SUSPENDED, report)
                 .await?;
         }
-        if score_referrer(&rows, &self.settings.abuse).is_tripped() {
+        Ok(())
+    }
+
+    /// Opens `referral_referrer_suspended` when the referrer trips over all
+    /// their codes' referees with this referee's new labels and indexes,
+    /// and that is new evidence ([`referrer_hold_is_new`]) against the
+    /// same rows as they stand: this referee's row as last written, or
+    /// without it when the pass never wrote it. So a cleared hold stays
+    /// cleared over the same referees, and a new referee (or a new label)
+    /// that grows a tripped signal opens it again. Each code's operator
+    /// exemptions apply to its own referees.
+    #[allow(clippy::too_many_arguments)]
+    async fn hold_referrer_on_new_evidence(
+        &self,
+        tenant: &str,
+        referrer: Uuid,
+        referee_ref_hash: &str,
+        labels: &[String],
+        recipient_index: Option<&str>,
+        subject_index: Option<&str>,
+        report: &mut ReferralBonusReport,
+    ) -> Step<()> {
+        let rows = store(self.store.referral_mirror_rows(tenant, referrer).await)?;
+        let exempt: BTreeMap<String, BTreeSet<String>> =
+            store(self.store.referral_codes(tenant).await)?
+                .into_iter()
+                .filter(|code| code.account_id == referrer)
+                .map(|code| (code.code_index, code.exempt_labels))
+                .collect();
+        let before: Vec<RefereeMirror> = rows
+            .iter()
+            .filter(|row| row.referee_ref_hash != referee_ref_hash || row.signals_seen)
+            .cloned()
+            .collect();
+        let mut after = rows;
+        for row in after
+            .iter_mut()
+            .filter(|row| row.referee_ref_hash == referee_ref_hash)
+        {
+            row.signal_labels = labels.to_vec();
+            row.recipient_index = recipient_index.map(str::to_owned);
+            row.subject_index = subject_index.map(str::to_owned);
+            row.signals_seen = true;
+        }
+        let settings = &self.settings.abuse;
+        if referrer_hold_is_new(
+            &score_referrer(&before, settings, &exempt),
+            &score_referrer(&after, settings, &exempt),
+        ) {
             self.hold(tenant, referrer, REFERRAL_REFERRER_SUSPENDED, report)
                 .await?;
         }

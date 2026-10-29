@@ -302,6 +302,15 @@ the referrer's tenant.
 A tripped code is suspended with its labels, and every bonus from its
 referees is held `referral_code_suspended`. The same rates over all of a
 referrer's codes trip a referrer-level hold, `referral_referrer_suspended`.
+Like the server-observed holds, it opens on new evidence, so an operator's
+clear stands over the same referees: when a referee's labels are written
+(or first written), the referrer is scored with them and without, and the
+hold opens only if the referrer trips with them and a tripped label is new
+or is carried by more referees than before. A label an operator exempted
+when clearing a code is dropped from that code's referees in this rollup;
+`referral_shared_identity` and `referral_burst`, which no one referee
+carries, are exempt in it only when every code with a live referee exempts
+them.
 More than 2 codes suspended in 24 hours switches referral mode to `dry_run`
 by itself, with an audit row, and readiness reports `referral_tripped`.
 The switch is the halt of the pseudo-rail `near_ai.referral`, and the
