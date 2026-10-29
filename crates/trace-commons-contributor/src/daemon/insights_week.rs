@@ -163,7 +163,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -419,6 +419,9 @@ pub(crate) enum NotAnalyzable {
     TooLarge,
     /// A Codex file that does not record exactly one `session_meta`.
     NotOneSession,
+    /// A file Analyze & save does not find or read: a session in a NEAR
+    /// AI managed profile, or a compressed Codex rollout.
+    InsightsOnly,
 }
 
 impl NotAnalyzable {
@@ -426,10 +429,13 @@ impl NotAnalyzable {
     /// session records when it is Codex's, would be refused.
     fn of(
         source: AnalyticsSource,
+        insights_only: bool,
         bytes: Option<u64>,
         session_metas: Option<usize>,
     ) -> Option<Self> {
-        if bytes.is_some_and(|bytes| bytes > crate::insights::MAX_SOURCE_BYTES) {
+        if insights_only {
+            Some(NotAnalyzable::InsightsOnly)
+        } else if bytes.is_some_and(|bytes| bytes > crate::insights::MAX_SOURCE_BYTES) {
             Some(NotAnalyzable::TooLarge)
         } else if source == AnalyticsSource::Codex && session_metas.is_some_and(|count| count != 1)
         {
@@ -866,6 +872,20 @@ pub(crate) struct CounterCandidate {
     pub started_at: Option<DateTime<Utc>>,
     /// Delegated transcripts beside the session file, which are not read.
     pub group_member_count: u32,
+    /// Where the watcher found it.
+    pub role: CandidateRole,
+}
+
+/// Where a counter-pass candidate was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateRole {
+    /// Through the watched sources, as offers are.
+    Watched,
+    /// In a NEAR AI managed profile (`<state>/managed-profiles/<id>/`),
+    /// which only this pass reads. The one copy of its session counted: a
+    /// watched copy of the same session (the post-exit export) is passed
+    /// over. See `superseded_by_profiles`.
+    ManagedProfile,
 }
 
 /// What one pass did. Counts only.
@@ -875,6 +895,12 @@ pub(crate) struct PassSummary {
     /// Left for a later poll by the per-poll budget.
     pub deferred: usize,
     pub dropped: usize,
+    /// Compressed rollouts read whose stream was corrupt or truncated:
+    /// stored as unknown, never as zero.
+    pub compressed_unreadable: usize,
+    /// Compressed rollouts read whose output passed its bound
+    /// (`source::compressed`): stored as unknown, never as zero.
+    pub compressed_too_large: usize,
 }
 
 /// What the daemon's settings add to an `insights_week` answer.
@@ -1133,17 +1159,162 @@ impl NeverSessions {
 ///
 /// `None` for any other name, so an unknown shape names no session.
 fn name_session_digest(key: &DigestKey, candidate: &CounterCandidate) -> Option<KeyedDigest> {
-    let stem = candidate.path.file_stem()?.to_str()?;
-    let id = match candidate.source {
-        SOURCE_CLAUDE_CODE => Some(stem).filter(|stem| !stem.is_empty())?,
+    let id = name_session_id(candidate.source, &candidate.path)?;
+    Some(harness_session_digest(key, candidate.source, id))
+}
+
+/// The raw session ID `name_session_digest` digests. A compressed Codex
+/// rollout names its session as its plain twin does.
+fn name_session_id<'p>(source: &str, path: &'p Path) -> Option<&'p str> {
+    let address = row_address(source, path);
+    let stem = Path::new(address).file_stem()?.to_str()?;
+    match source {
+        SOURCE_CLAUDE_CODE => Some(stem).filter(|stem| !stem.is_empty()),
         SOURCE_CODEX => {
             let rest = stem.strip_prefix("rollout-")?;
             let id = rest.get(rest.len().checked_sub(36)?..)?;
-            is_uuid(id).then_some(id)?
+            is_uuid(id).then_some(id)
         }
-        _ => return None,
+        _ => None,
+    }
+}
+
+/// The address a session's row is keyed by: its file's path, except that a
+/// compressed Codex rollout (`<name>.jsonl.zst`) answers as the plain
+/// `<name>.jsonl` Codex compressed it from. So a row first read from the
+/// plain file is replaced, not doubled, when Codex compresses it in place,
+/// and anything that names the session by its plain path (a queue entry)
+/// still finds the row. A path that is not UTF-8 is not stripped.
+fn row_address<'p>(source: &str, path: &'p Path) -> &'p str {
+    let Some(text) = path.to_str() else {
+        return "";
     };
-    Some(harness_session_digest(key, candidate.source, id))
+    // The adapter's own rule (`source::compressed::address_of`); discovery
+    // already hands the address, so this only matters for a path named
+    // some other way.
+    if source == SOURCE_CODEX && crate::source::compressed::is_compressed(path) {
+        text.strip_suffix(crate::source::compressed::COMPRESSED_SUFFIX)
+            .unwrap_or(text)
+    } else {
+        text
+    }
+}
+
+/// The row key of the session at `path`, as the adapter `source` found it:
+/// `session_key` of its `row_address`.
+pub(crate) fn row_key(key: &DigestKey, source: &str, path: &Path) -> KeyedDigest {
+    match path.to_str() {
+        Some(_) => session_key(key, source, row_address(source, path)),
+        None => session_key(key, source, &path.to_string_lossy()),
+    }
+}
+
+/// Whether Analyze & save cannot find or read the candidate's file: a
+/// managed profile's session (never among the watched sessions), or a
+/// compressed Codex rollout (the whole-file analysis reads plain files).
+fn insights_only(candidate: &CounterCandidate) -> bool {
+    candidate.role == CandidateRole::ManagedProfile || compressed_file(candidate).is_some()
+}
+
+/// Whether the candidate's path names a compressed Codex rollout itself
+/// (`<name>.jsonl.zst`) rather than its address.
+fn is_compressed_codex(candidate: &CounterCandidate) -> bool {
+    candidate.source == SOURCE_CODEX && crate::source::compressed::is_compressed(&candidate.path)
+}
+
+/// The compressed file behind a Codex candidate's address, when that is
+/// what is on disk (`source::compressed::on_disk`): the adapter addresses a
+/// compressed rollout by the plain path it replaced.
+fn compressed_file(candidate: &CounterCandidate) -> Option<PathBuf> {
+    if candidate.source != SOURCE_CODEX {
+        return None;
+    }
+    crate::source::compressed::on_disk(&candidate.path)
+        .filter(|file| crate::source::compressed::is_compressed(file))
+}
+
+/// What reading the candidate costs the per-poll budget: its file's size,
+/// or for a compressed rollout what it decompresses to. Delegated
+/// transcripts are counted in `size_bytes` but never read, so are not
+/// charged.
+fn read_cost(candidate: &CounterCandidate) -> u64 {
+    if let Some(file) = compressed_file(candidate) {
+        crate::source::compressed::estimated_decompressed_bytes(&file)
+            .unwrap_or(candidate.size_bytes)
+    } else {
+        std::fs::metadata(&candidate.path)
+            .map(|meta| meta.len())
+            .unwrap_or(candidate.size_bytes)
+    }
+}
+
+/// Which candidates this pass leaves unread because another one is the
+/// same session (by index into `candidates`), and, for each one whose row
+/// should go, the row key of the candidate that replaces it.
+///
+/// - A compressed Codex rollout and its plain twin share a row key; while
+///   both are on disk (Codex between writing one and removing the other)
+///   the plain file is read and the compressed one is not.
+/// - A session found in a managed profile is counted from there. Any other
+///   candidate whose file name names the same session (the post-exit
+///   export, or a copy in the home folder) is not read, and its row is
+///   dropped once the profile's row exists. The newest profile copy wins
+///   among several.
+fn superseded_by_profiles(
+    key: &DigestKey,
+    candidates: &[CounterCandidate],
+) -> (BTreeSet<usize>, Vec<(KeyedDigest, KeyedDigest)>) {
+    let mut skip = BTreeSet::new();
+    let mut by_key: BTreeMap<KeyedDigest, usize> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let row = row_key(key, candidate.source, &candidate.path);
+        match by_key.get(&row) {
+            Some(&kept)
+                if is_compressed_codex(&candidates[kept]) && !is_compressed_codex(candidate) =>
+            {
+                skip.insert(kept);
+                by_key.insert(row, index);
+            }
+            Some(_) => {
+                skip.insert(index);
+            }
+            None => {
+                by_key.insert(row, index);
+            }
+        }
+    }
+    let mut profile: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.role != CandidateRole::ManagedProfile || skip.contains(&index) {
+            continue;
+        }
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let slot = profile.entry((candidate.source, id)).or_insert(index);
+        if candidates[*slot].modified_at < candidate.modified_at {
+            *slot = index;
+        }
+    }
+    let mut replaced = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let Some(&keeper) = profile.get(&(candidate.source, id)) else {
+            continue;
+        };
+        if keeper == index {
+            continue;
+        }
+        let own = row_key(key, candidate.source, &candidate.path);
+        let keeper_row = row_key(key, candidates[keeper].source, &candidates[keeper].path);
+        if own != keeper_row {
+            replaced.push((own, keeper_row));
+        }
+        skip.insert(index);
+    }
+    (skip, replaced)
 }
 
 /// `8-4-4-4-12` hex digits.
@@ -1495,11 +1666,7 @@ impl CounterPass {
             analytics_source(candidate.source).is_some()
                 && current
                     .rows
-                    .get(&session_key(
-                        &key,
-                        candidate.source,
-                        &candidate.path.to_string_lossy(),
-                    ))
+                    .get(&row_key(&key, candidate.source, &candidate.path))
                     .is_some_and(CounterRow::awaiting_classification)
         });
         let eviction_floor = current
@@ -1563,7 +1730,13 @@ impl CounterPass {
             }
         }
 
-        let mut order: Vec<&CounterCandidate> = candidates.iter().collect();
+        let (skip, replaced) = superseded_by_profiles(&key, candidates);
+        let mut order: Vec<&CounterCandidate> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !skip.contains(index))
+            .map(|(_, candidate)| candidate)
+            .collect();
         order.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified_at));
         let mut reads: Vec<(KeyedDigest, CounterRow)> = Vec::new();
         let mut bytes_budgeted = 0u64;
@@ -1577,7 +1750,7 @@ impl CounterPass {
             if candidate.modified_at < cutoff {
                 continue;
             }
-            let session = session_key(&key, candidate.source, &candidate.path.to_string_lossy());
+            let session = row_key(&key, candidate.source, &candidate.path);
             if now
                 .signed_duration_since(candidate.modified_at)
                 .num_seconds()
@@ -1635,13 +1808,10 @@ impl CounterPass {
                     .extend(name_session_digest(&key, candidate));
                 continue;
             }
-            // Charged by the one file read, not the group: delegated
-            // transcripts are counted in `size_bytes` but never read. The
+            // Charged by the one file read (`read_cost`), decompressed. The
             // first read of a poll is always allowed, so a file over the
             // whole budget is read alone rather than starved.
-            let cost = std::fs::metadata(&candidate.path)
-                .map(|meta| meta.len())
-                .unwrap_or(candidate.size_bytes);
+            let cost = read_cost(candidate);
             if reads.len() >= COUNTER_PASS_MAX_READS_PER_TICK
                 || (!reads.is_empty()
                     && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
@@ -1659,6 +1829,15 @@ impl CounterPass {
             #[cfg(test)]
             self.run_before_read_hook();
             let read = read_body(source, candidate, &key);
+            match read.compressed_failure {
+                Some(crate::source::compressed::CompressedFailure::Undecodable) => {
+                    summary.compressed_unreadable += 1;
+                }
+                Some(crate::source::compressed::CompressedFailure::TooLarge) => {
+                    summary.compressed_too_large += 1;
+                }
+                None => {}
+            }
             reads.push((
                 session,
                 CounterRow {
@@ -1685,6 +1864,23 @@ impl CounterPass {
             ));
         }
         summary.read = reads.len();
+        if summary.compressed_unreadable + summary.compressed_too_large > 0 {
+            // Counts only: never a path or a session.
+            tracing::warn!(
+                unreadable = summary.compressed_unreadable,
+                too_large = summary.compressed_too_large,
+                "insights counter pass could not read compressed sessions; counted as unknown"
+            );
+        }
+        // A copy of a managed-profile session goes once the profile's own
+        // row exists, so the session is never missing in between.
+        for (copy, keeper) in replaced {
+            let keeper_kept = (current.rows.contains_key(&keeper) && !removals.contains(&keeper))
+                || reads.iter().any(|(session, _)| *session == keeper);
+            if keeper_kept && current.rows.contains_key(&copy) {
+                removals.insert(copy);
+            }
+        }
 
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
@@ -2465,12 +2661,10 @@ impl CounterPass {
             .enumerate()
             .find_map(|(index, (adapter, path))| {
                 let source = analytics_source(adapter)?;
-                (session_key(&key, adapter, &path.to_string_lossy()) == session).then_some(
-                    Located {
-                        index,
-                        format: source_format(source),
-                    },
-                )
+                (row_key(&key, adapter, path) == session).then_some(Located {
+                    index,
+                    format: source_format(source),
+                })
             }))
     }
 
@@ -3036,22 +3230,53 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// none or more than one, as a saved snapshot's identity does. The file is
 /// read line by line ([`scan_session`]), never held whole.
 fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
-    let file = std::fs::File::open(&candidate.path).ok();
-    // The one file's own size, as the analysis reads it: delegated
-    // transcripts are counted in the candidate's, never read.
-    let bytes = file
-        .as_ref()
-        .and_then(|file| file.metadata().ok())
-        .map(|meta| meta.len());
-    let scanned = file.and_then(|file| {
-        scan_session(
-            source,
-            std::io::BufReader::new(file),
-            key,
-            COUNTER_PASS_MAX_LINE_BYTES,
-            CODEX_PER_TURN_SERIES,
-        )
-    });
+    let insights_only = insights_only(candidate);
+    let mut compressed_failure = None;
+    let (bytes, scanned) = if let Some(file) = compressed_file(candidate) {
+        // Streamed through the bounded decoder, never to memory whole or a
+        // temp file; the line cap below applies to decompressed lines.
+        match crate::source::compressed::BoundedDecoder::open(&file) {
+            Ok(mut decoder) => {
+                let scanned = scan_session(
+                    source,
+                    std::io::BufReader::new(&mut decoder),
+                    key,
+                    COUNTER_PASS_MAX_LINE_BYTES,
+                    CODEX_PER_TURN_SERIES,
+                );
+                compressed_failure = decoder.failure();
+                // A stream that failed part way is unknown, never the part
+                // read before it failed.
+                let scanned = scanned.filter(|_| compressed_failure.is_none());
+                (Some(decoder.produced()), scanned)
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    compressed_failure =
+                        Some(crate::source::compressed::CompressedFailure::of(&error));
+                }
+                (None, None)
+            }
+        }
+    } else {
+        let file = std::fs::File::open(&candidate.path).ok();
+        // The one file's own size, as the analysis reads it: delegated
+        // transcripts are counted in the candidate's, never read.
+        let bytes = file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .map(|meta| meta.len());
+        let scanned = file.and_then(|file| {
+            scan_session(
+                source,
+                std::io::BufReader::new(file),
+                key,
+                COUNTER_PASS_MAX_LINE_BYTES,
+                CODEX_PER_TURN_SERIES,
+            )
+        });
+        (bytes, scanned)
+    };
     let Some(scanned) = scanned else {
         return ReadBody {
             body: RowBody::Unknown {
@@ -3063,7 +3288,8 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             span: None,
             facts: None,
             automation: Automation::Unknown,
-            not_analyzable: NotAnalyzable::of(source, bytes, None),
+            not_analyzable: NotAnalyzable::of(source, insights_only, bytes, None),
+            compressed_failure,
             goals: Vec::new(),
         };
     };
@@ -3128,7 +3354,13 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         first_event_at: scanned.first_event_at,
         span: scanned.span,
         automation: scanned.automation,
-        not_analyzable: NotAnalyzable::of(source, bytes, Some(scanned.session_metas)),
+        not_analyzable: NotAnalyzable::of(
+            source,
+            insights_only,
+            bytes,
+            Some(scanned.session_metas),
+        ),
+        compressed_failure,
         goals: scanned.goals,
     }
 }
@@ -3146,6 +3378,8 @@ struct ReadBody {
     facts: Option<SessionFacts>,
     automation: Automation,
     not_analyzable: Option<NotAnalyzable>,
+    /// Why a compressed rollout could not be read to its end.
+    compressed_failure: Option<crate::source::compressed::CompressedFailure>,
     /// Claude's `/goal` goals, status and counters only.
     goals: Vec<ClaudeGoal>,
 }
@@ -4519,6 +4753,10 @@ mod tests {
     use std::path::Path;
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
 
+    // `insights_week/tests/compressed_tests.rs`: compressed Codex rollouts
+    // and managed-profile sessions, over this module's fixture.
+    mod compressed_tests;
+
     const QUIET: u64 = 1_800;
     const PROJECT: &str = "/Users/PRIVATE_USER/code/PRIVATE_REPO";
 
@@ -4693,6 +4931,7 @@ mod tests {
             modified_at: written(),
             started_at: Some(written() - Duration::hours(1)),
             group_member_count: 0,
+            role: CandidateRole::Watched,
         }
     }
 
@@ -5206,6 +5445,7 @@ mod tests {
             goals: Vec::new(),
             not_analyzable: NotAnalyzable::of(
                 source,
+                false,
                 Some(bytes.len() as u64),
                 Some(
                     bytes
@@ -5215,6 +5455,7 @@ mod tests {
                         .count(),
                 ),
             ),
+            compressed_failure: None,
         }
     }
 

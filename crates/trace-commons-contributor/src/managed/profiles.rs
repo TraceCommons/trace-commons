@@ -48,6 +48,37 @@ impl NativeProfiles {
         }
     }
 
+    /// The profile roots that exist now, one per managed account, for the
+    /// Insights counter pass to read sessions from (`daemon::watcher`).
+    /// Creates nothing, unlike `profile_root`: a missing folder is none,
+    /// and an entry that is not a real directory named by an account ID (a
+    /// symlink included) is passed over.
+    pub fn existing_roots(&self) -> Vec<PathBuf> {
+        let real_dir = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        };
+        if !real_dir(&self.root) {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut roots: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok())
+            })
+            .map(|entry| entry.path())
+            .filter(|path| real_dir(path))
+            .collect();
+        roots.sort();
+        roots
+    }
+
     pub fn profile_root(&self, id: AccountId) -> Result<PathBuf, ManagedError> {
         private_directory(&self.root)?;
         let path = self.root.join(id.to_string());
@@ -543,6 +574,28 @@ pub fn tools() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_roots_lists_account_folders_and_creates_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("config")).unwrap();
+        let profiles = NativeProfiles::new(&store);
+        assert!(profiles.existing_roots().is_empty());
+        assert!(
+            !store.dir().join("managed-profiles").exists(),
+            "created nothing"
+        );
+
+        let id = AccountId(uuid::Uuid::new_v4());
+        let made = profiles.profile_root(id).unwrap();
+        let base = store.dir().join("managed-profiles");
+        std::fs::create_dir(base.join("not-an-account")).unwrap();
+        std::fs::write(base.join(uuid::Uuid::new_v4().to_string()), b"file").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path(), base.join(uuid::Uuid::new_v4().to_string()))
+            .unwrap();
+        assert_eq!(profiles.existing_roots(), vec![made]);
+    }
 
     #[test]
     fn managed_claude_commands_remove_inherited_secure_storage_override() {
