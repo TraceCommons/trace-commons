@@ -707,7 +707,7 @@ async fn build_preview_core(
     // function only to be fingerprinted.
     attested_bodies: bool,
 ) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
-    let transcript = source.load(session_ref)?;
+    let mut transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
 
     let enrolled = cfg.is_some();
@@ -761,6 +761,12 @@ async fn build_preview_core(
     if enrolled && cfg.witness.is_some() {
         return Err(anyhow::anyhow!("witness_claim_unavailable"));
     }
+    // The raw contribution now holds its own copy of every event, and only
+    // the transcript's subagent counts are read past this point. Freeing
+    // the parsed events before redaction keeps them from sitting beside the
+    // raw contribution and the envelope at the build's peak, which for a
+    // session near `source::MAX_SESSION_BYTES` is hundreds of megabytes.
+    transcript.events = Vec::new();
     let envelope = redact_to_envelope(&redactor, raw).await?;
     summarize_envelope(
         &envelope,
@@ -1719,10 +1725,10 @@ mod tests {
     #[tokio::test]
     async fn a_114_member_group_still_fits_the_envelope_cap() {
         // The plan's ratio (42 MB raw to a 2.8 MB envelope) is one
-        // observation, and `GROUP_RAW_BYTE_BUDGET` is set on the assumption
-        // that it holds with room to spare. This is the measurement rather
-        // than the assumption: the largest group on the probed machine had
-        // 114 members, and a group that overruns the cap is refused whole.
+        // observation, and the group budget once leaned on it. This is the
+        // measurement rather than the assumption: the largest group on the
+        // probed machine had 114 members, and a group that overruns the
+        // envelope cap is refused whole.
         let (_d, src, r) = grouped_session(114, 200);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);

@@ -2507,23 +2507,29 @@ async fn preview_visible_and_cancel_are_safe_to_call_repeatedly() {
 /// `too_large` must be able to trust that no would-send number accompanies
 /// it.
 #[test]
-fn the_admission_cap_admits_the_measured_claude_corpus_and_refuses_the_codex_tail() {
+fn the_admission_cap_admits_the_owners_long_sessions_and_refuses_past_512_mib() {
     // Asked of a real scheduler built the way the daemon builds it, so this
     // tracks the shipped policy rather than restating a constant.
     let sched = trace_commons_contributor::daemon::preview_scheduler::PreviewScheduler::default();
     assert_eq!(sched.admission_cap(), MAX_PREVIEW_SESSION_BYTES);
-    // The corpus behind the incident: Claude sessions topped out at
-    // 29.8 MB, Codex rollouts at 367.5 MB against a 3.5 MB mean.
+    assert_eq!(MAX_PREVIEW_SESSION_BYTES, 536_870_912);
+    // The owner's machine, 2026-10-29: Claude Code sessions up to 186 MB
+    // and Codex rollouts up to 432 MB in the last 28 days, all of which
+    // the old 64 MiB cap refused.
     assert!(
-        sched.admits(29_800_000),
-        "the largest measured Claude session must still be previewable"
+        sched.admits(186_000_000),
+        "the largest recent Claude Code session must be previewable"
+    );
+    assert!(
+        sched.admits(432_000_000),
+        "the largest recent Codex rollout must be previewable"
     );
     assert!(
         sched.admits(3_500_000),
         "the mean Codex rollout must be previewable"
     );
     assert!(
-        !sched.admits(367_500_000),
-        "the largest measured Codex rollout must not be parsed to draw a card"
+        !sched.admits(MAX_PREVIEW_SESSION_BYTES + 1),
+        "a session past the shared 512 MiB cap is not parsed to draw a card"
     );
 }

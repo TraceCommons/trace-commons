@@ -59,15 +59,16 @@ use super::{
     real_file_within_root, session_hash,
 };
 
-/// The most raw bytes one merged group may hash and load.
+/// The most raw bytes one merged group may hash and load:
+/// [`super::MAX_SESSION_BYTES`], 512 MiB, shared with the Codex adapter and
+/// the daemon's preview admission cap.
 ///
-/// `MAX_TRACE_ENVELOPE_BYTES` is 16 MB *after* redaction and mapping, and
-/// the one measurement on record is 42 MB of raw session producing a 2.8 MB
-/// envelope -- roughly 15:1. Trusting that ratio would put the ceiling near
-/// 240 MB; it is a single observation, so this stays well under a quarter of
-/// it. Being conservative here is cheap and the failure it prevents is not:
-/// a group that overruns the envelope cap is refused as a whole, losing the
-/// entire conversation rather than a tail of it.
+/// It bounds what is read, not what can be sent. `MAX_TRACE_ENVELOPE_BYTES`
+/// is 16 MB *after* redaction and mapping, and at the measured median of
+/// about 3.4 raw bytes per envelope byte a group over roughly 55 MB builds
+/// an envelope over it. Such a group is previewed, then refused locally at
+/// approval as `envelope-too-large`, as a whole. This budget no longer tries
+/// to keep groups under the envelope cap; it bounds the daemon's memory.
 ///
 /// When a group exceeds this, `load` drops its largest members until it
 /// fits. That decision is made in `load` -- never at send time -- so the
@@ -83,7 +84,7 @@ use super::{
 /// that grows between that stat and its read can overshoot by the amount it
 /// grew; the hash covers exactly the bytes that were read either way, so the
 /// consent invariant is untouched.
-pub const GROUP_RAW_BYTE_BUDGET: u64 = 64_000_000;
+pub const GROUP_RAW_BYTE_BUDGET: u64 = super::MAX_SESSION_BYTES;
 
 /// How far into a member file `peek_session_id` reads looking for a
 /// `sessionId`. Claude Code writes it on the first record; a bounded head
@@ -150,7 +151,7 @@ struct GroupMember {
 pub struct ClaudeCodeSource {
     root: PathBuf,
     /// The raw byte budget applied when merging a group, so a test can
-    /// exercise the drop path without writing 64 MB to disk. Production
+    /// exercise the drop path without writing 512 MiB to disk. Production
     /// always uses `GROUP_RAW_BYTE_BUDGET`.
     group_budget: u64,
 }
@@ -2360,6 +2361,50 @@ mod tests {
             }
         }
         (root, parent)
+    }
+
+    /// A group over the old 64 MB budget now loads whole: a 100 MB parent
+    /// keeps its delegated transcript, which the old budget would have
+    /// dropped to fit, and discovery sizes the ref as the whole group.
+    #[test]
+    fn a_group_over_the_old_64_mb_budget_loads_whole() {
+        use std::io::Write;
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "delegated")]);
+        let session = "22222222-2222-2222-2222-222222222222";
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let turn: String = (0..4 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (b'a' + (state % 26) as u8) as char
+            })
+            .collect();
+        let line = record(session, &turn);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&parent)
+            .unwrap();
+        let mut written = 0usize;
+        while written < 100_000_000 {
+            file.write_all(line.as_bytes()).unwrap();
+            written += line.len();
+        }
+        drop(file);
+
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].size_bytes > 64 * 1024 * 1024);
+        assert!(found[0].size_bytes < super::super::MAX_SESSION_BYTES);
+        let t = source.load(&found[0]).expect("a 100 MB group loads");
+        assert_eq!(t.subagent_count, 1);
+        assert_eq!(t.subagents_dropped, 0, "nothing is trimmed to fit");
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.content.as_deref() == Some("delegated"))
+        );
     }
 
     #[test]

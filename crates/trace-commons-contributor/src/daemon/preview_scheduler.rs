@@ -48,10 +48,12 @@ use uuid::Uuid;
 /// peak resident set is a multiple of the session bytes it loads -- the
 /// file, its parsed form, the redacted form, and the serialized envelope
 /// all exist at once -- so the scheduler's worst case is roughly
-/// `PREVIEW_WORKERS * MAX_PREVIEW_SESSION_BYTES * k`. With the admission
-/// cap below at 64 MiB, two workers keep that in the hundreds of megabytes
-/// even for the largest sessions this daemon will look at. Four would put
-/// the same machine back inside the range the incident reached.
+/// `PREVIEW_WORKERS * MAX_PREVIEW_SESSION_BYTES * k`. Measured on synthetic
+/// sessions in a release build, k is about 3: one 450 MB session peaked at
+/// 1.2 to 1.5 GB. So two workers at the 512 MiB admission cap can reach
+/// about 3 GB together, but only with two sessions of several hundred
+/// megabytes in flight at once; sessions of ordinary size keep it in the
+/// hundreds of megabytes. Four would double that worst case.
 ///
 /// The CPU argument points the same way and is the reason the number is not
 /// derived from `available_parallelism`. This is a background daemon whose
@@ -62,7 +64,7 @@ use uuid::Uuid;
 /// on.
 ///
 /// One would also fix the incident, and was rejected for a reason worth
-/// stating: a single worker means one 64 MiB session stalls every card on
+/// stating: a single worker means one very large session stalls every card on
 /// screen behind it, and the visible-first ordering below cannot help,
 /// because ordering only decides what starts next, never what is already
 /// running. Two means a slow job costs at most half the throughput.
@@ -71,20 +73,13 @@ pub const PREVIEW_WORKERS: usize = 2;
 /// The largest session, in raw bytes, this scheduler will run the preview
 /// pipeline over.
 ///
-/// 64 MiB. Grounded in the corpus that produced the incident: 1,028
-/// Claude Code sessions totalling 0.9 GB with a 29.8 MB maximum, and 3,069
-/// Codex rollouts totalling 10.8 GB with a 367.5 MB maximum and a 3.5 MB
-/// mean. Every Claude session in that sample is admitted with room to
-/// spare, and so is everything within an order of magnitude of the Codex
-/// mean; what the cap excludes is the Codex tail, where a single rollout is
-/// a hundred times the mean and no amount of scheduling makes parsing it to
-/// draw a card a reasonable thing to do.
-///
-/// The exact excluded fraction of that corpus is **not** computed here: the
-/// measurements available are totals, means, and maxima, and a fraction
-/// cannot be recovered from those. Treating the cap as "admits almost
-/// everything" is the claim being made, and it rests on the mean being two
-/// orders of magnitude below the cap, not on a percentile anybody measured.
+/// The session cap, `source::MAX_SESSION_BYTES` (512 MiB): the same number
+/// the Claude Code and Codex adapters load up to, so a session an adapter
+/// will read is never refused here for its size, and one it refuses is
+/// never admitted. Raised from 64 MiB by owner decision on 2026-10-29: the
+/// long agent sessions that cap excluded (the owner's largest were a
+/// 186 MB Claude Code session and a 432 MB Codex rollout) are among the
+/// most valuable.
 ///
 /// A session over the cap is **refused, visibly**, as
 /// [`PreviewOutcome::TooLarge`] -- never estimated. The preview card states
@@ -93,7 +88,7 @@ pub const PREVIEW_WORKERS: usize = 2;
 /// number in the one place this product cannot put one. The shell says the
 /// session is too large to preview and reports the raw size, which is a
 /// stat, not an estimate.
-pub const MAX_PREVIEW_SESSION_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_PREVIEW_SESSION_BYTES: u64 = crate::source::MAX_SESSION_BYTES;
 
 /// How many completed previews the result cache holds before it is cleared
 /// wholesale.
@@ -1145,6 +1140,44 @@ mod tests {
         }
     }
 
+    /// The admission cap is the shared session cap, 512 MiB. A 100 MiB
+    /// session, refused under the old 64 MiB cap, is run through the
+    /// preview pipeline; one byte over 512 MiB is not admitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_100_mib_session_is_previewed_under_the_512_mib_cap() {
+        assert_eq!(MAX_PREVIEW_SESSION_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_PREVIEW_SESSION_BYTES, crate::source::MAX_SESSION_BYTES);
+        let sched = Arc::new(PreviewScheduler::default());
+        assert_eq!(sched.admission_cap(), MAX_PREVIEW_SESSION_BYTES);
+        assert!(sched.admits(MAX_PREVIEW_SESSION_BYTES));
+        assert!(!sched.admits(MAX_PREVIEW_SESSION_BYTES + 1));
+
+        let FakeHandles {
+            runner,
+            delivered: mut rx,
+            gate: _gate,
+            started: _started,
+        } = FakeRunner::fixture(1000);
+        let handles = spawn_workers(Arc::clone(&sched), runner.clone());
+
+        let long = 100 * 1024 * 1024;
+        assert!(long > 64 * 1024 * 1024, "the old cap refused this");
+        let id = Uuid::new_v4();
+        assert_eq!(sched.request(id, key(1), long), RequestState::Queued);
+        let (delivered, outcome) = rx.recv().await.expect("a preview result");
+        assert_eq!(delivered, id);
+        assert!(
+            matches!(outcome, PreviewOutcome::Ready(_)),
+            "built, not refused: {outcome:?}"
+        );
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 1);
+
+        sched.stop();
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_oversized_session_is_refused_visibly_and_never_run() {
         let sched = Arc::new(PreviewScheduler::new(2, MAX_PREVIEW_SESSION_BYTES));
@@ -1157,7 +1190,7 @@ mod tests {
         let handles = spawn_workers(Arc::clone(&sched), runner.clone());
 
         let id = Uuid::new_v4();
-        let huge = 367_500_000u64;
+        let huge = MAX_PREVIEW_SESSION_BYTES + 1;
         assert!(!sched.admits(huge));
         sched.request(id, key(1), huge);
         let (delivered, outcome) = rx.recv().await.expect("a refusal is still a result");
@@ -1172,7 +1205,7 @@ mod tests {
         assert_eq!(
             runner.runs.load(Ordering::SeqCst),
             0,
-            "a 367 MB session is never parsed to draw a card"
+            "a session over 512 MiB is never parsed to draw a card"
         );
 
         // And the refusal carries no would-send number of any kind.

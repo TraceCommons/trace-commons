@@ -49,6 +49,69 @@ pub struct SessionTooLarge {
     pub budget_bytes: u64,
 }
 
+/// The largest session, in raw bytes, the contributor reads, offers and
+/// previews: 512 MiB. One number for the Claude Code group budget
+/// (`claude_code::GROUP_RAW_BYTE_BUDGET`), the Codex rollout budget, the
+/// bytes a compressed rollout may decompress to
+/// (`compressed::MAX_DECOMPRESSED_BYTES`), and the daemon's preview
+/// admission cap (`MAX_PREVIEW_SESSION_BYTES`), so a session one of them
+/// admits is never refused by another for its size. For a `.zst` rollout it
+/// counts decompressed bytes, never the file's own size.
+///
+/// Owner decision 2026-10-29, raised from 64 MB. The long agent sessions
+/// are among the most valuable, and on the owner's machine over 28 days two
+/// Claude Code sessions (largest 186 MB) and four Codex rollouts (largest
+/// 432 MB) were over the old figure; over all time 14 Codex rollouts were
+/// over 64 MB and 3 over 256 MB.
+///
+/// This bounds what is read, not what is sent. `MAX_TRACE_ENVELOPE_BYTES`
+/// (16 MB after redaction) is unchanged and still refuses an over-cap
+/// envelope locally, at approval, as `envelope-too-large`. At the measured
+/// median of about 3.4 raw bytes per envelope byte, most sessions above
+/// roughly 55 MB still build an envelope over that cap: this figure lets
+/// them be previewed, and the envelope cap decides whether they can be
+/// sent.
+///
+/// Memory: measured on synthetic sessions in a release build, a preview's
+/// peak resident set is about 3 times the session's raw bytes -- 1.2 to
+/// 1.5 GB for a 450 MB Claude Code session or Codex rollout, plain or
+/// compressed. The daemon runs two previews at once, so two sessions near
+/// this cap in flight together can reach about 3 GB (see
+/// `daemon::preview_scheduler::PREVIEW_WORKERS`).
+pub const MAX_SESSION_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The budget for adapters that parse a session as one JSON document
+/// (`gemini_cli`, `cline`, `trajectory`): 64 MB, the figure every adapter
+/// shared before [`MAX_SESSION_BYTES`] was raised.
+///
+/// Kept apart on purpose. These adapters cannot stream: they read the
+/// whole file and build a `serde_json::Value` tree of it, which costs
+/// several times the file in memory, and trajectory auto-discovery parses
+/// files that never claimed to be sessions. The raise was decided for the
+/// Claude Code and Codex sessions measured above, and nothing measured any
+/// of these sources near the old limit.
+pub const DOCUMENT_SESSION_BYTE_BUDGET: u64 = 64_000_000;
+
+#[cfg(test)]
+mod session_cap_tests {
+    /// One number, so the adapters and the decoder cannot drift apart. The
+    /// daemon's preview admission cap is pinned to it in
+    /// `daemon_ipc_contract.rs`.
+    #[test]
+    fn the_session_cap_is_512_mib_and_shared() {
+        assert_eq!(super::MAX_SESSION_BYTES, 536_870_912);
+        assert_eq!(
+            super::claude_code::GROUP_RAW_BYTE_BUDGET,
+            super::MAX_SESSION_BYTES
+        );
+        assert_eq!(
+            super::compressed::MAX_DECOMPRESSED_BYTES,
+            super::MAX_SESSION_BYTES
+        );
+        assert_eq!(super::DOCUMENT_SESSION_BYTE_BUDGET, 64_000_000);
+    }
+}
+
 /// This machine's home directory, or an empty path when the platform will
 /// not name one.
 ///

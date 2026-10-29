@@ -4607,7 +4607,7 @@ declined, kept or counted before Codex compressed it is the same session
 after, with the same content hash: not offered or sent again, and not
 re-read. While both files are on disk only the plain one is listed. The
 compressed file is streamed through a zstd decoder, never decompressed to
-memory whole or to a file; the 64 MB load budget (`rollout-too-large`), the
+memory whole or to a file; the 512 MiB load budget (`rollout-too-large`), the
 16 MB line limit below and the per-pass budget apply to the decompressed
 bytes. A file's output is also bounded at 512 MiB, and at 64 times the
 file's own size past 16 MiB, and a decoder window over 16 MiB is refused.
@@ -6327,8 +6327,9 @@ tool's layout matches. `trajectory_source` declares it:
   `watch` path that names no particular folder: a relative or empty path,
   the root, or the home directory itself.
 
-A file in the folder is read whole only up to the native adapters' 64 MB
-budget; a larger one is refused from its size alone and raises the
+A file in the folder is read whole only up to 64 MB, the budget of the
+adapters that parse a whole JSON document (the Claude Code and Codex
+adapters read up to 512 MiB); a larger one is refused from its size alone and raises the
 `session-too-large` health label. Discovery follows no symlinked entry.
 
 `get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
