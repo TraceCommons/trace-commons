@@ -296,9 +296,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "The usage setting couldn't be saved.",
     ),
     // 2. Coverage.
+    // The line is the trace count alone (owner, 2026-10-29); what is known
+    // of them is behind its "i", one sentence per count that is not 0.
+    ("analytics_coverage_line", "{n} traces"),
+    ("analytics_coverage_info_known", "Full details for {k}."),
+    ("analytics_coverage_info_partial", "Some missing for {p}."),
     (
-        "analytics_coverage_line",
-        "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+        "analytics_coverage_info_unknown",
+        "None for {u}; these aren't counted as zero.",
     ),
     (
         "analytics_coverage_undated",
@@ -871,26 +876,23 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_cache_savings", "Cache savings"),
     ("analytics_cache_savings_value", "about {x} saved"),
     ("analytics_column_spend", "Spend"),
-    ("analytics_bench_intro", "From {n} of your own traces"),
+    ("analytics_bench_intro", "Compared on {n} of your traces"),
     ("analytics_bench_quality", "Quality"),
     ("analytics_bench_value", "Value"),
     ("analytics_bench_speed", "Speed"),
-    ("analytics_bench_quality_detail", "Edits you kept"),
+    // Behind the "i" beside each metric's label on a card.
+    ("analytics_bench_quality_detail", "Share of edits you kept"),
     (
         "analytics_bench_value_detail",
         "Cost per trace at API prices",
     ),
     ("analytics_bench_speed_detail", "Time per trace"),
-    (
-        "analytics_bench_min",
-        "Models are compared only where each has {n} or more traces.",
-    ),
     ("analytics_bench_weeks", "Last {n} weeks"),
     ("analytics_bench_traces", "{n} traces"),
     ("analytics_bench_kept", "{p}% kept"),
     ("analytics_bench_per_trace", "{x} per trace"),
     ("analytics_bench_next", "Next: {label}, {x}"),
-    ("analytics_bench_not_enough", "Not enough traces yet"),
+    ("analytics_bench_not_enough", "Waiting for more data"),
     (
         "analytics_bench_not_enough_detail",
         "Models are compared here once two have {n} traces each.",
@@ -915,7 +917,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_bench_tip_fewer_undos",
         "{first} had {x}× fewer edits undone than {second}.",
     ),
-    ("analytics_bench_empty", "No traces to compare yet"),
     // 26. Approved by the product owner in these words (2026-10-29): the
     // get-started card and the sample data under it, on Overview, Breakdown
     // and Benchmarks while Insights has no trace of the person's own. The

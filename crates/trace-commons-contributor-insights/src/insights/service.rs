@@ -1700,6 +1700,39 @@ mod tests {
         }
     }
 
+    /// The owner's plain-words pass (2026-10-29): the coverage line is the
+    /// count alone with its breakdown behind an "i", and the Benchmarks
+    /// header and cards read plainly. The removed keys stay removed.
+    #[test]
+    fn the_coverage_and_benchmarks_words_are_the_plain_ones() {
+        let copy = ui_copy();
+        for (key, words) in [
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
+            (
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
+            ),
+            ("analytics_bench_intro", "Compared on {n} of your traces"),
+            ("analytics_bench_quality", "Quality"),
+            ("analytics_bench_value", "Value"),
+            ("analytics_bench_speed", "Speed"),
+            ("analytics_bench_quality_detail", "Share of edits you kept"),
+            (
+                "analytics_bench_value_detail",
+                "Cost per trace at API prices",
+            ),
+            ("analytics_bench_speed_detail", "Time per trace"),
+            ("analytics_bench_not_enough", "Waiting for more data"),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        for key in ["analytics_bench_min", "analytics_bench_empty"] {
+            assert!(!copy.contains_key(key), "{key} was removed");
+        }
+    }
+
     /// Ron's owner review of #1287 (D17, adopted by the owner 2026-10-11):
     /// his table's approved words, the two new strings and the four removed
     /// keys. The route split is pinned in the test above with its fifth,
@@ -1711,9 +1744,12 @@ mod tests {
         for (key, words) in [
             ("analytics_lever_title", "Higher than usual"),
             ("analytics_goals_title", "Goals"),
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
             (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
             ),
             (
                 "analytics_coverage_undated",
@@ -2032,10 +2068,7 @@ mod tests {
                 "analytics_by_project_unavailable",
                 "Not available for analyzed files",
             ),
-            (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
-            ),
+            ("analytics_coverage_line", "{n} traces"),
             ("analytics_glance_tokens_only", "{tokens} tokens"),
             // A saved session's picker and drill-down label, never its id.
             (
