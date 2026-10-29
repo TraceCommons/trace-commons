@@ -528,8 +528,9 @@ impl PayoutRails {
             });
         }
         // The referral stream, when attached: `referral_tripped` while it
-        // switched itself to `dry_run` (spec section 7). It sends nothing in
-        // this build, so it is never qualified.
+        // switched itself to `dry_run` (spec section 7). In `live` it sends
+        // on the near_ai rail's links, whose own row carries that rail's
+        // qualification; this row claims none of its own.
         if let Some(referral) = &self.referral_bonus {
             let tripped = referral.tripped() == Some(true);
             out.push(PayoutRailReadiness {

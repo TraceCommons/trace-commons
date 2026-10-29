@@ -46,8 +46,10 @@
 //! referee first shows the match (its label is not yet on the mirror; the
 //! org and subject labels are evidence only, never scored), so an operator
 //! who clears it is not overruled by the next pass; a new referee with the
-//! same match opens it again. It sends nothing: the referral stream's sends are
-//! a later change, and this pass runs in `dry_run` only.
+//! same match opens it again. This pass writes bonus rows and holds and
+//! sends nothing itself: in `live`, the payout pass's referral stream sends
+//! what is owed (`payout_pass`, `PayoutPass::with_referral_stream`); in
+//! `dry_run` nothing is sent.
 //!
 //! Logs carry counts and labels only.
 
