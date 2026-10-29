@@ -6,10 +6,13 @@
 //!
 //! Boot reads the bonus settings fail-closed
 //! ([`ReferralBonusSettings::from_env`]: a malformed setting, an earning
-//! period under 92 days, or `live` refuses the start) and, outside
-//! `disabled`, attaches the bonus work to the `near_ai` pass. `dry_run`
-//! without a database refuses the start (`referral_store_unavailable`).
-//! This build sends no referral credit in any mode.
+//! period under 92 days, or `live` without the referral credential refuses
+//! the start) and, outside `disabled`, attaches the bonus work to the
+//! `near_ai` pass. Outside `disabled`, no database refuses the start
+//! (`referral_store_unavailable`). In `live` the payout pass's referral
+//! stream sends what is owed; `dry_run` sends nothing. While referrals are
+//! on, boot also refuses a login that cannot assume
+//! `trace_referral_resolver` ([`require_referral_resolver`]).
 //!
 //! The operator routes take the payout control token
 //! (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`) and nothing else, as the payout
@@ -48,6 +51,29 @@ use trace_commons_server::referral_bonus::ReferralBonusHook;
 use trace_commons_server::referral_config::ReferralBonusSettings;
 
 const REFERRAL_OPERATOR_VOID: &str = "operator_void";
+
+/// Boot's check, while referrals are on (the program has a start, or the
+/// bonus is outside `disabled`), that the ingest login can assume
+/// `trace_referral_resolver`. Resolving a code and the bonus pass's
+/// deployment-wide reads take that role, and V142 grants it to no one: the
+/// operator grants it (docs/operator/referral-resolver-role.md). Without
+/// the grant every apply and every pass would fail, so the start is
+/// refused with a safe label instead. Without a database there is nothing
+/// to check: the referral routes refuse on their own, and the bonus already
+/// refuses to start (`referral_store_unavailable`).
+pub(crate) async fn require_referral_resolver(
+    postgres: Option<&PgBackend>,
+    referrals_on: bool,
+) -> anyhow::Result<()> {
+    let Some(postgres) = postgres.filter(|_| referrals_on) else {
+        return Ok(());
+    };
+    match postgres.referral_resolver_assumable().await {
+        Ok(true) => Ok(()),
+        Ok(false) => anyhow::bail!("referrals refused to start: referral_resolver_unprovisioned"),
+        Err(_) => anyhow::bail!("referrals refused to start: referral_resolver_check_failed"),
+    }
+}
 
 /// Attaches the referral bonus work to `rails` from the environment.
 pub(crate) fn with_referral_bonus_from_env(

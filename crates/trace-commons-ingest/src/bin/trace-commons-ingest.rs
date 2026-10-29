@@ -5090,6 +5090,15 @@ impl AppState {
             )
             .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?
             .map(Arc::new);
+        // The operator's grant of trace_referral_resolver, checked once at
+        // boot while referrals are on (fail closed, safe label).
+        referral_admin::require_referral_resolver(
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.as_ref()),
+            referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+        )
+        .await?;
         let referral_store = db_connections.as_ref().map(|connections| {
             connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
         });

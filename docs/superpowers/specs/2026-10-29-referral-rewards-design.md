@@ -85,7 +85,10 @@ probed.
 2. `referral_rate_limited`: more than 10 refused attempts by this account in
    24 hours.
 3. `referral_code_unknown`: no live code with this index (resolved through
-   `trace_referral_resolver`).
+   `trace_referral_resolver`, which V142 grants to no one; the operator
+   grants it to the ingest login, `docs/operator/referral-resolver-role.md`,
+   and ingest refuses to start with the program or bonus on until it can
+   assume it, `referral_resolver_unprovisioned`).
 4. `referral_already_referred`: the account has an attribution.
 5. `referral_account_too_old`: the account was created before the program
    start, or more than `TRACE_COMMONS_REFERRAL_LATE_DAYS` (default 30) ago.

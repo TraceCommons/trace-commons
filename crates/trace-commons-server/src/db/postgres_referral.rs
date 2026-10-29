@@ -161,6 +161,23 @@ pub const REFERRAL_RESOLVER_ASSUME_SQL: &str =
     "SET LOCAL ROLE trace_referral_resolver; SET LOCAL statement_timeout = '2s'";
 
 impl PgBackend {
+    /// Whether this connection's login can assume `trace_referral_resolver`.
+    /// V142 grants the role to no one; the operator grants it to the ingest
+    /// login (docs/operator/referral-resolver-role.md). `false` only for a
+    /// refused `SET ROLE` (insufficient privilege); any other failure is an
+    /// error.
+    pub async fn referral_resolver_assumable(&self) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        let assumable = match tx.batch_execute(REFERRAL_RESOLVER_ASSUME_SQL).await {
+            Ok(()) => true,
+            Err(error) if error.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) => false,
+            Err(error) => return Err(error.into()),
+        };
+        tx.rollback().await?;
+        Ok(assumable)
+    }
+
     /// Which tenant and account own the live code `code_index`, read as
     /// `trace_referral_resolver` in a transaction of its own. Not offered
     /// outside the apply: the answer names another tenant.

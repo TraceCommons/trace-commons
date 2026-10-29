@@ -28,7 +28,9 @@
 -- column grant and a permissive SELECT policy on trace_referral_codes only,
 -- assumed with SET LOCAL ROLE, as V30 does for trace_login_resolver. Like
 -- the payout roles (V132) it is not granted to trace_ingest_runtime here;
--- the operator grants it to the ingest login with INHERIT FALSE.
+-- the operator grants it to the ingest login with INHERIT FALSE
+-- (docs/operator/referral-resolver-role.md), and ingest refuses to start
+-- with referrals on until it can assume it (referral_resolver_unprovisioned).
 --
 -- THE REFERRER'S TENANT ID on an attribution is stored in the clear: the
 -- bonus pass needs it to write the referrer's rows, and a tenant id is a

@@ -891,3 +891,57 @@ async fn the_runtime_reads_the_cluster_columns_of_gate_decisions() {
         .expect_err("no other gate column is granted by V142");
     assert_eq!(code_of(&err), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
 }
+
+/// Boot's check of the operator's grant: a login that holds
+/// `trace_referral_resolver` (here the migrator) can assume it, and one
+/// that was never granted it cannot. Ingest refuses to start with
+/// referrals on in the second case (`referral_resolver_unprovisioned`).
+#[tokio::test]
+async fn only_a_login_granted_the_resolver_can_assume_it() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    assert!(fixture.owner.referral_resolver_assumable().await.unwrap());
+
+    // A NOSUPERUSER login with no grant. It has a password so the check
+    // runs under password authentication too.
+    const LOGIN: &str = "tc_referral_resolver_probe";
+    fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{LOGIN}') THEN
+                     CREATE ROLE {LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{LOGIN}';
+                 END IF;
+             END $$;
+             REVOKE trace_referral_resolver FROM {LOGIN};"
+        ))
+        .await
+        .expect("create the probe login");
+    let mut url = reqwest::Url::parse(&std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").unwrap())
+        .unwrap();
+    url.set_username(LOGIN).unwrap();
+    url.set_password(Some(LOGIN)).unwrap();
+    let probe = PgBackend::new(&DatabaseConfig::from_postgres_url(url.as_str(), 1))
+        .await
+        .expect("probe backend");
+    assert!(!probe.referral_resolver_assumable().await.unwrap());
+
+    // Granted as the runbook says (no inheritance, SET allowed), it can.
+    fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "GRANT trace_referral_resolver TO {LOGIN} WITH INHERIT FALSE, SET TRUE"
+        ))
+        .await
+        .expect("grant the resolver");
+    assert!(probe.referral_resolver_assumable().await.unwrap());
+}

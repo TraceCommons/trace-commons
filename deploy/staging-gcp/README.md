@@ -249,6 +249,24 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    assuming it (an enabled rail that reports `payout_store_failed` after the
    grant above is a missing table privilege).
 
+   **Referral resolver grant (before referrals are on).** Migration V142
+   makes `trace_referral_resolver`, the NOLOGIN role that resolves a referral
+   code across tenants, and grants it to no one. Grant it to `app` the same
+   way, before `TRACE_COMMONS_REFERRAL_PROGRAM_START` is set or
+   `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` leaves `disabled`
+   (`docs/operator/referral-resolver-role.md`):
+
+   ```bash
+   PGPASSWORD="$(gcloud secrets versions access latest --secret tc-staging-db-app-password \
+       --project tracecommons-pilot-2026)" \
+     psql -h 127.0.0.1 -U app -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
+   GRANT trace_referral_resolver TO app WITH INHERIT FALSE, SET TRUE;
+   SQL
+   ```
+
+   Without it, ingest refuses to start with referrals on
+   (`referral_resolver_unprovisioned`).
+
 7. **Verify.**
 
    ```bash

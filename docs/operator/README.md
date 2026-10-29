@@ -49,6 +49,7 @@ the link.
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Sending a native-app user to the browser passkey step-up page (URL contract, origin list) | [`./native-step-up-page.md`](./native-step-up-page.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
+| Granting the referral-resolver DB role to the ingest login | [`./referral-resolver-role.md`](./referral-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
 | Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
