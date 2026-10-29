@@ -328,7 +328,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("outcome", "Outcome"), ("recorded_at", "Recorded at"),
         ("unknown", "Unknown"), ("working", "Working…"),
         ("no_file", "No file selected"), ("cost", "Estimated cost"),
-        ("codex", "Codex rollout"), ("claude_code", "Claude Code trace"), ("trajectory", "Trajectory"),
+        // "Claude", not "Claude Code", in Insights (owner, approved 2026-10-28).
+        ("codex", "Codex rollout"), ("claude_code", "Claude trace"), ("trajectory", "Trajectory"),
         ("metric_sessions", "Traces"), ("metric_events", "Events"),
         ("metric_input_tokens", "Input tokens"), ("metric_output_tokens", "Output tokens"),
         ("metric_tool_calls", "Tool calls"), ("metric_tool_failures", "Reported tool failures"),
@@ -1844,7 +1845,7 @@ mod tests {
             ("analytics_from_counters", "from token counts"),
             (
                 "analytics_claude_sessions_only",
-                "Claude Code traces only: {k} of {n}.",
+                "Claude traces only: {k} of {n}.",
             ),
             ("analytics_see_sessions", "Show {n} traces"),
             ("analytics_goal_cache_share", "Cache share at least {p}%"),

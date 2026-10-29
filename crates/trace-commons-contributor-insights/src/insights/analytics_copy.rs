@@ -91,9 +91,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_subscriptions_title", "Subscription limits"),
     ("analytics_subscriptions_provider_codex", "Codex"),
     ("analytics_subscriptions_provider_claude", "Claude"),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_subscriptions_claude_detail",
-        "Reads your Claude Code sign-in only when you press Refresh. macOS may ask to allow access.",
+        "Reads your Claude sign-in only when you press Refresh. macOS may ask to allow access.",
     ),
     (
         "analytics_subscriptions_refresh_hint",
@@ -103,17 +105,23 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_refresh_login_accessibility",
         "Refresh {harness} usage for {login}",
     ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_subscriptions_claude_expired",
-        "The saved Claude usage token expired. Open Claude Code, then choose Refresh.",
+        "The saved Claude usage token expired. Open Claude, then choose Refresh.",
     ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_subscriptions_claude_auth_missing",
-        "Claude usage credentials aren't available. Open Claude Code, then choose Refresh.",
+        "Claude usage credentials aren't available. Open Claude, then choose Refresh.",
     ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_subscriptions_claude_scope",
-        "This Claude sign-in cannot read usage. Check usage in Claude Code.",
+        "This Claude sign-in cannot read usage. Check usage in Claude.",
     ),
     (
         "analytics_subscriptions_claude_keychain_denied",
@@ -155,9 +163,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     // Switch labels follow CodexBar's "Show ... usage" (2026-10-27).
     ("analytics_subscriptions_setting_codex", "Show Codex usage"),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_subscriptions_setting_claude",
-        "Show Claude Code usage",
+        "Show Claude usage",
     ),
     (
         "analytics_subscriptions_codex_detail",
@@ -377,10 +387,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_series_cache_read", "Cache read"),
     ("analytics_series_cache_write", "Cache write"),
     ("analytics_series_output", "Output"),
-    (
-        "analytics_source_claude_code",
-        "Claude Code · counted per turn",
-    ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    ("analytics_source_claude_code", "Claude · counted per turn"),
     (
         "analytics_source_codex",
         "Codex · total from first to last reading",
@@ -539,9 +548,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_pattern_long_context_headline_other", "{n} turns"),
     ("analytics_from_counters", "from token counts"),
     // 14.
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_claude_sessions_only",
-        "Claude Code traces only: {k} of {n}.",
+        "Claude traces only: {k} of {n}.",
     ),
     ("analytics_see_sessions", "Show {n} traces"),
     // 15. Re-read table (owner decision D8: letters plus extension, never a name).
@@ -657,9 +668,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The sparkline in words, for VoiceOver: its largest turn.
     ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
     // The row at the foot of the feed while the next page is read.
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_sessions_explainer_watched",
-        "Your Claude Code and Codex traces, newest first. Open one to see where its tokens went, label it, or analyze it.",
+        "Your Claude and Codex traces, newest first. Open one to see where its tokens went, label it, or analyze it.",
     ),
     (
         "analytics_sessions_explainer_saved",

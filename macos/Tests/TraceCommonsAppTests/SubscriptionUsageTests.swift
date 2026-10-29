@@ -422,7 +422,9 @@ final class SubscriptionUsageTests: XCTestCase {
             XCTAssertFalse(words.state?.isEmpty ?? true)
         }
         let expired = try XCTUnwrap(copy["analytics_subscriptions_claude_expired"])
-        XCTAssertTrue(expired.contains("Open Claude Code"))
+        // "Claude", not "Claude Code", in usage strings (owner, 2026-10-28).
+        XCTAssertTrue(expired.contains("Open Claude,"))
+        XCTAssertFalse(expired.contains("Claude Code"))
         XCTAssertTrue(expired.contains("Refresh"))
         XCTAssertFalse(expired.lowercased().contains("sign in"))
     }

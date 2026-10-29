@@ -73,7 +73,7 @@ pub(crate) fn schema() -> Value {
         ),
         (
             "subscription_usage_claude_on",
-            "Permit explicit Refresh to read Claude subscription limits with the saved Claude Code sign-in. On by default. No background credential reads, trace upload, or routing change.",
+            "Permit explicit Refresh to read Claude subscription limits with the saved Claude sign-in. On by default. No background credential reads, trace upload, or routing change.",
         ),
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
