@@ -2276,12 +2276,23 @@ mod tests {
         host.apply(false).await;
         assert!(host.finish_stop().await);
         assert_eq!(host.state(), PrivateInferenceState::Off);
-        assert!(
-            tokio::net::TcpListener::bind(("127.0.0.1", port))
+        // Windows can hold the port briefly after the listener is dropped
+        // (CI, 2026-10-29: 50 ms was not always enough), so the bind is
+        // retried for a bounded time rather than once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let released = loop {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
                 .await
-                .is_ok(),
-            "turning it off must release the port"
-        );
+                .is_ok()
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(released, "turning it off must release the port");
     }
 
     /// A proxy that came up with an empty registry serves health and routes
