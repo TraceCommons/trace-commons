@@ -50,6 +50,60 @@ final class InsightsModelTests: XCTestCase {
         XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
         model.close()
     }
+
+    /// A failed read shows the failure line, not blank words or an empty
+    /// store that looks like no snapshots.
+    @MainActor
+    func testAFailedCopyReadSetsTheFailureLine() async {
+        let model = InsightsModel(service: { _ in throw InsightsError.operationFailed })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.error, "insights-operation-failed")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+        XCTAssertNil(model.error)
+    }
+
+    /// A list read answered with another type is a failure, in the core's
+    /// own words once the copy has been read.
+    @MainActor
+    func testAMismatchedListResponseSetsTheCoresFailureLine() async {
+        let model = InsightsModel(service: { _ in
+            let json = "{\"type\":\"copy\",\"copy\":{\"error\":\"Could not read Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.text("error"), "Could not read Insights")
+        XCTAssertEqual(model.error, "Could not read Insights")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+    }
+
+    /// A read that succeeds clears an earlier failure.
+    @MainActor
+    func testASuccessfulReadClearsAnEarlierFailure() async {
+        let recorder = Recorder()
+        let fail = FailOnce()
+        let model = InsightsModel(service: { request in
+            if await fail.next() { throw InsightsError.operationFailed }
+            return try await recorder.call(request)
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertNotNil(model.error)
+        model.close()
+        model.open()
+        await model.loading?.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
+        model.close()
+    }
+}
+
+private actor FailOnce {
+    private var failed = false
+    func next() -> Bool { defer { failed = true }; return !failed }
 }
 
 private actor ResponseGate {

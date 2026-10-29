@@ -140,6 +140,8 @@ struct InsightsView: View {
             GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
+            // A failed copy or snapshot read, on every tab.
+            if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
