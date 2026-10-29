@@ -231,8 +231,9 @@ it explicitly; nothing else in tuning moved the number.
 ### What this means for configuration
 
 One request carries a whole field, so the 30-second adapter default is far too
-low and the 16 MB `MAX_INPUT_BYTES` default is far too high -- a 16 MB field at
-this rate is roughly 78 hours. Both must be set:
+low and the `MAX_INPUT_BYTES` default (the envelope cap: 16 MB until
+2026-10-29, 512 MiB since) is far too high -- a 16 MB field at this rate is
+roughly 78 hours. Both must be set:
 
 ```sh
 TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS=600000        # 10 minutes
