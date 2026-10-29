@@ -41,6 +41,7 @@ use crate::payout_pass::{
     PayoutRecipientOpener,
 };
 use crate::payout_rate::PayoutMode;
+use crate::referral_bonus::ReferralBonusHook;
 
 /// How often each enabled rail's worker runs with no settlement to wake it
 /// (spec section 7, "Retry tick"; proposed, section 12 open item 1).
@@ -261,6 +262,9 @@ pub struct PayoutRailReadiness {
 /// The rails this deployment runs.
 pub struct PayoutRails {
     entries: Vec<Arc<PayoutRailEntry>>,
+    /// The referral bonus work the `near_ai` pass runs after accrual, when
+    /// referral mode is not `disabled`.
+    referral_bonus: Option<Arc<ReferralBonusHook>>,
 }
 
 impl std::fmt::Debug for PayoutRails {
@@ -317,6 +321,7 @@ impl PayoutRails {
             }),
         };
         Ok(Self {
+            referral_bonus: None,
             entries: vec![Arc::new(PayoutRailEntry {
                 rail_id: RailId::near_ai(),
                 mode: near_ai.mode(),
@@ -330,6 +335,21 @@ impl PayoutRails {
 
     pub fn entries(&self) -> impl Iterator<Item = &Arc<PayoutRailEntry>> {
         self.entries.iter()
+    }
+
+    /// Attaches the referral bonus work to the `near_ai` pass. A hook in
+    /// `disabled` mode is not attached.
+    pub fn with_referral_bonus(mut self, hook: Arc<ReferralBonusHook>) -> Self {
+        if hook.mode() != PayoutMode::Disabled {
+            self.referral_bonus = Some(hook);
+        }
+        self
+    }
+
+    /// The referral bonus work, when attached. The referral admin routes
+    /// reach its store through it.
+    pub fn referral_bonus(&self) -> Option<&Arc<ReferralBonusHook>> {
+        self.referral_bonus.as_ref()
     }
 
     /// The rail named `rail_id`; an unknown id is refused, never defaulted.
@@ -420,6 +440,25 @@ impl PayoutRails {
                 },
             });
         }
+        // The referral stream, when attached: `referral_tripped` while it
+        // switched itself to `dry_run` (spec section 7). It sends nothing in
+        // this build, so it is never qualified.
+        if let Some(referral) = &self.referral_bonus {
+            let tripped = referral.tripped() == Some(true);
+            out.push(PayoutRailReadiness {
+                rail_id: crate::referral_bonus::NEAR_AI_REFERRAL_CONTROL_RAIL.to_owned(),
+                mode: if tripped {
+                    PayoutMode::DryRun.as_label()
+                } else {
+                    referral.mode().as_label()
+                },
+                halted: tripped,
+                rate_epoch: None,
+                qualified: false,
+                last_pass: None,
+                reason: tripped.then_some(crate::referral_abuse::REFERRAL_TRIPPED),
+            });
+        }
         out
     }
 
@@ -435,13 +474,18 @@ impl PayoutRails {
             .filter_map(|entry| {
                 let rail = entry.rail.clone()?;
                 let settings = entry.pass_settings()?;
-                let pass = PayoutPass::new(
+                let mut pass = PayoutPass::new(
                     rail,
                     payouts.clone(),
                     corpus.clone(),
                     opener.clone(),
                     settings,
                 );
+                if let Some(referral) = &self.referral_bonus
+                    && referral.rail_id() == entry.rail_id()
+                {
+                    pass = pass.with_referral_bonus(referral.clone());
+                }
                 let runner = Arc::new(EntryPass {
                     pass,
                     entry: entry.clone(),

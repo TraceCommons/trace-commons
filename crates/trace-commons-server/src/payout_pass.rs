@@ -50,6 +50,8 @@ use crate::db::{
 };
 use crate::payout_accrual::accrue_rail;
 use crate::payout_rate::PayoutMode;
+use crate::referral_abuse::hold_holds_referral_stream_only;
+use crate::referral_bonus::ReferralBonusHook;
 
 /// The most write calls (sends and zero reads) one pass makes on a rail,
 /// below `near_ai`'s per-minute quota (#1271 `max_sends_per_minute`),
@@ -268,6 +270,9 @@ pub struct PayoutPass {
     opener: Arc<dyn PayoutRecipientOpener>,
     settings: PayoutPassSettings,
     actor: String,
+    /// The referral bonus work run after accrual in each tenant
+    /// ([`crate::referral_bonus`]); `None` runs none.
+    referral: Option<Arc<ReferralBonusHook>>,
 }
 
 impl PayoutPass {
@@ -286,7 +291,14 @@ impl PayoutPass {
             opener,
             settings,
             actor,
+            referral: None,
         }
+    }
+
+    /// Runs `hook` after accrual in each tenant this pass visits.
+    pub fn with_referral_bonus(mut self, hook: Arc<ReferralBonusHook>) -> Self {
+        self.referral = Some(hook);
+        self
     }
 
     pub fn rail_id(&self) -> &RailId {
@@ -446,6 +458,11 @@ impl PayoutPass {
                 return Ok(());
             }
         }
+        // Step 1b: the referral bonus, written in each referrer's tenant.
+        // Its faults are its own: they never stop this tenant's sends.
+        if let Some(referral) = &self.referral {
+            referral.run_tenant(tenant, self.rail_id()).await;
+        }
         let links = store(
             self.payouts
                 .payout_links(
@@ -541,7 +558,12 @@ impl PayoutPass {
                 .open_payout_hold_labels(tenant, account, self.rail_id())
                 .await,
         )?;
-        Ok((!holds.is_empty()).then_some("payout_account_held"))
+        // A referral-stream hold (`referral_*`) never holds the earned
+        // stream.
+        let held = holds
+            .iter()
+            .any(|label| !hold_holds_referral_stream_only(label));
+        Ok(held.then_some("payout_account_held"))
     }
 
     async fn hold(
@@ -819,7 +841,10 @@ impl PayoutPass {
                 .open_payout_hold_labels(tenant, account, self.rail_id())
                 .await,
         )?;
-        if !rail_holds.is_empty() {
+        if rail_holds
+            .iter()
+            .any(|label| !hold_holds_referral_stream_only(label))
+        {
             report.skip("payout_account_held");
             return Ok(());
         }

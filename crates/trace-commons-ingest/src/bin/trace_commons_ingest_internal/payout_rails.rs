@@ -240,7 +240,7 @@ fn same_digest(left: &str, right: &str) -> bool {
 /// tenant tokens, so a tenant admin is refused like anyone else. Unset
 /// refuses every caller (`payout_control_unconfigured`). Returns the
 /// operator's actor hash for audit rows: a hash of the token's hash.
-fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+pub(crate) fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     let Some(expected) = state.payout_control_token_hash.as_deref() else {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -323,7 +323,7 @@ async fn set_payout_rail_control(
 }
 
 /// The shape a tenant id takes in a hold route's path.
-fn is_tenant_id(value: &str) -> bool {
+pub(crate) fn is_tenant_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -487,7 +487,7 @@ pub(crate) struct PayoutLinkReleaseResponse {
     state: &'static str,
 }
 
-fn is_link_id_hash(value: &str) -> bool {
+pub(crate) fn is_link_id_hash(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -496,7 +496,7 @@ fn is_link_id_hash(value: &str) -> bool {
     })
 }
 
-fn is_reason_label(value: &str) -> bool {
+pub(crate) fn is_reason_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value

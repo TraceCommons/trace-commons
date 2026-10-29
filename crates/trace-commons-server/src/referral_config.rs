@@ -24,6 +24,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+use crate::payout_rate::PayoutMode;
+use crate::referral_abuse::ReferralAbuseSettings;
+
 pub const REFERRAL_PROGRAM_START_ENV: &str = "TRACE_COMMONS_REFERRAL_PROGRAM_START";
 pub const REFERRAL_PROGRAM_END_ENV: &str = "TRACE_COMMONS_REFERRAL_PROGRAM_END";
 pub const REFERRAL_LATE_DAYS_ENV: &str = "TRACE_COMMONS_REFERRAL_LATE_DAYS";
@@ -77,6 +80,51 @@ impl ReferralConfigError {
             Self::EarnDaysBelowPromise => REFERRAL_EARN_DAYS_ENV,
         }
     }
+}
+
+/// `TRACE_COMMONS_REFERRAL_EARN_DAYS`, the one parser both
+/// [`ReferralConfig`] and [`ReferralBonusSettings`] use. Unset is the
+/// promised 92; a value that is present must be a plain decimal from 92 to
+/// [`REFERRAL_EARN_DAYS_MAX`]. An empty value is present and malformed:
+/// a setting that prices money never falls back to its default.
+pub fn earn_days_from(value: Option<&str>) -> Result<u32, ReferralConfigError> {
+    let invalid = ReferralConfigError::Invalid {
+        setting: REFERRAL_EARN_DAYS_ENV,
+    };
+    let Some(value) = value else {
+        return Ok(REFERRAL_EARN_DAYS_FLOOR);
+    };
+    let days = plain_decimal(value)
+        .then(|| value.parse::<u32>().ok())
+        .flatten()
+        .ok_or(invalid)?;
+    if days < REFERRAL_EARN_DAYS_FLOOR {
+        return Err(ReferralConfigError::EarnDaysBelowPromise);
+    }
+    if days > REFERRAL_EARN_DAYS_MAX {
+        return Err(invalid);
+    }
+    Ok(days)
+}
+
+/// `TRACE_COMMONS_REFERRAL_BONUS_BPS`, the one parser both
+/// [`ReferralConfig`] and [`ReferralBonusSettings`] use: unset is 1000, a
+/// present value a plain decimal from 1 to 10000 (empty is malformed).
+pub fn bonus_bps_from(value: Option<&str>) -> Result<u32, ReferralConfigError> {
+    let Some(value) = value else {
+        return Ok(REFERRAL_BONUS_BPS_DEFAULT);
+    };
+    plain_decimal(value)
+        .then(|| value.parse::<u32>().ok())
+        .flatten()
+        .filter(|bps| (1..=REFERRAL_BONUS_BPS_MAX).contains(bps))
+        .ok_or(ReferralConfigError::Invalid {
+            setting: REFERRAL_BONUS_BPS_ENV,
+        })
+}
+
+fn plain_decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The referral program's settings.
@@ -156,21 +204,8 @@ impl ReferralConfig {
                 setting: REFERRAL_LATE_DAYS_ENV,
             });
         }
-        let earn_days = number(REFERRAL_EARN_DAYS_ENV)?.unwrap_or(REFERRAL_EARN_DAYS_FLOOR);
-        if earn_days < REFERRAL_EARN_DAYS_FLOOR {
-            return Err(ReferralConfigError::EarnDaysBelowPromise);
-        }
-        if earn_days > REFERRAL_EARN_DAYS_MAX {
-            return Err(ReferralConfigError::Invalid {
-                setting: REFERRAL_EARN_DAYS_ENV,
-            });
-        }
-        let bonus_bps = number(REFERRAL_BONUS_BPS_ENV)?.unwrap_or(REFERRAL_BONUS_BPS_DEFAULT);
-        if !(1..=REFERRAL_BONUS_BPS_MAX).contains(&bonus_bps) {
-            return Err(ReferralConfigError::Invalid {
-                setting: REFERRAL_BONUS_BPS_ENV,
-            });
-        }
+        let earn_days = earn_days_from(get(REFERRAL_EARN_DAYS_ENV).as_deref())?;
+        let bonus_bps = bonus_bps_from(get(REFERRAL_BONUS_BPS_ENV).as_deref())?;
         Ok(Self {
             program_start,
             program_end,
@@ -194,7 +229,7 @@ impl ReferralConfig {
     /// The end of a referee's earning period. Computed when read, so raising
     /// the setting extends every live referral without a data change.
     pub fn earn_until(&self, referee_account_created_at: DateTime<Utc>) -> DateTime<Utc> {
-        referee_account_created_at + Duration::days(i64::from(self.earn_days))
+        crate::referral_bonus::earn_until(referee_account_created_at, self.earn_days)
     }
 
     /// The last moment an account created at `account_created_at` may apply
@@ -219,6 +254,153 @@ impl ReferralConfig {
             program_end: self.program_end,
             late_days: self.late_days,
         }
+    }
+}
+
+// -- The bonus pass's settings (spec sections 4, 5 and 7) --------------------
+//
+// - `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE`: `disabled` (default) or
+//   `dry_run`; `live` refuses here (`near_ai_referral_config_missing`) because
+//   the referral credential is read by `near_ai_rail_config`.
+// - `TRACE_COMMONS_REFERRAL_BONUS_BPS` and `TRACE_COMMONS_REFERRAL_EARN_DAYS`,
+//   through the same parsers as [`ReferralConfig`].
+// - `TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO`: above zero, default
+//   250 000 000 000 ($250).
+// - The abuse thresholds of [`ReferralAbuseSettings`].
+//
+// Every setting is checked whatever the mode, so a typo is found before the
+// stream is switched on. A refusal names the setting, never its value.
+
+pub const NEAR_AI_REFERRAL_MODE_ENV: &str = "TRACE_COMMONS_NEAR_AI_REFERRAL_MODE";
+pub const REFERRAL_ACCOUNT_CEILING_NANO_ENV: &str = "TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO";
+
+/// R1: "3 months promised but it can be extended."
+pub const REFERRAL_EARN_DAYS_PROMISED: u32 = REFERRAL_EARN_DAYS_FLOOR;
+/// R4: $250 per referrer, in nano-USD.
+pub const REFERRAL_ACCOUNT_CEILING_NANO_DEFAULT: u128 = 250_000_000_000;
+
+/// Why the settings were refused. One safe label each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReferralBonusConfigError {
+    #[error("near_ai_referral_mode_invalid")]
+    ModeInvalid,
+    /// `live` without the referral credential (not read by this build).
+    #[error("near_ai_referral_config_missing")]
+    LiveUnconfigured,
+    #[error("referral_bonus_bps_invalid")]
+    BpsInvalid,
+    #[error("referral_earn_days_below_promise")]
+    EarnDaysBelowPromise,
+    #[error("referral_earn_days_invalid")]
+    EarnDaysInvalid,
+    #[error("referral_account_ceiling_invalid")]
+    CeilingInvalid,
+    #[error("referral_abuse_setting_invalid")]
+    Abuse { setting: &'static str },
+}
+
+impl ReferralBonusConfigError {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ModeInvalid => "near_ai_referral_mode_invalid",
+            Self::LiveUnconfigured => "near_ai_referral_config_missing",
+            Self::BpsInvalid => "referral_bonus_bps_invalid",
+            Self::EarnDaysBelowPromise => "referral_earn_days_below_promise",
+            Self::EarnDaysInvalid => "referral_earn_days_invalid",
+            Self::CeilingInvalid => "referral_account_ceiling_invalid",
+            Self::Abuse { .. } => "referral_abuse_setting_invalid",
+        }
+    }
+
+    /// The setting's name, safe to log beside the label.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::ModeInvalid | Self::LiveUnconfigured => NEAR_AI_REFERRAL_MODE_ENV,
+            Self::BpsInvalid => REFERRAL_BONUS_BPS_ENV,
+            Self::EarnDaysBelowPromise | Self::EarnDaysInvalid => REFERRAL_EARN_DAYS_ENV,
+            Self::CeilingInvalid => REFERRAL_ACCOUNT_CEILING_NANO_ENV,
+            Self::Abuse { setting } => setting,
+        }
+    }
+}
+
+/// The bonus pass's settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralBonusSettings {
+    /// `Disabled` or `DryRun`: the pass writes bonus rows and holds in
+    /// `DryRun` and sends nothing in either.
+    pub mode: PayoutMode,
+    pub bps: u32,
+    pub earn_days: u32,
+    /// Rail atomic units (nano-USD on `near_ai`).
+    pub account_ceiling: u128,
+    pub abuse: ReferralAbuseSettings,
+}
+
+impl Default for ReferralBonusSettings {
+    fn default() -> Self {
+        Self {
+            mode: PayoutMode::Disabled,
+            bps: REFERRAL_BONUS_BPS_DEFAULT,
+            earn_days: REFERRAL_EARN_DAYS_PROMISED,
+            account_ceiling: REFERRAL_ACCOUNT_CEILING_NANO_DEFAULT,
+            abuse: ReferralAbuseSettings::default(),
+        }
+    }
+}
+
+impl ReferralBonusSettings {
+    /// Reads the settings through `get` (`None` for unset). Pure.
+    pub fn from_vars(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, ReferralBonusConfigError> {
+        let mode = PayoutMode::parse(get(NEAR_AI_REFERRAL_MODE_ENV).as_deref())
+            .map_err(|_| ReferralBonusConfigError::ModeInvalid)?;
+        if mode == PayoutMode::Live {
+            return Err(ReferralBonusConfigError::LiveUnconfigured);
+        }
+        let bps = bonus_bps_from(get(REFERRAL_BONUS_BPS_ENV).as_deref())
+            .map_err(|_| ReferralBonusConfigError::BpsInvalid)?;
+        let earn_days = earn_days_from(get(REFERRAL_EARN_DAYS_ENV).as_deref()).map_err(
+            |error| match error {
+                ReferralConfigError::EarnDaysBelowPromise => {
+                    ReferralBonusConfigError::EarnDaysBelowPromise
+                }
+                ReferralConfigError::Invalid { .. } => ReferralBonusConfigError::EarnDaysInvalid,
+            },
+        )?;
+        let account_ceiling = match get(REFERRAL_ACCOUNT_CEILING_NANO_ENV) {
+            None => REFERRAL_ACCOUNT_CEILING_NANO_DEFAULT,
+            Some(value) => plain_decimal(&value)
+                .then(|| value.parse::<u128>().ok())
+                .flatten()
+                .filter(|ceiling| *ceiling > 0)
+                .ok_or(ReferralBonusConfigError::CeilingInvalid)?,
+        };
+        let abuse = ReferralAbuseSettings::from_vars(&get).map_err(|error| {
+            ReferralBonusConfigError::Abuse {
+                setting: error.setting,
+            }
+        })?;
+        Ok(Self {
+            mode,
+            bps,
+            earn_days,
+            account_ceiling,
+            abuse,
+        })
+    }
+
+    /// [`Self::from_vars`] over the process environment. A value that is not
+    /// Unicode is refused as malformed, never read as unset.
+    pub fn from_env() -> Result<Self, ReferralBonusConfigError> {
+        if matches!(
+            std::env::var(NEAR_AI_REFERRAL_MODE_ENV),
+            Err(std::env::VarError::NotUnicode(_))
+        ) {
+            return Err(ReferralBonusConfigError::ModeInvalid);
+        }
+        Self::from_vars(|name| std::env::var(name).ok())
     }
 }
 
@@ -390,5 +572,111 @@ mod tests {
         assert_eq!(policy.program_start, config.program_start);
         assert_eq!(policy.program_end, config.program_end);
         assert_eq!(policy.late_days, 30);
+    }
+}
+
+#[cfg(test)]
+mod bonus_settings_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn with(
+        vars: &[(&'static str, &str)],
+    ) -> Result<ReferralBonusSettings, ReferralBonusConfigError> {
+        let vars: HashMap<&str, String> = vars
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_owned()))
+            .collect();
+        ReferralBonusSettings::from_vars(|name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn unset_is_disabled_with_the_spec_defaults() {
+        let settings = with(&[]).unwrap();
+        assert_eq!(settings, ReferralBonusSettings::default());
+        assert_eq!(settings.mode, PayoutMode::Disabled);
+        assert_eq!(settings.bps, 1_000);
+        assert_eq!(settings.earn_days, 92);
+        assert_eq!(settings.account_ceiling, 250_000_000_000);
+    }
+
+    #[test]
+    fn dry_run_is_accepted_and_live_refuses_without_the_credential() {
+        assert_eq!(
+            with(&[(NEAR_AI_REFERRAL_MODE_ENV, "dry_run")])
+                .unwrap()
+                .mode,
+            PayoutMode::DryRun
+        );
+        let live = with(&[(NEAR_AI_REFERRAL_MODE_ENV, "live")]).unwrap_err();
+        assert_eq!(live.label(), "near_ai_referral_config_missing");
+        assert_eq!(live.setting(), NEAR_AI_REFERRAL_MODE_ENV);
+        let typo = with(&[(NEAR_AI_REFERRAL_MODE_ENV, "dryrun")]).unwrap_err();
+        assert_eq!(typo, ReferralBonusConfigError::ModeInvalid);
+    }
+
+    #[test]
+    fn the_earning_period_can_be_raised_and_never_lowered() {
+        assert_eq!(
+            with(&[(REFERRAL_EARN_DAYS_ENV, "180")]).unwrap().earn_days,
+            180
+        );
+        assert_eq!(
+            with(&[(REFERRAL_EARN_DAYS_ENV, "92")]).unwrap().earn_days,
+            92
+        );
+        assert_eq!(
+            with(&[(REFERRAL_EARN_DAYS_ENV, "91")]).unwrap_err().label(),
+            "referral_earn_days_below_promise"
+        );
+        assert_eq!(
+            with(&[(REFERRAL_EARN_DAYS_ENV, "0")]).unwrap_err().label(),
+            "referral_earn_days_below_promise"
+        );
+        for bad in ["", "-100", "ninety", "100.5", "3651"] {
+            assert_eq!(
+                with(&[(REFERRAL_EARN_DAYS_ENV, bad)]).unwrap_err(),
+                ReferralBonusConfigError::EarnDaysInvalid,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bps_is_one_to_ten_thousand() {
+        assert_eq!(with(&[(REFERRAL_BONUS_BPS_ENV, "1")]).unwrap().bps, 1);
+        assert_eq!(
+            with(&[(REFERRAL_BONUS_BPS_ENV, "10000")]).unwrap().bps,
+            10_000
+        );
+        for bad in ["0", "10001", "", "10%", " 1000"] {
+            assert_eq!(
+                with(&[(REFERRAL_BONUS_BPS_ENV, bad)]).unwrap_err(),
+                ReferralBonusConfigError::BpsInvalid,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ceiling_is_above_zero_and_the_abuse_settings_are_checked() {
+        assert_eq!(
+            with(&[(REFERRAL_ACCOUNT_CEILING_NANO_ENV, "5")])
+                .unwrap()
+                .account_ceiling,
+            5
+        );
+        assert_eq!(
+            with(&[(REFERRAL_ACCOUNT_CEILING_NANO_ENV, "0")]).unwrap_err(),
+            ReferralBonusConfigError::CeilingInvalid
+        );
+        let abuse =
+            with(&[(crate::referral_abuse::REFERRAL_ABUSE_TRIP_CODES_ENV, "many")]).unwrap_err();
+        assert_eq!(abuse.label(), "referral_abuse_setting_invalid");
+        assert_eq!(
+            abuse.setting(),
+            crate::referral_abuse::REFERRAL_ABUSE_TRIP_CODES_ENV
+        );
     }
 }

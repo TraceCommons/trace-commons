@@ -39,6 +39,8 @@ mod payout_link_routes;
 mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/referral_admin.rs"]
+mod referral_admin;
 #[path = "trace_commons_ingest_internal/referral.rs"]
 mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -5051,13 +5053,18 @@ impl AppState {
         let payout_store = db_connections.as_ref().map(|connections| {
             connections.postgres.clone() as Arc<dyn trace_commons_server::db::PayoutStore>
         });
-        let payout_rails = Arc::new(
+        // The referral bonus rides the near_ai pass; `disabled`, the
+        // default, attaches nothing.
+        let payout_rails = Arc::new(referral_admin::with_referral_bonus_from_env(
             payout_rails::payout_rails_from_env(
                 credit_settlement_table.as_deref(),
                 payout_store.as_deref(),
             )
             .await?,
-        );
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.clone()),
+        )?);
         // Any live rail needs the operator's control token, or its kill
         // switch would be unreachable.
         let payout_control_token_hash =
@@ -9517,6 +9524,26 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
             post(payout_rails::payout_link_release_handler),
+        )
+        .route(
+            "/v1/admin/referrals/suspended",
+            get(referral_admin::referral_suspended_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/clear",
+            post(referral_admin::referral_code_clear_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/void",
+            post(referral_admin::referral_code_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/void",
+            post(referral_admin::referral_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/dry-run-report",
+            post(referral_admin::referral_dry_run_report_handler),
         )
         .route(
             "/v1/admin/near-attestation-drill",

@@ -156,6 +156,7 @@ jobs:
         admission_test_payout_pass
         admission_test_referral_rewards
         admission_test_referral_codes
+        admission_test_referral_bonus
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -376,6 +377,15 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test referral_codes_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_codes
+      # The referral bonus pass: a tenth of each referee credit written in the
+      # referrer's tenant once, its window and reversals, the referrer-gone
+      # void, the referral-stream holds, code scoring and suspension, the
+      # dry_run trip, and voids taking back only unsent bonus, as
+      # trace_ingest_runtime.
+      - name: referral_bonus_pg
+        run: cargo test --locked -p trace-commons-server --test referral_bonus_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_bonus
       # The payout rail tables (V132): forced RLS, the one-link-per-state and
       # one-pending-line indexes, NUMERIC(39,0) amounts, and the runtime,
       # enumerator and config-writer grants, each exercised as a real LOGIN
