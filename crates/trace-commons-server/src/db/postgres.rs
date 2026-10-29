@@ -314,6 +314,11 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_device_codes",
     "trace_device_session_renewals",
     "trace_consent_grants",
+    "trace_referral_codes",
+    "trace_referral_attributions",
+    "trace_referral_referees",
+    "trace_referral_bonus_accruals",
+    "trace_referral_audit",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1941,6 +1946,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         141,
         "trace_model_training_consent_grants",
         include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
+    ),
+    // V142: referral codes, who referred whom, the referrer's bonus
+    // accruals, and a referral payout stream on each link.
+    (
+        142,
+        "referral_rewards",
+        include_str!("../../../../migrations/V142__referral_rewards.sql"),
     ),
 ];
 
@@ -8664,6 +8676,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),
@@ -8713,6 +8726,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
             include_str!("../../../../migrations/V135__device_upload_ownership.sql"),

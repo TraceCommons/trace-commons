@@ -154,6 +154,7 @@ jobs:
         admission_test_inference_connection_route
         admission_test_payout_rails
         admission_test_payout_pass
+        admission_test_referral_rewards
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -357,6 +358,14 @@ jobs:
         run: cargo test -p trace-commons-server --test inference_connection_pg
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
+      # V142: the referral tables. Forced RLS, one referrer per account, one
+      # code index across tenants, the self-referral check, the resolver's
+      # narrow cross-tenant read, append-only bonus and audit rows, and the
+      # referral payout stream, each refusal checked as trace_ingest_runtime.
+      - name: referral_rewards_pg
+        run: cargo test --locked -p trace-commons-server --test referral_rewards_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_rewards
       # The payout rail tables (V132): forced RLS, the one-link-per-state and
       # one-pending-line indexes, NUMERIC(39,0) amounts, and the runtime,
       # enumerator and config-writer grants, each exercised as a real LOGIN
