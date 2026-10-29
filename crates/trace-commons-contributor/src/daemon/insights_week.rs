@@ -2036,7 +2036,7 @@ impl CounterPass {
             super::insights_week_work::work_value(
                 &inputs,
                 &folders,
-                &crate::insights::pricing_catalog::production_pricing_catalog(),
+                crate::insights::pricing_catalog::shared_pricing_catalog(),
                 this.week_start,
                 tz,
                 current - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1),
@@ -2508,7 +2508,7 @@ impl CounterPass {
             &routes,
             &charges,
             &labels,
-            &crate::insights::pricing_catalog::production_pricing_catalog(),
+            crate::insights::pricing_catalog::shared_pricing_catalog(),
             now,
         );
         let tables: Vec<serde_json::Value> = answers

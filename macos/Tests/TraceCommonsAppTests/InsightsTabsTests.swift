@@ -5,6 +5,7 @@ import TCBridge
 
 /// Insights' tab bar (product owner, 2026-10-29): Overview, Breakdown and
 /// Benchmarks. Sessions and Analyze are off the bar.
+@MainActor
 final class InsightsTabsTests: XCTestCase {
     func testTheBarShowsOverviewBreakdownAndBenchmarks() {
         XCTAssertEqual(InsightsView.shownTabs, [.overview, .patterns, .benchmarks])

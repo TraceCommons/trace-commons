@@ -26,8 +26,6 @@ struct InsightsUsageCards: View {
     let nearAiCredit: DaemonData.InsightsNearAiCredit?
     /// Claude and Codex tokens on each of the last 7 days.
     var usageByDay: [DaemonData.InsightsUsageDay]?
-    /// The week's spend at API prices per tool (product owner, 2026-10-29).
-    var work: DaemonData.InsightsWork? = nil
     let copy: [String: String]
     /// "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
@@ -97,10 +95,6 @@ struct InsightsUsageCards: View {
             }
             if row.headline == nil {
                 InsightsUsageRow(label: text("analytics_limits_pace"), value: row.pace, warns: row.paceWarns)
-            }
-            if let totals = work?.byTool.first(where: { $0.key == tool }), totals.pricedSessions > 0 {
-                InsightsUsageRow(label: text("analytics_limits_week_value"),
-                                 value: InsightsWorkWords.spend(totals, copy: copy))
             }
             if let banked = row.banked {
                 InsightsUsageRow(label: text("analytics_subscriptions_banked"), value: banked)

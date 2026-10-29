@@ -67,7 +67,19 @@ struct InsightsOverviewTab: View {
                 }
                 InsightsWeekTiles(work: work, credit: creditTile, copy: copy)
                 InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
-                                   work: work, copy: copy, showProjects: showProjects)
+                                   copy: copy, showProjects: showProjects)
+                // Without `work` (feed S, or a daemon that predates it) the
+                // harness cards keep the week's tokens on screen.
+                if work == nil, let overview = model.shown {
+                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        ForEach(overview.sources) { source in
+                            harnessCard(source, overview: overview)
+                        }
+                    }
+                    if overview.sources.isEmpty {
+                        Text(text("analytics_unavailable")).insightsFigure()
+                    }
+                }
                 if let work {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: GlassTokens.Space.cardGap,
                                                  alignment: .top)],
@@ -175,6 +187,61 @@ struct InsightsOverviewTab: View {
         } else {
             label()
         }
+    }
+
+    /// One harness: its tokens and cache share side by side, then, for
+    /// Codex, the note that it records whole-trace totals. Claude's days are
+    /// on Details' Tokens by day (product owner, 2026-10-28).
+    private func harnessCard(_ source: InsightsWeekSource, overview: InsightsWeekOverview) -> some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // The core's line for the harness says how it is counted:
+            // "Claude Code · counted per turn".
+            HStack(spacing: GlassTokens.Space.s5) {
+                InsightsHarnessTile(source: source.source)
+                Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsTitle()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
+                    drillButton("tokens") {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(text("analytics_card_tokens")).insightsEyebrow()
+                            Text(figure(source.tokens)).insightsFigure()
+                            if source.change_permille != nil {
+                                Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
+                            }
+                            if let largest = source.largest_session {
+                                Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
+                                    .insightsCaption()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    drillButton("cache_share") {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(text("analytics_card_cache_share")).insightsEyebrow()
+                            Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
+                                 ?? text("analytics_unavailable")).insightsFigure()
+                            // A bar, not a ring (owner decision D1, open).
+                            InsightsShareBar(permille: source.cache_share?.permille,
+                                             tick: InsightsOverviewWords.bestTick(source))
+                                .padding(.vertical, GlassTokens.Space.s2)
+                            if source.best != nil {
+                                Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if source.source == "codex" {
+                    codexInterval(overview)
+                }
+            }
+            .insightsCardBody()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSection()
     }
 
     /// Codex counts whole traces, not days: a dashed box, never zero bars.

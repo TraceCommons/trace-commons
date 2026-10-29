@@ -25,17 +25,27 @@ final class InsightsBenchmarksModel {
     /// Whether this daemon can answer at all.
     var available: Bool { reader != nil }
 
+    /// The latest request; an earlier reply that lands after it is dropped.
+    private var generation = 0
+
     func load() async {
         guard let reader else { return }
+        generation += 1
+        let mine = generation, asked = weeks
         busy = true
-        defer { busy = false }
         do {
-            answer = try await reader(weeks)
+            let reply = try await reader(asked)
+            guard mine == generation else { return }
+            answer = reply
             failed = false
+        } catch is CancellationError {
+            // Leaving the tab or picking another period is not a failure.
         } catch {
+            guard mine == generation else { return }
             answer = nil
             failed = true
         }
+        if mine == generation { busy = false }
     }
 }
 

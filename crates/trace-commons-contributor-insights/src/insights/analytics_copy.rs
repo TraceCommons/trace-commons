@@ -877,7 +877,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_limits_headline_on_pace",
         "On pace: lasts until reset",
     ),
-    ("analytics_limits_week_value", "This week at API prices"),
     ("analytics_by_model_title", "Spend by model"),
     ("analytics_lines_title", "Lines of code accepted"),
     ("analytics_lines_detail", "+{a} added · −{r} removed"),
@@ -885,7 +884,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_edits_accepted_value", "{p}% · {k} of {n}"),
     (
         "analytics_lines_note",
-        "Edits you rejected or undid are not counted.",
+        "Lines added by edits that were applied, including any later undone.",
     ),
     ("analytics_trends_title", "Trends"),
     ("analytics_trends_spend_per_day", "Spend per day"),

@@ -66,7 +66,7 @@ impl CounterPass {
             &inputs,
             &routes,
             &labels,
-            &crate::insights::pricing_catalog::production_pricing_catalog(),
+            crate::insights::pricing_catalog::shared_pricing_catalog(),
             weeks,
             tool,
             now,

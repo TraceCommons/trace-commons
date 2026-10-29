@@ -148,7 +148,7 @@ struct InsightsView: View {
 
     /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
     /// (product owner, 2026-10-29).
-    static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
 
     /// Home's credit tile, the same figure and word as Home's.
     private var creditTile: (value: String, detail: String)? {

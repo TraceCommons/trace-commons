@@ -37,7 +37,9 @@ enum InsightsWorkWords {
 
     /// Spend at list prices: exact, or the known part as "at least".
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.pricedSessions > 0 else { return text("analytics_unavailable", copy) }
+        guard let totals, totals.pricedSessions > 0 || totals.usdMicrosKnown > 0 else {
+            return text("analytics_unavailable", copy)
+        }
         return InsightsCreditWords.spend(totals.usdPartial ? nil : totals.usdMicrosKnown,
                                          known: totals.usdMicrosKnown, partial: totals.usdPartial, copy: copy)
     }
@@ -71,14 +73,26 @@ enum InsightsWorkWords {
         return (words, share)
     }
 
-    /// "▲ 18% vs last week"; `nil` without last week's figure or with no change.
-    static func change(_ now: Int64, last: Int64?, copy: [String: String]) -> (words: String, up: Bool)? {
-        guard let last, last > 0 else { return nil }
+    /// "▲ 18% vs last week"; `nil` without last week's figure, with no
+    /// change, or when either week's figure is only partly known: a minimum
+    /// compared with an exact sum says nothing about the change.
+    static func change(_ now: Int64, last: Int64?, partial: Bool = false,
+                       copy: [String: String]) -> (words: String, up: Bool)? {
+        guard !partial, let last, last > 0 else { return nil }
         let percent = Int((Double(abs(now - last)) / Double(last) * 100).rounded())
         guard percent > 0 else { return nil }
         let up = now > last
         return (InsightsOverviewWords.fill(text(up ? "analytics_change_up" : "analytics_change_down", copy),
                                            ["p": String(percent)]), up)
+    }
+
+    /// Whether this week's or last week's spend is only partly known.
+    static func spendPartial(_ work: DaemonData.InsightsWork) -> Bool {
+        work.week.usdPartial || work.week.pricedSessions == 0 || work.lastWeek?.usdPartial == true
+    }
+
+    static func linesPartial(_ work: DaemonData.InsightsWork) -> Bool {
+        work.week.linesPartial || work.lastWeek?.linesPartial == true
     }
 
     static func toolName(_ tool: String, copy: [String: String]) -> String {
@@ -104,13 +118,15 @@ enum InsightsWorkWords {
     static func changes(_ work: DaemonData.InsightsWork, tokens: [DaemonData.InsightsWeekChange]?,
                         copy: [String: String]) -> [Change] {
         var changes: [Change] = []
-        func add(_ id: String, _ label: String, _ now: Int64, _ last: Int64?) {
-            if let change = change(now, last: last, copy: copy) {
+        func add(_ id: String, _ label: String, _ now: Int64, _ last: Int64?, partial: Bool) {
+            if let change = change(now, last: last, partial: partial, copy: copy) {
                 changes.append(Change(id: id, label: label, words: change.words, up: change.up))
             }
         }
-        add("spend", text("analytics_tile_spend", copy), work.week.usdMicrosKnown, work.lastWeek?.usdMicrosKnown)
-        add("lines", text("analytics_tile_lines", copy), work.week.linesAddedKnown, work.lastWeek?.linesAddedKnown)
+        add("spend", text("analytics_tile_spend", copy), work.week.usdMicrosKnown, work.lastWeek?.usdMicrosKnown,
+            partial: spendPartial(work))
+        add("lines", text("analytics_tile_lines", copy), work.week.linesAddedKnown, work.lastWeek?.linesAddedKnown,
+            partial: linesPartial(work))
         for change in tokens ?? [] {
             guard let permille = change.permille, permille != 0 else { continue }
             let percent = Int((Double(abs(permille)) / 10).rounded())
@@ -157,10 +173,11 @@ struct InsightsWeekTiles: View {
             if let work {
                 tile(text("analytics_tile_spend"), InsightsWorkWords.spend(work.week, copy: copy),
                      InsightsWorkWords.change(work.week.usdMicrosKnown, last: work.lastWeek?.usdMicrosKnown,
+                                              partial: InsightsWorkWords.spendPartial(work),
                                               copy: copy)?.words ?? text("analytics_tile_api_prices"))
                 tile(text("analytics_tile_lines"), InsightsWorkWords.lines(work.week, copy: copy),
                      InsightsWorkWords.change(work.week.linesAddedKnown, last: work.lastWeek?.linesAddedKnown,
-                                              copy: copy)?.words)
+                                              partial: InsightsWorkWords.linesPartial(work), copy: copy)?.words)
                 if let top = InsightsWorkWords.modelRows(work, copy: copy).first {
                     tile(text("analytics_tile_top_model"), top.label,
                          InsightsOverviewWords.fill(text("analytics_tile_share_of_spend"), ["p": top.percent

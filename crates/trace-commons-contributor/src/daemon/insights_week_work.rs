@@ -299,6 +299,19 @@ fn in_week<'a>(
                 unpriceable: evidence.series.turns.iter().any(|turn| turn.at.is_none()),
             })
         }
+        // No priced series: unpriced in every week its observed interval
+        // reaches, so no such week reads as exact.
+        SessionBody::Codex {
+            observed: Some(observed),
+            ..
+        } => (local_week_start(&observed.first_at, tz) <= week_start
+            && week_start <= local_week_start(&observed.last_at, tz))
+        .then_some(InWeek {
+            accounting: PricingAccounting::Codex,
+            labels: &[],
+            turns: Vec::new(),
+            unpriceable: true,
+        }),
         SessionBody::Codex { .. } | SessionBody::Unknown { .. } => anchored.then_some(InWeek {
             accounting: PricingAccounting::Codex,
             labels: &[],

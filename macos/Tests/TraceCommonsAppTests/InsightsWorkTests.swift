@@ -6,6 +6,7 @@ import TCBridge
 
 /// Overview's week at a glance and Benchmarks (product owner, 2026-10-29),
 /// from the core's own words.
+@MainActor
 final class InsightsWorkTests: XCTestCase {
     private typealias Totals = DaemonData.InsightsWorkTotals
 
@@ -38,6 +39,11 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(InsightsWorkWords.change(88, last: 100, copy: copy)?.words, "▼ 12% vs last week")
         XCTAssertNil(InsightsWorkWords.change(5, last: nil, copy: copy))
         XCTAssertNil(InsightsWorkWords.change(5, last: 0, copy: copy))
+        XCTAssertNil(InsightsWorkWords.change(12, last: 30, partial: true, copy: copy),
+                     "a minimum against an exact sum says nothing about the change")
+        XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 1, pricedSessions: 0, usdMicrosKnown: 40_000_000,
+                                                      usdPartial: true), copy: copy),
+                       "at least $40.00", "a known part shows even when no trace priced in full")
     }
 
     func testModelRowsShareTheKnownSpend() throws {
