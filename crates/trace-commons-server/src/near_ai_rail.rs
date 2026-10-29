@@ -84,6 +84,20 @@ pub fn near_ai_program_for_link(link_id: Uuid) -> String {
     format!("{NEAR_AI_PROGRAM_PREFIX}{}", &digest[..32])
 }
 
+/// The prefix of every link's referral program (referral rewards spec
+/// section 5). Outside the `tc1-` namespace, so an earned-stream reading
+/// never counts a referral record.
+pub const NEAR_AI_REFERRAL_PROGRAM_PREFIX: &str = "tr1-";
+
+/// A link's referral program: `tr1-` plus the first 32 hex of
+/// `sha256("nearai-referral-program-v1:" || link_id)`. Like the earned
+/// program it is opaque, 36 bytes, and new for every link generation, and
+/// it is domain-separated from it, so the two never coincide.
+pub fn near_ai_referral_program_for_link(link_id: Uuid) -> String {
+    let digest = sha256_hex(&format!("nearai-referral-program-v1:{link_id}"));
+    format!("{NEAR_AI_REFERRAL_PROGRAM_PREFIX}{}", &digest[..32])
+}
+
 /// The `metadata.tc` value of a send: `sha256:` of
 /// `"nearai-payout-line-v1:" || line_ref_hash`. Metadata is visible to the
 /// recipient, so it carries one domain-separated hash and nothing else.
@@ -321,6 +335,10 @@ impl PayoutRail for NearAiRail {
         near_ai_program_for_link(link_id)
     }
 
+    fn referral_program_for_link(&self, link_id: Uuid) -> Option<String> {
+        Some(near_ai_referral_program_for_link(link_id))
+    }
+
     /// `capacity`, settled into the generic shape. #1271 reports every
     /// source's maximum as 0 when no sends are left in the current minute,
     /// so a zero `per_send_max` beside `sends_remaining: Some(0)` means
@@ -468,6 +486,48 @@ mod tests {
         assert_ne!(program, near_ai_program_for_link(Uuid::from_u128(1)));
         assert_ne!(program, NEAR_AI_PROBE_PROGRAM);
         assert!(!NEAR_AI_PROBE_PROGRAM.starts_with(NEAR_AI_PROGRAM_PREFIX));
+    }
+
+    #[test]
+    fn the_referral_program_is_tr1_plus_32_hex_and_never_the_earned_one() {
+        let link = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let program = near_ai_referral_program_for_link(link);
+        let digest = hex::encode(Sha256::digest(
+            format!("nearai-referral-program-v1:{link}").as_bytes(),
+        ));
+        assert_eq!(program, format!("tr1-{}", &digest[..32]));
+        assert_eq!(program.len(), 36);
+        assert!(program.starts_with(NEAR_AI_REFERRAL_PROGRAM_PREFIX));
+        assert!(!program.starts_with(NEAR_AI_PROGRAM_PREFIX));
+        // V142's link check: printable, no surrounding whitespace, at most
+        // 100 bytes, and distinct from the link's earned program.
+        assert!(
+            program
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+        );
+        assert_ne!(program, near_ai_program_for_link(link));
+        assert_ne!(&program[4..], &near_ai_program_for_link(link)[4..]);
+        assert_eq!(program, near_ai_referral_program_for_link(link));
+        assert_ne!(
+            program,
+            near_ai_referral_program_for_link(Uuid::from_u128(1))
+        );
+        assert!(!program.contains(&link.simple().to_string()[..8]));
+        assert_ne!(program, NEAR_AI_PROBE_PROGRAM);
+
+        let client =
+            NearAiTransferClient::new(crate::near_ai_transfer::NearAiTransferCredentials {
+                token: secrecy::SecretString::from(format!("oc_{}", "ab".repeat(32))),
+                credential_id: Uuid::from_u128(2),
+                sender_org: Uuid::from_u128(1),
+                source: crate::near_ai_transfer::NearAiCreditSource::Payment,
+            })
+            .unwrap();
+        assert_eq!(
+            NearAiRail::new(client).referral_program_for_link(link),
+            Some(program)
+        );
     }
 
     #[test]
