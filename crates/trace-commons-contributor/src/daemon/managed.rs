@@ -280,7 +280,13 @@ impl ManagedService {
                 Ok(json!(selection))
             }
             "managed_launch_prepare" => {
-                let p: LaunchRequest = parse(request)?;
+                // No folder named: the person's home directory.
+                let params = crate::managed::folder::with_default_cwd(
+                    request.params.clone(),
+                    dirs::home_dir(),
+                )?;
+                let p: LaunchRequest =
+                    serde_json::from_value(params).map_err(|_| ManagedError::InvalidRequest)?;
                 let account = self.launch_account(&p, sign_in)?;
                 let generation = self.accounts.generation(p.tool);
                 if p.expected_generation != generation {
@@ -966,6 +972,43 @@ mod tests {
             call(service, "managed_launch_prepare", launch(tool, cwd), true).unwrap(),
         )
         .unwrap()
+    }
+
+    /// A launch that names no folder runs in the person's home directory,
+    /// resolved by the daemon, and the session records it like a picked one.
+    #[test]
+    fn a_launch_without_a_folder_runs_in_the_home_directory() {
+        let (_home, _store, mut service) = service();
+        let mut params = launch(ToolId::Claude, std::path::Path::new("/unused"));
+        params.as_object_mut().unwrap().remove("cwd");
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_launch_prepare", params, true).unwrap(),
+        )
+        .unwrap();
+        let sessions = service.sessions.views().unwrap();
+        let view = sessions
+            .iter()
+            .find(|v| v.id == prepared.session_id)
+            .unwrap();
+        let home = std::fs::canonicalize(dirs::home_dir().unwrap()).unwrap();
+        assert_eq!(view.cwd, home);
+    }
+
+    /// A folder that is named is still checked: a missing one is refused,
+    /// never swapped for home.
+    #[test]
+    fn a_missing_named_folder_is_refused_not_replaced_by_home() {
+        let (home, _store, mut service) = service();
+        let gone = home.path().join("missing");
+        assert!(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                launch(ToolId::Claude, &gone),
+                true
+            )
+            .is_err()
+        );
     }
 
     /// #1408: the snapshot says whether a coding session has started on

@@ -26,6 +26,18 @@ final class ManagedFolderLaunchTests: XCTestCase {
     }
 
     @MainActor
+    func testLookupWithNoFolderSendsNoCwd() async throws {
+        let daemon = FolderSettingsDaemon()
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        var finished = false
+        model.managedFolderSettings(tool: "codex", cwd: nil) { _ in finished = true }
+        for _ in 0..<300 where !finished { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(daemon.params, ["tool": "codex"])
+    }
+
+    @MainActor
     func testRememberedUnavailableModelCannotBeLaunchedUntilChanged() throws {
         let value = try JSONDecoder().decode(ManagedFolderSettings.self, from: Data(#"{"tool":"codex","model":"removed-model","collect_traces":true,"cli_options":"","remembered":true,"revision":3}"#.utf8))
         var draft = ManagedFolderDraft()

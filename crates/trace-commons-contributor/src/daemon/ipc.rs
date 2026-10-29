@@ -6519,23 +6519,33 @@ fn handle_managed_folder_settings(shared: &DaemonShared, req: &Request) -> Respo
     #[serde(deny_unknown_fields)]
     struct Params {
         tool: crate::managed::ToolId,
-        cwd: std::path::PathBuf,
+        /// Absent means the person's home directory, which the daemon
+        /// resolves; a present value is checked as always.
+        #[serde(default)]
+        cwd: Option<std::path::PathBuf>,
     }
-    let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
+    let Ok(mut params) = serde_json::from_value::<Params>(req.params.clone()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "managed-invalid-request");
     };
+    if params.cwd.is_none() {
+        match crate::managed::folder::default_cwd(dirs::home_dir()) {
+            Ok(home) => params.cwd = Some(home),
+            Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "managed-invalid-request"),
+        }
+    }
+    let cwd = params.cwd.expect("filled above");
     if req.method == "managed_folder_settings_reset" {
         let write = Request {
             id: req.id,
             method: "set_settings".into(),
-            params: serde_json::json!({"managed_folder_settings":[{"tool":params.tool,"cwd":params.cwd,"reset":true}]}),
+            params: serde_json::json!({"managed_folder_settings":[{"tool":params.tool,"cwd":cwd,"reset":true}]}),
         };
         let response = handle_set_settings(shared, &write);
         if response.error.is_some() {
             return response;
         }
     }
-    match super::managed::folder_snapshot(shared, params.tool, &params.cwd) {
+    match super::managed::folder_snapshot(shared, params.tool, &cwd) {
         Ok(value) => Response::ok(req.id, value),
         Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
     }
