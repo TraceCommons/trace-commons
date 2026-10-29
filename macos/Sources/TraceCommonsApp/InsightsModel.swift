@@ -945,8 +945,14 @@ enum InsightsGoalsWords {
     static func line(_ goal: DaemonData.InsightsWeekGoal, copy: [String: String]) -> String {
         InsightsOverviewWords.fill(text("analytics_goal_line", copy), [
             "t": InsightsOverviewWords.figure(goal.tokens.map { UInt64(clamping: $0) }, copy: copy),
-            "span": InsightsSessionsWords.span(goal.timeSecs.map { UInt64(clamping: $0) }, copy: copy),
+            "span": span(goal.timeSecs, copy: copy),
         ])
+    }
+
+    /// Hours and minutes the tool reported; the dash when it reported none.
+    static func span(_ seconds: Int64?, copy: [String: String]) -> String {
+        guard let seconds else { return dash(copy) }
+        return Duration.seconds(max(seconds, 0)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
     }
 }
 

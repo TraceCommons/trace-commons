@@ -198,7 +198,7 @@ struct InsightsPatternsTab: View {
                             HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
                                 Text(InsightsGoalsWords.tool(goal.tool, copy: copy))
                                 Text(InsightsGoalsWords.status(goal.status, copy: copy))
-                                    .foregroundStyle(goal.met ? GlassTokens.Color.statusOn.color : GlassColor.textSecondary)
+                                    .foregroundStyle(goal.met ? GlassTokens.Color.statusOnText.color : GlassColor.textSecondary)
                                 Spacer(minLength: GlassTokens.Space.s4)
                                 Text(InsightsGoalsWords.line(goal, copy: copy)).insightsMono()
                                 if let folder = goal.folder {
