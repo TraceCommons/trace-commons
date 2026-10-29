@@ -879,6 +879,13 @@ pub struct MonitorScreensCopy {
     /// Home's pending-credit count (shown only beside the commons'
     /// statement of what it waits on, D6).
     pub credit_pending: &'static str,
+    /// Home's tile of credit already decided (History's Final), beside
+    /// [`Self::credit_pending_title`] (product owner, 2026-10-29: Home shows
+    /// both received and pending credit). "Credit earned" approved by the
+    /// product owner, 2026-10-29.
+    pub credit_received: &'static str,
+    /// Home's tile of credit still pending, under D6. DRAFT, needs approval.
+    pub credit_pending_title: &'static str,
     /// Home's status-card link to the Traces tab.
     pub open_traces: &'static str,
     /// Quits the app. Approved 2026-10-08 (button rule).
@@ -1465,6 +1472,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         previous: "Previous period",
         next: "Next period",
         credit_pending: "Credit",
+        credit_received: "Credit earned",
+        credit_pending_title: "Credit pending",
         open_traces: "Open Traces",
         quit: "Quit",
         core_unreachable: MONITOR_CORE_UNREACHABLE,

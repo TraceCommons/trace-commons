@@ -83,16 +83,16 @@ final class HomeViewTests: XCTestCase {
     /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
-        // Credit is History's figures (owner, 2026-10-28): Final once any
-        // credit is decided, else the pending figure under the same D6 gate.
+        // Received and pending side by side (owner, 2026-10-29), both
+        // History's figures; pending under the D6 gate.
         XCTAssertTrue(home.contains(
-            "let creditTile = HomeFormat.creditTile(final: freshRollup?.creditFinal, "
-                + "pending: freshRollup?.creditPending, accepted: freshRollup?.allTime?.accepted, "
-                + "credit: freshCredit)"))
+            "let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal, "
+                + "pending: freshRollup?.creditPending, credit: freshCredit)"))
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, "
-                + "detail: signIn ?? creditTile.detail, "
-                + "systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+            "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
+                + "detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
         // columns, under Waiting and Contributed (owner, 2026-10-19), and
         // the NEAR AI balance sits beside Credit.
@@ -214,10 +214,20 @@ final class HomeViewTests: XCTestCase {
 
     /// The tile reads the line from the core's payout-link export, not a
     /// string of this shell's.
+    /// Received is History's Final (0 once History answered with nothing
+    /// decided); pending keeps the D6 dash without the commons' statement.
+    func test_creditTilesShowReceivedAndPending() {
+        let decided = HomeFormat.creditTiles(final: 12.5, pending: 3, credit: nil)
+        XCTAssertEqual(decided.received, HomeFormat.points(12.5))
+        XCTAssertEqual(decided.pending, "—")
+        XCTAssertEqual(HomeFormat.creditTiles(final: nil, pending: 3, credit: nil).received, HomeFormat.points(0))
+        XCTAssertEqual(HomeFormat.creditTiles(final: nil, pending: nil, credit: nil).received, "—")
+    }
+
     func test_creditSignInLineIsThePayoutLinkConstant() throws {
         XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("detail: signIn ?? creditTile.detail"))
+        XCTAssertTrue(home.contains("detail: signIn, systemImage: HomeStatIcons.credit"))
         XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }
