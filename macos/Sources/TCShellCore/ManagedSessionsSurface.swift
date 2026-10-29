@@ -216,15 +216,6 @@ public enum ManagedSurface {
         template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
     }
 
-    /// The line before the folder picker (#1408), with `{tool}` and
-    /// `{destination}` filled; `fallback` (the core's "your terminal") when
-    /// the daemon reports no terminal, as `signInScope` does.
-    public static func folderChoiceLine(_ template: String, tool: String, destination: String?, fallback: String) -> String {
-        template
-            .replacingOccurrences(of: "{tool}", with: tool)
-            .replacingOccurrences(of: "{destination}", with: destination ?? fallback)
-    }
-
     /// `tool_unavailable` ("{tool} wasn't found on this computer.") with the
     /// tool's display name filled in.
     public static func toolUnavailable(_ tool: String, copy: (String) -> String) -> String {
@@ -354,14 +345,16 @@ public extension ManagedSurface {
     /// only where one was chosen: OpenCode's typed model with its
     /// collection opt-in, or a picked model where `offersModelChoice`.
     static func launchParams(
-        account: ManagedAccount, cwd: String, requestID: String, generation: UInt64,
+        account: ManagedAccount, cwd: String?, requestID: String, generation: UInt64,
         model: String?, collectTraces: Bool
     ) -> [String: Any] {
         var params: [String: Any] = [
             "request_id": requestID, "purpose": "coding", "tool": account.tool,
-            "connection": account.connection, "account_id": account.id, "cwd": cwd,
+            "connection": account.connection, "account_id": account.id,
             "expected_generation": generation, "save_default": false,
         ]
+        // No folder: the daemon starts the session in the home folder.
+        if let cwd { params["cwd"] = cwd }
         if account.tool == "opencode" {
             params["model"] = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             params["collect_traces"] = collectTraces

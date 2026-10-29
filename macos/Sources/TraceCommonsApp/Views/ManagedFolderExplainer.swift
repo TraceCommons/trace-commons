@@ -41,16 +41,6 @@ struct ManagedFolderExplainerSheet: View {
         self.onOpenWithSettings = onOpenWithSettings
     }
 
-    /// The line, with the tool's name and the terminal the daemon reports.
-    @MainActor
-    static func line(tool: String, model: AppModel) -> String {
-        ManagedSurface.folderChoiceLine(
-            model.managedText("folder_choice"),
-            tool: ManagedWords.tool(tool, model: model) ?? "",
-            destination: model.managedSnapshot?.capabilities.terminalDestination,
-            fallback: model.managedText("terminal"))
-    }
-
     /// The dialog's Open button: "Open Claude Code".
     @MainActor
     static func openLabel(tool: String, model: AppModel) -> String {
@@ -70,10 +60,6 @@ struct ManagedFolderExplainerSheet: View {
             GlassModalBody {
                 ManagedFolderHandoff(tool: ManagedWords.glassTool(tool))
                     .frame(maxWidth: .infinity)
-                Text(Self.line(tool: tool, model: model))
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 // The folder, once picked (else the home default), the button
                 // that picks it and, once picked, the one that clears it.
                 HStack(spacing: GlassTokens.Space.s4) {

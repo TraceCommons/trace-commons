@@ -14,12 +14,9 @@
 //!   2026-10-28, with `sign_in_title` and `title` "My Private AI sessions".
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
-//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in
-//!   your home folder or one you pick." DRAFT, NEEDS APPROVAL (2026-10-29;
-//!   it said "in the folder you choose" before a folder became optional).
-//!   Shells fill `{destination}` from
-//!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
-//!   never reads "Terminal".
+//! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
+//!   the owner 2026-10-29 (it named the terminal and the folder). Shells
+//!   still replace a `{destination}` if the line ever carries one.
 //! - `open_tool` "Open {tool}" -- the launch dialog's button once a folder
 //!   is chosen (owner, 2026-10-19: "Open Claude"). Shells fill `{tool}`
 //!   with the tool's name.
@@ -63,17 +60,13 @@
 //! with none runs in the person's home folder, which the daemon resolves.
 //! - `pick_folder` "Pick a folder as context" -- the dialog's folder button.
 //!   Approved by the owner 2026-10-29.
-//! - `home_folder` "Your home folder" and `clear_folder` "Use home folder" --
-//!   what the dialog shows while no folder is picked, and the button that
-//!   clears a picked one. DRAFT, NEEDS APPROVAL.
+//! - `home_folder` "Home folder" and `clear_folder` "Use home" --
+//!   what the launch dialog and the Launch sheet show while no folder is
+//!   picked, and the button that clears a picked one. Approved by the owner
+//!   2026-10-29.
 //!
-//! The line in the launch dialog (#1408). Reworded 2026-10-29, DRAFT, NEEDS
-//! APPROVAL (it said "Choose a folder for {tool} to work in."):
-//! - `folder_choice` "{tool} opens in {destination}, in your home folder
-//!   unless you pick one." Shells fill `{tool}` with the tool's name key and
-//!   `{destination}` from `capabilities.terminal_destination`, as for
-//!   `sign_in_scope`. Its title is the Start button's own label, and its
-//!   buttons are `cancel` and `open_tool`; its folder button is `pick_folder`.
+//! `folder_choice` (#1408) is gone: the launch dialog no longer explains the
+//! folder choice (owner, 2026-10-29: "way too verbose"), so no shell reads it.
 //!
 //! Choosing the model of a NEAR AI session. Proposed 2026-10-16, not yet
 //! approved:
@@ -178,9 +171,8 @@ pub fn copy() -> serde_json::Value {
             "project_placeholder": "No folder chosen",
             "choose_folder": "Choose folder",
             "pick_folder": "Pick a folder as context",
-            "home_folder": "Your home folder",
-            "clear_folder": "Use home folder",
-            "folder_choice": "{tool} opens in {destination}, in your home folder unless you pick one.",
+            "home_folder": "Home folder",
+            "clear_folder": "Use home",
             "launch_scope": "Opens in {destination}.",
             "launch_short": "Launch",
             "terminal": "your terminal",
@@ -209,7 +201,7 @@ pub fn copy() -> serde_json::Value {
             "guide_step_start": "Start Claude Code, Codex or OpenCode below.",
             "guide_step_use": "Work as usual. Calls go through Private AI and use your credit.",
             "sign_in_title": "Start a Private AI session",
-            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in your home folder or one you pick.",
+            "sign_in_scope": "Uses your NEAR AI sign-in.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
@@ -246,11 +238,12 @@ mod tests {
 
     /// #1408: the line before the folder picker, as approved 2026-10-14.
     #[test]
-    fn the_folder_choice_line_has_its_words() {
-        assert_eq!(
-            copy()["folder_choice"],
-            "{tool} opens in {destination}, in your home folder unless you pick one."
-        );
+    fn the_folder_choice_line_is_gone_and_the_folder_words_are_short() {
+        let copy = copy();
+        assert!(copy.get("folder_choice").is_none());
+        assert_eq!(copy["pick_folder"], "Pick a folder as context");
+        assert_eq!(copy["home_folder"], "Home folder");
+        assert_eq!(copy["clear_folder"], "Use home");
     }
 
     /// The NEAR AI sign-in launch reads these words, exactly as proposed.
@@ -261,10 +254,7 @@ mod tests {
         assert_eq!(copy["start_codex"], "Start Codex");
         assert_eq!(copy["start_opencode"], "Start OpenCode");
         assert_eq!(copy["sign_in_title"], "Start a Private AI session");
-        assert_eq!(
-            copy["sign_in_scope"],
-            "Uses your NEAR AI sign-in. Runs in {destination}, in your home folder or one you pick."
-        );
+        assert_eq!(copy["sign_in_scope"], "Uses your NEAR AI sign-in.");
         assert_eq!(
             copy["sign_in_needed"],
             "Sign in to NEAR AI to start a session."

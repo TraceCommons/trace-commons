@@ -161,10 +161,10 @@ public sealed class ManagedSessionsTests
     [Fact]
     public void SignInSurfacePicksCoreKeys()
     {
-        const string line = "Uses your NEAR AI sign-in. Runs in {destination}, in your home folder or one you pick.";
-        Assert.Equal("Uses your NEAR AI sign-in. Runs in Windows Terminal, in your home folder or one you pick.",
+        const string line = "Uses your NEAR AI sign-in.";
+        Assert.Equal("Uses your NEAR AI sign-in.",
             ManagedSignIn.Scope(line, "Windows Terminal", "your terminal"));
-        Assert.Equal("Uses your NEAR AI sign-in. Runs in your terminal, in your home folder or one you pick.",
+        Assert.Equal("Uses your NEAR AI sign-in.",
             ManagedSignIn.Scope(line, null, "your terminal"));
         Assert.Equal("start_claude", ManagedSignIn.StartKey("claude"));
         Assert.Equal("start_codex", ManagedSignIn.StartKey("codex"));
