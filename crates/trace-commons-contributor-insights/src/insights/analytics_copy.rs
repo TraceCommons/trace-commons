@@ -67,8 +67,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "folder",
     // The weekday picked on "Tokens by day".
     "day",
-    // Overview and Benchmarks (product owner, 2026-10-29): a limit
-    // window's name, and the two models a tip compares.
+    // Overview (product owner, 2026-10-29): a limit window's name, and
+    // the two folders the get-started card names.
     "window",
     "first",
     "second",
@@ -853,10 +853,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_ledger_feed", "Count Private AI tokens"),
     // 24. The Models card left Insights (product owner, 2026-10-28) with
     // its words; `insights_model_answers` still answers over the socket.
-    // 25. DRAFT, NEEDS APPROVAL: Overview, Breakdown and Benchmarks
-    // (mockups approved by the product owner, 2026-10-29). Money is a
-    // `{x}` hole, always at API list prices for Claude and Codex.
-    ("analytics_tab_benchmarks", "Benchmarks"),
+    // 25. DRAFT, NEEDS APPROVAL: Overview and Breakdown (mockups
+    // approved by the product owner, 2026-10-29). Money is a `{x}` hole,
+    // always at API list prices for Claude and Codex. The kinds of work
+    // (`analytics_bench_cat_*`) name the daemon's task keys on Submitted.
     ("analytics_tile_spend", "AI spend"),
     ("analytics_tile_top_model", "Top model"),
     ("analytics_tile_credits", "Credits earned"),
@@ -881,30 +881,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_cache_savings", "Cache savings"),
     ("analytics_cache_savings_value", "about {x} saved"),
     ("analytics_column_spend", "Spend"),
-    ("analytics_bench_intro", "From {n} of your own traces"),
-    ("analytics_bench_quality", "Quality"),
-    ("analytics_bench_value", "Value"),
-    ("analytics_bench_speed", "Speed"),
-    ("analytics_bench_quality_detail", "Edits you kept"),
-    (
-        "analytics_bench_value_detail",
-        "Cost per trace at API prices",
-    ),
-    ("analytics_bench_speed_detail", "Time per trace"),
-    (
-        "analytics_bench_min",
-        "Models are compared only where each has {n} or more traces.",
-    ),
-    ("analytics_bench_weeks", "Last {n} weeks"),
-    ("analytics_bench_traces", "{n} traces"),
-    ("analytics_bench_kept", "{p}% kept"),
-    ("analytics_bench_per_trace", "{x} per trace"),
-    ("analytics_bench_next", "Next: {label}, {x}"),
-    ("analytics_bench_not_enough", "Not enough traces yet"),
-    (
-        "analytics_bench_not_enough_detail",
-        "Models are compared here once two have {n} traces each.",
-    ),
     ("analytics_bench_cat_bug_fix", "Fix a bug"),
     ("analytics_bench_cat_feature", "Build a feature"),
     ("analytics_bench_cat_refactor", "Refactor"),
@@ -913,22 +889,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_bench_cat_understand", "Understand code"),
     ("analytics_bench_cat_review", "Code review"),
     ("analytics_bench_cat_setup", "Setup & dependencies"),
-    (
-        "analytics_bench_tip_test_first",
-        "Fixes where a failing test ran first finished {p}% faster. {k} of your {n} fixes did not start that way.",
-    ),
-    (
-        "analytics_bench_tip_cheaper",
-        "{first} kept about as many edits as {second} at {p}% of the cost.",
-    ),
-    (
-        "analytics_bench_tip_fewer_undos",
-        "{first} had {x}× fewer edits undone than {second}.",
-    ),
-    ("analytics_bench_empty", "No traces to compare yet"),
     // 26. DRAFT, NEEDS APPROVAL: the get-started card and the sample data
-    // under it (product owner, 2026-10-29), on Overview, Breakdown and
-    // Benchmarks while Insights has no trace of the person's own. The
+    // under it (product owner, 2026-10-29), on Overview and Breakdown
+    // while Insights has no trace of the person's own. The
     // steps name the app's own screens: Traces' folder list and its rules
     // (Ask / Automatic, `project_copy`), and Settings. `{first}` and
     // `{second}` are the two folders the app watches; "30 minutes" is the
@@ -965,5 +928,107 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_sample_banner_detail",
         "This is what Insights shows once your traces come in.",
+    ),
+    // 27. DRAFT, NEEDS APPROVAL: the Submitted tab (product owner,
+    // 2026-10-29: "analyse submitted work, not even admitted work, all the
+    // traces submitted"), from `insights_submitted`. Credit is in points,
+    // as History shows it; money is a `{x}` hole at API list prices. Why a
+    // trace earned nothing is History's own words
+    // (`history_copy::CREDIT_OUTCOME_LABELS`), not repeated here.
+    ("analytics_tab_submitted", "Submitted"),
+    ("analytics_sub_intro", "From the {n} traces you sent"),
+    ("analytics_sub_intro_one", "From the one trace you sent"),
+    (
+        "analytics_sub_scope",
+        "Every trace you sent, whatever became of it: accepted, held, rejected, withdrawn or still waiting.",
+    ),
+    ("analytics_sub_period", "Period"),
+    ("analytics_sub_period_weeks", "Last {n} weeks"),
+    ("analytics_sub_period_all", "All time"),
+    ("analytics_sub_none_in_period", "No traces sent in this period"),
+    ("analytics_sub_tile_submitted", "Submitted"),
+    ("analytics_sub_tile_submitted_note", "Traces you sent"),
+    ("analytics_sub_tile_accepted", "Accepted"),
+    ("analytics_sub_tile_accepted_rate", "{p}% of traces sent"),
+    ("analytics_sub_tile_credit", "Credit received"),
+    ("analytics_sub_tile_credit_pending", "{n} pending"),
+    ("analytics_sub_tile_top_model", "Top earning model"),
+    ("analytics_sub_tile_top_model_note", "{n} credit received"),
+    ("analytics_sub_tile_top_model_none", "No credit received yet"),
+    ("analytics_sub_traces", "{n} traces"),
+    ("analytics_sub_traces_one", "1 trace"),
+    ("analytics_sub_reasons_title", "Why traces earned nothing"),
+    (
+        "analytics_sub_reasons_open_history",
+        "Add Train consent in History",
+    ),
+    ("analytics_sub_models_title", "By model"),
+    ("analytics_sub_col_model", "Model"),
+    ("analytics_sub_col_submitted", "Submitted"),
+    ("analytics_sub_col_accepted", "Accepted"),
+    ("analytics_sub_col_credit", "Credit"),
+    ("analytics_sub_col_spend", "Spend at API prices"),
+    ("analytics_sub_col_kept", "Edits kept"),
+    ("analytics_sub_kept_of", "{k} of {n}"),
+    (
+        "analytics_sub_models_left_out",
+        "Not in this table: {n} traces with no single model on record.",
+    ),
+    ("analytics_sub_tasks_title", "By kind of work"),
+    ("analytics_sub_task_unknown", "Kind not recorded"),
+    ("analytics_sub_accepted_of", "{k} of {n} accepted"),
+    ("analytics_sub_code_title", "Code in your traces"),
+    ("analytics_sub_files", "Files changed"),
+    ("analytics_sub_files_source", "Source"),
+    ("analytics_sub_files_test", "Tests"),
+    ("analytics_sub_files_doc", "Docs"),
+    ("analytics_sub_files_config", "Config"),
+    ("analytics_sub_edits", "Edits"),
+    ("analytics_sub_edits_kept", "Kept"),
+    ("analytics_sub_edits_undone", "Undone"),
+    ("analytics_sub_edits_denied", "Declined"),
+    ("analytics_sub_weeks_title", "Over time"),
+    ("analytics_sub_projects_title", "By project"),
+    ("analytics_sub_col_project", "Project"),
+    ("analytics_sub_list_title", "Your traces"),
+    ("analytics_sub_col_date", "Date"),
+    ("analytics_sub_col_task", "Kind of work"),
+    ("analytics_sub_col_status", "Status"),
+    ("analytics_sub_row_pending", "{n} pending"),
+    ("analytics_sub_show_all", "Show all {n}"),
+    ("analytics_sub_show_fewer", "Show fewer"),
+    (
+        "analytics_sub_list_capped",
+        "The newest {k} of {n} traces are listed.",
+    ),
+    // The get-started card on Submitted while nothing has been sent: the
+    // steps lead to the first trace sent. "30 minutes" is the daemon's
+    // default quiet time before a finished trace is sent.
+    (
+        "analytics_sub_start_title",
+        "Send your first trace and see what it earns",
+    ),
+    (
+        "analytics_sub_start_why",
+        "Every trace you send shows up here, accepted or not: the credit it earned, the model behind it and what it cost at API prices. One trace is enough to fill this page in.",
+    ),
+    ("analytics_sub_start_step_folder", "Choose a folder to share"),
+    (
+        "analytics_sub_start_step_folder_detail",
+        "In Traces, pick a folder you work in and set its rule to Ask or Automatic.",
+    ),
+    ("analytics_sub_start_step_send", "Send a trace"),
+    (
+        "analytics_sub_start_step_send_detail",
+        "With Ask, you look over each finished trace and send it. With Automatic, a finished trace is sent after about 30 minutes without activity.",
+    ),
+    ("analytics_sub_start_step_see", "See what it earned"),
+    (
+        "analytics_sub_start_step_see_detail",
+        "This tab shows whether each trace was accepted, the credit it earned, and why any earned nothing.",
+    ),
+    (
+        "analytics_sub_sample_banner_detail",
+        "This is what Submitted shows once you send your first trace.",
     ),
 ];
