@@ -4361,6 +4361,8 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
+mod benchmarks;
+
 #[cfg(test)]
 mod tests {
     use super::*;

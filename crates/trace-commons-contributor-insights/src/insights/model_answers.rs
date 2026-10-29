@@ -311,7 +311,7 @@ impl ModelRoute {
     /// Sessions in these categories are compared in the rejection and time
     /// questions; a label routed any other way may not name the model that
     /// served it.
-    fn compared(self) -> bool {
+    pub(crate) fn compared(self) -> bool {
         matches!(
             self,
             ModelRoute::Unobserved | ModelRoute::Outside | ModelRoute::RoutedVerified
@@ -321,7 +321,7 @@ impl ModelRoute {
     /// The cost question list-prices sessions with no route tally only:
     /// list prices do not describe a routed session, and what NEAR AI
     /// charged for one is its own figure (`NearAiChargeFigure`).
-    fn priced_at_list(self) -> bool {
+    pub(crate) fn priced_at_list(self) -> bool {
         self == ModelRoute::Unobserved
     }
 }
@@ -329,11 +329,11 @@ impl ModelRoute {
 /// The majority model's own counts, summed over every declared label that
 /// normalizes to it. `None` is unknown, never zero.
 #[derive(Debug, Clone, Copy)]
-struct OwnCounts {
-    edits: Option<u32>,
-    denied: Option<u32>,
-    undone: Option<u32>,
-    interrupted: Option<u32>,
+pub(crate) struct OwnCounts {
+    pub(crate) edits: Option<u32>,
+    pub(crate) denied: Option<u32>,
+    pub(crate) undone: Option<u32>,
+    pub(crate) interrupted: Option<u32>,
 }
 
 /// A session in the window with facts, not the reviewer's, with edits.
@@ -399,7 +399,7 @@ fn add(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 
 /// The session's latest dated turn, or its `placed_at` when no turn is
 /// dated.
-fn latest_at(session: &SessionInput) -> Option<DateTime<Utc>> {
+pub(crate) fn latest_at(session: &SessionInput) -> Option<DateTime<Utc>> {
     let turns = match &session.body {
         SessionBody::Claude { series, .. } => Some(&series.turns),
         SessionBody::Codex {
@@ -419,7 +419,7 @@ fn latest_at(session: &SessionInput) -> Option<DateTime<Utc>> {
     from_turns.max(observed).or(session.placed_at)
 }
 
-fn own_counts(models: &[ModelFacts], labels: &[String], majority: &str) -> OwnCounts {
+pub(crate) fn own_counts(models: &[ModelFacts], labels: &[String], majority: &str) -> OwnCounts {
     let mut own: Option<OwnCounts> = None;
     for model in models {
         let label = labels
@@ -733,7 +733,7 @@ fn saturating_len(len: usize) -> u32 {
 }
 
 /// `num / den` in permille, rounded half-up once. `None` when `den` is zero.
-fn permille(num: u64, den: u64) -> Option<u32> {
+pub(crate) fn permille(num: u64, den: u64) -> Option<u32> {
     if den == 0 {
         return None;
     }
@@ -743,7 +743,7 @@ fn permille(num: u64, den: u64) -> Option<u32> {
 
 /// The median; of an even count, the two middle values' mean rounded
 /// half-up. `None` when empty.
-fn median(values: &mut [u64]) -> Option<u64> {
+pub(crate) fn median(values: &mut [u64]) -> Option<u64> {
     values.sort_unstable();
     let len = values.len();
     let upper = *values.get(len / 2)?;
