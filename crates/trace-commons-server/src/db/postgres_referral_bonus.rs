@@ -59,7 +59,9 @@ fn parse_floor_zero(value: &str) -> Result<u128, DatabaseError> {
     parse_units(value)
 }
 
-async fn lock_account(
+/// The per-account lock every write that changes a referrer's referral owed
+/// or sent takes: bonus rows, voids, and the referral stream's line insert.
+pub(super) async fn lock_account(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     account: Uuid,
@@ -116,7 +118,7 @@ fn mirror_from_row(row: &tokio_postgres::Row) -> RefereeMirror {
 }
 
 /// The account's referral stream on `rail`, inside `tx`.
-async fn owed_on_tx(
+pub(super) async fn owed_on_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     account: Uuid,

@@ -106,6 +106,10 @@ const PAYOUT_OWED_INCONSISTENT: &str = "payout_owed_inconsistent";
 pub const REFERRAL_HOLD_PREFIX: &str = "referral_";
 /// The referrer's referral owed exceeds the referral ceiling.
 pub const REFERRAL_OVER_CEILING: &str = "referral_over_ceiling";
+/// A skip, never a hold: what is owed fell (a void, a reversal) between the
+/// pass's read and its line insert, so the line was not written. The next
+/// pass reads the new amount.
+pub const REFERRAL_OWED_CHANGED: &str = "referral_owed_changed";
 pub const REFERRAL_PROGRAM_TOTAL_MISMATCH: &str = "referral_program_total_mismatch";
 pub const REFERRAL_RECOVERY_UNMATCHED: &str = "referral_recovery_unmatched";
 pub const REFERRAL_RECEIPT_UNRECORDED: &str = "referral_receipt_unrecorded";
@@ -1680,6 +1684,10 @@ impl PayoutPass {
             }
             PendingPayoutLineInsert::LinkNotActive => {
                 report.skip("payout_link_not_active");
+                return Ok(());
+            }
+            PendingPayoutLineInsert::ReferralOwedChanged => {
+                report.skip(REFERRAL_OWED_CHANGED);
                 return Ok(());
             }
             PendingPayoutLineInsert::ReferralProgramMismatch => {

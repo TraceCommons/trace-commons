@@ -219,6 +219,13 @@ the referral admin routes (section 6).
   links)`, capped per send by the referral credential's
   `max_amount_per_transfer`, where `owed_referral = sum(bonus_units)` of the
   account's bonus rows on the rail.
+- The pass prices a line from a read made before its rail call, and an
+  operator void can commit in between. So a referral line's insert takes
+  the same per-account lock (`referral-bonus-v1:`) as bonus writes and
+  voids, and, under it, refuses a line whose delta is more than
+  `owed_referral` less every confirmed or pending referral delta. Nothing
+  is written, the pass counts `referral_owed_changed`, and the next pass
+  prices from the new amount.
 - Sends use a dedicated credential, `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL`,
   whose `max_total_amount` is the program's lifetime budget (default $2,500),
   enforced by cloud-api.

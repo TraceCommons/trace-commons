@@ -3466,6 +3466,11 @@ pub enum PendingPayoutLineInsert {
     /// A referral line names a program other than the referral program the
     /// link already carries; nothing changed.
     ReferralProgramMismatch,
+    /// A referral line's delta is more than the referrer's referral owed
+    /// less what is confirmed or pending, read under the account lock a
+    /// void takes: owed fell since the pass priced the line. Nothing
+    /// changed.
+    ReferralOwedChanged,
 }
 
 /// A stored line. `Debug` redacts the account.

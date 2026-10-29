@@ -813,6 +813,10 @@ impl PayoutStore for PgBackend {
         }
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        if line.stream == PayoutStream::Referral {
+            // First, so a void and this insert lock in one order.
+            super::postgres_referral_bonus::lock_account(&tx, tenant, line.account_id).await?;
+        }
         if let Some(program) = line.referral_program.as_deref() {
             // FOR UPDATE: the program is set once, under the link row's lock,
             // in the same transaction as the line it was set for.
@@ -844,6 +848,35 @@ impl PayoutStore for PgBackend {
                     )
                     .await?;
                 }
+            }
+        }
+        if line.stream == PayoutStream::Referral {
+            let pending: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_payout_lines
+                                     WHERE tenant_id = $1 AND link_id = $2
+                                       AND stream = 'referral' AND state = 'pending')",
+                    &[&tenant, &line.link_id],
+                )
+                .await?
+                .get(0);
+            if pending {
+                return Ok(PendingPayoutLineInsert::LinkHasPendingLine);
+            }
+            // The pass priced this line from a read of what is owed made
+            // before its rail call. A void (or a reversal) that committed
+            // since took back only what was unsent then, so re-read owed and
+            // sent under the account lock those writes take, and write
+            // nothing that would send more than is owed now.
+            let owed = super::postgres_referral_bonus::owed_on_tx(
+                &tx,
+                tenant,
+                line.account_id,
+                line.rail_id.as_str(),
+            )
+            .await?;
+            if line.delta.get() > owed.unsent() {
+                return Ok(PendingPayoutLineInsert::ReferralOwedChanged);
             }
         }
         // Only onto the account's active link on the line's rail: never a

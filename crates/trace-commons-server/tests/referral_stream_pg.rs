@@ -44,7 +44,7 @@ use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     Database, PayoutLineWrite, PayoutLink, PayoutLinkClose, PayoutLinkInsert, PayoutLinkState,
     PayoutLinkWrite, PayoutRateEpochRecord, PayoutStore, PayoutStream, PendingPayoutLineInsert,
-    SealedRecipient,
+    ReferralBonusStore, SealedRecipient,
 };
 use trace_commons_server::near_ai_rail::{
     NEAR_AI_PROGRAM_PREFIX, NEAR_AI_REFERRAL_PROGRAM_PREFIX, near_ai_receipt_hash,
@@ -52,7 +52,7 @@ use trace_commons_server::near_ai_rail::{
 };
 use trace_commons_server::payout_pass::{
     PayoutPass, PayoutPassOutcome, PayoutPassReport, PayoutPassSettings, PayoutRecipientOpener,
-    REFERRAL_OVER_CEILING, ReferralStreamSettings,
+    REFERRAL_OVER_CEILING, REFERRAL_OWED_CHANGED, ReferralStreamSettings,
 };
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::referral_bonus::near_ai_referral_control_rail;
@@ -653,6 +653,155 @@ async fn earned_and_referral_sends_are_independent() {
     // Nothing more on a rerun.
     completed(&rails.live(&fixture, &opener).run_once().await);
     assert_eq!(rails.mock.transfers().len(), 4);
+}
+
+/// A referral rail that, on its first `read_total` -- after the pass read
+/// what is owed and before it writes the line -- voids one referee, as an
+/// operator void route running mid-pass would.
+struct VoidingRail {
+    inner: Arc<dyn PayoutRail>,
+    store: Arc<PgBackend>,
+    tenant: String,
+    referee_ref_hash: String,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl PayoutRail for VoidingRail {
+    fn descriptor(&self) -> &trace_commons_gate_api::RailDescriptor {
+        self.inner.descriptor()
+    }
+    fn adapter_identity(&self) -> &str {
+        self.inner.adapter_identity()
+    }
+    fn production_qualified(&self) -> bool {
+        self.inner.production_qualified()
+    }
+    fn program_for_link(&self, link_id: Uuid) -> String {
+        self.inner.program_for_link(link_id)
+    }
+    fn referral_program_for_link(&self, link_id: Uuid) -> Option<String> {
+        self.inner.referral_program_for_link(link_id)
+    }
+    async fn preflight(
+        &self,
+    ) -> Result<trace_commons_gate_api::RailCapacity, trace_commons_gate_api::RailRefusal> {
+        self.inner.preflight().await
+    }
+    async fn read_total(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<AtomicUnits, trace_commons_gate_api::RailRefusal> {
+        if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let voided = self
+                .store
+                .void_referral_referee(
+                    &self.tenant,
+                    &self.referee_ref_hash,
+                    "operator_void",
+                    &near_ai(),
+                    ACTOR,
+                )
+                .await
+                .unwrap()
+                .expect("the referee is voided");
+            assert_eq!(voided.taken_back, 500);
+        }
+        self.inner.read_total(recipient, program).await
+    }
+    async fn send(
+        &self,
+        line: &trace_commons_gate_api::RailLine<'_>,
+    ) -> Result<trace_commons_gate_api::SendOutcome, trace_commons_gate_api::RailRefusal> {
+        self.inner.send(line).await
+    }
+    async fn find_receipt(
+        &self,
+        line: &trace_commons_gate_api::RailLine<'_>,
+        exclude: &[String],
+    ) -> Result<trace_commons_gate_api::ReceiptLookup, trace_commons_gate_api::RailRefusal> {
+        self.inner.find_receipt(line, exclude).await
+    }
+    async fn history(
+        &self,
+        recipient: &RecipientRef,
+        program: &str,
+    ) -> Result<Vec<trace_commons_gate_api::RailHistoryEntry>, trace_commons_gate_api::RailRefusal>
+    {
+        self.inner.history(recipient, program).await
+    }
+    async fn probe_recipient(
+        &self,
+        recipient: &RecipientRef,
+    ) -> Result<(), trace_commons_gate_api::RailRefusal> {
+        self.inner.probe_recipient(recipient).await
+    }
+}
+
+/// A void that commits between the pass's read of what is owed and its
+/// line insert takes the bonus back; the line must not then send it. The
+/// insert re-checks owed under the account lock the void takes.
+#[tokio::test]
+async fn a_void_during_the_pass_is_never_sent() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let rails = Rails::start().await;
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    let account = accounts[0];
+    let org = recipient_org(1);
+    let referee_ref = referee(&fixture, &tenant, account).await;
+    bonus(&fixture, &tenant, account, &referee_ref, 500).await;
+    link(
+        &fixture,
+        &tenant,
+        account,
+        rails.earned.as_ref(),
+        &opener,
+        org,
+        PayoutLinkState::Active,
+    )
+    .await;
+
+    let voiding: Arc<dyn PayoutRail> = Arc::new(VoidingRail {
+        inner: rails.referral.clone(),
+        store: fixture.runtime.clone(),
+        tenant: tenant.clone(),
+        referee_ref_hash: referee_ref.clone(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    let pass = PayoutPass::new(
+        rails.earned.clone(),
+        fixture.runtime.clone() as Arc<dyn PayoutStore>,
+        fixture.runtime.clone() as Arc<dyn Database>,
+        opener.clone() as Arc<dyn PayoutRecipientOpener>,
+        settings(PayoutMode::Live),
+    )
+    .with_referral_stream(Some(voiding), referral_settings(PayoutMode::Live));
+    let report = pass.run_once().await;
+    completed(&report);
+    assert_eq!(report.referral_sent, 0, "{report:?}");
+    assert_eq!(
+        report.skipped.get(REFERRAL_OWED_CHANGED),
+        Some(&1),
+        "{report:?}"
+    );
+    assert!(rails.sent(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX).is_empty());
+    assert!(
+        lines(&fixture, &tenant)
+            .await
+            .iter()
+            .all(|line| line.stream != "referral"),
+        "no referral line was written"
+    );
+
+    // The next pass reads the void: nothing owed, nothing sent.
+    let report = rails.live(&fixture, &opener).run_once().await;
+    completed(&report);
+    assert_eq!(report.referral_sent, 0, "{report:?}");
+    assert!(rails.sent(org, NEAR_AI_REFERRAL_PROGRAM_PREFIX).is_empty());
 }
 
 #[tokio::test]
@@ -1261,6 +1410,9 @@ async fn the_store_keeps_streams_apart_and_closes_with_both_totals() {
     let rails = Rails::start().await;
     let opener = TestOpener::default();
     let (tenant, accounts) = tenant_with_accounts(&fixture, 1).await;
+    // A referral line is written only against bonus owed.
+    let referee_ref = referee(&fixture, &tenant, accounts[0]).await;
+    bonus(&fixture, &tenant, accounts[0], &referee_ref, 100).await;
     let linked = link(
         &fixture,
         &tenant,
@@ -1469,7 +1621,7 @@ async fn the_store_keeps_streams_apart_and_closes_with_both_totals() {
     );
 
     // Bonus rows that sum below zero are refused as an owed amount, never
-    // wrapped.
+    // wrapped: the 100 above and -105 here.
     let referee_ref = referee(&fixture, &tenant, accounts[0]).await;
     owner_exec(
         &fixture,
@@ -1477,7 +1629,7 @@ async fn the_store_keeps_streams_apart_and_closes_with_both_totals() {
         "INSERT INTO trace_referral_bonus_accruals
              (tenant_id, bonus_id, rail_id, account_id, referee_ref_hash, kind,
               source_accrual_id, bps, base_units, bonus_units, rate_version, instrument_id)
-         VALUES ($1, $2, 'near_ai', $3, $4, 'void', NULL, 1000, 0, -5, 'v1', 'near_ai_usd')",
+         VALUES ($1, $2, 'near_ai', $3, $4, 'void', NULL, 1000, 0, -105, 'v1', 'near_ai_usd')",
         &[&tenant, &Uuid::new_v4(), &accounts[0], &referee_ref],
     )
     .await;
@@ -1485,5 +1637,5 @@ async fn the_store_keeps_streams_apart_and_closes_with_both_totals() {
         .payout_referral_owed(&tenant, accounts[0], &near_ai())
         .await
         .unwrap();
-    assert_eq!((owed.net, owed.bonus_count), (None, 1));
+    assert_eq!((owed.net, owed.bonus_count), (None, 2));
 }
