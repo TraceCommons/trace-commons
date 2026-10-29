@@ -5,16 +5,16 @@ import TCShellCore
 /// The sample Insights draws under the get-started card while it has no
 /// trace of the person's own (product owner, 2026-10-29): the sample week
 /// (`InsightsSampleWeek`) as the daemon would send it, with spend at API
-/// prices, lines, edits and benchmarks to go with it. Claude and Codex
+/// prices, edits and benchmarks to go with it. Claude and Codex
 /// models, six folders and seven days. Sample figures, never a pilot's, and
 /// never mixed with the person's own: each tab draws either its real
 /// models or these, never both.
 enum InsightsSample {
-    private static func totals(_ key: String?, sessions: Int, usd: Int64, lines: Int64, removed: Int64,
+    private static func totals(_ key: String?, sessions: Int, usd: Int64,
                                edits: Int64, undone: Int64, denied: Int64,
                                cacheSavings: Int64 = 0) -> DaemonData.InsightsWorkTotals {
         .init(key: key, sessions: sessions, usdMicrosKnown: usd, cacheSavingsUsdMicrosKnown: cacheSavings,
-              linesAddedKnown: lines, linesRemovedKnown: removed, editsKnown: edits, editsUndoneKnown: undone,
+              editsKnown: edits, editsUndoneKnown: undone,
               editsDeniedKnown: denied)
     }
 
@@ -29,17 +29,17 @@ enum InsightsSample {
         }
     }
 
-    /// The sample week's spend at API list prices, lines and edits. Its
+    /// The sample week's spend at API list prices and edits. Its
     /// models' tokens are the sample week's.
     static let work = DaemonData.InsightsWork(
-        week: totals(nil, sessions: 37, usd: 125_500_000, lines: 2_610, removed: 470, edits: 233, undone: 15,
+        week: totals(nil, sessions: 37, usd: 125_500_000, edits: 233, undone: 15,
                      denied: 6, cacheSavings: 61_300_000),
-        lastWeek: totals(nil, sessions: 33, usd: 112_000_000, lines: 2_210, removed: 520, edits: 198, undone: 17,
+        lastWeek: totals(nil, sessions: 33, usd: 112_000_000, edits: 198, undone: 17,
                          denied: 4),
         byTool: [
-            totals("claude_code", sessions: 31, usd: 115_700_000, lines: 2_140, removed: 390, edits: 190, undone: 12,
+            totals("claude_code", sessions: 31, usd: 115_700_000, edits: 190, undone: 12,
                    denied: 5),
-            totals("codex", sessions: 6, usd: 9_800_000, lines: 470, removed: 80, edits: 43, undone: 3, denied: 1),
+            totals("codex", sessions: 6, usd: 9_800_000, edits: 43, undone: 3, denied: 1),
         ],
         byModel: [
             .init(key: "claude-opus-5-5", tool: "claude_code", sessions: 14, tokens: 29_000_000,
@@ -51,14 +51,14 @@ enum InsightsSample {
                   usdMicrosKnown: 1_100_000),
         ],
         byFolder: [
-            totals("trace-commons", sessions: 7, usd: 38_200_000, lines: 820, removed: 140, edits: 71, undone: 4,
+            totals("trace-commons", sessions: 7, usd: 38_200_000, edits: 71, undone: 4,
                    denied: 2),
-            totals("design-system", sessions: 6, usd: 27_400_000, lines: 610, removed: 95, edits: 52, undone: 3,
+            totals("design-system", sessions: 6, usd: 27_400_000, edits: 52, undone: 3,
                    denied: 1),
-            totals("scripts", sessions: 7, usd: 22_100_000, lines: 480, removed: 90, edits: 44, undone: 3, denied: 1),
-            totals("website", sessions: 6, usd: 16_300_000, lines: 330, removed: 70, edits: 31, undone: 2, denied: 1),
-            totals("infra", sessions: 6, usd: 13_900_000, lines: 240, removed: 50, edits: 22, undone: 2, denied: 1),
-            totals("notes", sessions: 5, usd: 7_600_000, lines: 130, removed: 25, edits: 13, undone: 1, denied: 0),
+            totals("scripts", sessions: 7, usd: 22_100_000, edits: 44, undone: 3, denied: 1),
+            totals("website", sessions: 6, usd: 16_300_000, edits: 31, undone: 2, denied: 1),
+            totals("infra", sessions: 6, usd: 13_900_000, edits: 22, undone: 2, denied: 1),
+            totals("notes", sessions: 5, usd: 7_600_000, edits: 13, undone: 1, denied: 0),
         ],
         byDay: days(InsightsSampleWeek.weekStart, [18.40, 24.90, 27.30, 21.60, 16.20, 6.80, 10.30]),
         lastWeekByDay: days("2026-09-28", [16.10, 21.30, 24.80, 19.90, 17.40, 5.20, 7.30]))
@@ -103,7 +103,7 @@ enum InsightsSample {
               quality: pick((sonnet, claude, 950), (opus, claude, 930)),
               value: pick((sonnet, claude, 290_000), (opus, claude, 1_100_000)),
               speed: pick((sonnet, claude, 660), (opus, claude, 900)),
-              tip: tip("rereads") { $0.sessionsWith = 6; $0.sessions = 17 }),
+              tip: tip("test_first") { $0.fasterPermille = 220; $0.sessionsWithout = 5; $0.sessions = 17 }),
         .init(key: "docs", sessions: 9,
               quality: pick((sonnet, claude, 970), (haiku, claude, 950)),
               value: pick((haiku, claude, 60_000), (sonnet, claude, 210_000)),

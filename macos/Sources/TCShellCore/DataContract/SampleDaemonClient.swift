@@ -480,35 +480,8 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_week")
     }
 
-    public func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        // SAMPLE: no counter pass is recorded, so Sessions shows saved
-        // snapshots, as against a daemon that predates it.
-        throw DaemonDataError.notAvailableYet(method: "insights_sessions")
-    }
-
-    public func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
-    }
-
     public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
         try serve("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
-    }
-
-    public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
-                                     outcome: DaemonData.InsightsLabelChange) async throws
-        -> DaemonData.InsightsSessionLabelAnswer {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        // SAMPLE: no counter pass is recorded, so there is no row to label.
-        throw DaemonDataError.notAvailableYet(method: "insights_session_label")
-    }
-
-    public func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
-        -> DaemonData.InsightsAnalyzeSessionAnswer {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        // SAMPLE: no counter pass is recorded, so there is no row to analyze.
-        throw DaemonDataError.notAvailableYet(method: "insights_analyze_session")
     }
 
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {

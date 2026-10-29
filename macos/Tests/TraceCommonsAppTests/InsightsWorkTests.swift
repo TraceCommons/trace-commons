@@ -12,13 +12,17 @@ final class InsightsWorkTests: XCTestCase {
 
     private func words() throws -> [String: String] { try XCTUnwrap(TCInsights.copy()) }
 
-    func testSpendIsAtLeastItsKnownSumWhileSomeTracesAreUnpriced() throws {
+    func testSpendIsItsKnownSumToTheCent() throws {
         let copy = try words()
         XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 2, usdMicrosKnown: 63_400_000), copy: copy), "$63.40")
         XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 2, unpricedSessions: 1, usdMicrosKnown: 5_000_000,
-                                                      usdPartial: true), copy: copy), "at least $5.00")
+                                                      usdPartial: true), copy: copy), "$5.00",
+                       "a partly known sum shows plain; the coverage line says how many traces it covers")
         XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 1, pricedSessions: 0, usdMicrosKnown: 0, usdPartial: true),
                                                copy: copy), "—", "nothing priced is the dash, never $0.00")
+        XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 2, usdMicrosKnown: 896_212_500), copy: copy), "$896.21")
+        XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 1, usdMicrosKnown: 40), copy: copy), "$0.00004",
+                       "a charge under a cent keeps a significant digit")
     }
 
     func testChangeVsLastWeekNeedsLastWeeksFigure() throws {
@@ -31,7 +35,7 @@ final class InsightsWorkTests: XCTestCase {
                      "a minimum against an exact sum says nothing about the change")
         XCTAssertEqual(InsightsWorkWords.spend(Totals(sessions: 1, pricedSessions: 0, usdMicrosKnown: 40_000_000,
                                                       usdPartial: true), copy: copy),
-                       "at least $40.00", "a known part shows even when no trace priced in full")
+                       "$40.00", "a known part shows even when no trace priced in full")
     }
 
     func testModelRowsShareTheKnownSpend() throws {
@@ -50,8 +54,8 @@ final class InsightsWorkTests: XCTestCase {
     func testWorkDecodesFromTheWire() throws {
         let json = #"""
         {"basis":"api_list","week":{"sessions":2,"priced_sessions":1,"unpriced_sessions":1,"usd_micros_known":5,
-         "usd_partial":true,"cache_savings_usd_micros_known":1,"lines_added_known":3,"lines_removed_known":1,
-         "lines_partial":false,"edits_known":4,"edits_undone_known":1,"edits_denied_known":0,"edits_partial":false},
+         "usd_partial":true,"cache_savings_usd_micros_known":1,
+         "edits_known":4,"edits_undone_known":1,"edits_denied_known":0,"edits_partial":false},
          "last_week":null,"by_tool":[],"by_model":[],"by_folder":[],"by_day":[{"date":"2026-10-23","usd_micros_known":5,
          "usd_partial":false}],"last_week_by_day":null}
         """#
@@ -90,6 +94,44 @@ final class InsightsWorkTests: XCTestCase {
         }
     }
 
+    /// Breakdown's By model lists NEAR AI's models beside Claude's and
+    /// Codex's (product owner, 2026-10-29): NEAR AI's figure is the ledger's
+    /// charge by served model, "at least" while partly known, the unknown
+    /// model in the core's word; and the view is offered with NEAR AI alone.
+    func testByModelAddsNearAiModelsAtTheLedgersCharge() throws {
+        let copy = try words()
+        var object = try InsightsSessionRouteTests.recorded()
+        object["work"] = nil
+        let nearAiOnly = try InsightsSessionRouteTests.decode(object)
+        XCTAssertNil(nearAiOnly.work)
+        XCTAssertTrue(InsightsCreditWords.showsModels(nearAiOnly))
+        XCTAssertEqual(InsightsCreditWords.modelLines(nearAiOnly, copy: copy).map(\.label), ["zai-org/glm-4.6"])
+
+        var credit = try XCTUnwrap(object["near_ai_credit"] as? [String: Any])
+        var week = try XCTUnwrap(credit["week"] as? [String: Any])
+        var groups = try XCTUnwrap(week["by_model"] as? [[String: Any]])
+        groups.append(["key": NSNull(), "usd_micros": NSNull(), "sessions": 1, "calls": 2,
+                       "calls_without_charge": 1, "tokens": 50, "usd_micros_known": 300_000,
+                       "usd_partial": true, "tokens_known": 50, "tokens_partial": false])
+        week["by_model"] = groups
+        credit["week"] = week
+        object["near_ai_credit"] = credit
+        let empty: [String: Any] = ["key": NSNull(), "sessions": 0, "priced_sessions": 0, "unpriced_sessions": 0,
+                                    "usd_micros_known": 0, "usd_partial": false, "cache_savings_usd_micros_known": 0,
+                                    "lines_added_known": 0, "lines_removed_known": 0, "lines_partial": false,
+                                    "edits_known": 0, "edits_undone_known": 0, "edits_denied_known": 0,
+                                    "edits_partial": false]
+        object["work"] = ["basis": "api_list", "week": empty, "by_tool": [Any](), "by_folder": [Any](),
+                          "by_day": [Any](),
+                          "by_model": [["key": "claude-opus-4-7", "tool": "claude_code", "sessions": 1,
+                                        "tokens": 1_000, "usd_micros_known": 2_000_000, "usd_partial": false]]]
+        let lines = InsightsCreditWords.modelLines(try InsightsSessionRouteTests.decode(object), copy: copy)
+        XCTAssertEqual(lines.map(\.label), ["claude-opus-4-7", "zai-org/glm-4.6", copy["analytics_unknown_label"]])
+        XCTAssertEqual(lines.map(\.tool), ["Claude", "NEAR AI", "NEAR AI"])
+        XCTAssertEqual(lines.map(\.amount), ["$2.00", "$0.0125", "at least $0.30"])
+        XCTAssertEqual(Set(lines.map(\.id)).count, 3)
+    }
+
     /// Breakdown's By project carries Claude and Codex spend at API prices,
     /// and the largest spend leads.
     func testByProjectAddsSpendFromWork() throws {
@@ -101,16 +143,15 @@ final class InsightsWorkTests: XCTestCase {
         rows[1]["folder"] = "site"
         rollup["sessions"] = rows
         object["rollup"] = rollup
-        func totals(_ key: String, usd: Int, lines: Int) -> [String: Any] {
+        func totals(_ key: String, usd: Int) -> [String: Any] {
             ["key": key, "sessions": 1, "priced_sessions": 1, "unpriced_sessions": 0, "usd_micros_known": usd,
-             "usd_partial": false, "cache_savings_usd_micros_known": 0, "lines_added_known": lines,
-             "lines_removed_known": 0, "lines_partial": false, "edits_known": 0, "edits_undone_known": 0,
+             "usd_partial": false, "cache_savings_usd_micros_known": 0, "edits_known": 0, "edits_undone_known": 0,
              "edits_denied_known": 0, "edits_partial": false]
         }
-        var week = totals("week", usd: 2_100_000, lines: 130)
+        var week = totals("week", usd: 2_100_000)
         week["key"] = NSNull()
         object["work"] = ["basis": "api_list", "week": week, "by_tool": [Any](), "by_model": [Any](),
-                          "by_folder": [totals("site", usd: 2_000_000, lines: 120), totals("app", usd: 100_000, lines: 10)],
+                          "by_folder": [totals("site", usd: 2_000_000), totals("app", usd: 100_000)],
                           "by_day": [Any]()]
         let decoded = try InsightsSessionRouteTests.decode(object)
         let table = InsightsProjectRows.rows(decoded, copy: copy)

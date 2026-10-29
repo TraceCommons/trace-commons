@@ -47,9 +47,7 @@ struct InsightsPatternsTab: View {
                 header(patterns)
                 // Details leads with the drill-down, by project, task or
                 // tool (product owner, 2026-10-28). The pattern cards
-                // stay under it: Overview's "Where tokens went" and the
-                // lever's "Show the reads" open them here, and the goals
-                // and re-read files live only here.
+                // stay under it, and the goals live only here.
                 if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
                 // Tokens by day moved here from Overview, a picked day's
                 // sessions with it (product owner, 2026-10-28).
@@ -59,9 +57,9 @@ struct InsightsPatternsTab: View {
                 // them, rather than cards of zeros and dashes.
                 if patterns.claude_sessions > 0 {
                     InsightsCardFlow(minimum: 380) {
-                        ForEach(patterns.cards) { card in
+                        ForEach(InsightsPatternsWords.shown(patterns.cards)) { card in
                             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                                patternCard(card, threshold: patterns.long_context_threshold)
+                                patternCard(card)
                                 if let sessions = model.sessions, sessions.pattern == card.kind {
                                     InsightsPatternSessionsView(found: sessions, copy: copy)
                                 }
@@ -69,11 +67,8 @@ struct InsightsPatternsTab: View {
                         }
                     }
                 }
-                InsightsCardFlow(minimum: 440) {
-                    if !patterns.reread_files.isEmpty { rereadTable(patterns) }
-                    if patterns.feed == "counter_pass", let found = comparisons.comparisons {
-                        goals(found)
-                    }
+                if patterns.feed == "counter_pass", let found = comparisons.comparisons {
+                    goals(found)
                 }
             } else if model.failed {
                 Text(text("analytics_unavailable")).insightsError()
@@ -111,7 +106,7 @@ struct InsightsPatternsTab: View {
         }
     }
 
-    private func patternCard(_ card: InsightsPatternCard, threshold: UInt64) -> some View {
+    private func patternCard(_ card: InsightsPatternCard) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             // How the figure was arrived at, behind the title's "i".
             InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
@@ -126,7 +121,7 @@ struct InsightsPatternsTab: View {
                         Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
                     }
                 }
-                Text(InsightsPatternsWords.countLine(card, threshold: threshold, copy: copy)).insightsNote()
+                Text(InsightsPatternsWords.countLine(card, copy: copy)).insightsNote()
                     .fixedSize(horizontal: false, vertical: true)
                 weeklyBars(card)
             }
@@ -140,12 +135,6 @@ struct InsightsPatternsTab: View {
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .insightsSection()
-    }
-
-    /// A goal's tokens on the card it covers (feed T only).
-    private func goalTokens(_ kind: String) -> UInt64? {
-        let goalKind = ["repeated_reads": "repeated_reads_under", "long_context": "long_context_under"][kind]
-        return comparisons.comparisons?.goals.first { $0.goal.kind == goalKind }?.goal.tokens
     }
 
     /// The week's short date on the axis.
@@ -162,7 +151,6 @@ struct InsightsPatternsTab: View {
     private func weeklyBars(_ card: InsightsPatternCard) -> some View {
         let bars = InsightsPatternsWords.bars(card)
         let current = bars.last?.week
-        let goal = goalTokens(card.kind)
         return Chart {
             ForEach(bars) { bar in
                 if let tokens = bar.tokens {
@@ -183,14 +171,6 @@ struct InsightsPatternsTab: View {
                         Text(text("analytics_unavailable")).insightsTick()
                     }
                 }
-            }
-            if let goal {
-                RuleMark(y: .value(text("analytics_goals_title"), goal))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .annotation(position: .top, alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(figure(goal)).insightsTick()
-                    }
             }
         }
         .chartXScale(domain: bars.map { Self.weekLabel($0.week) })
@@ -218,7 +198,7 @@ struct InsightsPatternsTab: View {
             InsightsSectionTitle(text("analytics_goals_title"), info: [text("analytics_goals_note")])
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 VStack(spacing: 0) {
-                    ForEach(Array(found.goals.enumerated()), id: \.element.id) { index, goal in
+                    ForEach(Array(found.goals.filter { InsightsComparisonsWords.goalKinds.contains($0.goal.kind) }.enumerated()), id: \.element.id) { index, goal in
                         GlassTableRow(first: index == 0) {
                             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
@@ -279,49 +259,6 @@ struct InsightsPatternsTab: View {
                                                                number: goalNumber) == nil)
                 }
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    /// The re-read files in four columns sized for the main pane; the long
-    /// column title wraps rather than widening the table.
-    private func rereadTable(_ patterns: InsightsWeekPatterns) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(text("analytics_reread_title")).insightsTitle()
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                if patterns.reread_files.isEmpty {
-                    Text(text("analytics_unavailable")).insightsNote()
-                } else {
-                    VStack(spacing: 0) {
-                        GlassTableHead {
-                            HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
-                                Text(text("analytics_reread_file")).frame(maxWidth: .infinity, alignment: .leading)
-                                Text(text("analytics_reread_reads")).frame(width: 44, alignment: .trailing)
-                                Text(text("analytics_reread_after_shrink"))
-                                    .multilineTextAlignment(.trailing)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(width: 120, alignment: .trailing)
-                                Text(text("analytics_reread_tokens")).frame(width: 56, alignment: .trailing)
-                            }
-                        }
-                        ForEach(patterns.reread_files) { row in
-                            GlassTableRow {
-                                HStack(spacing: GlassTokens.Space.s4) {
-                                    Text(InsightsPatternsWords.fileLabel(row, copy: copy)).insightsMono()
-                                        .foregroundStyle(GlassColor.textPrimary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Text(String(row.reads)).insightsMono().frame(width: 44, alignment: .trailing)
-                                    Text(String(row.after_shrink)).insightsMono().frame(width: 120, alignment: .trailing)
-                                    Text(figure(row.tokens)).insightsMono().foregroundStyle(GlassColor.textPrimary)
-                                        .frame(width: 56, alignment: .trailing)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()

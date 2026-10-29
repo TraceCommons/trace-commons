@@ -6,7 +6,7 @@ import TCShellCore
 /// project folder, with Claude Code and Codex usage (traces and tokens,
 /// from the counter pass's rows) beside NEAR AI spend (the NEAR AI
 /// ledger's own charge, from `near_ai_credit`, never a list price); and
-/// NEAR AI spend by task or by tool. Folder names come from this Mac's own
+/// NEAR AI spend by task, by tool or by model. Folder names come from this Mac's own
 /// folder list and stay on it (owner decision 2026-10-28, over D7 for this
 /// view). An unknown figure is the core's dash, never zero.
 enum InsightsCreditWords {
@@ -89,6 +89,40 @@ enum InsightsCreditWords {
         }
     }
 
+    /// One By model row: Claude's and Codex's at API prices (`work`), then
+    /// NEAR AI's at the ledger's charge, by served model.
+    struct ModelLine: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let tool: String
+        let tokens: String
+        let amount: String
+    }
+
+    /// Whether By model has anything to show: Claude or Codex spend at API
+    /// prices, or NEAR AI spend by model.
+    static func showsModels(_ week: DaemonData.InsightsWeek) -> Bool {
+        week.work != nil || !(week.nearAiCredit?.week.byModel ?? []).isEmpty
+    }
+
+    static func modelLines(_ week: DaemonData.InsightsWeek, copy: [String: String]) -> [ModelLine] {
+        let priced = (week.work?.byModel ?? []).map { model in
+            ModelLine(id: model.tool + ":" + model.key, label: model.key,
+                      tool: InsightsWorkWords.toolName(model.tool, copy: copy),
+                      tokens: tokens(model.tokens, copy: copy),
+                      amount: InsightsWorkWords.dollars(model.usdMicrosKnown))
+        }
+        let charged = (week.nearAiCredit?.week.byModel ?? []).map { group in
+            ModelLine(id: "near_ai:" + (group.key ?? "\u{0}unknown"),
+                      label: label(group.key, dimension: .model, copy: copy),
+                      tool: text("analytics_usage_near_ai", copy),
+                      tokens: tokens(group.tokens, known: group.tokensKnown, partial: group.tokensPartial, copy: copy),
+                      amount: spend(group.usdMicros, known: group.usdMicrosKnown, partial: group.usdPartial,
+                                    copy: copy))
+        }
+        return priced + charged
+    }
+
     static func lines(_ groups: [DaemonData.InsightsCreditGroup], dimension: Dimension,
                       copy: [String: String]) -> [Line] {
         groups.map { group in
@@ -125,8 +159,8 @@ enum InsightsProjectRows {
         let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
-        /// Claude and Codex at API prices (product
-        /// owner, 2026-10-29); `nil` from a daemon that predates `work`.
+        /// Claude and Codex at API prices (product owner, 2026-10-29);
+        /// `nil` from a daemon that predates `work`.
         var spend: String? = nil
         var spendMicros: Int64 = 0
     }
@@ -224,7 +258,7 @@ enum InsightsProjectRows {
 }
 
 /// Details' drill-down: By project (the default, and what each Overview
-/// usage card's "By project" opens), By task and By tool.
+/// usage card's "By project" opens), By task, By tool and By model.
 struct InsightsDetailsTable: View {
     let week: DaemonData.InsightsWeek
     let copy: [String: String]
@@ -234,11 +268,11 @@ struct InsightsDetailsTable: View {
 
     /// The views this week has something for: By project always; By task
     /// and By tool only with a NEAR AI call this week, since they split
-    /// NEAR AI spend; By model only with a model's spend.
+    /// NEAR AI spend; By model as `InsightsCreditWords.showsModels` says.
     static func dimensions(_ week: DaemonData.InsightsWeek) -> [InsightsCreditWords.Dimension] {
         var shown: [InsightsCreditWords.Dimension] = [.folder]
         if InsightsProjectRows.hasNearAi(week) { shown += [.task, .tool] }
-        if let work = week.work, !work.byModel.isEmpty { shown.append(.model) }
+        if InsightsCreditWords.showsModels(week) { shown.append(.model) }
         return shown
     }
 
@@ -325,29 +359,28 @@ struct InsightsDetailsTable: View {
         }
     }
 
-    /// Claude and Codex spend by model at API prices, with its tokens.
+    /// Claude and Codex spend by model at API prices, then NEAR AI spend
+    /// by model at the ledger's charge, each with its tokens.
     @ViewBuilder private var models: some View {
-        if let work = week.work, !work.byModel.isEmpty {
+        let lines = InsightsCreditWords.modelLines(week, copy: copy)
+        if !lines.isEmpty {
             VStack(spacing: 0) {
-                ForEach(Array(work.byModel.enumerated()), id: \.offset) { index, model in
+                ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
                     GlassTableRow(first: index == 0) {
                         HStack(alignment: .firstTextBaseline) {
                             VStack(alignment: .leading, spacing: 0) {
-                                Text(model.key)
-                                Text(InsightsWorkWords.toolName(model.tool, copy: copy)).insightsCaption()
+                                Text(line.label)
+                                Text(line.tool).insightsCaption()
                             }
                             Spacer(minLength: GlassTokens.Space.s4)
-                            Text(InsightsCreditWords.tokens(model.tokens, copy: copy)).insightsCaption()
-                            Text(InsightsCreditWords.spend(model.usdPartial ? nil : model.usdMicrosKnown,
-                                                           known: model.usdMicrosKnown, partial: model.usdPartial,
-                                                           copy: copy))
-                                .insightsMono().frame(minWidth: 72, alignment: .trailing)
+                            Text(line.tokens).insightsCaption()
+                            Text(line.amount).insightsMono().frame(minWidth: 72, alignment: .trailing)
                         }
                         .accessibilityElement(children: .combine)
                     }
                 }
             }
-            if work.week.cacheSavingsUsdMicrosKnown > 0 {
+            if let work = week.work, work.week.cacheSavingsUsdMicrosKnown > 0 {
                 InsightsUsageRow(label: text("analytics_cache_savings"),
                                  value: InsightsOverviewWords.fill(text("analytics_cache_savings_value"), [
                                      "x": InsightsCreditWords.amount(work.week.cacheSavingsUsdMicrosKnown, copy: copy),

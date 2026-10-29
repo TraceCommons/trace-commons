@@ -43,14 +43,88 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where await recorder.operations.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
-        for _ in 0..<20 { await Task.yield() }
+        await model.loading?.value
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
         XCTAssertEqual(operations, ["copy", "list"])
         XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
         model.close()
     }
+
+    /// A failed read shows the failure line, not blank words or an empty
+    /// store that looks like no snapshots.
+    @MainActor
+    func testAFailedCopyReadSetsTheFailureLine() async {
+        let model = InsightsModel(service: { _ in throw InsightsError.operationFailed })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.error, "insights-operation-failed")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+        XCTAssertNil(model.error)
+    }
+
+    /// A list read answered with another type is a failure, in the core's
+    /// own words once the copy has been read.
+    @MainActor
+    func testAMismatchedListResponseSetsTheCoresFailureLine() async {
+        let model = InsightsModel(service: { _ in
+            let json = "{\"type\":\"copy\",\"copy\":{\"error\":\"Could not read Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.text("error"), "Could not read Insights")
+        XCTAssertEqual(model.error, "Could not read Insights")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+    }
+
+    /// A read that succeeds clears an earlier failure.
+    @MainActor
+    func testASuccessfulReadClearsAnEarlierFailure() async {
+        let recorder = Recorder()
+        let fail = FailOnce()
+        let model = InsightsModel(service: { request in
+            if await fail.next() { throw InsightsError.operationFailed }
+            return try await recorder.call(request)
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertNotNil(model.error)
+        model.close()
+        model.open()
+        await model.loading?.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
+        model.close()
+    }
+
+    /// Reading the snapshots again lists only, once the copy is in hand,
+    /// and picks up a snapshot saved since.
+    @MainActor
+    func testReloadSnapshotsListsAgainWithoutTheCopy() async {
+        let recorder = Recorder()
+        let model = InsightsModel(service: { request in try await recorder.call(request) })
+        model.open()
+        await model.loading?.value
+        await recorder.add("snap-2")
+        model.reloadSnapshots()
+        await model.loading?.value
+        let operations = await recorder.operations
+        XCTAssertEqual(operations, ["copy", "list", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1", "snap-2"])
+        model.close()
+        model.reloadSnapshots()
+        XCTAssertNil(model.loading, "a closed screen reads nothing")
+        let after = await recorder.operations
+        XCTAssertEqual(after.count, 3)
+    }
+}
+
+private actor FailOnce {
+    private var failed = false
+    func next() -> Bool { defer { failed = true }; return !failed }
 }
 
 private actor ResponseGate {
@@ -68,15 +142,15 @@ private actor ResponseGate {
 }
 private actor Recorder {
     var operations: [String] = []
+    private var ids = ["snap-1"]
+    func add(_ id: String) { ids.append(id) }
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
         if request.operation.type == "copy" {
             let json = "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
             return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
         }
-        let list: [String: Any] = ["type": "list", "insights": [
-            InsightsSessionsTests.snapshotJSON("snap-1"),
-        ]]
+        let list: [String: Any] = ["type": "list", "insights": ids.map { InsightsSessionsTests.snapshotJSON($0) }]
         return try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: list))
     }
 }
@@ -390,7 +464,6 @@ private actor FlipReader {
 final class InsightsPatternsTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_pattern_repeated_reads": "REPEATED",
         "analytics_pattern_repeated_reads_count": "{r} reads of {f} files",
         "analytics_pattern_retried_calls_count": "{c} calls",
         "analytics_pattern_edit_fail_edit_count": "{l} times",
@@ -452,10 +525,9 @@ final class InsightsPatternsTests: XCTestCase {
         let week = try patterns()
         let copy = Self.words
         XCTAssertEqual(week.cards.map(\.kind), ["repeated_reads", "retried_calls", "edit_fail_edit", "long_context"])
-        let lines = week.cards.map { InsightsPatternsWords.countLine($0, threshold: week.long_context_threshold, copy: copy) }
-        XCTAssertEqual(lines, ["3 reads of 2 files", "0 calls", "1 times",
-                              "after " + InsightsOverviewWords.figure(200_000, copy: copy)])
-        XCTAssertEqual(InsightsPatternsWords.title("repeated_reads", copy: copy), "REPEATED")
+        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map(\.kind), ["retried_calls"])
+        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map { InsightsPatternsWords.countLine($0, copy: copy) },
+                       ["0 calls"])
         // A measured zero stays zero; an unknown figure is the dash.
         XCTAssertEqual(InsightsOverviewWords.figure(week.cards[1].tokens, copy: copy), "0")
         XCTAssertEqual(InsightsOverviewWords.figure(week.cards[2].tokens, copy: copy), "\u{2014}")
@@ -493,29 +565,11 @@ final class InsightsPatternsTests: XCTestCase {
             """
             return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
         }
-        let reads = try card("repeated_reads", tokens: "0", count: 2, files: "1")
-        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(reads))
-        XCTAssertEqual(InsightsPatternsWords.headline(reads, copy: copy), "2 READS")
-        XCTAssertEqual(InsightsPatternsWords.countLine(reads, threshold: 200_000, copy: copy), "in 1 file")
-        let manyFiles = try card("repeated_reads", tokens: "0", count: 5, files: "3")
-        XCTAssertEqual(InsightsPatternsWords.countLine(manyFiles, threshold: 200_000, copy: copy), "in 3 files")
         let call = try card("retried_calls", tokens: "0", count: 1)
         XCTAssertEqual(InsightsPatternsWords.headline(call, copy: copy), "1 CALL")
-        XCTAssertEqual(InsightsPatternsWords.countLine(call, threshold: 200_000, copy: copy), "same tool and input")
-        let cycle = try card("edit_fail_edit", tokens: "0", count: 3)
-        XCTAssertEqual(InsightsPatternsWords.headline(cycle, copy: copy), "3 TIMES")
-        XCTAssertEqual(InsightsPatternsWords.countLine(cycle, threshold: 200_000, copy: copy), "edited, failed, edited")
-        let long = try card("long_context", tokens: "0", count: 1)
-        XCTAssertEqual(InsightsPatternsWords.headline(long, copy: copy), "1 TURN")
-        XCTAssertEqual(InsightsPatternsWords.countLine(long, threshold: 200_000, copy: copy),
-                       "after " + InsightsOverviewWords.figure(200_000, copy: copy))
+        XCTAssertEqual(InsightsPatternsWords.countLine(call, copy: copy), "same tool and input")
+        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(call))
 
-        // The token headline, as before: the figure, and the count line.
-        let tokens = try card("repeated_reads", tokens: "20000", count: 3, files: "2", headline: "tokens")
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(tokens))
-        XCTAssertEqual(InsightsPatternsWords.headline(tokens, copy: copy),
-                       InsightsOverviewWords.figure(20_000, copy: copy))
-        XCTAssertEqual(InsightsPatternsWords.countLine(tokens, threshold: 200_000, copy: copy), "3 reads of 2 files")
         // An answer without the field leads with tokens, even at 0.
         let older = try card("retried_calls", tokens: "0", count: 2, headline: nil)
         XCTAssertNil(older.headline)
@@ -562,10 +616,10 @@ final class InsightsPatternsTests: XCTestCase {
         }
     }
 
-    func testFilesAreLettersWithTheirExtensionAndTheOtherHarnessLineIsFilled() throws {
+    func testTheOtherHarnessLineIsFilled() throws {
         let week = try patterns()
-        XCTAssertEqual(week.reread_files.map { InsightsPatternsWords.fileLabel($0, copy: Self.words) },
-                       ["File B \u{b7} .rs", "File A"])
+        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map(\.kind), ["retried_calls"],
+                       "repeated reads, edit after a failed command and long context are not shown")
         XCTAssertEqual(InsightsPatternsWords.claudeOnlyLine(week, copy: Self.words), "Claude only: 1 of 2.")
         XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "Show 1 traces")
     }
@@ -802,15 +856,12 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_change_up": "\u{25B2} {p}% vs last week",
         "analytics_best_week": "Your best week \u{b7} previous best {q}%",
         "analytics_goal_cache_share": "Input read from cache \u{2265} {p}%",
-        "analytics_goal_repeated_reads": "Repeated reads under {t}",
         "analytics_goal_weekly_tokens": "Weekly tokens under {t}",
         "analytics_goal_met": "Met",
         "analytics_goal_not_met": "Not met",
         "analytics_goal_down_from": "Down from {x} last week.",
         "analytics_goal_up_from": "Up from {x} last week.",
-        "analytics_lever_line": "{f} files were read again {r} times, about {t} tokens.",
         "analytics_pattern_retried_calls": "RETRIED",
-        "analytics_pattern_repeated_reads": "REPEATED",
         "analytics_your_week": "Your week \u{b7} {range}",
         "analytics_recap_fewer": "{n} traces \u{b7} {p}% fewer tokens than last week",
         "analytics_recap_more": "{n} traces \u{b7} {p}% more tokens than last week",
@@ -896,7 +947,7 @@ final class InsightsComparisonsTests: XCTestCase {
         let recorder = ComparisonsRecorder()
         let model = InsightsComparisonsModel(service: { try await recorder.call($0) })
         model.load(counterWeeks: nil, weekStart: "2026-10-05", recapCardEnabled: true)
-        model.notUseful(); model.addGoal(InsightsGoal(kind: "repeated_reads_under", tokens: 5))
+        model.notUseful(); model.addGoal(InsightsGoal(kind: "weekly_tokens_under", source: "codex", tokens: 5))
         for _ in 0..<20 { await Task.yield() }
         let requests = await recorder.requests
         XCTAssertTrue(requests.isEmpty)
@@ -965,15 +1016,18 @@ final class InsightsComparisonsTests: XCTestCase {
         let share = InsightsGoal(kind: "cache_share_at_least", source: "claude_code", permille: 600)
         XCTAssertEqual(InsightsComparisonsWords.goal(share, copy: words),
                        "Claude Code \u{b7} Input read from cache \u{2265} 60%")
-        XCTAssertEqual(InsightsComparisonsWords.goal(InsightsGoal(kind: "repeated_reads_under", tokens: 50_000),
-                                                     copy: words), "Repeated reads under 50K")
+        XCTAssertEqual(InsightsComparisonsWords.goal(InsightsGoal(kind: "weekly_tokens_under", source: "claude_code",
+                                                                  tokens: 50_000), copy: words),
+                       "Claude Code \u{b7} Weekly tokens under 50K")
+        XCTAssertEqual(InsightsComparisonsWords.goalKinds, ["cache_share_at_least", "weekly_tokens_under"],
+                       "repeated reads and long context goals left Insights")
         XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "60"),
                        InsightsGoal(kind: "cache_share_at_least", source: "codex", permille: 600))
         XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "101"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "0"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "lots"))
-        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "9000"),
-                       InsightsGoal(kind: "repeated_reads_under", tokens: 9000))
+        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "0"))
+        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "lots"))
+        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "9000"),
+                       InsightsGoal(kind: "weekly_tokens_under", source: "codex", tokens: 9000))
         XCTAssertEqual(InsightsComparisonsWords.mark("met", copy: words), "Met")
         XCTAssertEqual(InsightsComparisonsWords.mark("not_met", copy: words), "Not met")
         XCTAssertEqual(InsightsComparisonsWords.mark("no_figure", copy: words), "\u{2014}")
@@ -988,10 +1042,6 @@ final class InsightsComparisonsTests: XCTestCase {
     }
 
     func testTheLeverIsAnObservationInTheCoresWords() throws {
-        let reads = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
-            #"{"kind":"repeated_reads","tokens":300000,"count":9,"files":4,"ratio_permille":3000}"#.utf8))
-        XCTAssertEqual(InsightsComparisonsWords.leverLines(reads, copy: Self.words),
-                       ["4 files were read again 9 times, about 300K tokens."])
         let retried = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
             #"{"kind":"retried_calls","tokens":120000,"count":3,"files":null,"ratio_permille":1500}"#.utf8))
         XCTAssertEqual(InsightsComparisonsWords.leverLines(retried, copy: Self.words), ["RETRIED", "120K"])
@@ -1003,8 +1053,9 @@ final class InsightsComparisonsTests: XCTestCase {
          "sources":[{"source":"claude_code","tokens":800000,"change_permille":-200},
                     {"source":"codex","tokens":10,"change_permille":null}],
          "items":[{"kind":"best_cache_week","source":"claude_code","permille":450,"previous_best_permille":300},
-                  {"kind":"goal","id":"goal-1","goal":{"kind":"repeated_reads_under","tokens":50000},"met":true},
+                  {"kind":"goal","id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":50000},"met":true},
                   {"kind":"pattern_up","pattern":"repeated_reads","up_permille":1500},
+                  {"kind":"pattern_up","pattern":"retried_calls","up_permille":500},
                   {"kind":"from_a_newer_core"}],
          "past_threshold":null}
         """.utf8))
@@ -1015,8 +1066,8 @@ final class InsightsComparisonsTests: XCTestCase {
                      "no comparable week: no line, never 0%")
         XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
             "Best cache week yet: 45%. Previous best 30%.",
-            "Goal met: Repeated reads under 50K.",
-            "REPEATED up 150% on your usual week.",
+            "Goal met: Claude Code \u{b7} Weekly tokens under 50K.",
+            "RETRIED up 50% on your usual week.",
         ])
         XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),
                      "no threshold line until the user sets one")

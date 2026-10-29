@@ -78,7 +78,7 @@ pub(crate) fn schema() -> Value {
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
             "insights_counter_pass",
-            "Enable the optional Insights counter pass.",
+            "Enable the Insights counter pass. On by default.",
         ),
         (
             "insights_recap_card_enabled",

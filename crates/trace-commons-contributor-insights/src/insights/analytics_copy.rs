@@ -583,8 +583,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // 16. Goals.
     ("analytics_goal_add", "Add goal"),
     ("analytics_goal_cache_share", "Cache share at least {p}%"),
-    ("analytics_goal_repeated_reads", "Repeated reads under {t}"),
-    ("analytics_goal_long_context", "Long context under {t}"),
     ("analytics_goal_weekly_tokens", "Weekly tokens under {t}"),
     ("analytics_goal_met", "Met"),
     ("analytics_goal_not_met", "Not met"),
@@ -843,8 +841,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_not_set", "Not set"),
     ("analytics_setting_recap_card", "Weekly summary"),
     ("analytics_setting_lever", "Higher-than-usual card"),
-    // The `insights_counter_pass` switch (owner decision D4: off by
-    // default; Ron's #1287 review).
+    // The `insights_counter_pass` switch (Ron's #1287 review). Counting is
+    // on by default and always on since 2026-10-29 (product owner), so the
+    // macOS Settings card no longer draws it.
     (
         "analytics_setting_counter_pass",
         "Count tokens in watched folders",
@@ -882,7 +881,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_cache_savings", "Cache savings"),
     ("analytics_cache_savings_value", "about {x} saved"),
     ("analytics_column_spend", "Spend"),
-    ("analytics_column_edits", "Edits accepted"),
     ("analytics_bench_intro", "From {n} of your own traces"),
     ("analytics_bench_quality", "Quality"),
     ("analytics_bench_value", "Value"),
@@ -926,10 +924,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_bench_tip_fewer_undos",
         "{first} had {x}× fewer edits undone than {second}.",
-    ),
-    (
-        "analytics_bench_tip_rereads",
-        "{k} of your {n} traces re-read the same files.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
     // 26. DRAFT, NEEDS APPROVAL: the get-started card and the sample data
