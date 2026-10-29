@@ -346,14 +346,16 @@ private struct HomeOverview: View {
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
-        // Three groups, each under its title. Traces leads (owner,
-        // 2026-10-28: the macOS MVP is "contribute traces, earn credit"):
-        // its hero, then Waiting and Contributed, and what is not
-        // contributed across both columns. Then Account (Credit and the
-        // NEAR AI balance), then Private AI, below and smaller than Traces.
+        // The Traces hero leads (owner, 2026-10-28: the macOS MVP is
+        // "contribute traces, earn credit"), above the Traces heading
+        // (owner, 2026-10-29), so the heading sits over Waiting and
+        // Contributed. Then three groups, each under its title: Traces
+        // (the tiles and what is not contributed across both columns),
+        // Account (Credit and the NEAR AI balance), then Private AI, below
+        // and smaller than Traces.
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            tracesHero
             HomeSection(words?.sectionTraces) {
-                tracesHero
                 Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                     GridRow {
                         HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
