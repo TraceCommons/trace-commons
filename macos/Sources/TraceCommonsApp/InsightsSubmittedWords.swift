@@ -232,6 +232,18 @@ enum InsightsSubmittedWords {
         return code.files.total > 0 || code.edits.editsKnown > 0
     }
 
+    /// The local calendar with weeks from Monday, as `by_week` counts them.
+    static var mondayCalendar: Calendar {
+        var calendar = Calendar.current
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    /// A week's axis label, "Oct 19", from its Monday.
+    static func weekLabel(_ weekStart: String?) -> String {
+        weekDate(weekStart)?.formatted(.dateTime.month(.abbreviated).day()) ?? (weekStart ?? "")
+    }
+
     /// A week's Monday (`YYYY-MM-DD`, local) at local noon, for the chart.
     static func weekDate(_ weekStart: String?) -> Date? {
         guard let weekStart else { return nil }

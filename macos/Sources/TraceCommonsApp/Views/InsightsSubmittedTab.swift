@@ -270,30 +270,14 @@ struct InsightsSubmittedTab: View {
     }
 
     private func weeksCard(_ weeks: [DaemonData.InsightsSubmittedTally]) -> some View {
-        let sent = text("analytics_sub_col_submitted"), accepted = text("analytics_sub_col_accepted")
-        // A few weeks keep slim bars rather than one bar the plot's width.
-        let width: MarkDimension = weeks.count <= 8 ? .fixed(28) : .ratio(0.7)
-        return card(text("analytics_sub_weeks_title")) {
-            Chart {
-                ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
-                    if let monday = InsightsSubmittedWords.weekDate(week.weekStart) {
-                        BarMark(x: .value("week", monday, unit: .weekOfYear), y: .value("traces", week.submitted),
-                                width: width, stacking: .unstacked)
-                            .foregroundStyle(by: .value("kind", sent))
-                        BarMark(x: .value("week", monday, unit: .weekOfYear), y: .value("traces", week.accepted),
-                                width: width, stacking: .unstacked)
-                            .foregroundStyle(by: .value("kind", accepted))
-                    }
-                }
+        card(text("analytics_sub_weeks_title")) {
+            Group {
+                // A few weeks: a slim bar each, its Monday under it. More:
+                // a time axis, labelled a month apart.
+                if weeks.count <= 8 { fewWeeks(weeks) } else { manyWeeks(weeks) }
             }
-            .chartForegroundStyleScale([sent: GlassTokens.Color.chartGrid.color,
-                                        accepted: GlassTokens.Color.chartSeries1.color])
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                    AxisValueLabel(format: .dateTime.month(.abbreviated).day(), centered: true)
-                        .font(.system(size: 10))
-                }
-            }
+            .chartForegroundStyleScale([text("analytics_sub_col_submitted"): GlassTokens.Color.chartGrid.color,
+                                        text("analytics_sub_col_accepted"): GlassTokens.Color.chartSeries1.color])
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
                     AxisGridLine()
@@ -304,6 +288,47 @@ struct InsightsSubmittedTab: View {
             .frame(height: 150)
             .insightsPlot()
         }
+    }
+
+    private func fewWeeks(_ weeks: [DaemonData.InsightsSubmittedTally]) -> some View {
+        let sent = text("analytics_sub_col_submitted"), accepted = text("analytics_sub_col_accepted")
+        return Chart {
+            ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+                let label = InsightsSubmittedWords.weekLabel(week.weekStart)
+                BarMark(x: .value("week", label), y: .value("traces", week.submitted), width: .fixed(28),
+                        stacking: .unstacked)
+                    .foregroundStyle(by: .value("kind", sent))
+                BarMark(x: .value("week", label), y: .value("traces", week.accepted), width: .fixed(28),
+                        stacking: .unstacked)
+                    .foregroundStyle(by: .value("kind", accepted))
+            }
+        }
+        .chartXAxis {
+            AxisMarks { _ in AxisValueLabel().font(.system(size: 10)) }
+        }
+    }
+
+    private func manyWeeks(_ weeks: [DaemonData.InsightsSubmittedTally]) -> some View {
+        let sent = text("analytics_sub_col_submitted"), accepted = text("analytics_sub_col_accepted")
+        return Chart {
+            ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+                if let monday = InsightsSubmittedWords.weekDate(week.weekStart) {
+                    BarMark(x: .value("week", monday, unit: .weekOfYear), y: .value("traces", week.submitted),
+                            width: .ratio(0.7), stacking: .unstacked)
+                        .foregroundStyle(by: .value("kind", sent))
+                    BarMark(x: .value("week", monday, unit: .weekOfYear), y: .value("traces", week.accepted),
+                            width: .ratio(0.7), stacking: .unstacked)
+                        .foregroundStyle(by: .value("kind", accepted))
+                }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .month)) { _ in
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day()).font(.system(size: 10))
+            }
+        }
+        // The daemon's weeks start on Monday; bin them so.
+        .environment(\.calendar, InsightsSubmittedWords.mondayCalendar)
     }
 
     private func projectsCard(_ rows: [DaemonData.InsightsSubmittedTally]) -> some View {
