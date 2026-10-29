@@ -579,19 +579,19 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_reread_tokens", "Tokens"),
     ("analytics_file_label", "File {letter} · {ext}"),
     ("analytics_file_label_no_ext", "File {letter}"),
-    // 16. Goals: the goals set with /goal in Claude and Codex, with each
-    // tool's own status (product owner, 2026-10-29). Never the goal's text.
+    // 16. Goals: the goals set with /goal in Claude and Codex (product
+    // owner, 2026-10-29). Never the goal's text. One set of status words
+    // for both tools ("normalize the language between claude and codex"):
+    // Met is Codex `complete` or Claude's latest check met; In progress is
+    // Codex `active`, or a Claude goal not checked yet or last checked not
+    // met; Limit reached is Codex `usage_limited` or `budget_limited`.
     ("analytics_goals_met_of", "Goals met {n} of {m}"),
     ("analytics_goals_note", "Set with /goal in Claude or Codex."),
     ("analytics_goal_met", "Met"),
-    ("analytics_goal_not_met", "Not met"),
-    ("analytics_goal_open", "Open"),
-    ("analytics_goal_active", "Active"),
+    ("analytics_goal_in_progress", "In progress"),
     ("analytics_goal_paused", "Paused"),
     ("analytics_goal_blocked", "Blocked"),
-    ("analytics_goal_usage_limited", "Usage limit"),
-    ("analytics_goal_budget_limited", "Budget limit"),
-    ("analytics_goal_complete", "Complete"),
+    ("analytics_goal_limit_reached", "Limit reached"),
     ("analytics_goal_status_unknown", "Status unavailable"),
     ("analytics_goal_line", "{t} tokens · {span}"),
     // 17. Lever (an observation only; its advice sentence is held, D2).

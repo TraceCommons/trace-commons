@@ -922,11 +922,18 @@ enum InsightsGoalsWords {
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
     private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
 
-    /// The statuses the core has words for; any other reads "Status
+    /// One set of words for both tools (owner, 2026-10-29: "normalize the
+    /// language between claude and codex"): each status the daemon sends,
+    /// Claude's or Codex's, to its shared word. Any other reads "Status
     /// unavailable".
-    static let statuses = [
-        "met", "not_met", "open", "active", "paused", "blocked", "usage_limited", "budget_limited", "complete",
+    static let statusWords = [
+        "met": "analytics_goal_met", "complete": "analytics_goal_met",
+        "open": "analytics_goal_in_progress", "not_met": "analytics_goal_in_progress",
+        "active": "analytics_goal_in_progress",
+        "paused": "analytics_goal_paused", "blocked": "analytics_goal_blocked",
+        "usage_limited": "analytics_goal_limit_reached", "budget_limited": "analytics_goal_limit_reached",
     ]
+    static var statuses: [String] { Array(statusWords.keys) }
 
     /// "Goals met {n} of {m}".
     static func metOf(_ goals: DaemonData.InsightsWeekGoals, copy: [String: String]) -> String {
@@ -941,9 +948,9 @@ enum InsightsGoalsWords {
         return words.isEmpty ? dash(copy) : words
     }
 
-    /// The tool's own status, in the core's words.
+    /// The tool's status in the shared words.
     static func status(_ status: String, copy: [String: String]) -> String {
-        statuses.contains(status) ? text("analytics_goal_" + status, copy) : text("analytics_goal_status_unknown", copy)
+        text(statusWords[status] ?? "analytics_goal_status_unknown", copy)
     }
 
     /// "{t} tokens · {span}"; an unknown figure is the dash, never 0.

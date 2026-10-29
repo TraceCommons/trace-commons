@@ -858,10 +858,10 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_best_week": "Your best week \u{b7} previous best {q}%",
         "analytics_goals_met_of": "Goals met {n} of {m}",
         "analytics_goal_met": "Met",
-        "analytics_goal_not_met": "Not met",
-        "analytics_goal_open": "Open",
-        "analytics_goal_complete": "Complete",
-        "analytics_goal_usage_limited": "Usage limit",
+        "analytics_goal_in_progress": "In progress",
+        "analytics_goal_paused": "Paused",
+        "analytics_goal_blocked": "Blocked",
+        "analytics_goal_limit_reached": "Limit reached",
         "analytics_goal_status_unknown": "Status unavailable",
         "analytics_goal_line": "{t} tokens \u{b7} {span}",
         "analytics_credit_tool_claude_code": "Claude",
@@ -1037,7 +1037,17 @@ final class InsightsComparisonsTests: XCTestCase {
         XCTAssertEqual(InsightsGoalsWords.metOf(goals, copy: words), "Goals met 1 of 3")
         XCTAssertEqual(goals.goals.map { InsightsGoalsWords.tool($0.tool, copy: words) }, ["Claude", "Codex", "Codex"])
         XCTAssertEqual(goals.goals.map { InsightsGoalsWords.status($0.status, copy: words) },
-                       ["Open", "Complete", "Status unavailable"])
+                       ["In progress", "Met", "Status unavailable"])
+        // One set of words for both tools.
+        let shared: [String: String] = [
+            "met": "Met", "complete": "Met",
+            "open": "In progress", "not_met": "In progress", "active": "In progress",
+            "paused": "Paused", "blocked": "Blocked",
+            "usage_limited": "Limit reached", "budget_limited": "Limit reached",
+        ]
+        for (wire, shown) in shared {
+            XCTAssertEqual(InsightsGoalsWords.status(wire, copy: words), shown, wire)
+        }
         XCTAssertEqual(InsightsGoalsWords.line(goals.goals[0], copy: words), "\u{2014} tokens \u{b7} \u{2014}",
                        "unknown figures are the dash, never 0")
         let tenMinutes = Duration.seconds(600).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
