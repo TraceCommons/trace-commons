@@ -684,4 +684,22 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: NudgeCopy(table: [:])))
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: nil))
     }
+
+    /// The popover offers "Check for Updates…" only where Sparkle runs, and
+    /// disabled while the updater cannot check (owner, 2026-10-29).
+    func test_theMenuChecksForUpdatesOnlyWhenSelfUpdating() throws {
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("@ObservedObject private var updates = UpdateController.shared"))
+        XCTAssertTrue(panel.contains("if updates.mode == .selfUpdating, let title = MenuWords.checkForUpdates {"))
+        XCTAssertTrue(panel.contains("updates.checkNow()"))
+        XCTAssertTrue(panel.contains(".disabled(!updates.canCheckNow)"))
+        // Sparkle's window opens in front of a menu-bar app.
+        XCTAssertTrue(panel.contains("NSApp.activate(ignoringOtherApps: true)\n                    updates.checkNow()"))
+    }
+
+    /// The label is the core's word, with a real ellipsis.
+    func test_theUpdateCheckWordComesFromTheCore() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        XCTAssertEqual(copy.checkForUpdates, "Check for Updates\u{2026}")
+    }
 }
