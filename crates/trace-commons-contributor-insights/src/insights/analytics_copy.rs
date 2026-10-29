@@ -946,7 +946,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_sub_period", "Period"),
     ("analytics_sub_period_weeks", "Last {n} weeks"),
     ("analytics_sub_period_all", "All time"),
-    ("analytics_sub_none_in_period", "No traces sent in this period"),
+    (
+        "analytics_sub_none_in_period",
+        "No traces sent in this period",
+    ),
     ("analytics_sub_tile_submitted", "Submitted"),
     ("analytics_sub_tile_submitted_note", "Accepted or not"),
     ("analytics_sub_tile_accepted", "Accepted"),
@@ -955,7 +958,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_sub_tile_credit_pending", "{n} pending"),
     ("analytics_sub_tile_top_model", "Top earning model"),
     ("analytics_sub_tile_top_model_note", "{n} credit received"),
-    ("analytics_sub_tile_top_model_none", "No credit received yet"),
+    (
+        "analytics_sub_tile_top_model_none",
+        "No credit received yet",
+    ),
     ("analytics_sub_traces", "{n} traces"),
     ("analytics_sub_traces_one", "1 trace"),
     ("analytics_sub_reasons_title", "Why traces earned nothing"),
@@ -965,7 +971,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     ("analytics_sub_models_title", "By model"),
     // Overview's Spend by model links here.
-    ("analytics_by_model_open_submitted", "What each model earned"),
+    (
+        "analytics_by_model_open_submitted",
+        "What each model earned",
+    ),
     ("analytics_sub_col_model", "Model"),
     ("analytics_sub_col_submitted", "Submitted"),
     ("analytics_sub_col_accepted", "Accepted"),
@@ -1015,7 +1024,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_sub_start_why",
         "Every trace you send shows up here, accepted or not: the credit it earned, the model behind it and what it cost at API prices. One trace is enough to fill this page in.",
     ),
-    ("analytics_sub_start_step_folder", "Choose a folder to share"),
+    (
+        "analytics_sub_start_step_folder",
+        "Choose a folder to share",
+    ),
     (
         "analytics_sub_start_step_folder_detail",
         "In Traces, pick a folder you work in and set its rule to Ask or Automatic.",
