@@ -11,7 +11,7 @@ final class SettingsSectionsTests: XCTestCase {
     func test_theSectionsAreTheSpecsInItsOrder() {
         XCTAssertEqual(SettingsSection.allCases, [
             .general, .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
-            .watchedFolders, .tools, .privateAI, .witness, .projects, .changes, .compute,
+            .watchedFolders, .tools, .privateAI, .referrals, .witness, .projects, .changes, .compute,
         ])
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
     }
@@ -22,12 +22,12 @@ final class SettingsSectionsTests: XCTestCase {
     func test_theListIsRonsTwelveInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
             .general, .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
-            .privateAI, .witness, .projects, .changes, .compute,
+            .privateAI, .referrals, .witness, .projects, .changes, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
             "General", "Connection", "Startup & notifications", "Watching", "Data uses", "Public profile",
-            "Watched folders", "Tools", "Private AI", "Redaction witness", "Projects",
+            "Watched folders", "Tools", "Private AI", "Referrals", "Redaction witness", "Projects",
             "Change log", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
@@ -127,6 +127,7 @@ final class SettingsSectionsTests: XCTestCase {
             // The section's own panels, headed by the standard-settings rule
             // (owner, 2026-10-10); the modal's rule names it by the list's word.
             .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
+            .referrals: ("ReferralsSection", "GlassEyebrowCard(surface.copy.title)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
             .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),

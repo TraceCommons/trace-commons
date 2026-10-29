@@ -35,6 +35,8 @@ struct InsightsOverviewTab: View {
     /// Claude and Codex tokens on each of the last 7 days, for the usage
     /// cards' bars.
     var usageByDay: [DaemonData.InsightsUsageDay]?
+    /// The NEAR AI card's own-traces and referrals rows; empty draws none.
+    var earnings: [NearAiEarningsSplit.Row] = []
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
     /// Put a week on screen; the window routes it to the feed showing.
@@ -63,7 +65,7 @@ struct InsightsOverviewTab: View {
                 // AI usage at a glance leads (product owner, 2026-10-28):
                 // one card per resource found on this Mac.
                 InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
-                                   copy: copy, showProjects: showProjects)
+                                   copy: copy, showProjects: showProjects, earnings: earnings)
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
                     // The Sessions breakdown and Tokens by day are off

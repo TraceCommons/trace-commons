@@ -29,6 +29,11 @@ struct InsightsUsageCards: View {
     let copy: [String: String]
     /// "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
+    /// The NEAR AI payout split (referral spec section 6): credit from own
+    /// traces and from referrals, from the payout rail's streams
+    /// (`NearAiEarningsSplit`). Empty draws nothing, as it is for an
+    /// account that never referred anyone.
+    var earnings: [NearAiEarningsSplit.Row] = []
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
@@ -118,6 +123,9 @@ struct InsightsUsageCards: View {
                              value: InsightsCreditWords.spendAndTokens(credit.today, copy: copy))
             InsightsUsageRow(label: text("analytics_usage_last_31_days"),
                              value: InsightsCreditWords.spendAndTokens(credit.last31Days, copy: copy))
+            ForEach(earnings) { row in
+                InsightsUsageRow(label: row.label, value: row.value)
+            }
         })
     }
 }

@@ -17,6 +17,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case watchedFolders
     case tools
     case privateAI
+    /// Referral codes (referral spec section 6), beside Private AI, whose
+    /// section holds the NEAR AI payout the referral credit goes to.
+    case referrals
     case witness
     case projects
     case changes
@@ -32,7 +35,10 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var availableBeforeOnboarding: Bool {
         switch self {
         case .general, .connection, .startup, .notifications, .updates, .privateAI, .compute: true
-        case .watching, .consent, .publicProfile, .watchedFolders, .tools, .witness, .projects, .changes: false
+        // Referrals waits: before first run there is no account to hold a
+        // code or to apply one to.
+        case .watching, .consent, .publicProfile, .watchedFolders, .tools, .referrals, .witness, .projects,
+             .changes: false
         }
     }
 
@@ -64,6 +70,10 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .watchedFolders: return nav.folders
         case .tools: return nav.tools
         case .privateAI: return nav.privateAI
+        // Not in the core's nav table: the referral words' own title, a
+        // draft for owner review (`ReferralCopy.title`), so the list row and
+        // the section heading are one string.
+        case .referrals: return SettingsWords.referrals
         case .witness: return nav.witness
         case .projects: return nav.projects
         case .changes: return nav.log
@@ -104,6 +114,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .watchedFolders: "folder"
         case .tools: "wrench.and.screwdriver"
         case .privateAI: "key"
+        case .referrals: "person.2"
         case .witness: "seal"
         case .projects: "square.stack"
         case .changes: "clock.arrow.circlepath"
@@ -125,4 +136,9 @@ enum SettingsWords {
     static let updates = "Updates"
     static let watching = "Watching"
     static let projects = "Projects"
+    /// The core's referral title (DRAFT, NEEDS APPROVAL), read once; nil
+    /// while the export has not arrived, which the list draws as its
+    /// placeholder row.
+    static let referrals: String? = TCConsentCopy.referralCopyJSON()
+        .flatMap(ReferralCopy.decode(fromJSON:))?.title
 }
