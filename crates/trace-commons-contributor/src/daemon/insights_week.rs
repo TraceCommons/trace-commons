@@ -3136,16 +3136,20 @@ struct ScannedSession {
 /// `vscode`, `exec`, `mcp`) otherwise. Only the shape is read, never a
 /// value inside it.
 ///
-/// The first `session_meta` decides. A spawned thread forked from its
-/// parent can carry the parent's `session_meta` after its own; when a
-/// later one is not spawned too, the session reads as unknown rather than
-/// automated, so a mixed transcript is never set aside. No `session_meta`,
-/// no `source`, or `source: "unknown"` is unknown. `exec` and `mcp`
-/// sessions read as the person's: a person can start either.
+/// The first `session_meta` decides, and a later one never changes it. A
+/// thread an agent spawned is written with its own `session_meta` and then
+/// a copy of its parent's (`source: "vscode"`, say): that copy does not
+/// make the thread the person's, nor unknown. Search of 2026-10-29 over
+/// 907 local Codex transcripts: every one with more than one
+/// `session_meta` opens with a spawned thread's and has the second within
+/// its first three lines (121 then a person-started label, 10 then another
+/// spawned thread), and none opens with a person-started one, so no
+/// transcript that is the person's own is set aside by this rule. No
+/// `session_meta`, no `source`, or `source: "unknown"` is unknown. `exec`
+/// and `mcp` sessions read as the person's: a person can start either.
 #[derive(Default)]
 struct CodexAutomationScan {
     first: Option<Automation>,
-    mixed: bool,
 }
 
 impl CodexAutomationScan {
@@ -3164,19 +3168,11 @@ impl CodexAutomationScan {
             Some(serde_json::Value::String(label)) if label == "unknown" => Automation::Unknown,
             Some(_) => Automation::Person,
         };
-        match self.first {
-            None => self.first = Some(class),
-            Some(Automation::Automated) if class != Automation::Automated => self.mixed = true,
-            Some(_) => {}
-        }
+        self.first.get_or_insert(class);
     }
 
     fn finish(self) -> Automation {
-        if self.mixed {
-            Automation::Unknown
-        } else {
-            self.first.unwrap_or_default()
-        }
+        self.first.unwrap_or_default()
     }
 }
 
@@ -4106,6 +4102,20 @@ fn route_map(
         .collect()
 }
 
+/// The tool a stored row was read from, as the rollup's `source` spells
+/// it (`claude_code`, `codex`).
+fn row_tool(row: &CounterRow) -> &'static str {
+    let source = match &row.body {
+        RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+        RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::Unknown { source, .. } => *source,
+    };
+    match source {
+        AnalyticsSource::ClaudeCode => "claude_code",
+        AnalyticsSource::Codex => "codex",
+    }
+}
+
 /// Each row's NEAR AI charge for the Models answers, by the engine's
 /// session reference: absent when its session sent no call through NEAR AI
 /// (or routing is unavailable, as in `route_map`). Empty while
@@ -4346,6 +4356,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 mod benchmarks;
+pub(crate) mod submitted;
 
 #[cfg(test)]
 mod tests {
@@ -8371,12 +8382,35 @@ mod tests {
 
     #[test]
     fn a_codex_session_its_harness_spawned_is_automated() {
-        for source in [
-            spawned(),
-            serde_json::json!({"subagent": "review"}),
-            serde_json::json!({"subagent": {"other": "synthetic-reviewer"}}),
+        for (sources, source) in [
+            (vec![Some(spawned())], "spawned"),
+            (
+                vec![Some(serde_json::json!({"subagent": "review"}))],
+                "review",
+            ),
+            (
+                vec![Some(
+                    serde_json::json!({"subagent": {"other": "synthetic-reviewer"}}),
+                )],
+                "other",
+            ),
+            (
+                vec![Some(serde_json::json!({"subagent": {"other": "guardian"}}))],
+                "guardian",
+            ),
+            // A spawned thread followed by its parent's copied
+            // `session_meta`: still the agent's, not the person's.
+            (
+                vec![Some(spawned()), Some(serde_json::json!("vscode"))],
+                "spawned then vscode",
+            ),
+            (
+                vec![Some(spawned()), Some(serde_json::json!("cli"))],
+                "spawned then cli",
+            ),
+            (vec![Some(spawned()), Some(spawned())], "spawned twice"),
         ] {
-            let row = codex_row_of(&codex_bytes_from(&[Some(source.clone())]));
+            let row = codex_row_of(&codex_bytes_from(&sources));
             assert_eq!(row.automation, Automation::Automated, "{source}");
             assert!(row.automation_read);
             assert!(row.session_input().automated, "{source}");
@@ -8401,15 +8435,13 @@ mod tests {
     }
 
     /// Unknown is never automated: no `session_meta` source, Codex's own
-    /// `unknown`, a spawned thread carrying a person-started
-    /// `session_meta` after its own, or a Claude Code session.
+    /// `unknown`, or a Claude Code session.
     #[test]
     fn an_undeterminable_session_is_unknown_and_not_automated() {
         for bytes in [
             codex_bytes(),
             codex_bytes_from(&[None]),
             codex_bytes_from(&[Some(serde_json::json!("unknown"))]),
-            codex_bytes_from(&[Some(spawned()), Some(serde_json::json!("cli"))]),
         ] {
             let row = codex_row_of(&bytes);
             assert_eq!(row.automation, Automation::Unknown);
@@ -8422,6 +8454,34 @@ mod tests {
         let row = only_row(&f.pass);
         assert_eq!(row.automation, Automation::Unknown);
         assert!(!row.session_input().automated);
+    }
+
+    /// A spawned thread stored as unknown under the older facts version (the
+    /// rule that read its parent's copied `session_meta` as mixed) is read
+    /// once more, though its file is unchanged and its automation was
+    /// looked for, and comes back automated.
+    #[test]
+    fn a_stored_spawned_thread_read_as_unknown_is_read_again_as_automated() {
+        let f = Fixture::new();
+        let path = f.write(
+            "s.jsonl",
+            &codex_bytes_from(&[Some(spawned()), Some(serde_json::json!("vscode"))]),
+        );
+        let candidates = [candidate(SOURCE_CODEX, &path)];
+        assert_eq!(f.run(&candidates).read, 1);
+        assert_eq!(f.run(&candidates).read, 0);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        for row in store.rows.values_mut() {
+            row.facts_version = SESSION_FACTS_VERSION - 1;
+            row.automation = Automation::Unknown;
+            assert!(row.automation_read);
+        }
+        f.pass.save(store).unwrap();
+        assert_eq!(f.run(&candidates).read, 1);
+        let row = only_row(&f.pass);
+        assert_eq!(row.automation, Automation::Automated);
+        assert_eq!(row.facts_version, SESSION_FACTS_VERSION);
+        assert_eq!(f.run(&candidates).read, 0);
     }
 
     fn codex_body() -> RowBody {

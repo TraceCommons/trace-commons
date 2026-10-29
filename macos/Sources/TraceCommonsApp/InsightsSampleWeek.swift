@@ -1,11 +1,12 @@
-#if DEBUG
 import Foundation
 import TCBridge
 import TCShellCore
 
-/// Debug builds only: `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from a
-/// fixed sample week, so a design review can see every chart and section in
-/// a dev build. A dev build is ad-hoc signed and cannot read the team
+/// A fixed sample week. Every build draws it under the get-started card,
+/// dimmed and labelled as sample data (`InsightsSample`), while Insights has
+/// no trace of the person's own. Debug builds only:
+/// `TRACE_COMMONS_INSIGHTS_SAMPLE=1` also draws Insights from it, so a
+/// design review can see every chart and section in a dev build. A dev build is ad-hoc signed and cannot read the team
 /// keychain group that holds the Insights digest keys, so its watched-folder
 /// counting and saved analyses stay empty. A release build never reads the
 /// variable.
@@ -19,7 +20,11 @@ import TCShellCore
 /// nowhere, or refused. No write reaches the store.
 enum InsightsSampleWeek {
     static var enabled: Bool {
-        ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #else
+        return false
+        #endif
     }
 
     static let weekStart = "2026-10-05"
@@ -223,8 +228,9 @@ enum InsightsSampleWeek {
                 ["id": "g1", "goal": cacheGoal, "figure": 872,
                  "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
             ],
-            "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
-                      "disabled": [String](), "card_enabled": true],
+            // No pattern is shown any more (owner, 2026-10-29), so the
+            // sample's lever picks none.
+            "lever": ["pick": NSNull(), "disabled": [String](), "card_enabled": true],
             "recap": [
                 "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
                 "sources": [["source": "claude_code", "tokens": 45_000_000, "change_permille": -120],
@@ -232,10 +238,8 @@ enum InsightsSampleWeek {
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
                     ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
-                    ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
         ]
     }
 }
-#endif

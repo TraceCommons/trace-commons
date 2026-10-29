@@ -32,8 +32,9 @@ final class InsightsCreditTests: XCTestCase {
         let table = try GlassSurfaceRulesTests.text("Views/InsightsCreditViews.swift")
         XCTAssertFalse(table.contains("analytics_credit_by_task"))
         XCTAssertFalse(table.contains("Dimension.tool"))
-        XCTAssertTrue(table.contains("GlassSegment(text(\"analytics_card_by_project\"), value: InsightsCreditWords.Dimension.folder)"))
-        XCTAssertTrue(table.contains("GlassSegment(text(\"analytics_card_by_model\"), value: InsightsCreditWords.Dimension.model)"))
+        XCTAssertFalse(table.contains("analytics_card_by_tool"))
+        XCTAssertTrue(table.contains("case .folder: GlassSegment(text(\"analytics_card_by_project\"), value: dimension)"))
+        XCTAssertTrue(table.contains("case .model: GlassSegment(text(\"analytics_card_by_model\"), value: dimension)"))
     }
 
     /// The NEAR AI card shows only while there was NEAR AI spend in the

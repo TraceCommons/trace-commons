@@ -309,6 +309,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_benchmarks", params: ["weeks": weeks], as: DaemonData.InsightsBenchmarks.self)
     }
 
+    public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
+        var params: [String: Any] = ["tz": TimeZone.current.secondsFromGMT()]
+        if let weeks { params["weeks"] = weeks }
+        return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
         return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
     }

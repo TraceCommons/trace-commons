@@ -132,8 +132,8 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(Set(lines.map(\.id)).count, 3)
     }
 
-    /// Breakdown's By project carries Claude and Codex spend at API prices
-    /// at API prices, and the largest spend leads.
+    /// Breakdown's By project carries Claude and Codex spend at API prices,
+    /// and the largest spend leads.
     func testByProjectAddsSpendFromWork() throws {
         let copy = try words()
         var object = try InsightsSessionRouteTests.recorded()

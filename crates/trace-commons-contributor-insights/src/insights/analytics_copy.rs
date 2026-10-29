@@ -67,9 +67,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "folder",
     // The weekday picked on "Tokens by day".
     "day",
-    // Overview and Benchmarks (product owner, 2026-10-29): lines added,
-    // a limit window's name, and the two models a tip compares.
-    "a",
+    // Overview and Benchmarks (product owner, 2026-10-29): a limit
+    // window's name, and the two models a tip compares.
     "window",
     "first",
     "second",
@@ -918,4 +917,45 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{first} had {x}× fewer edits undone than {second}.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
+    // 26. Approved by the product owner in these words (2026-10-29): the
+    // get-started card and the sample data under it, on Overview, Breakdown
+    // and Benchmarks while Insights has no trace of the person's own. The
+    // steps name the app's own screens: Traces' folder list and its rules
+    // (Ask / Automatic, `project_copy`); the one action, "Choose what to
+    // share", is a text link with an arrow to that list. "Sessions" in the
+    // steps is the owner's word for what Claude Code and Codex record on
+    // this Mac. "30 minutes" is the daemon's default quiet time before a
+    // finished trace is sent.
+    (
+        "analytics_start_title",
+        "Your Insights grow with your traces",
+    ),
+    (
+        "analytics_start_why",
+        "Keep using AI as you normally do. As your traces come in, you'll see how much you spend, which models you use most, and which work best for your tasks.",
+    ),
+    ("analytics_start_step_use", "Keep using Claude or Codex"),
+    (
+        "analytics_start_step_use_detail",
+        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
+    ),
+    ("analytics_start_step_share", "Choose what to share"),
+    (
+        "analytics_start_step_share_detail",
+        "Go to Traces to select a folder. Choose Automatic to share eligible traces without reviewing each one, or Ask to approve them first.",
+    ),
+    ("analytics_start_choose", "Choose what to share"),
+    ("analytics_start_step_fill", "See your Insights take shape"),
+    (
+        "analytics_start_step_fill_detail",
+        "As traces are collected, your Insights update automatically. In Automatic mode, completed sessions are shared after about 30 minutes of inactivity.",
+    ),
+    // The API-price note when only one tool was used this week.
+    ("analytics_tile_api_prices_claude", "Claude at API prices"),
+    ("analytics_tile_api_prices_codex", "Codex at API prices"),
+    ("analytics_sample_banner", "Sample data — not yours"),
+    (
+        "analytics_sample_banner_detail",
+        "This is what Insights shows once your traces come in.",
+    ),
 ];

@@ -177,6 +177,22 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         }
     }
 
+    /// `insights_submitted` (product owner, 2026-10-29), from the daemon's
+    /// own recorded answer. A key the model drops fails here, by path.
+    func testEverySubmittedKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_submitted.json")
+        let recorded = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        assertDeclared(DaemonData.InsightsSubmitted.self, recorded, method: "insights_submitted")
+        let paths = KeyRecorder.keyPaths(in: recorded)
+        for path in ["by_model[].edits_denied_partial", "by_model[].usd_micros_known", "code.files.config",
+                     "traces[].unmatched_reason", "totals.by_status.withdrawn"] {
+            XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
+        }
+    }
+
     /// `insights_week`'s `near_ai_credit` (product owner, 2026-10-28),
     /// which the throwaway store above never reaches: the daemon's own
     /// recorded routed answer. A key the model drops fails here, by path.

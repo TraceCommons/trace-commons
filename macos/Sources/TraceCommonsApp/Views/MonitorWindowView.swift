@@ -274,7 +274,11 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
-                                 inspector: insightsInspector, home: home)
+                                 inspector: insightsInspector, home: home,
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).

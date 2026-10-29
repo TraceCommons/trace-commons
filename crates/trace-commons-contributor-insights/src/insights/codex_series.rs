@@ -22,6 +22,18 @@
 //!
 //! Each turn carries the model of the `turn_context` before it. A tool call
 //! belongs to the turn whose `token_count` follows it.
+//!
+//! Edits. An `apply_patch` call's file sections are edits. Codex also routes
+//! its actions through one custom `exec` tool, read as a shell, whose edits
+//! are not seen in its script; it records each patch it applies as an
+//! `item_completed` event whose item is a `FileChange`, holding a `status`
+//! and its `changes` keyed by path (`add` and `delete` with the file's
+//! `content`, `update` with a `unified_diff` and a `move_path`). A
+//! `completed` one is an applied patch of the model of the latest
+//! `turn_context`, read like an `apply_patch` section; `failed` and
+//! `declined` ones (search of 2026-10-29: 2 and 1 of 1,984 in 107 local
+//! transcripts) are not edits. A change both an `apply_patch` call and a
+//! `FileChange` record is counted once, by the call.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +67,12 @@ pub const CODEX_INTERRUPTED_REASON: &str = "interrupted";
 
 /// How a tool output starts when the contributor stopped the command.
 pub const CODEX_EXEC_ABORT_PREFIX: &str = "aborted by user";
+
+/// The `item_completed` item type Codex records an applied patch as.
+const FILE_CHANGE_ITEM: &str = "FileChange";
+
+/// The `FileChange` status of a change that was applied.
+const FILE_CHANGE_COMPLETED: &str = "completed";
 
 /// The approval policy under which Codex puts no call to the contributor.
 const NEVER_ASK_POLICY: &str = "never";
@@ -128,6 +146,9 @@ struct PatchFile {
     lines: Option<(u32, u32)>,
     /// Each update hunk's removed and added text, as keyed digests.
     hunks: Vec<(KeyedDigest, KeyedDigest)>,
+    /// What the section changes, apart from its path: one change that both
+    /// an `apply_patch` call and a `FileChange` record has one signature.
+    signature: KeyedDigest,
 }
 
 /// A tool call held until its output is read.
@@ -197,6 +218,9 @@ pub struct CodexTurnSeriesScan<'k> {
     calls: BTreeMap<String, PendingCall>,
     edits_by_path: BTreeMap<KeyedDigest, Vec<HeldEdit>>,
     held_edits: usize,
+    /// Signatures of the `apply_patch` sections called so far, each with how
+    /// many calls made it and no `FileChange` has matched yet.
+    patch_signatures: BTreeMap<KeyedDigest, u32>,
     files: BTreeMap<KeyedDigest, PathClass>,
     failed_before_edit: BTreeSet<KeyedDigest>,
     passed_after_edit: BTreeSet<KeyedDigest>,
@@ -243,6 +267,7 @@ impl<'k> CodexTurnSeriesScan<'k> {
             calls: BTreeMap::new(),
             edits_by_path: BTreeMap::new(),
             held_edits: 0,
+            patch_signatures: BTreeMap::new(),
             files: BTreeMap::new(),
             failed_before_edit: BTreeSet::new(),
             passed_after_edit: BTreeSet::new(),
@@ -286,6 +311,13 @@ impl<'k> CodexTurnSeriesScan<'k> {
             ("turn_context", _) => self.turn_context(payload),
             ("event_msg", Some("task_started")) => self.task_started(at),
             ("event_msg", Some("token_count")) => self.token_count(payload, at),
+            ("event_msg", Some("item_completed")) => {
+                let item = payload.get("item").unwrap_or(&Value::Null);
+                if item.get("type").and_then(Value::as_str) == Some(FILE_CHANGE_ITEM) {
+                    self.model_event(at);
+                    self.file_change(item);
+                }
+            }
             ("event_msg", Some("task_complete")) => {
                 self.model_event(at);
                 self.last_end = Some(TaskEnd::Complete);
@@ -491,7 +523,19 @@ impl<'k> CodexTurnSeriesScan<'k> {
                         .edits
                         .saturating_add(u32::try_from(parsed.len()).unwrap_or(u32::MAX));
                 }
-                call.patch = Some(parsed.iter().map(|file| file.digest(self.key)).collect());
+                let files: Vec<PatchFile> =
+                    parsed.iter().map(|file| file.digest(self.key)).collect();
+                for file in &files {
+                    if self.patch_signatures.len() < MAX_SERIES_TOOL_CALLS
+                        || self.patch_signatures.contains_key(&file.signature)
+                    {
+                        let made = self.patch_signatures.entry(file.signature).or_default();
+                        *made = made.saturating_add(1);
+                    } else {
+                        self.capped = true;
+                    }
+                }
+                call.patch = Some(files);
             }
             ToolKind::Bash => {
                 if let Some(model) = model {
@@ -593,6 +637,46 @@ impl<'k> CodexTurnSeriesScan<'k> {
         if success == Some(false) {
             return;
         }
+        self.apply_files(files, model);
+    }
+
+    /// A completed `FileChange` item: each of its changes is an applied file
+    /// section of the current model, unless an `apply_patch` call already
+    /// made the same change. A `FileChange` of another status is a patch
+    /// tried, not applied.
+    fn file_change(&mut self, item: &Value) {
+        let Some(changes) = item.get("changes").and_then(Value::as_object) else {
+            return;
+        };
+        self.patch_calls = self.patch_calls.saturating_add(1);
+        self.patch_where_asked |= !self.not_asking;
+        if item.get("status").and_then(Value::as_str) != Some(FILE_CHANGE_COMPLETED) {
+            return;
+        }
+        let mut files = Vec::new();
+        for (path, change) in changes {
+            let file = file_change_section(self.key, path, change);
+            match self.patch_signatures.get_mut(&file.signature) {
+                Some(made) if *made > 0 => *made -= 1,
+                _ => files.push(file),
+            }
+        }
+        if files.is_empty() {
+            return;
+        }
+        let model = self.model;
+        if let Some(model) = model {
+            let counts = &mut self.counts[model];
+            counts.patched = true;
+            counts.edits = counts
+                .edits
+                .saturating_add(u32::try_from(files.len()).unwrap_or(u32::MAX));
+        }
+        self.apply_files(files, model);
+    }
+
+    /// The file sections of one applied patch, made by `model`.
+    fn apply_files(&mut self, files: Vec<PatchFile>, model: Option<usize>) {
         self.applied_patches = self.applied_patches.saturating_add(1);
         for file in files {
             match file.lines {
@@ -915,6 +999,9 @@ struct ParsedFile<'a> {
     removed: u32,
     /// Each update hunk's removed and added lines.
     hunks: Vec<(Vec<&'a str>, Vec<&'a str>)>,
+    /// Every removed and added line, in order, whatever the op.
+    removed_lines: Vec<&'a str>,
+    added_lines: Vec<&'a str>,
 }
 
 impl<'a> ParsedFile<'a> {
@@ -940,7 +1027,102 @@ impl<'a> ParsedFile<'a> {
                     )
                 })
                 .collect(),
+            signature: section_signature(key, self.op, &self.removed_lines, &self.added_lines),
         }
+    }
+}
+
+/// The signature of a file section: its op and its removed and added lines,
+/// never its path, which an `apply_patch` call may give relative and a
+/// `FileChange` absolute. A deleted file's lines are left out: an
+/// `apply_patch` deletion does not carry them.
+fn section_signature(
+    key: &DigestKey,
+    op: PatchOp,
+    removed: &[&str],
+    added: &[&str],
+) -> KeyedDigest {
+    let (label, removed, added) = match op {
+        PatchOp::Add => ("add", removed, added),
+        PatchOp::Update => ("update", removed, added),
+        PatchOp::Delete => ("delete", &[][..], &[][..]),
+    };
+    edit_text_key(
+        key,
+        &format!("{label}\0{}\0{}", removed.join("\n"), added.join("\n")),
+    )
+}
+
+/// One change of a `FileChange` item, keyed by its `path`, as a file
+/// section. `add` and `delete` carry the file's `content`, whose lines are
+/// added or removed; `update` carries a `unified_diff` read like an
+/// `apply_patch` update (`@@` hunk starts, `+`/`-` lines; header lines
+/// before the first `@@` are passed over) and a `move_path`, the target
+/// when it is a string. A change of another type, or one missing its text,
+/// is an edit of unknown lines.
+fn file_change_section(key: &DigestKey, path: &str, change: &Value) -> PatchFile {
+    let move_to = change.get("move_path").and_then(Value::as_str);
+    let target = move_to.unwrap_or(path);
+    let text = |field: &str| change.get(field).and_then(Value::as_str);
+    let (op, content) = match change.get("type").and_then(Value::as_str) {
+        Some("add") => (Some(PatchOp::Add), text("content")),
+        Some("delete") => (Some(PatchOp::Delete), text("content")),
+        Some("update") => (Some(PatchOp::Update), text("unified_diff")),
+        _ => (None, None),
+    };
+    let mut removed_lines: Vec<&str> = Vec::new();
+    let mut added_lines: Vec<&str> = Vec::new();
+    let mut hunks: Vec<(Vec<&str>, Vec<&str>)> = Vec::new();
+    match (op, content) {
+        (Some(PatchOp::Add), Some(content)) => added_lines.extend(content.lines()),
+        (Some(PatchOp::Delete), Some(content)) => removed_lines.extend(content.lines()),
+        (Some(PatchOp::Update), Some(diff)) => {
+            for line in diff.lines() {
+                if line.starts_with("@@") {
+                    hunks.push((Vec::new(), Vec::new()));
+                    continue;
+                }
+                let Some(hunk) = hunks.last_mut() else {
+                    continue;
+                };
+                if let Some(added) = line.strip_prefix('+') {
+                    added_lines.push(added);
+                    hunk.1.push(added);
+                } else if let Some(removed) = line.strip_prefix('-') {
+                    removed_lines.push(removed);
+                    hunk.0.push(removed);
+                }
+            }
+        }
+        _ => {}
+    }
+    let lines = content.and(op).map(|_| {
+        (
+            u32::try_from(removed_lines.len()).unwrap_or(u32::MAX),
+            u32::try_from(added_lines.len()).unwrap_or(u32::MAX),
+        )
+    });
+    PatchFile {
+        path: path_key(key, target),
+        class: path_class(target),
+        moved: move_to.is_some(),
+        lines,
+        hunks: hunks
+            .iter()
+            .filter(|(old, new)| !(old.is_empty() && new.is_empty()))
+            .map(|(old, new)| {
+                (
+                    edit_text_key(key, &old.join("\n")),
+                    edit_text_key(key, &new.join("\n")),
+                )
+            })
+            .collect(),
+        signature: section_signature(
+            key,
+            op.unwrap_or(PatchOp::Update),
+            &removed_lines,
+            &added_lines,
+        ),
     }
 }
 
@@ -965,6 +1147,8 @@ fn parse_patch(text: &str) -> Vec<ParsedFile<'_>> {
                 added: 0,
                 removed: 0,
                 hunks: Vec::new(),
+                removed_lines: Vec::new(),
+                added_lines: Vec::new(),
             });
             continue;
         }
@@ -990,11 +1174,13 @@ fn parse_patch(text: &str) -> Vec<ParsedFile<'_>> {
         }
         if let Some(added) = line.strip_prefix('+') {
             file.added = file.added.saturating_add(1);
+            file.added_lines.push(added);
             if let (true, Some(hunk)) = (update, file.hunks.last_mut()) {
                 hunk.1.push(added);
             }
         } else if let Some(removed) = line.strip_prefix('-') {
             file.removed = file.removed.saturating_add(1);
+            file.removed_lines.push(removed);
             if let (true, Some(hunk)) = (update, file.hunks.last_mut()) {
                 hunk.0.push(removed);
             }

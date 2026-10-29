@@ -26,9 +26,12 @@ struct InsightsPatternsTab: View {
     /// The week's Overview model, for Tokens by day beside the drill-down
     /// (product owner, 2026-10-28); `nil` hides it.
     var overview: InsightsOverviewModel?
-    /// The window's inspector, where a picked day's sessions and a card's
-    /// sessions are shown (owner, 2026-10-29).
+    /// The window's inspector, where a picked day's sessions are shown
+    /// (owner, 2026-10-29).
     var inspector = InsightsBreakdownInspector()
+    /// The get-started card over this tab drawn from the sample (product
+    /// owner, 2026-10-29); `nil` for the person's own week.
+    var getStarted: InsightsGetStarted?
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
     @State private var goalSource = "claude_code"
     @State private var goalNumber = ""
@@ -36,34 +39,29 @@ struct InsightsPatternsTab: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                if let patterns = model.shown {
-                    header(patterns)
-                    // Details leads with the drill-down, by project or by
-                    // model (product owner, 2026-10-28; By task and By tool
-                    // removed 2026-10-29). No pattern card is shown any more
-                    // (owner, 2026-10-29: Retried tool calls, the last, was
-                    // removed); the goals live only here.
-                    if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
-                    // Tokens by day moved here from Overview (product owner,
-                    // 2026-10-28); a picked day's sessions are the
-                    // inspector's (owner, 2026-10-29).
-                    if let overview {
-                        InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,
-                                            pick: { inspector.pick(day: $0) })
-                    }
-                    if patterns.feed == "counter_pass", let found = comparisons.comparisons {
-                        goals(found)
-                    }
-                } else if model.failed {
-                    Text(text("analytics_unavailable")).insightsError()
+        InsightsTabPage(getStarted: getStarted) {
+            if let patterns = model.shown {
+                header(patterns)
+                // Details leads with the drill-down, by project or by model
+                // (product owner, 2026-10-28; By task and By tool removed
+                // 2026-10-29). No pattern card is shown any more (owner,
+                // 2026-10-29: Retried tool calls, the last, was removed);
+                // the goals live only here.
+                if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
+                // Tokens by day moved here from Overview (product owner,
+                // 2026-10-28); a picked day's sessions are the inspector's
+                // (owner, 2026-10-29).
+                if let overview {
+                    InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,
+                                        pick: { inspector.pick(day: $0) })
                 }
-                if model.busy { GlassSpinner() }
+                if patterns.feed == "counter_pass", let found = comparisons.comparisons {
+                    goals(found)
+                }
+            } else if model.failed {
+                Text(text("analytics_unavailable")).insightsError()
             }
-            .padding(.vertical, GlassTokens.Space.s7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSurface()
+            if model.busy { GlassSpinner() }
         }
     }
 
