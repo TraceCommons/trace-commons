@@ -464,29 +464,7 @@ private actor FlipReader {
 final class InsightsPatternsTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_pattern_repeated_reads_count": "{r} reads of {f} files",
-        "analytics_pattern_retried_calls_count": "{c} calls",
-        "analytics_pattern_edit_fail_edit_count": "{l} times",
-        "analytics_pattern_long_context_line": "after {threshold}",
-        "analytics_pattern_repeated_reads_headline_one": "{r} READ",
-        "analytics_pattern_repeated_reads_headline_other": "{r} READS",
-        "analytics_pattern_repeated_reads_count_under_count_one": "in {f} file",
-        "analytics_pattern_repeated_reads_count_under_count_other": "in {f} files",
-        "analytics_pattern_retried_calls_headline_one": "{c} CALL",
-        "analytics_pattern_retried_calls_headline_other": "{c} CALLS",
-        "analytics_pattern_retried_calls_count_under_count": "same tool and input",
-        "analytics_pattern_edit_fail_edit_headline_one": "{l} TIME",
-        "analytics_pattern_edit_fail_edit_headline_other": "{l} TIMES",
-        "analytics_pattern_edit_fail_edit_count_under_count": "edited, failed, edited",
-        "analytics_pattern_long_context_headline_one": "{n} TURN",
-        "analytics_pattern_long_context_headline_other": "{n} TURNS",
-        "analytics_estimate_from_result_size": "ABOUT",
-        "analytics_from_counters": "COUNTERS",
-        "analytics_inferred_from_order": "INFERRED",
         "analytics_claude_sessions_only": "Claude only: {k} of {n}.",
-        "analytics_see_sessions": "Show {n} traces",
-        "analytics_file_label": "File {letter} \u{b7} {ext}",
-        "analytics_file_label_no_ext": "File {letter}",
     ]
 
     static let patternsJSON = """
@@ -521,111 +499,24 @@ final class InsightsPatternsTests: XCTestCase {
         try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.patternsJSON.utf8)).patterns)
     }
 
-    func testCardsKeepTheCoresOrderAndTheirCountLinesAreTheCoresWordsFilled() throws {
-        let week = try patterns()
-        let copy = Self.words
-        XCTAssertEqual(week.cards.map(\.kind), ["repeated_reads", "retried_calls", "edit_fail_edit", "long_context"])
-        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map(\.kind), ["retried_calls"])
-        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map { InsightsPatternsWords.countLine($0, copy: copy) },
-                       ["0 calls"])
-        // A measured zero stays zero; an unknown figure is the dash.
-        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[1].tokens, copy: copy), "0")
-        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[2].tokens, copy: copy), "\u{2014}")
-    }
-
-    func testDerivationLabelsNameTheBasisAndTheInferredCard() throws {
-        let week = try patterns()
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[0], copy: Self.words), ["ABOUT"])
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[2], copy: Self.words), ["INFERRED", "ABOUT"])
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[3], copy: Self.words), ["COUNTERS"])
-    }
-
-    func testAnAbsentWeekIsAGapNeverAZeroBar() throws {
-        let week = try patterns()
-        let bars = InsightsPatternsWords.bars(week.cards[1])
-        XCTAssertEqual(bars.map(\.week), ["2026-09-07", "2026-09-14"])
-        XCTAssertNil(bars[0].tokens)
-        XCTAssertEqual(bars[1].tokens, 0)
-        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[1]).map(\.week), ["2026-09-14"])
-        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[2]).count, 0)
-    }
-
-    /// Owner decision 2026-10-20: a card whose estimate rounds to 0 leads
-    /// with its count and unit, as the core says, and the line beneath it
-    /// drops the count; a token headline is unchanged, and an answer from
-    /// before the core said leads with tokens.
-    func testACardTheCoreLeadsWithItsCountShowsTheCountAndUnit() throws {
-        let copy = Self.words
-        func card(_ kind: String, tokens: String, count: UInt32, files: String = "null",
-                  headline: String? = "count") throws -> InsightsPatternCard {
-            let field = headline.map { "\"headline\":\"\($0)\"," } ?? ""
-            let json = """
-            {"kind":"\(kind)","tokens":\(tokens),"count":\(count),\(field)"files":\(files),"sessions":1,
-             "basis":"estimate_from_result_size","inferred":false,"weeks":[],"change":250,"change_unavailable":null}
-            """
-            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
-        }
-        let call = try card("retried_calls", tokens: "0", count: 1)
-        XCTAssertEqual(InsightsPatternsWords.headline(call, copy: copy), "1 CALL")
-        XCTAssertEqual(InsightsPatternsWords.countLine(call, copy: copy), "same tool and input")
-        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(call))
-
-        // An answer without the field leads with tokens, even at 0.
-        let older = try card("retried_calls", tokens: "0", count: 2, headline: nil)
-        XCTAssertNil(older.headline)
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(older))
-        XCTAssertEqual(InsightsPatternsWords.headline(older, copy: copy), "0")
-        // A headline this build does not know leads with tokens.
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(try card("retried_calls", tokens: "0", count: 2,
-                                                                     headline: "later")))
-        // The count headline never carries the token change beside it.
+    /// No pattern card is drawn on macOS any more (owner, 2026-10-29:
+    /// Retried tool calls, the last one #1723 left, is removed). The core
+    /// still sends the cards, for the other shells.
+    func testBreakdownDrawsNoPatternCard() throws {
+        XCTAssertEqual(try patterns().cards.count, 4, "the core still sends them")
         let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(view.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()"))
-        XCTAssertTrue(view.contains("if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {"))
-    }
-
-    func testACountHeadlineCardDrawsNoZeroOnItsCurrentWeekBar() throws {
-        let copy = Self.words
-        func card(headline: String, tokens: String, count: UInt32) throws -> InsightsPatternCard {
-            let json = """
-            {"kind":"retried_calls","tokens":\(tokens),"count":\(count),"headline":"\(headline)","files":null,"sessions":1,
-             "basis":"estimate_from_result_size","inferred":false,
-             "weeks":[{"week_start":"2026-10-05","tokens":12000},{"week_start":"2026-10-12","tokens":\(tokens)}],
-             "change":null,"change_unavailable":null}
-            """
-            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
-        }
-        // Tokens Some(0), count 1: the headline is the count, and no "0" sits above the bar.
-        let counted = try card(headline: "count", tokens: "0", count: 1)
-        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(counted))
-        XCTAssertNil(InsightsPatternsWords.currentWeekFigure(counted, copy: copy))
-        // A token headline keeps the figure on the current week.
-        let tokens = try card(headline: "tokens", tokens: "20000", count: 3)
-        XCTAssertEqual(InsightsPatternsWords.currentWeekFigure(tokens, copy: copy),
-                       InsightsOverviewWords.figure(20_000, copy: copy))
-        // The view draws that text and nothing else on the current bar.
-        let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(view.contains("InsightsPatternsWords.currentWeekFigure(card, copy: copy)"))
-        XCTAssertFalse(view.contains("Text(figure(tokens)).insightsTick(current: true)"))
-    }
-
-    func testNoWeekIsComparedUnderTheSavedFeed() throws {
-        let week = try patterns()
-        for card in week.cards {
-            XCTAssertEqual(InsightsPatternsWords.change(card, copy: Self.words), "\u{2014}")
-        }
+        XCTAssertFalse(view.contains("patternCard("))
+        XCTAssertFalse(view.contains("patterns.cards"))
+        XCTAssertFalse(view.contains("InsightsPatternSessionsView"))
     }
 
     func testTheOtherHarnessLineIsFilled() throws {
         let week = try patterns()
-        XCTAssertEqual(InsightsPatternsWords.shown(week.cards).map(\.kind), ["retried_calls"],
-                       "repeated reads, edit after a failed command and long context are not shown")
         XCTAssertEqual(InsightsPatternsWords.claudeOnlyLine(week, copy: Self.words), "Claude only: 1 of 2.")
-        XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "Show 1 traces")
     }
 
     @MainActor
-    func testPatternsModelAsksForTheWeekInTheLocalOffsetAndListsSessions() async throws {
+    func testPatternsModelAsksForTheWeekInTheLocalOffset() async throws {
         let recorder = PatternsRecorder()
         let model = InsightsPatternsModel(service: { try await recorder.call($0) })
         model.open()
@@ -637,20 +528,10 @@ final class InsightsPatternsTests: XCTestCase {
         XCTAssertNil(requests[0].operation.weeks, "the core's six bars by default")
         XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
 
-        model.showSessions("edit_fail_edit")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        requests = await recorder.requests
-        XCTAssertEqual(requests.last?.operation.type, "pattern_sessions")
-        XCTAssertEqual(requests.last?.operation.pattern, "edit_fail_edit")
-        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-14")
-        XCTAssertEqual(model.sessions?.pattern, "edit_fail_edit")
-        XCTAssertNil(model.sessions?.sessions.first?.tokens)
-
         model.selectWeek("2026-09-07")
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         requests = await recorder.requests
         XCTAssertEqual(requests.last?.operation.week_start, "2026-09-07")
-        XCTAssertNil(model.sessions, "a new week closes the old session list")
 
         await recorder.fail()
         model.reload()
@@ -687,18 +568,9 @@ private actor PatternsRecorder {
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         requests.append(request)
         if failing { throw InsightsError.service("insights-operation-failed") }
-        let json: String
-        if request.operation.type == "pattern_sessions" {
-            json = """
-            {"type":"pattern_sessions","pattern_sessions":{"pattern":"\(request.operation.pattern ?? "")",
-             "feed":"saved","generation":7,"week_start":"2026-09-14","tz":0,
-             "sessions":[{"session_ref":"abc","count":1,"tokens":null,"state":"known","reasons":[]}]}}
-            """
-        } else {
-            json = InsightsPatternsTests.patternsJSON.replacingOccurrences(
-                of: "\"2026-09-14\",\"week_end\"",
-                with: "\"\(request.operation.week_start ?? "2026-09-14")\",\"week_end\"")
-        }
+        let json = InsightsPatternsTests.patternsJSON.replacingOccurrences(
+            of: "\"2026-09-14\",\"week_end\"",
+            with: "\"\(request.operation.week_start ?? "2026-09-14")\",\"week_end\"")
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
@@ -871,7 +743,6 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_recap_fewer": "{n} traces \u{b7} {p}% fewer tokens than last week",
         "analytics_recap_more": "{n} traces \u{b7} {p}% more tokens than last week",
         "analytics_recap_best_cache": "Best cache week yet: {p}%. Previous best {q}%.",
-        "analytics_recap_pattern_up": "{pattern} up {p}% on your usual week.",
         "analytics_recap_threshold": "{n} traces passed your {threshold} threshold.",
         "claude_code": "Claude Code",
     ]
@@ -1081,8 +952,7 @@ final class InsightsComparisonsTests: XCTestCase {
                      "no comparable week: no line, never 0%")
         XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
             "Best cache week yet: 45%. Previous best 30%.",
-            "RETRIED up 50% on your usual week.",
-        ])
+        ], "no pattern is shown on macOS, so a pattern_up says nothing (owner, 2026-10-29)")
         XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),
                      "no threshold line until the user sets one")
         XCTAssertTrue(InsightsComparisonsWords.recapTitle(recap, copy: words).hasPrefix("Your week \u{b7} "))

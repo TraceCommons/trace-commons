@@ -139,15 +139,13 @@ final class DesignRulings20261022Tests: XCTestCase {
         XCTAssertFalse(overview.contains("drillButton(\"sessions\")"), "the Sessions figure drills again")
         XCTAssertFalse(overview.contains("if model.drills(\"sessions\") { GlassChevron() }"))
         // Off Overview (product owner, 2026-10-28), with Tokens by day: on
-        // Details a picked day shows that day's sessions.
+        // Breakdown a picked day shows that day's sessions, in the window's
+        // inspector since the owner's 2026-10-29 ruling.
         XCTAssertFalse(overview.contains("sessionsBreakdown"))
         XCTAssertFalse(overview.contains("model.counterInputs"))
-        let byDay = try GlassSurfaceRulesTests.text("Views/InsightsTokensByDay.swift")
-        XCTAssertTrue(byDay.contains("if pickedDay != nil { sessionsBreakdown(overview) }"))
-        let breakdown = try Self.section("    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {",
-                                         in: byDay)
-        XCTAssertTrue(breakdown.contains("if !sessions.rows.isEmpty {"))
-        XCTAssertTrue(breakdown.contains("let inputs = model.sessionsInputs, !inputs.sessions.isEmpty"))
+        let detail = try GlassSurfaceRulesTests.text("Views/InsightsBreakdownInspector.swift")
+        XCTAssertTrue(detail.contains("if let sessions = overview.counterSessions { return !sessions.rows.isEmpty }"))
+        XCTAssertTrue(detail.contains("return !(overview.sessionsInputs?.sessions.isEmpty ?? true)"))
     }
 
     /// A Traces menu row lights as every menu row does: the menu's accent

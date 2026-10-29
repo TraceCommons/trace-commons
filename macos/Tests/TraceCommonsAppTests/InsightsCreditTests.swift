@@ -4,19 +4,17 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// AI usage this week and its drill-down (product owner, 2026-10-28): the
-/// usage cards that lead Overview, and Details' By project, By task and By
-/// tool views, from `insights_week`. A call with no charge is the dash,
+/// usage cards that lead Overview, and Details' By project and By model
+/// views, from `insights_week`. A call with no charge is the dash,
 /// never `$0.00`.
 final class InsightsCreditTests: XCTestCase {
-    private typealias Group = DaemonData.InsightsCreditGroup
     private typealias Window = DaemonData.InsightsCreditWindow
     private let copy = [
-        "analytics_unavailable": "—", "analytics_task_bug_fix": "Bug fix", "analytics_task_docs": "Docs",
-        "analytics_task_other": "Other", "analytics_unknown_label": "Unknown",
+        "analytics_unavailable": "—", "analytics_unknown_label": "Unknown",
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
         "analytics_credit_tool_claude_code": "Claude",
         "analytics_projects_traces": "{n} traces", "analytics_projects_traces_one": "{n} trace",
-        "analytics_usage_tokens": "{t} tokens", "analytics_usage_at_least": "at least {x}",
+        "analytics_usage_tokens": "{t} tokens",
     ]
 
     private func empty() -> Window { Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0) }
@@ -25,18 +23,18 @@ final class InsightsCreditTests: XCTestCase {
         .init(week: week, today: empty(), byDay: byDay, last31Days: last31 ?? week)
     }
 
-    func testGroupsNameEachKeyWithItsAmountAndDashForUnknown() {
-        let lines = InsightsCreditWords.lines([
-            Group(key: "bug_fix", usdMicros: 1_250_000),
-            Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1),
-            Group(key: nil, usdMicros: 500),
-        ], dimension: .task, copy: copy)
-        XCTAssertEqual(lines.map(\.label), ["Bug fix", "Docs", "Unknown"])
-        XCTAssertEqual(lines[0].amount, "$1.25")
-        XCTAssertEqual(lines[1].amount, "—", "unknown is the dash, never $0.00")
-        let tools = InsightsCreditWords.lines([Group(key: "codex", usdMicros: 10), Group(key: "claude_code", usdMicros: 5)],
-                                              dimension: .tool, copy: copy)
-        XCTAssertEqual(tools.map(\.label), ["Codex", "Claude"])
+    /// By task and By tool are removed (owner, 2026-10-29): the drill-down
+    /// is By project and By model, and nothing opens the removed views.
+    func testTheDrillDownIsByProjectAndByModelOnly() throws {
+        XCTAssertEqual(InsightsCreditWords.label(nil, dimension: .folder, copy: copy), "Unknown folder")
+        XCTAssertEqual(InsightsCreditWords.label("app", dimension: .folder, copy: copy), "app")
+        XCTAssertEqual(InsightsCreditWords.label(nil, dimension: .model, copy: copy), "Unknown")
+        let table = try GlassSurfaceRulesTests.text("Views/InsightsCreditViews.swift")
+        XCTAssertFalse(table.contains("analytics_credit_by_task"))
+        XCTAssertFalse(table.contains("Dimension.tool"))
+        XCTAssertFalse(table.contains("analytics_card_by_tool"))
+        XCTAssertTrue(table.contains("case .folder: GlassSegment(text(\"analytics_card_by_project\"), value: dimension)"))
+        XCTAssertTrue(table.contains("case .model: GlassSegment(text(\"analytics_card_by_model\"), value: dimension)"))
     }
 
     /// The NEAR AI card shows only while there was NEAR AI spend in the
@@ -75,30 +73,29 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertTrue(InsightsUsageWords.tokenBars(nil, tool: "codex", copy: copy).isEmpty)
     }
 
-    /// Owner, 2026-10-28: some calls with no charge show the known sum as
-    /// a minimum, "at least $5.21"; the dash only when nothing is known.
-    func testAPartlyKnownFigureReadsAtLeastItsKnownSum() {
+    /// Some calls with no charge show the known sum as it is, to the cent,
+    /// with no "at least" (owner, 2026-10-29); the dash only when nothing
+    /// is known.
+    func testAPartlyKnownFigureReadsItsKnownSumPlain() {
         var owner = Window(usdMicros: nil, sessions: 0, calls: 421, callsWithoutCharge: 1, tokens: nil)
-        owner.usdMicrosKnown = 5_210_000
+        owner.usdMicrosKnown = 5_215_300
         owner.usdPartial = true
         owner.tokensKnown = 2_000_000
         owner.tokensPartial = true
-        XCTAssertEqual(InsightsCreditWords.spendAndTokens(owner, copy: copy), "at least $5.21 · at least 2M tokens")
+        XCTAssertEqual(InsightsCreditWords.spendAndTokens(owner, copy: copy), "$5.22 · 2M tokens")
         var nothing = Window(usdMicros: nil, sessions: 0, calls: 1, callsWithoutCharge: 1, tokens: nil)
         nothing.usdPartial = false
-        XCTAssertEqual(InsightsCreditWords.spend(nil, known: nil, partial: false, copy: copy), "—")
+        XCTAssertEqual(InsightsCreditWords.spend(nil, known: nil, copy: copy), "—")
         XCTAssertEqual(InsightsCreditWords.spendAndTokens(nothing, copy: copy), "— · —")
-        var group = Group(key: "docs", usdMicros: nil, callsWithoutCharge: 1)
-        group.usdMicrosKnown = 50
-        group.usdPartial = true
-        XCTAssertEqual(InsightsCreditWords.lines([group], dimension: .task, copy: copy)[0].amount, "at least $0.00005")
+        XCTAssertEqual(InsightsCreditWords.spend(nil, known: 50, copy: copy), "$0.00005",
+                       "under a cent is never $0.00")
         // A partly known day draws its known part.
         var day = Window(date: "2026-10-26", usdMicros: nil, sessions: 0, calls: 2, callsWithoutCharge: 1)
         day.usdMicrosKnown = 250_000
         day.usdPartial = true
         let bars = InsightsUsageWords.days(.init(week: owner, today: owner, byDay: [day], last31Days: owner), copy: copy)
         XCTAssertEqual(bars[0].value, 0.25)
-        XCTAssertEqual(bars[0].amount, "at least $0.25")
+        XCTAssertEqual(bars[0].amount, "$0.25")
     }
 
     /// Owner, 2026-10-28: the NEAR AI card shows spend and tokens together.
@@ -144,7 +141,7 @@ final class InsightsCreditTests: XCTestCase {
         let unknown = table[2]
         XCTAssertEqual(unknown.codex, .init(traces: 1, tokens: 110))
         XCTAssertEqual(InsightsProjectRows.traces(unknown.codex, copy: copy), "1 trace", "one, not \"1 traces\"")
-        XCTAssertEqual(unknown.nearAi, "$0.0125")
+        XCTAssertEqual(unknown.nearAi, "$0.01", "to the cent (owner, 2026-10-29)")
         XCTAssertEqual(table[0].nearAi, "$0.0009")
         XCTAssertEqual(table[0].nearAiTokens, "4.2K tokens")
         XCTAssertEqual(unknown.nearAiTokens, "—", "tokens unknown, never 0")
@@ -169,7 +166,7 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertFalse(window.contains("Insights shows no money"), "owner, 2026-10-28: Insights may show money")
         let details = try GlassSurfaceRulesTests.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(details.contains("if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }"))
-        XCTAssertTrue(details.contains("if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }"))
+        XCTAssertTrue(details.contains("InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,"))
         XCTAssertFalse(window.contains("modelAnswers"))
         let monitor = try GlassSurfaceRulesTests.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(monitor.contains(".credit(AnyView(InferenceBalanceSection()))"))

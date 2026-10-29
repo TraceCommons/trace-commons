@@ -201,31 +201,13 @@ enum InsightsSampleWeek {
         return rows.enumerated().map { index, row in row.merging(["session_ref": "t\(index + 1)"]) { $1 } }
     }
 
-    /// Six weeks, oldest first; `nil` is a week with no figure.
-    private static func patternWeeks(_ values: [Int?]) -> [[String: Any]] {
-        let starts = ["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05"]
-        return zip(starts, values).map { start, value in ["week_start": start, "tokens": value ?? NSNull()] }
-    }
-
-    private static func card(_ kind: String, tokens: Int, count: Int?, files: Int? = nil, sessions: Int,
-                             basis: String, inferred: Bool, change: Int, weeks: [Int?]) -> [String: Any] {
-        var card: [String: Any] = ["kind": kind, "tokens": tokens, "sessions": sessions, "basis": basis,
-                                   "inferred": inferred, "change": change, "weeks": patternWeeks(weeks)]
-        if let count { card["count"] = count }
-        if let files { card["files"] = files }
-        return card
-    }
-
     static var patterns: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
             "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
             "long_context_threshold": 150_000,
-            "cards": [
-                card("retried_calls", tokens: 410_000, count: 37, sessions: 7,
-                     basis: "estimate_from_result_size", inferred: false, change: -60,
-                     weeks: [520_000, 470_000, nil, 390_000, 440_000, 410_000]),
-            ],
+            // No pattern card is shown on macOS any more (owner, 2026-10-29).
+            "cards": [Any](),
             "reread_files": [Any](),
             "weeks": weeks,
         ]
@@ -234,15 +216,15 @@ enum InsightsSampleWeek {
     static var comparisons: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05",
-            "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
-                      "disabled": [String](), "card_enabled": true],
+            // No pattern is shown any more (owner, 2026-10-29), so the
+            // sample's lever picks none.
+            "lever": ["pick": NSNull(), "disabled": [String](), "card_enabled": true],
             "recap": [
                 "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
                 "sources": [["source": "claude_code", "tokens": 45_000_000, "change_permille": -120],
                             ["source": "codex", "tokens": 6_200_000, "change_permille": 40]],
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
-                    ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
         ]
