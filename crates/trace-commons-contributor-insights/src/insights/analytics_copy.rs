@@ -67,6 +67,12 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "folder",
     // The weekday picked on "Tokens by day".
     "day",
+    // Overview and Benchmarks (product owner, 2026-10-29): lines added,
+    // a limit window's name, and the two models a tip compares.
+    "a",
+    "window",
+    "first",
+    "second",
 ];
 
 /// Key, words. Approved in Ron's 2026-10-11 owner review (D17).
@@ -849,4 +855,93 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_ledger_feed", "Count Private AI tokens"),
     // 24. The Models card left Insights (product owner, 2026-10-28) with
     // its words; `insights_model_answers` still answers over the socket.
+    // 25. DRAFT, NEEDS APPROVAL: Overview, Breakdown and Benchmarks
+    // (mockups approved by the product owner, 2026-10-29). Money is a
+    // `{x}` hole, always at API list prices for Claude and Codex.
+    ("analytics_tab_benchmarks", "Benchmarks"),
+    ("analytics_tile_spend", "AI spend"),
+    ("analytics_tile_lines", "Lines accepted"),
+    ("analytics_tile_top_model", "Top model"),
+    ("analytics_tile_credits", "Credits earned"),
+    (
+        "analytics_tile_api_prices",
+        "Claude and Codex at API prices",
+    ),
+    ("analytics_tile_share_of_spend", "{p}% of spend"),
+    ("analytics_tile_credits_note", "From traces you shared"),
+    (
+        "analytics_limits_headline_runs_out",
+        "{window} limit runs out in {time}, before it resets",
+    ),
+    (
+        "analytics_limits_headline_on_pace",
+        "On pace: lasts until reset",
+    ),
+    ("analytics_limits_week_value", "This week at API prices"),
+    ("analytics_by_model_title", "Spend by model"),
+    ("analytics_lines_title", "Lines of code accepted"),
+    ("analytics_lines_detail", "+{a} added · −{r} removed"),
+    ("analytics_edits_accepted", "Edits accepted"),
+    ("analytics_edits_accepted_value", "{p}% · {k} of {n}"),
+    (
+        "analytics_lines_note",
+        "Edits you rejected or undid are not counted.",
+    ),
+    ("analytics_trends_title", "Trends"),
+    ("analytics_trends_spend_per_day", "Spend per day"),
+    ("analytics_trends_week_before", "Week before"),
+    ("analytics_cache_savings", "Cache savings"),
+    ("analytics_cache_savings_value", "about {x} saved"),
+    ("analytics_column_spend", "Spend"),
+    ("analytics_column_lines", "Lines accepted"),
+    ("analytics_column_edits", "Edits accepted"),
+    ("analytics_bench_intro", "From {n} of your own traces"),
+    ("analytics_bench_quality", "Quality"),
+    ("analytics_bench_value", "Value"),
+    ("analytics_bench_speed", "Speed"),
+    ("analytics_bench_quality_detail", "Edits you kept"),
+    (
+        "analytics_bench_value_detail",
+        "Cost per trace at API prices",
+    ),
+    ("analytics_bench_speed_detail", "Time per trace"),
+    (
+        "analytics_bench_min",
+        "Models are compared only where each has {n} or more traces.",
+    ),
+    ("analytics_bench_weeks", "Last {n} weeks"),
+    ("analytics_bench_traces", "{n} traces"),
+    ("analytics_bench_kept", "{p}% kept"),
+    ("analytics_bench_per_trace", "{x} per trace"),
+    ("analytics_bench_next", "Next: {label}, {x}"),
+    ("analytics_bench_not_enough", "Not enough traces yet"),
+    (
+        "analytics_bench_not_enough_detail",
+        "Models are compared here once two have {n} traces each.",
+    ),
+    ("analytics_bench_cat_bug_fix", "Fix a bug"),
+    ("analytics_bench_cat_feature", "Build a feature"),
+    ("analytics_bench_cat_refactor", "Refactor"),
+    ("analytics_bench_cat_tests", "Write tests"),
+    ("analytics_bench_cat_docs", "Docs & writing"),
+    ("analytics_bench_cat_understand", "Understand code"),
+    ("analytics_bench_cat_review", "Code review"),
+    ("analytics_bench_cat_setup", "Setup & dependencies"),
+    (
+        "analytics_bench_tip_test_first",
+        "Fixes where a failing test ran first finished {p}% faster. {k} of your {n} fixes did not start that way.",
+    ),
+    (
+        "analytics_bench_tip_cheaper",
+        "{first} kept about as many edits as {second} at {p}% of the cost.",
+    ),
+    (
+        "analytics_bench_tip_fewer_undos",
+        "{first} had {x}× fewer edits undone than {second}.",
+    ),
+    (
+        "analytics_bench_tip_rereads",
+        "{k} of your {n} traces re-read the same files.",
+    ),
+    ("analytics_bench_empty", "No traces to compare yet"),
 ];
