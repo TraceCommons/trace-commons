@@ -130,6 +130,10 @@ struct InsightsView: View {
         self.inspector = inspector
     }
 
+    /// The tabs on the bar, in order: Overview, then Breakdown (product
+    /// owner, 2026-10-29).
+    static let shownTabs: [InsightsTab] = [.overview, .patterns]
+
     /// The line naming a custom store, exactly as the view renders it; `nil`
     /// for the standard store, which shows no location line.
     static func storeLocationLine(_ selection: InsightsStoreSelection,
@@ -161,12 +165,12 @@ struct InsightsView: View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
-                GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
-                GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
-                GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
-                GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
-            ])
+            // Overview and Breakdown only (product owner, 2026-10-29):
+            // Sessions and Analyze are off the bar. A picked day or row
+            // shows its sessions in place; Analyze's views go next.
+            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
+                GlassSegment(model.text($0.copyKey), value: $0)
+            })
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
@@ -578,8 +582,22 @@ struct InsightDetail: View {
     }
 }
 
-/// The Insights window's tabs that have landed.
-enum InsightsTab: Hashable { case overview, patterns, sessions, analyze }
+/// The Insights window's tabs that have landed. `sessions` and `analyze`
+/// are no longer on the bar (`InsightsView.shownTabs`); only a caller's
+/// `initialTab` opens them, until their views are removed.
+enum InsightsTab: Hashable {
+    case overview, patterns, sessions, analyze
+
+    /// The copy key of the tab's name.
+    var copyKey: String {
+        switch self {
+        case .overview: "analytics_tab_overview"
+        case .patterns: "analytics_tab_patterns"
+        case .sessions: "analytics_tab_sessions"
+        case .analyze: "analytics_tab_analyze"
+        }
+    }
+}
 
 /// The assessment choices, by their wire values; their words are the
 /// copy table's `category_` and `outcome_` entries.
