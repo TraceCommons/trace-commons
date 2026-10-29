@@ -790,7 +790,7 @@ final class MonitorNavigationTests: XCTestCase {
         // Inference is shown, and its inspector stays closed.
         XCTAssertTrue(window.contains("if !model.onboardingKnown || !inspectorAvailable {\n            Color.clear\n"),
                       "the inspector must draw nothing until onboarding is known")
-        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail:"))
+        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage)"))
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.

@@ -1070,12 +1070,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
-    // Insights: the tab container and the Analyze tab read the core's
-    // vocabulary; the Overview tab fills the core's analytics words with the
+    // Insights: the tab container reads the core's vocabulary; the Overview tab fills the core's analytics words with the
     // core's figures (`InsightsOverviewWords`), read through the model's
     // `tc_insights_call`.
     (
-        "Insights tabs and the Analyze tab",
+        "Insights tabs",
         "TraceCommonsApp/Views/InsightsView.swift",
         "TCInsights.copy()",
         "TCBridge/TCInsights.swift",
@@ -1152,12 +1151,12 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
-    // The Sessions tab fills the core's analytics words with one saved
-    // session's figures (`InsightsSessionsWords`), read through the model's
-    // `tc_insights_call`.
+    // Overview's drill-down rows fill the core's analytics words with one
+    // saved session's figures (`InsightsSessionsWords`), read through the
+    // model's `tc_insights_call`.
     (
         "Insights Sessions words",
-        "TraceCommonsApp/Views/InsightsSessionsTab.swift",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
         "InsightsSessionsWords.",
         "TCBridge/TCInsights.swift",
         "tc_insights_call",

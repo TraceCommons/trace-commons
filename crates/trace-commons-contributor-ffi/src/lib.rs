@@ -821,6 +821,50 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
     })
 }
 
+/// The command-line tool's state for the app at `bundle_path`
+/// (`cli_tool::probe`): the link this build's channel installs in
+/// `/usr/local/bin`, what is there now, and the AppleScript that changes it.
+///
+/// ```json
+/// {"command_name":"near-ai","link_path":"/usr/local/bin/near-ai",
+///  "state":"not_installed","install_script":"do shell script ...",
+///  "uninstall_script":null}
+/// ```
+///
+/// `state` is `not_installed`, `installed`, `stale` (our link to an app that
+/// moved), `foreign` (something this app did not create; no script is
+/// offered) or `unavailable` (`bundle_path` is not an app bundle with an
+/// executable `Contents/MacOS/near-ai`, as under `swift run`). Each script is
+/// present only when its action is offered, and is one `do shell script ...
+/// with administrator privileges` statement built from fixed text and
+/// single-quoted, validated paths. Reads the link path and the bundle
+/// without following the link, and writes nothing.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `bundle_path`, if non-null, must point to a valid, NUL-terminated C
+/// string. NULL or a non-UTF-8 path reads as `unavailable`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_cli_tool_json(bundle_path: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::cli_tool;
+        let bundle = if bundle_path.is_null() {
+            String::new()
+        } else {
+            unsafe { borrow_str(bundle_path) }
+                .map(str::to_owned)
+                .unwrap_or_default()
+        };
+        let status = cli_tool::probe(
+            std::path::Path::new(&bundle),
+            std::path::Path::new(cli_tool::LINK_DIR),
+        );
+        Ok(to_owned_cstring(&serde_json::to_string(&status)?))
+    })
+}
+
 /// The sentence the app shows instead of starting when its bundle and this
 /// library disagree on the channel: `health_copy::CHANNEL_MISMATCH`.
 ///

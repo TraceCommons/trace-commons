@@ -982,6 +982,9 @@ extension DaemonData {
         /// daemon runs the counter pass for `insights_week` (on by default
         /// and always on; product owner, 2026-10-29).
         public let insightsCounterPass: Bool?
+        /// Decode-only: whether the 2026-10-29 default change turned the
+        /// counter pass on; `nil` from a daemon that predates it.
+        public let insightsCounterPassDefaultedOn: Bool?
         /// Native subscription readers, on by default since 2026-10-27; nil
         /// means an older daemon. The Overview usage snapshot remains
         /// authoritative for its controls. `subscriptionUsageClaudeEnabled` is
@@ -1036,6 +1039,7 @@ extension DaemonData {
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
+            case insightsCounterPassDefaultedOn = "insights_counter_pass_defaulted_on"
             case subscriptionUsageCodexEnabled = "subscription_usage_codex_enabled"
             case subscriptionUsageClaudeEnabled = "subscription_usage_claude_enabled"
             case subscriptionUsageClaudeOn = "subscription_usage_claude_on"

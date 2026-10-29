@@ -4570,6 +4570,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 mod benchmarks;
+pub(crate) mod submitted;
 
 #[cfg(test)]
 mod tests {

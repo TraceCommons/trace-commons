@@ -13,7 +13,6 @@ final class InsightsGlassConventionsTests: XCTestCase {
         "Views/InsightsView.swift",
         "Views/InsightsOverviewTab.swift",
         "Views/InsightsPatternsTab.swift",
-        "Views/InsightsSessionsTab.swift",
         "Views/Monitor/InsightsGlanceCard.swift",
         "Views/Monitor/InferenceViews.swift",
     ]
@@ -76,7 +75,7 @@ final class InsightsGlassConventionsTests: XCTestCase {
         // Tokens by day moved from Overview to its own view on Details,
         // and every usage card draws the same bars (owner, 2026-10-28).
         for file in ["Views/InsightsTokensByDay.swift", "Views/InsightsUsageCards.swift",
-                     "Views/InsightsPatternsTab.swift", "Views/InsightsSessionsTab.swift"] {
+                     "Views/InsightsPatternsTab.swift"] {
             let source = try Self.text(file)
             XCTAssertTrue(source.contains(".insightsPlot()"), "\(file) plots straight on glass")
             XCTAssertFalse(source.contains("accentText.opacity("), "\(file) dims accentText for a series")
