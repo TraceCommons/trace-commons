@@ -380,7 +380,7 @@ struct InsightsCounterSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }
@@ -482,7 +482,7 @@ struct InsightsCardInputsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
         // A picked day, or the week again, opens folded.
         .onChange(of: day) { _, _ in showAll = false }
     }
