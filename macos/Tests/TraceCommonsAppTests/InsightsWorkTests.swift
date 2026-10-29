@@ -87,6 +87,32 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertNil(InsightsBenchmarkWords.tip(.init(kind: "from_a_newer_daemon"), copy: copy))
     }
 
+    /// One model is enough (product owner, 2026-10-29): its own figures on
+    /// each kind of work, and the share of its traces that went to each.
+    func testOneModelShowsItsOwnFiguresAndWorkMix() throws {
+        let copy = try words()
+        let opus = DaemonData.InsightsBenchmarkModel(label: "claude-opus-5-5", tool: "claude_code", sessions: 6,
+                                                     keptPermille: 1000, usdMicrosMedian: 4_785_380,
+                                                     activeSecsMedian: 1_436)
+        let docs = DaemonData.InsightsBenchmarkModel(label: "claude-opus-5-5", tool: "claude_code", sessions: 2)
+        let answer = DaemonData.InsightsBenchmarks(weeks: 4, sessions: 8, minSessions: 5, categories: [
+            .init(key: "docs", sessions: 2, models: [docs]),
+            .init(key: "feature", sessions: 6, models: [opus]),
+        ])
+        let rows = InsightsBenchmarkWords.rows(try XCTUnwrap(answer.categories?.last), copy: copy)
+        XCTAssertEqual(rows.map(\.kept), ["100%"])
+        XCTAssertEqual(rows.map(\.cost), ["$4.79"])
+        XCTAssertEqual(rows.map(\.traces), ["6 traces"])
+        let docsRows = InsightsBenchmarkWords.rows(try XCTUnwrap(answer.categories?.first), copy: copy)
+        XCTAssertEqual(docsRows.map(\.kept), [copy["analytics_unavailable"]], "an unknown figure is the dash")
+
+        let mix = InsightsBenchmarkWords.mix(answer, copy: copy)
+        XCTAssertEqual(mix.map(\.model), ["claude-opus-5-5"])
+        XCTAssertEqual(mix[0].traces, "8 traces")
+        XCTAssertEqual(mix[0].shares.map(\.task), ["Build a feature", "Docs & writing"], "most first")
+        XCTAssertEqual(mix[0].shares.map(\.label), ["75% · 6 traces", "25% · 2 traces"])
+    }
+
     func testEveryBenchmarkCategoryHasAName() throws {
         let copy = try words()
         for key in InsightsBenchmarkWords.categories {
