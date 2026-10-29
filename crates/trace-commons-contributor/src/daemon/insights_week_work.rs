@@ -13,7 +13,18 @@
 //! Codex budget) has no priced turn: it is unpriced, never $0.
 //!
 //! Lines and edits are the session's facts (`session_facts`), counted once,
-//! in the week holding the session's first recorded activity.
+//! in the week holding the session's first recorded activity. A resumed
+//! Claude transcript repeats the one it continues, facts and all, so it
+//! counts only what it holds beyond that one, in the week of its first new
+//! turn (`claude_resumes`); one whose overlap cannot be untangled counts as
+//! unknown, never twice.
+//!
+//! A session sent through NEAR AI is charged by NEAR AI, in
+//! `near_ai_credit`; its list estimate is never added to the spend here
+//! (owner decision D5: a session's charge and its list estimate never meet
+//! in one figure). One sent wholly through the route is left out of the
+//! spend and counted in `near_ai_sessions`; one sent partly through it has
+//! a list-priced part that cannot be told apart, so it is unpriced.
 //!
 //! Every figure is a sum of what is known (`*_known`) beside a `*_partial`
 //! flag: an unknown is never read as zero. Automated sessions are counted,
@@ -31,7 +42,8 @@ use crate::insights::session_pricing::{
     PRICING_BASIS_API_LIST, PricingTableRef, TurnPrice, exact_to_micros, price_turn_exact,
 };
 use crate::insights::week_rollup::{
-    AnalyticsSource, Feed, SessionBody, SessionInput, counted_claude_turns, local_week_start,
+    AnalyticsSource, ClaudeResume, Feed, SessionBody, SessionInput, claude_resumes,
+    counted_claude_turns, local_week_start,
 };
 
 const TOOL_CLAUDE_CODE: &str = "claude_code";
@@ -42,6 +54,7 @@ const TOOL_CODEX: &str = "codex";
 struct Totals {
     sessions: u64,
     priced_sessions: u64,
+    near_ai_sessions: u64,
     exact: u128,
     cache_savings_exact: u128,
     edits: u64,
@@ -68,59 +81,178 @@ struct DaySpend {
     partial: bool,
 }
 
+/// A count that may be only partly known: the known part, and whether
+/// some of it is not.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Count {
+    known: u64,
+    partial: bool,
+}
+
+impl Count {
+    fn of(count: Option<u32>) -> Self {
+        Count {
+            known: count.map_or(0, u64::from),
+            partial: count.is_none(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Count {
+            known: 0,
+            partial: true,
+        }
+    }
+
+    fn add(&mut self, other: Count) {
+        self.known += other.known;
+        self.partial |= other.partial;
+    }
+
+    /// What `self` holds beyond `earlier`, which it repeats. When the
+    /// repeated part is only partly known, so is what is left: known 0.
+    fn beyond(self, earlier: Count) -> Self {
+        if earlier.partial {
+            return Count::unknown();
+        }
+        Count {
+            known: self.known.saturating_sub(earlier.known),
+            partial: self.partial,
+        }
+    }
+}
+
+/// A session's edits, summed over its models.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FactCounts {
+    edits: Count,
+    edits_undone: Count,
+    edits_denied: Count,
+}
+
+impl FactCounts {
+    fn of(facts: Option<&SessionFacts>) -> Self {
+        let Some(facts) = facts else {
+            return FactCounts::unknown();
+        };
+        let mut counts = FactCounts::default();
+        for model in &facts.models {
+            counts.edits.add(Count::of(model.edits));
+            counts.edits_undone.add(Count::of(model.undone));
+            counts.edits_denied.add(Count::of(model.denied));
+        }
+        counts
+    }
+
+    fn unknown() -> Self {
+        FactCounts {
+            edits: Count::unknown(),
+            edits_undone: Count::unknown(),
+            edits_denied: Count::unknown(),
+        }
+    }
+
+    fn beyond(self, earlier: FactCounts) -> Self {
+        FactCounts {
+            edits: self.edits.beyond(earlier.edits),
+            edits_undone: self.edits_undone.beyond(earlier.edits_undone),
+            edits_denied: self.edits_denied.beyond(earlier.edits_denied),
+        }
+    }
+}
+
+/// The edits a session adds, net of the transcript it resumes
+/// (`claude_resumes`), so work a resumed transcript repeats counts once.
+fn own_counts(inputs: &[SessionInput], resumes: &[ClaudeResume], index: usize) -> FactCounts {
+    let own = FactCounts::of(inputs[index].facts.as_ref());
+    let resume = resumes.get(index).copied().unwrap_or_default();
+    if resume.tangled {
+        return FactCounts::unknown();
+    }
+    match resume.continues {
+        Some(earlier) => own.beyond(FactCounts::of(inputs[earlier].facts.as_ref())),
+        None => own,
+    }
+}
+
+/// When a session's edits are dated: its first activity, or for
+/// a resumed transcript its first dated turn the resumed one lacks.
+fn facts_at(
+    inputs: &[SessionInput],
+    resumes: &[ClaudeResume],
+    index: usize,
+) -> Option<DateTime<Utc>> {
+    let input = &inputs[index];
+    let earlier = resumes
+        .get(index)
+        .and_then(|resume| resume.continues)
+        .map(|earlier| &inputs[earlier].body);
+    if let (
+        SessionBody::Claude { series, .. },
+        Some(SessionBody::Claude {
+            series: earlier, ..
+        }),
+    ) = (&input.body, earlier)
+    {
+        let repeated: BTreeSet<_> = earlier
+            .turns
+            .iter()
+            .filter_map(|turn| turn.msg_key)
+            .collect();
+        if let Some(at) = series
+            .turns
+            .iter()
+            .filter(|turn| turn.msg_key.is_none_or(|key| !repeated.contains(&key)))
+            .filter_map(|turn| turn.at)
+            .min()
+        {
+            return Some(at);
+        }
+    }
+    first_activity(input)
+}
+
 /// One session's figures in one week.
 #[derive(Debug, Default)]
 struct SessionWork {
     priced: bool,
+    /// Sent wholly through NEAR AI: its spend is NEAR AI's charge.
+    near_ai: bool,
     exact: u128,
     cache_savings_exact: u128,
-    /// The session's facts, when its first activity is in the week.
-    facts: Option<Option<SessionFacts>>,
+    /// The session's own edits, when they are dated in the week.
+    facts: Option<FactCounts>,
 }
 
 impl Totals {
     fn add(&mut self, session: &SessionWork) {
         self.sessions += 1;
-        if session.priced {
+        if session.near_ai {
+            self.near_ai_sessions += 1;
+        } else if session.priced {
             self.priced_sessions += 1;
         }
         self.exact = self.exact.saturating_add(session.exact);
         self.cache_savings_exact = self
             .cache_savings_exact
             .saturating_add(session.cache_savings_exact);
-        let Some(facts) = &session.facts else {
+        let Some(facts) = session.facts else {
             return;
         };
-        let Some(facts) = facts else {
-            self.edits_count_partial = true;
-            self.edits_undone_partial = true;
-            self.edits_denied_partial = true;
-            return;
-        };
-        let sum = |known: &mut u64, partial: &mut bool, count: Option<u32>| match count {
-            Some(count) => *known += u64::from(count),
-            None => *partial = true,
-        };
-        for model in &facts.models {
-            sum(&mut self.edits, &mut self.edits_count_partial, model.edits);
-            sum(
-                &mut self.edits_undone,
-                &mut self.edits_undone_partial,
-                model.undone,
-            );
-            sum(
-                &mut self.edits_denied,
-                &mut self.edits_denied_partial,
-                model.denied,
-            );
-        }
+        self.edits += facts.edits.known;
+        self.edits_count_partial |= facts.edits.partial;
+        self.edits_undone += facts.edits_undone.known;
+        self.edits_undone_partial |= facts.edits_undone.partial;
+        self.edits_denied += facts.edits_denied.known;
+        self.edits_denied_partial |= facts.edits_denied.partial;
     }
 
     fn value(&self) -> serde_json::Value {
-        let unpriced = self.sessions - self.priced_sessions;
+        let unpriced = self.sessions - self.priced_sessions - self.near_ai_sessions;
         serde_json::json!({
             "sessions": self.sessions,
             "priced_sessions": self.priced_sessions,
+            "near_ai_sessions": self.near_ai_sessions,
             "unpriced_sessions": unpriced,
             "usd_micros_known": micros(self.exact),
             "usd_partial": unpriced > 0,
@@ -303,6 +435,15 @@ fn in_week<'a>(
     }
 }
 
+/// How a session went through NEAR AI, by its route tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NearAiRoute {
+    /// Every labelled call through the route.
+    Wholly,
+    /// Labelled calls both through the route and outside it.
+    Partly,
+}
+
 /// Roll up the week starting `week_start`.
 fn week_work(
     inputs: &[SessionInput],
@@ -310,6 +451,7 @@ fn week_work(
     catalog: &PricingCatalog,
     week_start: NaiveDate,
     tz: &FixedOffset,
+    (resumes, routed): (&[ClaudeResume], &BTreeMap<String, NearAiRoute>),
     tables: &mut BTreeSet<PricingTableRef>,
 ) -> WeekWork {
     let counted = counted_claude_turns(Feed::CounterPass, inputs, week_start, tz);
@@ -328,7 +470,7 @@ fn week_work(
         let Some(tool) = tool_of(input) else {
             continue;
         };
-        let Some(scope) = in_week(
+        let Some(mut scope) = in_week(
             input,
             counted.get(index).and_then(Option::as_ref),
             week_start,
@@ -336,8 +478,15 @@ fn week_work(
         ) else {
             continue;
         };
+        let route = routed.get(&input.session_ref).copied();
+        if route.is_some() {
+            // NEAR AI's charge, not a list estimate (D5).
+            scope.turns.clear();
+            scope.unpriceable = route == Some(NearAiRoute::Partly);
+        }
         let mut session = SessionWork {
             priced: !scope.unpriceable && !scope.turns.is_empty(),
+            near_ai: route == Some(NearAiRoute::Wholly),
             ..SessionWork::default()
         };
         let mut models: BTreeSet<String> = BTreeSet::new();
@@ -384,7 +533,7 @@ fn week_work(
                 spend.sessions += 1;
             }
         }
-        if !session.priced {
+        if !session.priced && !session.near_ai {
             // The day the unpriced usage is marked on: its first dated turn
             // in the week, else its first activity, else the week's first
             // day.
@@ -397,8 +546,10 @@ fn week_work(
                 .unwrap_or(0);
             week.by_day[day].partial = true;
         }
-        if first_activity(input).is_some_and(|at| local_week_start(&at, tz) == week_start) {
-            session.facts = Some(input.facts.clone());
+        if facts_at(inputs, resumes, index)
+            .is_some_and(|at| local_week_start(&at, tz) == week_start)
+        {
+            session.facts = Some(own_counts(inputs, resumes, index));
         }
         let folder = folders.get(&input.session_ref).cloned().flatten();
         week.totals.add(&session);
@@ -412,7 +563,8 @@ fn week_work(
 /// is each session's folder label by its engine reference (`None`: the
 /// folder is unknown). `oldest_kept` is the first day of the oldest week
 /// the store keeps: a week before it has no figures, so `last_week` is
-/// `null` rather than zero.
+/// `null` rather than zero. `routed` is each session sent through NEAR AI,
+/// by its engine reference.
 pub(crate) fn work_value(
     inputs: &[SessionInput],
     folders: &BTreeMap<String, Option<String>>,
@@ -420,12 +572,31 @@ pub(crate) fn work_value(
     week_start: NaiveDate,
     tz: FixedOffset,
     oldest_kept: NaiveDate,
+    routed: &BTreeMap<String, NearAiRoute>,
 ) -> serde_json::Value {
     let mut tables = BTreeSet::new();
-    let this = week_work(inputs, folders, catalog, week_start, &tz, &mut tables);
+    let resumes = claude_resumes(inputs);
+    let this = week_work(
+        inputs,
+        folders,
+        catalog,
+        week_start,
+        &tz,
+        (&resumes, routed),
+        &mut tables,
+    );
     let last_start = week_start - Duration::days(7);
-    let last = (last_start >= oldest_kept)
-        .then(|| week_work(inputs, folders, catalog, last_start, &tz, &mut tables));
+    let last = (last_start >= oldest_kept).then(|| {
+        week_work(
+            inputs,
+            folders,
+            catalog,
+            last_start,
+            &tz,
+            (&resumes, routed),
+            &mut tables,
+        )
+    });
     let by_tool: Vec<serde_json::Value> = [TOOL_CLAUDE_CODE, TOOL_CODEX]
         .iter()
         .filter_map(|tool| {
@@ -645,6 +816,7 @@ mod tests {
             monday(),
             tz,
             monday() - Duration::weeks(12),
+            &BTreeMap::new(),
         )
     }
 
@@ -832,6 +1004,7 @@ mod tests {
             monday(),
             utc(),
             monday(),
+            &BTreeMap::new(),
         );
         assert_eq!(oldest["last_week"], serde_json::Value::Null);
         assert_eq!(oldest["last_week_by_day"], serde_json::Value::Null);
@@ -873,5 +1046,81 @@ mod tests {
         let value = work(&[claude("t1", vec![first], None), resumed], &[]);
         assert_eq!(value["week"]["usd_micros_known"], HAIKU_TURN_MICROS);
         assert_eq!(value["week"]["sessions"], 1);
+    }
+
+    #[test]
+    fn a_resumed_transcript_counts_only_its_new_edits() {
+        let key = |byte: u8| {
+            Some(trace_commons_protocol::insights_usage_series::KeyedDigest(
+                [byte; 32],
+            ))
+        };
+        let mut old = claude_turn(0, at(19, 9));
+        old.msg_key = key(1);
+        let mut new = claude_turn(1, at(27, 9));
+        new.msg_key = key(2);
+        // Begun last week; resumed this week, repeating it facts and all.
+        let first = claude("t1", vec![old.clone()], Some(facts(Some(10), Some(2))));
+        let mut resumed = claude("t2", vec![old, new], Some(facts(Some(16), Some(3))));
+        resumed.import_seq = 1;
+        let value = work(&[first, resumed], &[]);
+        assert_eq!(value["last_week"]["edits_known"], 2);
+        assert_eq!(value["week"]["edits_known"], 1);
+        assert_eq!(value["week"]["edits_partial"], false);
+    }
+
+    #[test]
+    fn a_resumed_transcript_whose_repeat_is_unknown_is_partial_never_twice() {
+        let key = |byte: u8| {
+            Some(trace_commons_protocol::insights_usage_series::KeyedDigest(
+                [byte; 32],
+            ))
+        };
+        let mut old = claude_turn(0, at(26, 9));
+        old.msg_key = key(1);
+        let mut new = claude_turn(1, at(27, 9));
+        new.msg_key = key(2);
+        let first = claude("t1", vec![old.clone()], Some(facts(None, None)));
+        let mut resumed = claude("t2", vec![old, new], Some(facts(Some(16), Some(3))));
+        resumed.import_seq = 1;
+        let value = work(&[first, resumed], &[]);
+        assert_eq!(value["week"]["edits_known"], 0);
+        assert_eq!(value["week"]["edits_count_partial"], true);
+    }
+
+    #[test]
+    fn a_session_sent_through_near_ai_is_never_list_priced() {
+        let inputs = [
+            claude("own", vec![claude_turn(0, at(26, 9))], None),
+            claude("routed", vec![claude_turn(0, at(27, 9))], None),
+            claude("mixed", vec![claude_turn(0, at(28, 9))], None),
+        ];
+        let routed = BTreeMap::from([
+            ("routed".to_owned(), NearAiRoute::Wholly),
+            ("mixed".to_owned(), NearAiRoute::Partly),
+        ]);
+        let value = work_value(
+            &inputs,
+            &BTreeMap::new(),
+            &production_pricing_catalog(),
+            monday(),
+            utc(),
+            monday() - Duration::weeks(12),
+            &routed,
+        );
+        let week = &value["week"];
+        assert_eq!(week["usd_micros_known"], HAIKU_TURN_MICROS);
+        assert_eq!(week["sessions"], 3);
+        assert_eq!(week["priced_sessions"], 1);
+        assert_eq!(week["near_ai_sessions"], 1);
+        assert_eq!(week["unpriced_sessions"], 1);
+        assert_eq!(week["usd_partial"], true);
+        let days: Vec<bool> = value["by_day"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|day| day["usd_partial"] == true)
+            .collect();
+        assert_eq!(days, [false, false, true, false, false, false, false]);
     }
 }

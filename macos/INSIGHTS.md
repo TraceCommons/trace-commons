@@ -85,7 +85,7 @@ show that turn-by-turn usage is not recorded. No what-if estimate and no
 project name are shown.
 
 When the daemon's watched-folder counting (feed T, the
-`insights_counter_pass` setting, off by default) is on and readable,
+`insights_counter_pass` setting, on by default since 2026-10-29) is on and readable,
 Overview and Patterns show its week instead, in the same shapes, and the feed
 line says so; the two feeds are never mixed, and a failed read falls back to
 the saved week with a line saying counting is unavailable. Sessions then

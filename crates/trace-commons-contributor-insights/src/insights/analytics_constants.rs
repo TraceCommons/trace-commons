@@ -186,8 +186,11 @@ pub const LEDGER_GLANCE_STALE_SECS: i64 = 600;
 /// Whether the daemon setting `insights_counter_pass` starts on. While it is
 /// off the watcher runs no counter pass, nothing is read for Insights, and
 /// `insights_week` answers `enabled: false` without touching the store.
-/// Owner decision D4, open.
-pub const COUNTER_PASS_DEFAULT_ON: bool = false;
+/// On (product owner, 2026-10-29: "counting is on by default, it must be on
+/// always"), which settles owner decision D4: Insights reads the local
+/// session files, nothing is uploaded for it. An install saved before then
+/// is turned on once (`insights_counter_pass_defaulted_on`).
+pub const COUNTER_PASS_DEFAULT_ON: bool = true;
 /// Whether the weekly summary card starts on. It is an in-app card only (no
 /// notification: owner decision D1), and it shows nothing without feed T.
 /// Owner decisions D1 and D4, open.
@@ -441,7 +444,7 @@ mod tests {
 
     #[test]
     fn counter_pass_constants() {
-        const { assert!(!COUNTER_PASS_DEFAULT_ON) };
+        const { assert!(COUNTER_PASS_DEFAULT_ON) };
         const { assert!(COUNTER_PASS_EXCLUDES_NEVER_FOLDERS) };
         const { assert!(RECAP_CARD_DEFAULT_ON) };
         assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);

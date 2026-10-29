@@ -39,7 +39,7 @@ enum InsightsWorkWords {
     /// under a cent keeps `InsightsCreditWords.money`'s digit so it is never
     /// shown as zero.
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.pricedSessions > 0 || totals.usdMicrosKnown > 0 else {
+        guard let totals, totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0 else {
             return text("analytics_unavailable", copy)
         }
         return dollars(totals.usdMicrosKnown)
